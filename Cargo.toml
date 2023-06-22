@@ -1,0 +1,2 @@
+[workspace]
+members = ["rsky-feedgen", "rsky-firehose"]

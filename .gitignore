@@ -1,0 +1,20 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+.openapi-generator-ignore
+.openapi-generator
+.github
+.DS_Store
+.cargo
+NOTE.md
+.graveyard/
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+.env.prod
+
+/venv/

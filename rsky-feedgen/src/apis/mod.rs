@@ -1,0 +1,85 @@
+use crate::models::*;
+use diesel::prelude::*;
+use crate::db::*;
+use chrono::{ NaiveDateTime};
+
+pub async fn get_blacksky_posts (
+    limit: Option<i64>,
+    params_cursor: Option<String>,
+) -> Result<AlgoResponse, Box<dyn std::error::Error>> {
+    use crate::schema::post::dsl::*;
+
+    let connection = &mut establish_connection();
+
+    let mut query = post
+        .limit(limit.unwrap_or(50))
+        .select(Post::as_select())
+        .order((indexedAt.desc(), cid.desc()))
+        .into_boxed();
+
+    if params_cursor.is_some() {
+        let cursor_str = params_cursor.unwrap();
+        let v = cursor_str
+            .split("::")
+            .take(2)
+            .map(String::from)
+            .collect::<Vec<_>>();
+        if let [indexed_at_c, cid_c] = &v[..] {
+            let timestamp = indexed_at_c.parse::<i64>().unwrap();
+            if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp, 0) {
+                let timestr = format!("{}", dt.format("%+"));
+                query = query
+                    .filter(indexedAt.le(timestr.to_owned()))
+                    .filter(cid.lt(cid_c.to_owned()))
+            }
+        } else {
+            let validation_error = ValidationErrorMessageResponse {
+                code: Some(ErrorCode::ValidationError),
+                message: Some("malformed cursor".into()),
+            };
+            return Err(Box::new(validation_error));
+        }
+    }
+
+    let results = query
+        .load(connection)
+        .expect("Error loading post records");
+
+    let mut post_results = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
+    if let Some(last_post) = results.last() {
+        if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+") {
+            cursor = Some(format!("{}::{}",parsed_time.timestamp_millis(),last_post.cid));
+        }
+    }
+
+    results
+        .into_iter()
+        .map(|result| {
+            let post_result = PostResult {
+                post: result.uri
+            };
+            post_results.push(post_result);
+        })
+        .for_each(drop);
+
+    let new_response = AlgoResponse {
+        cursor: cursor,
+        feed: post_results,
+    };
+    Ok(new_response)
+}
+
+pub async fn queue_creation(
+    _body: Vec<CreateRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+pub async fn queue_deletion(
+    _body: Vec<DeleteRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
