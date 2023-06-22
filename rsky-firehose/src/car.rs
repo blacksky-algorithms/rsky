@@ -1,4 +1,4 @@
-use crate::cid::Cid;
+use cid::Cid;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};

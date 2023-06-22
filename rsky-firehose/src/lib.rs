@@ -8,4 +8,3 @@ pub mod firehose;
 pub mod lexicon;
 pub mod car;
 pub mod models;
-pub mod cid;

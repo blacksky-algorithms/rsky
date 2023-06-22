@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::cid::Cid;
+use cid::Cid;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StrongRef {

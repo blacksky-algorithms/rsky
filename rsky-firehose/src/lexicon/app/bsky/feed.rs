@@ -41,10 +41,16 @@ pub enum Embeds {
     ))]
     External(External),
 
-    #[serde(rename(deserialize = "app.bsky.embed.record"))]
+    #[serde(rename(
+        deserialize = "app.bsky.embed.record",
+        serialize = "app.bsky.embed.record"
+    ))]
     Record(RecordEmbed),
 
-    #[serde(rename(deserialize = "app.bsky.embed.recordWithMedia"))]
+    #[serde(rename(
+        deserialize = "app.bsky.embed.recordWithMedia",
+        serialize = "app.bsky.embed.recordWithMedia",
+    ))]
     TodoRecordWithMedia,
 
     // Record(Record),
@@ -66,8 +72,8 @@ pub struct Post {
     #[serde(rename(deserialize = "$type", serialize = "$type"))]
     pub rust_type: Option<String>,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embed: Option<Embeds>,
+    //#[serde(skip_serializing_if = "Option::is_none")]
+    //pub embed: Option<Embeds>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<ReplyRef>,
 }

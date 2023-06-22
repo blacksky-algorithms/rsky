@@ -1,33 +1,54 @@
+#![allow(unused_imports)]
+
 use rsky_firehose::lexicon::app::bsky::feed::Post;
 use rsky_firehose::lexicon::com::atproto::sync::SubscribeRepos;
 use futures::StreamExt as _;
 use std::io::Cursor;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use url::Url;
+use dotenvy::dotenv;
 use std::env;
 
-async fn queue(
+
+async fn queue_delete(
     url: String,
-    records: Vec<_>
+    records: Vec<rsky_firehose::models::DeleteOp>
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("RSKY_API_KEY").map_err(|_| {
         "Pass a valid preshared token via `RSKY_API_KEY` environment variable.".to_string()
     })?;
-
-    let resp = reqwest::Client::new()
+    reqwest::Client::new()
         .put(url)
         .json(&records)
         .header("X-RSKY-KEY", token)
         .send()
-        .await?
+        .await?;
+    Ok(())
+}
 
-    println!("{:#?}", resp);
+async fn queue_create<T: serde::ser::Serialize>(
+    url: String,
+    records: Vec<rsky_firehose::models::CreateOp<T>>
+) -> Result<(), Box<dyn std::error::Error>> {
+    let token = env::var("RSKY_API_KEY").map_err(|_| {
+        "Pass a valid preshared token via `RSKY_API_KEY` environment variable.".to_string()
+    })?;
+    reqwest::Client::new()
+        .put(url)
+        .json(&records)
+        .header("X-RSKY-KEY", token)
+        .send()
+        .await?;
     Ok(())
 }
 
 
 #[tokio::main]
 async fn main() {
+    match dotenvy::dotenv() {
+        _ => ()
+    };
+
     let mut default_subscriber_path = "wss://bsky.social".to_owned();
     let mut default_queue_path = "https://[::1]:8081".to_owned();
 
@@ -112,12 +133,20 @@ async fn main() {
         if posts_to_create.len() > 0 {
             println!("Create: {posts_to_create:?}");
             let queue_endpoint = format!("{}/queue/create",default_queue_path);
-            queue(queue_endpoint, posts_to_create);
+            let resp = queue_create(queue_endpoint, posts_to_create).await;
+            match resp {
+                Ok(()) => println!("Records queued succesfully."),
+                Err(error) => eprintln!("Records failed to queue: {error:?}")
+            };
         }
         if posts_to_delete.len() > 0 {
             println!("Delete: {posts_to_delete:?}");
             let queue_endpoint = format!("{}/queue/delete",default_queue_path);
-            queue(default_queue_path, posts_to_delete);
+            let resp = queue_delete(queue_endpoint, posts_to_delete).await;
+            match resp {
+                Ok(()) => println!("Records queued succesfully."),
+                Err(error) => eprintln!("Records failed to queue: {error:?}")
+            };
         }
     }
 }
