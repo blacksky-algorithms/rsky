@@ -1,4 +1,4 @@
-use crate::lexicon::com::atproto::repo::Blob;
+use crate::com::atproto::repo::Blob;
 use serde::{Deserialize, Serialize};
 
 // "app.bsky.embed.images#view",

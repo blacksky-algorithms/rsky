@@ -2,6 +2,9 @@ use crate::models::*;
 use diesel::prelude::*;
 use crate::db::*;
 use chrono::{ NaiveDateTime};
+use chrono::offset::Utc;
+use chrono::DateTime;
+use std::time::SystemTime;
 
 pub async fn get_blacksky_posts (
     limit: Option<i64>,
@@ -73,8 +76,46 @@ pub async fn get_blacksky_posts (
 }
 
 pub async fn queue_creation(
-    _body: Vec<CreateRequest>,
+    body: Vec<CreateRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::schema::post::dsl::*;
+
+    let connection = &mut establish_connection();
+
+    let mut new_posts = Vec::new();
+    body
+        .into_iter()
+        .map(|req_post| {
+            let system_time = SystemTime::now();
+            let dt: DateTime<Utc> = system_time.into();
+
+            let mut new_post = Post {
+                uri: req_post.uri,
+                cid: req_post.cid,
+                reply_parent: None,
+                reply_root: None,
+                indexed_at: format!("{}", dt.format("%+")),
+            };
+            if let Some(reply) = req_post.record.reply {
+                new_post.reply_parent = Some(reply.parent.uri);
+                new_post.reply_root = Some(reply.root.uri);
+            }
+            let new_post = (
+                uri.eq(new_post.uri),
+                cid.eq(new_post.cid),
+                replyParent.eq(new_post.reply_parent),
+                replyRoot.eq(new_post.reply_root),
+                indexedAt.eq(new_post.indexed_at)
+            );
+            new_posts.push(new_post);
+        })
+        .for_each(drop);
+
+    diesel::insert_into(post)
+        .values(&new_posts)
+        .on_conflict(uri)
+        .do_nothing()
+        .execute(connection)?;
     Ok(())
 }
 

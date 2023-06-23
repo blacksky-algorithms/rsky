@@ -1,4 +1,4 @@
-use crate::lexicon::com::atproto::sync::SubscribeRepos;
+use lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::io::Cursor;
 

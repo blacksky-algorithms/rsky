@@ -1,2 +1,2 @@
 [workspace]
-members = ["rsky-feedgen", "rsky-firehose"]
+members = ["rsky-feedgen", "rsky-firehose", "lexicon"]

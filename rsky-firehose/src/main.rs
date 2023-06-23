@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 
-use rsky_firehose::lexicon::app::bsky::feed::Post;
-use rsky_firehose::lexicon::com::atproto::sync::SubscribeRepos;
+use lexicon::app::bsky::feed::Post;
+use lexicon::com::atproto::sync::SubscribeRepos;
 use futures::StreamExt as _;
 use std::io::Cursor;
 use tokio_tungstenite::tungstenite::protocol::Message;

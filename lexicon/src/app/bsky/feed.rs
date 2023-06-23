@@ -2,7 +2,7 @@ use super::{
     actor::ProfileView,
     embed::{External, Image},
 };
-use crate::lexicon::com::atproto::repo::StrongRef;
+use crate::com::atproto::repo::StrongRef;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

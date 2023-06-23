@@ -7,5 +7,5 @@ pub struct CreateRequest {
     #[serde(rename = "author")]
     pub author: String,
     #[serde(rename = "record")]
-    pub record: crate::lexicon::app::bsky::feed::Post,
+    pub record: lexicon::app::bsky::feed::Post,
 }
