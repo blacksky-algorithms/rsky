@@ -120,7 +120,23 @@ pub async fn queue_creation(
 }
 
 pub async fn queue_deletion(
-    _body: Vec<DeleteRequest>,
+    body: Vec<DeleteRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::schema::post::dsl::*;
+
+    let connection = &mut establish_connection();
+
+    let mut delete_posts = Vec::new();
+    body
+        .into_iter()
+        .map(|req_post| {
+            delete_posts.push(req_post.uri);
+        })
+        .for_each(drop);
+
+    diesel::delete(
+            post.filter(uri.eq_any(delete_posts))
+        )
+        .execute(connection)?;
     Ok(())
 }
