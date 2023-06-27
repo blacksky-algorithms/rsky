@@ -15,7 +15,7 @@ pub async fn get_blacksky_posts (
 ) -> Result<AlgoResponse, Box<dyn std::error::Error>> {
     use crate::schema::post::dsl::*;
 
-    let connection = &mut establish_connection();
+    let connection = &mut establish_connection()?;
 
     let mut query = post
         .limit(limit.unwrap_or(50))
@@ -84,7 +84,7 @@ pub fn is_included(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
-    let connection = &mut establish_connection();
+    let connection = &mut establish_connection()?;
     let result = membership
         .filter(did.eq(did_))
         .filter(list.eq(list_))
@@ -105,14 +105,14 @@ pub async fn queue_creation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::post::dsl::*;
 
-    let connection = &mut establish_connection();
+    let connection = &mut establish_connection()?;
 
     let mut new_posts = Vec::new();
     let mut hellthread_roots = HashSet::new();
     hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
     lazy_static! {
-        static ref RE: Regex = Regex::new(r"/#[^\s#\.\;]*/gmi").unwrap();
+        static ref RE: Regex = Regex::new(r"/#[^\s#\.\;]*/gmi").unwrap(); // Not working
     }
 
     body
@@ -168,7 +168,7 @@ pub async fn queue_deletion(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::post::dsl::*;
 
-    let connection = &mut establish_connection();
+    let connection = &mut establish_connection()?;
 
     let mut delete_posts = Vec::new();
     body
