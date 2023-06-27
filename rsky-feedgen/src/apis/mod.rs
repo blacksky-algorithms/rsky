@@ -5,6 +5,9 @@ use chrono::{ NaiveDateTime};
 use chrono::offset::Utc;
 use chrono::DateTime;
 use std::time::SystemTime;
+use std::collections::HashSet;
+use regex::Regex;
+use lazy_static::lazy_static;
 
 pub async fn get_blacksky_posts (
     limit: Option<i64>,
@@ -75,20 +78,52 @@ pub async fn get_blacksky_posts (
     Ok(new_response)
 }
 
+pub fn is_included(
+    did_: String,
+    list_: String
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use crate::schema::membership::dsl::*;
+
+    let connection = &mut establish_connection();
+    let result = membership
+        .filter(did.eq(did_))
+        .filter(list.eq(list_))
+        .filter(included.eq(true))
+        .limit(1)
+        .select(Membership::as_select())
+        .load(connection)?;
+
+    if result.len() > 0 {
+        Ok(result[0].included)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn queue_creation(
-    body: Vec<CreateRequest>,
+    body: Vec<CreateRequest>
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::post::dsl::*;
 
     let connection = &mut establish_connection();
 
     let mut new_posts = Vec::new();
+    let mut hellthread_roots = HashSet::new();
+    hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
+
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"/#[^\s#\.\;]*/gmi").unwrap();
+    }
+
     body
         .into_iter()
         .map(|req_post| {
             let system_time = SystemTime::now();
             let dt: DateTime<Utc> = system_time.into();
-
+            let mut is_hellthread = false;
+            let is_blacksky_author = is_included(req_post.author,"blacksky".into()).unwrap_or(false);
+            let hashtags = RE.captures_iter(&req_post.record.text).collect::<Vec<_>>();
+            
             let mut new_post = Post {
                 uri: req_post.uri,
                 cid: req_post.cid,
@@ -99,7 +134,12 @@ pub async fn queue_creation(
             if let Some(reply) = req_post.record.reply {
                 new_post.reply_parent = Some(reply.parent.uri);
                 new_post.reply_root = Some(reply.root.uri);
+
+                is_hellthread = hellthread_roots.contains(&reply.root.cid);
             }
+            let uri_ = &new_post.uri;
+            println!("uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
+
             let new_post = (
                 uri.eq(new_post.uri),
                 cid.eq(new_post.cid),

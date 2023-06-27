@@ -22,3 +22,5 @@ pub mod create_request;
 pub use self::create_request::CreateRequest;
 pub mod delete_request;
 pub use self::delete_request::DeleteRequest;
+pub mod membership;
+pub use self::membership::Membership;

@@ -5,6 +5,7 @@ extern crate serde;
 extern crate serde_json;
 
 extern crate lexicon;
+extern crate lazy_static;
 
 pub mod schema;
 pub mod models;

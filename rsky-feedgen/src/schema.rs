@@ -1,6 +1,15 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    membership (did) {
+        did -> Varchar,
+        included -> Bool,
+        excluded -> Bool,
+        list -> Varchar,
+    }
+}
+
+diesel::table! {
     post (uri) {
         uri -> Varchar,
         cid -> Varchar,
@@ -18,6 +27,7 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
+    membership,
     post,
     sub_state,
 );
