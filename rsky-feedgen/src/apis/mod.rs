@@ -130,22 +130,26 @@ pub async fn queue_creation(
                 reply_parent: None,
                 reply_root: None,
                 indexed_at: format!("{}", dt.format("%+")),
+                prev: req_post.prev,
+                sequence: req_post.sequence
             };
             if let Some(reply) = req_post.record.reply {
                 new_post.reply_parent = Some(reply.parent.uri);
                 new_post.reply_root = Some(reply.root.uri);
-
                 is_hellthread = hellthread_roots.contains(&reply.root.cid);
             }
             let uri_ = &new_post.uri;
-            println!("uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
+            let seq_ = &new_post.sequence;
+            println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
 
             let new_post = (
                 uri.eq(new_post.uri),
                 cid.eq(new_post.cid),
                 replyParent.eq(new_post.reply_parent),
                 replyRoot.eq(new_post.reply_root),
-                indexedAt.eq(new_post.indexed_at)
+                indexedAt.eq(new_post.indexed_at),
+                prev.eq(new_post.prev),
+                sequence.eq(new_post.sequence)
             );
             new_posts.push(new_post);
         })

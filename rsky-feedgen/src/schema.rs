@@ -16,6 +16,8 @@ diesel::table! {
         replyParent -> Nullable<Varchar>,
         replyRoot -> Nullable<Varchar>,
         indexedAt -> Varchar,
+        prev -> Nullable<Varchar>,
+        sequence -> Nullable<Int8>,
     }
 }
 

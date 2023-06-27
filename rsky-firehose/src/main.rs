@@ -79,12 +79,17 @@ async fn process(
                                                 .split("/")
                                                 .map(String::from)
                                                 .collect::<Vec<_>>()[0];
-                                            let create = rsky_firehose::models::CreateOp {
+                                            let mut create = rsky_firehose::models::CreateOp {
                                                 uri: uri.to_owned(),
                                                 cid: cid.to_string(),
+                                                sequence: commit.sequence,
+                                                prev: None,
                                                 author: commit.repo.to_owned(),
                                                 record: post
                                             };
+                                            if let Some(prev) = commit.prev {
+                                                create.prev = Some(prev.to_string());
+                                            }
                                             posts_to_create.push(create);
                                         },
                                         Err(error) => {

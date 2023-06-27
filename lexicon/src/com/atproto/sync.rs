@@ -20,7 +20,7 @@ pub struct SubscribeReposCommit {
     pub rebase: bool,
     pub repo: String,
     #[serde(rename(deserialize = "seq"))]
-    pub sequence: u64,
+    pub sequence: i64,
     pub time: DateTime<Utc>,
     #[serde(rename(deserialize = "tooBig"))]
     pub too_big: bool,
@@ -31,7 +31,7 @@ pub struct SubscribeReposHandle {
     pub did: String,
     pub handle: String,
     #[serde(rename(deserialize = "seq"))]
-    pub sequence: u64,
+    pub sequence: i64,
     pub time: DateTime<Utc>,
 }
 
@@ -39,7 +39,7 @@ pub struct SubscribeReposHandle {
 pub struct SubscribeReposTombstone {
     pub did: String,
     #[serde(rename(deserialize = "seq"))]
-    pub sequence: u64,
+    pub sequence: i64,
     pub time: DateTime<Utc>,
 }
 
