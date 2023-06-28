@@ -124,6 +124,47 @@ async fn queue_deletion(
     }
 }
 
+#[get("/.well-known/did.json", format = "json")]
+async fn well_known(
+) -> Result<Json<rsky_feedgen::models::WellKnown>, status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
+    match env::var("FEEDGEN_SERVICE_DID") {
+        Ok(service_did) => {
+            let hostname = env::var("FEEDGEN_HOSTNAME").unwrap_or("".into());
+            if !service_did.ends_with(hostname.as_str()) {
+                let path_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                    code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                    message: Some("Not Found".to_string()),
+                };
+                Err(status::Custom(
+                    Status::NotFound,
+                    Json(path_error),
+                ))
+            } else {
+                let known_service = rsky_feedgen::models::KnownService {
+                    id: "#bsky_fg".to_owned(),
+                    r#type: "BskyFeedGenerator".to_owned(),
+                    service_endpoint: format!("https://{}", hostname)
+                };
+                let result = rsky_feedgen::models::WellKnown {
+                    context: vec!["https://www.w3.org/ns/did/v1".into()],
+                    id: service_did,
+                    service: vec![known_service]
+                };
+                Ok(Json(result))
+            }
+        },
+        Err(_) => {
+            let path_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                message: Some("Not Found".to_string()),
+            };
+            Err(status::Custom(
+                Status::NotFound,
+                Json(path_error),
+            ))
+        }
+    }
+}
 
 #[catch(404)]
 fn not_found() -> Json<rsky_feedgen::models::PathUnknownErrorMessageResponse> {
@@ -208,6 +249,7 @@ fn rocket() -> _ {
                 index,
                 queue_creation,
                 queue_deletion,
+                well_known,
                 all_options
             ],
         )

@@ -24,3 +24,7 @@ pub mod delete_request;
 pub use self::delete_request::DeleteRequest;
 pub mod membership;
 pub use self::membership::Membership;
+pub mod well_known;
+pub use self::well_known::WellKnown;
+pub mod known_service;
+pub use self::known_service::KnownService;
