@@ -126,13 +126,13 @@ async fn queue_deletion(
 
 #[get("/.well-known/did.json", format = "json")]
 async fn well_known(
-) -> Result<Json<rsky_feedgen::models::WellKnown>, status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
+) -> Result<Json<rsky_feedgen::models::WellKnown>, status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>> {
     match env::var("FEEDGEN_SERVICE_DID") {
         Ok(service_did) => {
             let hostname = env::var("FEEDGEN_HOSTNAME").unwrap_or("".into());
             if !service_did.ends_with(hostname.as_str()) {
-                let path_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                    code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                let path_error = rsky_feedgen::models::PathUnknownErrorMessageResponse {
+                    code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
                     message: Some("Not Found".to_string()),
                 };
                 Err(status::Custom(
@@ -154,8 +154,8 @@ async fn well_known(
             }
         },
         Err(_) => {
-            let path_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+            let path_error = rsky_feedgen::models::PathUnknownErrorMessageResponse {
+                code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
                 message: Some("Not Found".to_string()),
             };
             Err(status::Custom(
