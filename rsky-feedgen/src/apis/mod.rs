@@ -100,6 +100,13 @@ pub fn is_included(
     }
 }
 
+fn extract_hashtags(input: &str) -> HashSet<&str> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"\#[a-zA-Z][0-9a-zA-Z_]*").unwrap();
+    }
+    RE.find_iter(input).map(|mat| mat.as_str()).collect()
+}
+
 pub async fn queue_creation(
     body: Vec<CreateRequest>
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -111,10 +118,6 @@ pub async fn queue_creation(
     let mut hellthread_roots = HashSet::new();
     hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"/#[^\s#\.\;]*/gmi").unwrap(); // Not working
-    }
-
     body
         .into_iter()
         .map(|req_post| {
@@ -122,7 +125,8 @@ pub async fn queue_creation(
             let dt: DateTime<Utc> = system_time.into();
             let mut is_hellthread = false;
             let is_blacksky_author = is_included(req_post.author,"blacksky".into()).unwrap_or(false);
-            let hashtags = RE.captures_iter(&req_post.record.text).collect::<Vec<_>>();
+            let post_text: String = req_post.record.text.to_lowercase();
+            let hashtags = extract_hashtags(&post_text);
             
             let mut new_post = Post {
                 uri: req_post.uri,
