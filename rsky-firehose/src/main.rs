@@ -14,12 +14,13 @@ use tokio_tungstenite::{WebSocketStream, MaybeTlsStream};
 
 async fn queue_delete(
     url: String,
-    records: Vec<rsky_firehose::models::DeleteOp>
+    records: Vec<rsky_firehose::models::DeleteOp>,
+    client: &reqwest::Client
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("RSKY_API_KEY").map_err(|_| {
         "Pass a valid preshared token via `RSKY_API_KEY` environment variable.".to_string()
     })?;
-    reqwest::Client::new()
+    client
         .put(url)
         .json(&records)
         .header("X-RSKY-KEY", token)
@@ -30,12 +31,13 @@ async fn queue_delete(
 
 async fn queue_create<T: serde::ser::Serialize>(
     url: String,
-    records: Vec<rsky_firehose::models::CreateOp<T>>
+    records: Vec<rsky_firehose::models::CreateOp<T>>,
+    client: &reqwest::Client
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("RSKY_API_KEY").map_err(|_| {
         "Pass a valid preshared token via `RSKY_API_KEY` environment variable.".to_string()
     })?;
-    reqwest::Client::new()
+    client
         .put(url)
         .json(&records)
         .header("X-RSKY-KEY", token)
@@ -45,7 +47,8 @@ async fn queue_create<T: serde::ser::Serialize>(
 }
 
 async fn process(
-    message: Vec<u8>
+    message: Vec<u8>,
+    client: &reqwest::Client
 ) {
     let default_queue_path = env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("https://[::1]:8081".into());
 
@@ -114,7 +117,7 @@ async fn process(
         if posts_to_create.len() > 0 {
             //println!("Create: {posts_to_create:?}");
             let queue_endpoint = format!("{}/queue/create",default_queue_path);
-            let resp = queue_create(queue_endpoint, posts_to_create).await;
+            let resp = queue_create(queue_endpoint, posts_to_create, client).await;
             match resp {
                 Ok(()) => (),
                 Err(error) => eprintln!("Records failed to queue: {error:?}")
@@ -123,7 +126,7 @@ async fn process(
         if posts_to_delete.len() > 0 {
             //println!("Delete: {posts_to_delete:?}");
             let queue_endpoint = format!("{}/queue/delete",default_queue_path);
-            let resp = queue_delete(queue_endpoint, posts_to_delete).await;
+            let resp = queue_delete(queue_endpoint, posts_to_delete, client).await;
             match resp {
                 Ok(()) => (),
                 Err(error) => eprintln!("Records failed to queue: {error:?}")
@@ -142,7 +145,7 @@ async fn main() {
     };
 
     let default_subscriber_path = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT").unwrap_or("wss://bsky.social".into());
-
+    let client = reqwest::Client::new();
     loop {
         let (mut socket, _response) = tokio_tungstenite::connect_async(
             Url::parse(
@@ -156,10 +159,11 @@ async fn main() {
         )
         .await
         .unwrap();
-
+        
         while let Some(Ok(Message::Binary(message))) = socket.next().await {
+            let client = client.clone();
             tokio::spawn(async move {
-                process(message).await;
+                process(message, &client).await;
             });
         }
     }

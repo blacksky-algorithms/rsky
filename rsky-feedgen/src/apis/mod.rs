@@ -142,20 +142,26 @@ pub async fn queue_creation(
                 new_post.reply_root = Some(reply.root.uri);
                 is_hellthread = hellthread_roots.contains(&reply.root.cid);
             }
-            let uri_ = &new_post.uri;
-            let seq_ = &new_post.sequence;
-            println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
 
-            let new_post = (
-                uri.eq(new_post.uri),
-                cid.eq(new_post.cid),
-                replyParent.eq(new_post.reply_parent),
-                replyRoot.eq(new_post.reply_root),
-                indexedAt.eq(new_post.indexed_at),
-                prev.eq(new_post.prev),
-                sequence.eq(new_post.sequence)
-            );
-            new_posts.push(new_post);
+            if (is_blacksky_author || 
+                hashtags.contains("#blacksky") ||
+                hashtags.contains("#blacktechsky") ||
+                hashtags.contains("#nbablacksky")) && !is_hellthread  {
+                let uri_ = &new_post.uri;
+                let seq_ = &new_post.sequence;
+                println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
+
+                let new_post = (
+                    uri.eq(new_post.uri),
+                    cid.eq(new_post.cid),
+                    replyParent.eq(new_post.reply_parent),
+                    replyRoot.eq(new_post.reply_root),
+                    indexedAt.eq(new_post.indexed_at),
+                    prev.eq(new_post.prev),
+                    sequence.eq(new_post.sequence)
+                );
+                new_posts.push(new_post);
+            }
         })
         .for_each(drop);
 
