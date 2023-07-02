@@ -41,7 +41,7 @@ diesel::table! {
 diesel::table! {
     sub_state (service) {
         service -> Varchar,
-        cursor -> Int4,
+        cursor -> Int8,
     }
 }
 

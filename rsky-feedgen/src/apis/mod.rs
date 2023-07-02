@@ -194,3 +194,48 @@ pub async fn queue_deletion(
         .execute(connection)?;
     Ok(())
 }
+
+pub async fn update_cursor(
+    service_: String,
+    sequence: i64
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::schema::sub_state::dsl::*;
+
+    let connection = &mut establish_connection()?;
+    let update_state = (
+        service.eq(service_),
+        cursor.eq(&sequence)
+    );
+
+    diesel::insert_into(sub_state)
+        .values(&update_state)
+        .on_conflict(service)
+        .do_update()
+        .set(cursor.eq(&sequence))
+        .execute(connection)?;
+    Ok(())
+}
+
+pub async fn get_cursor(
+    service_: String
+) -> Result<SubState, Box<dyn std::error::Error>> {
+    use crate::schema::sub_state::dsl::*;
+
+    let connection = &mut establish_connection()?;
+    let mut result = sub_state
+        .filter(service.eq(service_))
+        .order(cursor.desc())
+        .limit(1)
+        .select(SubState::as_select())
+        .load(connection)?;
+
+    if let Some(cursor_) = result.pop() {
+        Ok(cursor_)
+    } else {
+        let not_found_error = crate::models::PathUnknownErrorMessageResponse {
+            code: Some(crate::models::NotFoundErrorCode::NotFoundError),
+            message: Some("Not found.".into()),
+        };
+        Err(Box::new(not_found_error))
+    }
+}

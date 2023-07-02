@@ -82,6 +82,49 @@ async fn index (
     }
 }
 
+#[put("/cursor?<service>&<sequence>")]
+async fn update_cursor(
+    service: String,
+    sequence: i64,
+    _key: ApiKey<'_>,
+) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
+    match rsky_feedgen::apis::update_cursor(service, sequence).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ))
+        }
+    }
+}
+
+#[get("/cursor?<service>", format = "json")]
+async fn get_cursor(
+    service: String,
+    _key: ApiKey<'_>,
+) -> Result<Json<rsky_feedgen::models::SubState>, status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>> {
+    match rsky_feedgen::apis::get_cursor(service).await {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let path_error = rsky_feedgen::models::PathUnknownErrorMessageResponse {
+                code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
+                message: Some("Not Found".to_string()),
+            };
+            Err(status::Custom(
+                Status::NotFound,
+                Json(path_error),
+            ))
+        }
+    }
+}
+
 #[put("/queue/create", format = "json", data = "<body>")]
 async fn queue_creation(
     body: Json<Vec<rsky_feedgen::models::CreateRequest>>,
@@ -250,6 +293,8 @@ fn rocket() -> _ {
                 queue_creation,
                 queue_deletion,
                 well_known,
+                get_cursor,
+                update_cursor,
                 all_options
             ],
         )

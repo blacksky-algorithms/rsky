@@ -46,11 +46,35 @@ async fn queue_create<T: serde::ser::Serialize>(
     Ok(())
 }
 
+async fn update_cursor(
+    url: String,
+    service: String,
+    sequence: &i64,
+    client: &reqwest::Client
+) -> Result<(), Box<dyn std::error::Error>> {
+    let token = env::var("RSKY_API_KEY").map_err(|_| {
+        "Pass a valid preshared token via `RSKY_API_KEY` environment variable.".to_string()
+    })?;
+    let query = vec![
+        ("service", service),
+        ("sequence", sequence.to_string()),
+    ];
+    client
+        .put(url)
+        .query(&query)
+        .header("X-RSKY-KEY", token)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    Ok(())
+}
+
 async fn process(
     message: Vec<u8>,
     client: &reqwest::Client
 ) {
     let default_queue_path = env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("https://[::1]:8081".into());
+    let default_subscriber_path = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT").unwrap_or("wss://bsky.social".into());
 
     if let Ok((_header, body)) = rsky_firehose::firehose::read(&message) {
         let mut posts_to_delete = Vec::new();
@@ -60,6 +84,15 @@ async fn process(
             SubscribeRepos::Commit(commit) => {
                 if commit.operations.is_empty() {
                     println!("Operations empty.");
+                }
+                // update stored cursor every 20 events or so
+                if (&commit.sequence).rem_euclid(20) == 0 {
+                    let cursor_endpoint = format!("{}/cursor",default_queue_path);
+                    let resp = update_cursor(cursor_endpoint, default_subscriber_path, &commit.sequence, client).await;
+                    match resp {
+                        Ok(()) => (),
+                        Err(error) => eprintln!("Failed to update cursor: {error:?}")
+                    };
                 }
                 commit.operations
                     .into_iter()

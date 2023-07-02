@@ -7,5 +7,5 @@ pub struct SubState {
     #[serde(rename = "service")]
     pub service: String,
     #[serde(rename = "cursor")]
-    pub cursor: i32,
+    pub cursor: i64,
 }
