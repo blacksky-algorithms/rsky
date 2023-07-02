@@ -79,14 +79,14 @@ pub async fn get_blacksky_posts (
 }
 
 pub fn is_included(
-    did_: String,
+    did_: &String,
     list_: String
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let connection = &mut establish_connection()?;
     let result = membership
-        .filter(did.eq(did_))
+        .filter(did.eq(did_.to_string()))
         .filter(list.eq(list_))
         .filter(included.eq(true))
         .limit(1)
@@ -111,10 +111,12 @@ pub async fn queue_creation(
     body: Vec<CreateRequest>
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::post::dsl::*;
+    use crate::schema::membership::dsl::*;
 
     let connection = &mut establish_connection()?;
 
     let mut new_posts = Vec::new();
+    let mut new_members = Vec::new();
     let mut hellthread_roots = HashSet::new();
     hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
@@ -124,7 +126,7 @@ pub async fn queue_creation(
             let system_time = SystemTime::now();
             let dt: DateTime<Utc> = system_time.into();
             let mut is_hellthread = false;
-            let is_blacksky_author = is_included(req_post.author,"blacksky".into()).unwrap_or(false);
+            let is_blacksky_author = is_included(&req_post.author,"blacksky".into()).unwrap_or(false);
             let post_text: String = req_post.record.text.to_lowercase();
             let hashtags = extract_hashtags(&post_text);
             
@@ -146,7 +148,8 @@ pub async fn queue_creation(
             if (is_blacksky_author || 
                 hashtags.contains("#blacksky") ||
                 hashtags.contains("#blacktechsky") ||
-                hashtags.contains("#nbablacksky")) && !is_hellthread  {
+                hashtags.contains("#nbablacksky") ||
+                hashtags.contains("#addtoblacksky")) && !is_hellthread  {
                 let uri_ = &new_post.uri;
                 let seq_ = &new_post.sequence;
                 println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
@@ -161,6 +164,17 @@ pub async fn queue_creation(
                     sequence.eq(new_post.sequence)
                 );
                 new_posts.push(new_post);
+
+                if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
+                    println!("New member: {:?}", &req_post.author);
+                    let new_member = (
+                        did.eq(req_post.author),
+                        included.eq(true),
+                        excluded.eq(false),
+                        list.eq("blacksky")
+                    );
+                    new_members.push(new_member);
+                }
             }
         })
         .for_each(drop);
@@ -168,6 +182,12 @@ pub async fn queue_creation(
     diesel::insert_into(post)
         .values(&new_posts)
         .on_conflict(uri)
+        .do_nothing()
+        .execute(connection)?;
+
+    diesel::insert_into(membership)
+        .values(&new_members)
+        .on_conflict(did)
         .do_nothing()
         .execute(connection)?;
     Ok(())
