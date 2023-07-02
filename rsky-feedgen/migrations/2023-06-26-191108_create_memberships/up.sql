@@ -1,5 +1,5 @@
 -- Your SQL goes here
-CREATE TABLE public.membership (
+CREATE TABLE IF NOT EXISTS public.membership (
     did character varying NOT NULL,
     included BOOLEAN NOT NULL,
     excluded BOOLEAN NOT NULL,
