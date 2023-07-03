@@ -6,6 +6,9 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
 use std::env;
+use rsky_feedgen::{WriteDbConn, ReadReplicaConn};
+use rocket::figment::{value::{Map, Value}, util::map};
+use dotenvy::dotenv;
 
 pub struct CORS;
 
@@ -47,6 +50,7 @@ async fn index (
     feed: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
+    connection: ReadReplicaConn,
 ) -> Result<
     Json<rsky_feedgen::models::AlgoResponse>,
     status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>,
@@ -54,7 +58,7 @@ async fn index (
     let _blacksky: String = String::from(BLACKSKY);
     match feed {
         Some(_blacksky) => {
-            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor).await {
+            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -87,8 +91,9 @@ async fn update_cursor(
     service: String,
     sequence: i64,
     _key: ApiKey<'_>,
+    connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::update_cursor(service, sequence).await {
+    match rsky_feedgen::apis::update_cursor(service, sequence, connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -108,8 +113,9 @@ async fn update_cursor(
 async fn get_cursor(
     service: String,
     _key: ApiKey<'_>,
+    connection: ReadReplicaConn,
 ) -> Result<Json<rsky_feedgen::models::SubState>, status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>> {
-    match rsky_feedgen::apis::get_cursor(service).await {
+    match rsky_feedgen::apis::get_cursor(service, connection).await {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -129,8 +135,9 @@ async fn get_cursor(
 async fn queue_creation(
     body: Json<Vec<rsky_feedgen::models::CreateRequest>>,
     _key: ApiKey<'_>,
+    connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_creation(body.into_inner()).await {
+    match rsky_feedgen::apis::queue_creation(body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -150,8 +157,9 @@ async fn queue_creation(
 async fn queue_deletion(
     body: Json<Vec<rsky_feedgen::models::DeleteRequest>>,
     _key: ApiKey<'_>,
+    connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_deletion(body.into_inner()).await {
+    match rsky_feedgen::apis::queue_deletion(body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -210,7 +218,7 @@ async fn well_known(
 }
 
 #[catch(404)]
-fn not_found() -> Json<rsky_feedgen::models::PathUnknownErrorMessageResponse> {
+async fn not_found() -> Json<rsky_feedgen::models::PathUnknownErrorMessageResponse> {
     let path_error = rsky_feedgen::models::PathUnknownErrorMessageResponse {
         code: Some(rsky_feedgen::models::NotFoundErrorCode::UndefinedEndpoint),
         message: Some("Not Found".to_string()),
@@ -219,7 +227,7 @@ fn not_found() -> Json<rsky_feedgen::models::PathUnknownErrorMessageResponse> {
 }
 
 #[catch(422)]
-fn unprocessable_entity() -> Json<rsky_feedgen::models::ValidationErrorMessageResponse> {
+async fn unprocessable_entity() -> Json<rsky_feedgen::models::ValidationErrorMessageResponse> {
     let validation_error = rsky_feedgen::models::ValidationErrorMessageResponse {
         code: Some(rsky_feedgen::models::ErrorCode::ValidationError),
         message: Some(
@@ -231,7 +239,7 @@ fn unprocessable_entity() -> Json<rsky_feedgen::models::ValidationErrorMessageRe
 }
 
 #[catch(400)]
-fn bad_request() -> Json<rsky_feedgen::models::ValidationErrorMessageResponse> {
+async fn bad_request() -> Json<rsky_feedgen::models::ValidationErrorMessageResponse> {
     let validation_error = rsky_feedgen::models::ValidationErrorMessageResponse {
         code: Some(rsky_feedgen::models::ErrorCode::ValidationError),
         message: Some("The request was improperly formed.".to_string()),
@@ -240,7 +248,7 @@ fn bad_request() -> Json<rsky_feedgen::models::ValidationErrorMessageResponse> {
 }
 
 #[catch(401)]
-fn unauthorized() -> Json<rsky_feedgen::models::InternalErrorMessageResponse> {
+async fn unauthorized() -> Json<rsky_feedgen::models::InternalErrorMessageResponse> {
     let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
         code: Some(rsky_feedgen::models::InternalErrorCode::Unavailable),
         message: Some("Request could not be processed.".to_string()),
@@ -249,7 +257,7 @@ fn unauthorized() -> Json<rsky_feedgen::models::InternalErrorMessageResponse> {
 }
 
 #[catch(default)]
-fn default_catcher() -> Json<rsky_feedgen::models::InternalErrorMessageResponse> {
+async fn default_catcher() -> Json<rsky_feedgen::models::InternalErrorMessageResponse> {
     let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
         code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
         message: Some("Internal error.".to_string()),
@@ -259,7 +267,7 @@ fn default_catcher() -> Json<rsky_feedgen::models::InternalErrorMessageResponse>
 
 /// Catches all OPTION requests in order to get the CORS related Fairing triggered.
 #[options("/<_..>")]
-fn all_options() {
+async fn all_options() {
     /* Intentionally left empty */
 }
 
@@ -285,7 +293,27 @@ impl Fairing for CORS {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build()
+    dotenv().ok();
+
+    let write_database_url = env::var("DATABASE_URL").unwrap_or("".into());
+    let read_database_url = env::var("READ_REPLICA_URL").unwrap_or("".into());
+
+    let write_db: Map<_, Value> = map! {
+        "url" => write_database_url.into(),
+        "pool_size" => 20.into(),
+        "timeout" => 30.into(),
+    };
+
+    let read_db: Map<_, Value> = map! {
+        "url" => read_database_url.into(),
+        "pool_size" => 20.into(),
+        "timeout" => 30.into(),
+    };
+
+    let figment = rocket::Config::figment()
+        .merge(("databases", map!["pg_read_replica" => read_db, "pg_db" => write_db]));
+
+    rocket::custom(figment)
         .mount(
             "/",
             routes![
@@ -309,4 +337,6 @@ fn rocket() -> _ {
             ],
         )
         .attach(CORS)
+        .attach(WriteDbConn::fairing())
+        .attach(ReadReplicaConn::fairing())
 }
