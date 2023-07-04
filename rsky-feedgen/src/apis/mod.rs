@@ -9,6 +9,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::time::SystemTime;
+use std::fmt::Write;
 
 pub async fn get_blacksky_posts(
     limit: Option<i64>,
@@ -33,12 +34,15 @@ pub async fn get_blacksky_posts(
                     .map(String::from)
                     .collect::<Vec<_>>();
                 if let [indexed_at_c, cid_c] = &v[..] {
-                    let timestamp = indexed_at_c.parse::<i64>().unwrap();
-                    if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp, 0) {
-                        let timestr = format!("{}", dt.format("%+"));
-                        query = query
-                            .filter(indexedAt.le(timestr.to_owned()))
-                            .filter(cid.lt(cid_c.to_owned()))
+                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                        if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp/1000, 0) {
+                            let mut timestr = String::new();
+                            if let Ok(_) = write!(timestr, "{}", dt.format("%+")) {
+                                query = query
+                                    .filter(indexedAt.le(timestr.to_owned()))
+                                    .filter(cid.lt(cid_c.to_owned()))
+                            }
+                        }
                     }
                 } else {
                     let validation_error = ValidationErrorMessageResponse {
