@@ -71,6 +71,7 @@ impl<'r> FromRequest<'r> for AccessToken {
                 Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
             }
             Some(token) => {
+                println!("Visited by {token:?}");
                 let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
                 let jwt = token
                     .split(" ")
