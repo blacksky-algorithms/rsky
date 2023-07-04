@@ -1,14 +1,19 @@
-#[macro_use] extern crate rocket;
+#[macro_use]
+extern crate rocket;
+use dotenvy::dotenv;
 use rocket::fairing::{Fairing, Info, Kind};
+use rocket::figment::{
+    util::map,
+    value::{Map, Value},
+};
 use rocket::http::Header;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
+use rsky_feedgen::{ReadReplicaConn, WriteDbConn};
 use std::env;
-use rsky_feedgen::{WriteDbConn, ReadReplicaConn};
-use rocket::figment::{value::{Map, Value}, util::map};
-use dotenvy::dotenv;
+use rsky_feedgen::models::JwtParts;
 
 pub struct CORS;
 
@@ -17,7 +22,16 @@ use rocket::request::{FromRequest, Outcome};
 struct ApiKey<'r>(&'r str);
 
 #[derive(Debug)]
+struct AccessToken(String);
+
+#[derive(Debug)]
 enum ApiKeyError {
+    Missing,
+    Invalid,
+}
+
+#[derive(Debug)]
+enum AccessTokenError {
     Missing,
     Invalid,
 }
@@ -43,18 +57,67 @@ impl<'r> FromRequest<'r> for ApiKey<'r> {
     }
 }
 
+#[allow(unused_assignments)]
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessToken {
+    type Error = AccessTokenError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.headers().get_one("Authorization") {
+            None => Outcome::Failure((Status::Unauthorized, AccessTokenError::Missing)),
+            Some(token) if !token.starts_with("Bearer ") => {
+                Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+            }
+            Some(token) => {
+                let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
+                let jwt = token
+                    .split(" ")
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                if let Some(jwtstr) = jwt.last() {
+                    match rsky_feedgen::auth::verify_jwt(&jwtstr, &service_did) {
+                        Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
+                        Err(error) => {
+                            eprintln!("Error decoding jwt: {error}");
+                            Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                        },
+                    }
+                } else {
+                    Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                }
+            }
+        }
+    }
+}
+
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
 
-#[get("/xrpc/app.bsky.feed.getFeedSkeleton?<feed>&<limit>&<cursor>", format = "json")]
-async fn index (
+#[get(
+    "/xrpc/app.bsky.feed.getFeedSkeleton?<feed>&<limit>&<cursor>",
+    format = "json"
+)]
+async fn index(
     feed: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
     connection: ReadReplicaConn,
+    _token: Result<AccessToken, AccessTokenError>,
 ) -> Result<
     Json<rsky_feedgen::models::AlgoResponse>,
     status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>,
 > {
+    if let Ok(jwt) = _token {
+        match serde_json::from_str::<JwtParts>(&jwt.0) {
+            Ok(jwt_obj) => {
+                println!("AccessToken {jwt_obj:?}");
+                match rsky_feedgen::apis::add_visitor(jwt_obj) {
+                    Ok(_) => (),
+                    Err(error) => eprintln!("Failed to write visitor: {error:?}"),
+                }
+            },
+            Err(error) => eprintln!("Failed to parse jwt string: {error:?} | jwt: {jwt:?}"),
+        }
+    }
     let _blacksky: String = String::from(BLACKSKY);
     match feed {
         Some(_blacksky) => {
@@ -114,7 +177,10 @@ async fn get_cursor(
     service: String,
     _key: ApiKey<'_>,
     connection: ReadReplicaConn,
-) -> Result<Json<rsky_feedgen::models::SubState>, status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>> {
+) -> Result<
+    Json<rsky_feedgen::models::SubState>,
+    status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>,
+> {
     match rsky_feedgen::apis::get_cursor(service, connection).await {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
@@ -123,10 +189,7 @@ async fn get_cursor(
                 code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
                 message: Some("Not Found".to_string()),
             };
-            Err(status::Custom(
-                Status::NotFound,
-                Json(path_error),
-            ))
+            Err(status::Custom(Status::NotFound, Json(path_error)))
         }
     }
 }
@@ -176,8 +239,10 @@ async fn queue_deletion(
 }
 
 #[get("/.well-known/did.json", format = "json")]
-async fn well_known(
-) -> Result<Json<rsky_feedgen::models::WellKnown>, status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>> {
+async fn well_known() -> Result<
+    Json<rsky_feedgen::models::WellKnown>,
+    status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>,
+> {
     match env::var("FEEDGEN_SERVICE_DID") {
         Ok(service_did) => {
             let hostname = env::var("FEEDGEN_HOSTNAME").unwrap_or("".into());
@@ -186,33 +251,27 @@ async fn well_known(
                     code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
                     message: Some("Not Found".to_string()),
                 };
-                Err(status::Custom(
-                    Status::NotFound,
-                    Json(path_error),
-                ))
+                Err(status::Custom(Status::NotFound, Json(path_error)))
             } else {
                 let known_service = rsky_feedgen::models::KnownService {
                     id: "#bsky_fg".to_owned(),
                     r#type: "BskyFeedGenerator".to_owned(),
-                    service_endpoint: format!("https://{}", hostname)
+                    service_endpoint: format!("https://{}", hostname),
                 };
                 let result = rsky_feedgen::models::WellKnown {
                     context: vec!["https://www.w3.org/ns/did/v1".into()],
                     id: service_did,
-                    service: vec![known_service]
+                    service: vec![known_service],
                 };
                 Ok(Json(result))
             }
-        },
+        }
         Err(_) => {
             let path_error = rsky_feedgen::models::PathUnknownErrorMessageResponse {
                 code: Some(rsky_feedgen::models::NotFoundErrorCode::NotFoundError),
                 message: Some("Not Found".to_string()),
             };
-            Err(status::Custom(
-                Status::NotFound,
-                Json(path_error),
-            ))
+            Err(status::Custom(Status::NotFound, Json(path_error)))
         }
     }
 }
@@ -310,8 +369,10 @@ fn rocket() -> _ {
         "timeout" => 30.into(),
     };
 
-    let figment = rocket::Config::figment()
-        .merge(("databases", map!["pg_read_replica" => read_db, "pg_db" => write_db]));
+    let figment = rocket::Config::figment().merge((
+        "databases",
+        map!["pg_read_replica" => read_db, "pg_db" => write_db],
+    ));
 
     rocket::custom(figment)
         .mount(

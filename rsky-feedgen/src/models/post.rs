@@ -1,7 +1,7 @@
 use crate::schema::post;
-use diesel::deserialize::{self, Queryable};
-use diesel::prelude::{Selectable};
 use diesel::backend::Backend;
+use diesel::deserialize::{self, Queryable};
+use diesel::prelude::Selectable;
 
 type DB = diesel::pg::Pg;
 
@@ -24,7 +24,15 @@ pub struct Post {
 }
 
 impl Queryable<post::SqlType, DB> for Post {
-    type Row = (String, String, Option<String>, Option<String>, String, Option<String>, Option<i64>);
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+    );
 
     fn build(row: Self::Row) -> deserialize::Result<Self> {
         Ok(Post {
@@ -41,11 +49,27 @@ impl Queryable<post::SqlType, DB> for Post {
 
 impl<DB> Selectable<DB> for Post
 where
-    DB: Backend
+    DB: Backend,
 {
-    type SelectExpression = (post::uri, post::cid, post::replyParent, post::replyRoot, post::indexedAt, post::prev, post::sequence);
+    type SelectExpression = (
+        post::uri,
+        post::cid,
+        post::replyParent,
+        post::replyRoot,
+        post::indexedAt,
+        post::prev,
+        post::sequence,
+    );
 
     fn construct_selection() -> Self::SelectExpression {
-        (post::uri, post::cid, post::replyParent, post::replyRoot, post::indexedAt, post::prev, post::sequence)
+        (
+            post::uri,
+            post::cid,
+            post::replyParent,
+            post::replyRoot,
+            post::indexedAt,
+            post::prev,
+            post::sequence,
+        )
     }
 }

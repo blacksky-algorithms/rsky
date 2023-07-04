@@ -1,92 +1,91 @@
-use crate::models::*;
-use diesel::prelude::*;
 use crate::db::*;
-use chrono::{ NaiveDateTime};
+use crate::models::*;
+use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc;
 use chrono::DateTime;
-use std::time::SystemTime;
-use std::collections::HashSet;
-use regex::Regex;
+use chrono::NaiveDateTime;
+use diesel::prelude::*;
 use lazy_static::lazy_static;
-use crate::{WriteDbConn, ReadReplicaConn};
+use regex::Regex;
+use std::collections::HashSet;
+use std::time::SystemTime;
 
-pub async fn get_blacksky_posts (
+pub async fn get_blacksky_posts(
     limit: Option<i64>,
     params_cursor: Option<String>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl::*;
 
-    let result = connection.run( move |conn| {
-        let mut query = post
-            .limit(limit.unwrap_or(50))
-            .select(Post::as_select())
-            .order((indexedAt.desc(), cid.desc()))
-            .into_boxed();
+    let result = connection
+        .run(move |conn| {
+            let mut query = post
+                .limit(limit.unwrap_or(50))
+                .select(Post::as_select())
+                .order((indexedAt.desc(), cid.desc()))
+                .into_boxed();
 
-        if params_cursor.is_some() {
-            let cursor_str = params_cursor.unwrap();
-            let v = cursor_str
-                .split("::")
-                .take(2)
-                .map(String::from)
-                .collect::<Vec<_>>();
-            if let [indexed_at_c, cid_c] = &v[..] {
-                let timestamp = indexed_at_c.parse::<i64>().unwrap();
-                if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp, 0) {
-                    let timestr = format!("{}", dt.format("%+"));
-                    query = query
-                        .filter(indexedAt.le(timestr.to_owned()))
-                        .filter(cid.lt(cid_c.to_owned()))
+            if params_cursor.is_some() {
+                let cursor_str = params_cursor.unwrap();
+                let v = cursor_str
+                    .split("::")
+                    .take(2)
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                if let [indexed_at_c, cid_c] = &v[..] {
+                    let timestamp = indexed_at_c.parse::<i64>().unwrap();
+                    if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp, 0) {
+                        let timestr = format!("{}", dt.format("%+"));
+                        query = query
+                            .filter(indexedAt.le(timestr.to_owned()))
+                            .filter(cid.lt(cid_c.to_owned()))
+                    }
+                } else {
+                    let validation_error = ValidationErrorMessageResponse {
+                        code: Some(ErrorCode::ValidationError),
+                        message: Some("malformed cursor".into()),
+                    };
+                    return Err(validation_error);
                 }
-            } else {
-                let validation_error = ValidationErrorMessageResponse {
-                    code: Some(ErrorCode::ValidationError),
-                    message: Some("malformed cursor".into()),
-                };
-                return Err(validation_error);
             }
-        }
 
-        let results = query
-            .load(conn)
-            .expect("Error loading post records");
+            let results = query.load(conn).expect("Error loading post records");
 
-        let mut post_results = Vec::new();
-        let mut cursor: Option<String> = None;
+            let mut post_results = Vec::new();
+            let mut cursor: Option<String> = None;
 
-        // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
-        if let Some(last_post) = results.last() {
-            if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+") {
-                cursor = Some(format!("{}::{}",parsed_time.timestamp_millis(),last_post.cid));
+            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
+            if let Some(last_post) = results.last() {
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                {
+                    cursor = Some(format!(
+                        "{}::{}",
+                        parsed_time.timestamp_millis(),
+                        last_post.cid
+                    ));
+                }
             }
-        }
 
-        results
-            .into_iter()
-            .map(|result| {
-                let post_result = PostResult {
-                    post: result.uri
-                };
-                post_results.push(post_result);
-            })
-            .for_each(drop);
+            results
+                .into_iter()
+                .map(|result| {
+                    let post_result = PostResult { post: result.uri };
+                    post_results.push(post_result);
+                })
+                .for_each(drop);
 
-        let new_response = AlgoResponse {
-            cursor: cursor,
-            feed: post_results,
-        };
-        Ok(new_response)
-    }).await;
+            let new_response = AlgoResponse {
+                cursor: cursor,
+                feed: post_results,
+            };
+            Ok(new_response)
+        })
+        .await;
 
     result
-
 }
 
-pub fn is_included(
-    did_: &String,
-    list_: String
-) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn is_included(did_: &String, list_: String) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let connection = &mut establish_connection()?;
@@ -116,8 +115,8 @@ pub async fn queue_creation(
     body: Vec<CreateRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
-    use crate::schema::post::dsl::*;
     use crate::schema::membership::dsl::*;
+    use crate::schema::post::dsl::*;
 
     let result = connection.run( move |conn| {
 
@@ -135,7 +134,7 @@ pub async fn queue_creation(
                 let is_blacksky_author = is_included(&req_post.author,"blacksky".into()).unwrap_or(false);
                 let post_text: String = req_post.record.text.to_lowercase();
                 let hashtags = extract_hashtags(&post_text);
-                
+
                 let mut new_post = Post {
                     uri: req_post.uri,
                     cid: req_post.cid,
@@ -151,7 +150,7 @@ pub async fn queue_creation(
                     is_hellthread = hellthread_roots.contains(&reply.root.cid);
                 }
 
-                if (is_blacksky_author || 
+                if (is_blacksky_author ||
                     hashtags.contains("#blacksky") ||
                     hashtags.contains("#blacktechsky") ||
                     hashtags.contains("#nbablacksky") ||
@@ -210,23 +209,21 @@ pub async fn queue_deletion(
 ) -> Result<(), String> {
     use crate::schema::post::dsl::*;
 
-    let result = connection.run( move |conn| {
+    let result = connection
+        .run(move |conn| {
+            let mut delete_posts = Vec::new();
+            body.into_iter()
+                .map(|req_post| {
+                    delete_posts.push(req_post.uri);
+                })
+                .for_each(drop);
 
-        let mut delete_posts = Vec::new();
-        body
-            .into_iter()
-            .map(|req_post| {
-                delete_posts.push(req_post.uri);
-            })
-            .for_each(drop);
-
-        diesel::delete(
-                post.filter(uri.eq_any(delete_posts))
-            )
-            .execute(conn)
-            .expect("Error deleting post records");
-        Ok(())
-    }).await;
+            diesel::delete(post.filter(uri.eq_any(delete_posts)))
+                .execute(conn)
+                .expect("Error deleting post records");
+            Ok(())
+        })
+        .await;
 
     result
 }
@@ -238,23 +235,39 @@ pub async fn update_cursor(
 ) -> Result<(), String> {
     use crate::schema::sub_state::dsl::*;
 
-    let result = connection.run( move |conn| {
-        let update_state = (
-            service.eq(service_),
-            cursor.eq(&sequence)
-        );
+    let result = connection
+        .run(move |conn| {
+            let update_state = (service.eq(service_), cursor.eq(&sequence));
 
-        diesel::insert_into(sub_state)
-            .values(&update_state)
-            .on_conflict(service)
-            .do_update()
-            .set(cursor.eq(&sequence))
-            .execute(conn)
-            .expect("Error updating cursor records");
-        Ok(())
-    }).await;
+            diesel::insert_into(sub_state)
+                .values(&update_state)
+                .on_conflict(service)
+                .do_update()
+                .set(cursor.eq(&sequence))
+                .execute(conn)
+                .expect("Error updating cursor records");
+            Ok(())
+        })
+        .await;
 
     result
+}
+
+pub fn add_visitor(
+    jwt: JwtParts
+) -> Result<(), Box<dyn std::error::Error>>  {
+    use crate::schema::visitor::dsl::*;
+
+    let connection = &mut establish_connection()?;
+
+    let system_time = SystemTime::now();
+    let dt: DateTime<Utc> = system_time.into();
+    let new_visitor = (did.eq(jwt.iss), web.eq(jwt.aud), visited_at.eq(format!("{}", dt.format("%+"))));
+
+    diesel::insert_into(visitor)
+        .values(&new_visitor)
+        .execute(connection)?;
+    Ok(())
 }
 
 pub async fn get_cursor(
@@ -263,25 +276,27 @@ pub async fn get_cursor(
 ) -> Result<SubState, PathUnknownErrorMessageResponse> {
     use crate::schema::sub_state::dsl::*;
 
-    let result = connection.run( move |conn| {
-        let mut result = sub_state
-            .filter(service.eq(service_))
-            .order(cursor.desc())
-            .limit(1)
-            .select(SubState::as_select())
-            .load(conn)
-            .expect("Error loading cursor records");
+    let result = connection
+        .run(move |conn| {
+            let mut result = sub_state
+                .filter(service.eq(service_))
+                .order(cursor.desc())
+                .limit(1)
+                .select(SubState::as_select())
+                .load(conn)
+                .expect("Error loading cursor records");
 
-        if let Some(cursor_) = result.pop() {
-            Ok(cursor_)
-        } else {
-            let not_found_error = crate::models::PathUnknownErrorMessageResponse {
-                code: Some(crate::models::NotFoundErrorCode::NotFoundError),
-                message: Some("Not found.".into()),
-            };
-            Err(not_found_error)
-        }
-    }).await;
+            if let Some(cursor_) = result.pop() {
+                Ok(cursor_)
+            } else {
+                let not_found_error = crate::models::PathUnknownErrorMessageResponse {
+                    code: Some(crate::models::NotFoundErrorCode::NotFoundError),
+                    message: Some("Not found.".into()),
+                };
+                Err(not_found_error)
+            }
+        })
+        .await;
 
     result
 }

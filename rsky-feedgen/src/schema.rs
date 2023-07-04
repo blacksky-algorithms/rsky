@@ -45,10 +45,20 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    visitor (id) {
+        id -> Int4,
+        did -> Varchar,
+        web -> Varchar,
+        visited_at -> Varchar,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     kysely_migration,
     kysely_migration_lock,
     membership,
     post,
     sub_state,
+    visitor,
 );

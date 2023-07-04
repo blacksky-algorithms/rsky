@@ -28,3 +28,5 @@ pub mod well_known;
 pub use self::well_known::WellKnown;
 pub mod known_service;
 pub use self::known_service::KnownService;
+pub mod jwt_parts;
+pub use self::jwt_parts::JwtParts;

@@ -22,6 +22,7 @@ chrono = "0.4.26"
 cid = { version = "0.10.1", features = ["serde-codec"] }
 regex = "1.8.4"
 lazy_static = "1.4.0"
+base64 = "0.21.2"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

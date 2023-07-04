@@ -5,5 +5,5 @@ pub struct KnownService {
     #[serde(rename = "type")]
     pub r#type: String,
     #[serde(rename = "serviceEndpoint")]
-    pub service_endpoint: String
+    pub service_endpoint: String,
 }

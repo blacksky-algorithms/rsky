@@ -5,5 +5,5 @@ pub struct WellKnown {
     #[serde(rename = "id")]
     pub id: String,
     #[serde(rename = "service")]
-    pub service: Vec<crate::models::KnownService>
+    pub service: Vec<crate::models::KnownService>,
 }

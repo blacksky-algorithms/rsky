@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use cid::Cid;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StrongRef {
@@ -46,7 +46,10 @@ pub struct Link {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Blob {
-    #[serde(rename(deserialize = "$type", serialize = "$type"),skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename(deserialize = "$type", serialize = "$type"),
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rust_type: Option<String>,
     pub r#ref: Cid,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
@@ -57,7 +60,10 @@ pub struct Blob {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OriginalBlob {
-    #[serde(rename(deserialize = "$type", serialize = "$type"),skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename(deserialize = "$type", serialize = "$type"),
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rust_type: Option<String>,
     pub r#ref: Cid,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]

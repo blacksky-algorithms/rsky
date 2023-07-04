@@ -52,7 +52,6 @@ pub enum Embeds {
         serialize = "app.bsky.embed.recordWithMedia",
     ))]
     TodoRecordWithMedia,
-
     // Record(Record),
     // #[serde(alias = "app.bsky.embed.recordWithMedia")]
     // RecordWithMedia(RecordWithMedia),
