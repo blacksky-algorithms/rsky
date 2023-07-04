@@ -78,7 +78,7 @@ impl<'r> FromRequest<'r> for AccessToken {
                     match rsky_feedgen::auth::verify_jwt(&jwtstr, &service_did) {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
                         Err(error) => {
-                            eprintln!("Error decoding jwt: {error}");
+                            eprintln!("Error decoding jwt.");
                             Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
                         },
                     }
@@ -111,10 +111,10 @@ async fn index(
             Ok(jwt_obj) => {
                 match rsky_feedgen::apis::add_visitor(jwt_obj.iss, jwt_obj.aud) {
                     Ok(_) => (),
-                    Err(error) => eprintln!("Failed to write visitor: {error:?}."),
+                    Err(error) => eprintln!("Failed to write visitor."),
                 }
             },
-            Err(error) => eprintln!("Failed to parse jwt string: {error:?}."),
+            Err(error) => eprintln!("Failed to parse jwt string."),
         }
     } else {
         let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
