@@ -14,6 +14,8 @@ use rocket::{Request, Response};
 use rsky_feedgen::{ReadReplicaConn, WriteDbConn};
 use std::env;
 use rsky_feedgen::models::JwtParts;
+use std::collections::HashSet;
+use lazy_static::lazy_static;
 
 pub struct CORS;
 
@@ -77,8 +79,8 @@ impl<'r> FromRequest<'r> for AccessToken {
                 if let Some(jwtstr) = jwt.last() {
                     match rsky_feedgen::auth::verify_jwt(&jwtstr, &service_did) {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
-                        Err(_) => {
-                            eprintln!("Error decoding jwt.");
+                        Err(error) => {
+                            eprintln!("Error decoding jwt. {error:?}");
                             Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
                         },
                     }
@@ -91,6 +93,14 @@ impl<'r> FromRequest<'r> for AccessToken {
 }
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
+lazy_static! {
+    static ref BANNED_FROM_TV: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert("did:plc:w4xbfzo7kqfes5zb7r6qv3rw"); // Test
+        s.insert("did:plc:bqlobp4ngysw3a52gdfnxbn"); // HS
+        s
+    };
+}
 
 #[get(
     "/xrpc/app.bsky.feed.getFeedSkeleton?<feed>&<limit>&<cursor>",
@@ -106,11 +116,18 @@ async fn index(
     Json<rsky_feedgen::models::AlgoResponse>,
     status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>,
 > {
+    let mut is_banned = false;
     if let Ok(jwt) = _token {
         match serde_json::from_str::<JwtParts>(&jwt.0) {
             Ok(jwt_obj) => {
-                match rsky_feedgen::apis::add_visitor(jwt_obj.iss, jwt_obj.aud) {
-                    Ok(_) => (),
+                let did = jwt_obj.iss;
+                match rsky_feedgen::apis::add_visitor(did.clone(), jwt_obj.aud) {
+                    Ok(_) => {
+                        if BANNED_FROM_TV.contains(&did.as_str()) {
+                            is_banned = true;
+                        }
+                        ()
+                    },
                     Err(_) => eprintln!("Failed to write visitor."),
                 }
             },
@@ -125,7 +142,7 @@ async fn index(
     }
     let _blacksky: String = String::from(BLACKSKY);
     match feed {
-        Some(_blacksky) => {
+        Some(_blacksky) if !is_banned => {
             match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -140,6 +157,15 @@ async fn index(
                     ))
                 }
             }
+        }
+        Some(_blacksky) if is_banned => {
+            let banned_notice_uri = env::var("BANNED_NOTICE_POST").unwrap_or("".into());
+            let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
+            let banned_response = rsky_feedgen::models::AlgoResponse {
+                cursor: None,
+                feed: vec![banned_notice],
+            };
+            Ok(Json(banned_response))
         }
         _ => {
             let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
