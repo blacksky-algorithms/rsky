@@ -12,7 +12,7 @@ use std::fmt::Write;
 
 #[allow(deprecated)]
 pub async fn get_blacksky_posts(
-    limit: Option<i64>,
+    _limit: Option<i64>,
     params_cursor: Option<String>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
@@ -21,7 +21,7 @@ pub async fn get_blacksky_posts(
     let result = connection
         .run(move |conn| {
             let mut query = post
-                .limit(limit.unwrap_or(50))
+                .limit(100)
                 .select(Post::as_select())
                 .order((indexedAt.desc(), cid.desc()))
                 .into_boxed();
