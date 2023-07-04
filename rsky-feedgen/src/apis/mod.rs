@@ -1,9 +1,8 @@
 use crate::db::*;
 use crate::models::*;
 use crate::{ReadReplicaConn, WriteDbConn};
-use chrono::offset::Utc;
-use chrono::DateTime;
-use chrono::NaiveDateTime;
+use chrono::offset::Utc as UtcOffset;
+use chrono::{DateTime, NaiveDateTime, Utc}; 
 use diesel::prelude::*;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -11,6 +10,7 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 use std::fmt::Write;
 
+#[allow(deprecated)]
 pub async fn get_blacksky_posts(
     limit: Option<i64>,
     params_cursor: Option<String>,
@@ -35,13 +35,16 @@ pub async fn get_blacksky_posts(
                     .collect::<Vec<_>>();
                 if let [indexed_at_c, cid_c] = &v[..] {
                     if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
-                        if let Some(dt) = NaiveDateTime::from_timestamp_opt(timestamp/1000, 0) {
-                            let mut timestr = String::new();
-                            if let Ok(_) = write!(timestr, "{}", dt.format("%+")) {
+                        let nanoseconds = 230 * 1000000;
+                        let datetime = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(timestamp/1000, nanoseconds), Utc);
+                        let mut timestr = String::new();
+                        match write!(timestr, "{}", datetime.format("%+")) {
+                            Ok(_) => {
                                 query = query
                                     .filter(indexedAt.le(timestr.to_owned()))
-                                    .filter(cid.lt(cid_c.to_owned()))
-                            }
+                                    .filter(cid.lt(cid_c.to_owned()));
+                            },
+                            Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
                     }
                 } else {
@@ -133,7 +136,7 @@ pub async fn queue_creation(
             .into_iter()
             .map(|req_post| {
                 let system_time = SystemTime::now();
-                let dt: DateTime<Utc> = system_time.into();
+                let dt: DateTime<UtcOffset> = system_time.into();
                 let mut is_hellthread = false;
                 let is_blacksky_author = is_included(&req_post.author,"blacksky".into()).unwrap_or(false);
                 let post_text: String = req_post.record.text.to_lowercase();
@@ -266,7 +269,7 @@ pub fn add_visitor(
     let connection = &mut establish_connection()?;
 
     let system_time = SystemTime::now();
-    let dt: DateTime<Utc> = system_time.into();
+    let dt: DateTime<UtcOffset> = system_time.into();
     let new_visitor = (did.eq(user), web.eq(service), visited_at.eq(format!("{}", dt.format("%+"))));
 
     diesel::insert_into(visitor)
