@@ -77,7 +77,7 @@ impl<'r> FromRequest<'r> for AccessToken {
                 if let Some(jwtstr) = jwt.last() {
                     match rsky_feedgen::auth::verify_jwt(&jwtstr, &service_did) {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
-                        Err(error) => {
+                        Err(_) => {
                             eprintln!("Error decoding jwt.");
                             Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
                         },
@@ -111,16 +111,16 @@ async fn index(
             Ok(jwt_obj) => {
                 match rsky_feedgen::apis::add_visitor(jwt_obj.iss, jwt_obj.aud) {
                     Ok(_) => (),
-                    Err(error) => eprintln!("Failed to write visitor."),
+                    Err(_) => eprintln!("Failed to write visitor."),
                 }
             },
-            Err(error) => eprintln!("Failed to parse jwt string."),
+            Err(_) => eprintln!("Failed to parse jwt string."),
         }
     } else {
         let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
         match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did) {
             Ok(_) => (),
-            Err(error) => eprintln!("Failed to write anonymous visitor."),
+            Err(_) => eprintln!("Failed to write anonymous visitor."),
         }
     }
     let _blacksky: String = String::from(BLACKSKY);
