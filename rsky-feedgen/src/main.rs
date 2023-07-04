@@ -163,7 +163,7 @@ async fn index(
             let banned_notice_uri = env::var("BANNED_NOTICE_POST").unwrap_or("".into());
             let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
             let banned_response = rsky_feedgen::models::AlgoResponse {
-                cursor: None,
+                cursor: Some("".to_owned()),
                 feed: vec![banned_notice],
             };
             Ok(Json(banned_response))
