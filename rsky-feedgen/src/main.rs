@@ -111,16 +111,16 @@ async fn index(
             Ok(jwt_obj) => {
                 match rsky_feedgen::apis::add_visitor(jwt_obj.iss, jwt_obj.aud) {
                     Ok(_) => (),
-                    Err(error) => eprintln!("Failed to write visitor: {error:?}"),
+                    Err(error) => eprintln!("Failed to write visitor: {error:?}."),
                 }
             },
-            Err(error) => eprintln!("Failed to parse jwt string: {error:?} | jwt: {jwt:?}"),
+            Err(error) => eprintln!("Failed to parse jwt string: {error:?}."),
         }
     } else {
         let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
         match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did) {
             Ok(_) => (),
-            Err(error) => eprintln!("Failed to write anonymous visitor: {error:?}"),
+            Err(error) => eprintln!("Failed to write anonymous visitor."),
         }
     }
     let _blacksky: String = String::from(BLACKSKY);
