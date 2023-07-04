@@ -109,13 +109,18 @@ async fn index(
     if let Ok(jwt) = _token {
         match serde_json::from_str::<JwtParts>(&jwt.0) {
             Ok(jwt_obj) => {
-                println!("AccessToken {jwt_obj:?}");
-                match rsky_feedgen::apis::add_visitor(jwt_obj) {
+                match rsky_feedgen::apis::add_visitor(jwt_obj.iss, jwt_obj.aud) {
                     Ok(_) => (),
                     Err(error) => eprintln!("Failed to write visitor: {error:?}"),
                 }
             },
             Err(error) => eprintln!("Failed to parse jwt string: {error:?} | jwt: {jwt:?}"),
+        }
+    } else {
+        let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
+        match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did) {
+            Ok(_) => (),
+            Err(error) => eprintln!("Failed to write anonymous visitor: {error:?}"),
         }
     }
     let _blacksky: String = String::from(BLACKSKY);

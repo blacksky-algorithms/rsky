@@ -254,7 +254,8 @@ pub async fn update_cursor(
 }
 
 pub fn add_visitor(
-    jwt: JwtParts
+    user: String,
+    service: String,
 ) -> Result<(), Box<dyn std::error::Error>>  {
     use crate::schema::visitor::dsl::*;
 
@@ -262,7 +263,7 @@ pub fn add_visitor(
 
     let system_time = SystemTime::now();
     let dt: DateTime<Utc> = system_time.into();
-    let new_visitor = (did.eq(jwt.iss), web.eq(jwt.aud), visited_at.eq(format!("{}", dt.format("%+"))));
+    let new_visitor = (did.eq(user), web.eq(service), visited_at.eq(format!("{}", dt.format("%+"))));
 
     diesel::insert_into(visitor)
         .values(&new_visitor)

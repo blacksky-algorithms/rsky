@@ -1,23 +1,6 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    kysely_migration (name) {
-        #[max_length = 255]
-        name -> Varchar,
-        #[max_length = 255]
-        timestamp -> Varchar,
-    }
-}
-
-diesel::table! {
-    kysely_migration_lock (id) {
-        #[max_length = 255]
-        id -> Varchar,
-        is_locked -> Int4,
-    }
-}
-
-diesel::table! {
     membership (did) {
         did -> Varchar,
         included -> Bool,
@@ -55,8 +38,6 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
-    kysely_migration,
-    kysely_migration_lock,
     membership,
     post,
     sub_state,
