@@ -16,6 +16,7 @@ use std::env;
 use rsky_feedgen::models::JwtParts;
 use std::collections::HashSet;
 use lazy_static::lazy_static;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct CORS;
 
@@ -97,7 +98,6 @@ const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.gene
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
         let mut s = HashSet::new();
-        s.insert("did:plc:w4xbfzo7kqfes5zb7r6qv3rw"); // Test
         s.insert("did:plc:bqlobp4ngysw3a52gdfnxbn"); // HS
         s
     };
@@ -160,10 +160,21 @@ async fn index(
             }
         }
         Some(_blacksky) if is_banned => {
-            let banned_notice_uri = env::var("BANNED_NOTICE_POST").unwrap_or("".into());
+            let banned_notice_uri = env::var("BANNED_NOTICE_POST_URI").unwrap_or("".into());
+            let banned_notice_cid = env::var("BANNED_NOTICE_POST_CID").unwrap_or("".into());
+            let start = SystemTime::now();
+            let since_the_epoch = start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards");
+            let timestamp = since_the_epoch.as_millis();
+            let cursor = Some(format!(
+                "{}::{}",
+                timestamp,
+                banned_notice_cid
+            ));
             let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
             let banned_response = rsky_feedgen::models::AlgoResponse {
-                cursor: Some("".to_owned()),
+                cursor: cursor,
                 feed: vec![banned_notice],
             };
             Ok(Json(banned_response))
