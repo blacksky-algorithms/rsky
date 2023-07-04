@@ -98,7 +98,7 @@ const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.gene
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
         let mut s = HashSet::new();
-        s.insert("did:plc:bqlobp4ngysw3a52gdfnxbn"); // HS
+        s.insert("did:plc:bqlobp4ngysw3a52gdfnxbne"); // HS
         s
     };
 }
