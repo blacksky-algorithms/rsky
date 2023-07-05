@@ -95,7 +95,7 @@ impl<'r> FromRequest<'r> for AccessToken {
 }
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
-const BLACKSKY_OP: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-only-posts";
+const BLACKSKY_OP: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
