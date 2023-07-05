@@ -95,12 +95,35 @@ impl<'r> FromRequest<'r> for AccessToken {
 }
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
+const BLACKSKY_OP: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-only-posts";
+
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
         let mut s = HashSet::new();
         s.insert("did:plc:bqlobp4ngysw3a52gdfnxbne"); // HS
         s
     };
+}
+
+fn get_banned_response() -> rsky_feedgen::models::AlgoResponse {
+    let banned_notice_uri = env::var("BANNED_NOTICE_POST_URI").unwrap_or("".into());
+    let banned_notice_cid = env::var("BANNED_NOTICE_POST_CID").unwrap_or("".into());
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
+    let timestamp = since_the_epoch.as_millis();
+    let cursor = Some(format!(
+        "{}::{}",
+        timestamp,
+        banned_notice_cid
+    ));
+    let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
+    let banned_response = rsky_feedgen::models::AlgoResponse {
+        cursor: cursor,
+        feed: vec![banned_notice],
+    };
+    banned_response
 }
 
 #[get(
@@ -118,6 +141,7 @@ async fn index(
     status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>,
 > {
     let mut is_banned = false;
+    let feed = feed.unwrap_or("".into());
     if let Ok(jwt) = _token {
         match serde_json::from_str::<JwtParts>(&jwt.0) {
             Ok(jwt_obj) => {
@@ -141,10 +165,9 @@ async fn index(
             Err(_) => eprintln!("Failed to write anonymous visitor."),
         }
     }
-    let _blacksky: String = String::from(BLACKSKY);
     match feed {
-        Some(_blacksky) if !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, connection).await {
+        _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
+            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -159,24 +182,28 @@ async fn index(
                 }
             }
         }
-        Some(_blacksky) if is_banned => {
-            let banned_notice_uri = env::var("BANNED_NOTICE_POST_URI").unwrap_or("".into());
-            let banned_notice_cid = env::var("BANNED_NOTICE_POST_CID").unwrap_or("".into());
-            let start = SystemTime::now();
-            let since_the_epoch = start
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards");
-            let timestamp = since_the_epoch.as_millis();
-            let cursor = Some(format!(
-                "{}::{}",
-                timestamp,
-                banned_notice_cid
-            ));
-            let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
-            let banned_response = rsky_feedgen::models::AlgoResponse {
-                cursor: cursor,
-                feed: vec![banned_notice],
-            };
+        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && !is_banned => {
+            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, true, connection).await {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
+        _blacksky if _blacksky.as_str() == BLACKSKY && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && is_banned => {
+            let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
         _ => {

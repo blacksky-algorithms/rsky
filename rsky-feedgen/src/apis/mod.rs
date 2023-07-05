@@ -14,6 +14,7 @@ use std::fmt::Write;
 pub async fn get_blacksky_posts(
     _limit: Option<i64>,
     params_cursor: Option<String>,
+    only_posts: bool,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl::*;
@@ -55,7 +56,11 @@ pub async fn get_blacksky_posts(
                     return Err(validation_error);
                 }
             }
-
+            if only_posts {
+                query = query
+                    .filter(replyParent.is_null())
+                    .filter(replyRoot.is_null());
+            }
             let results = query.load(conn).expect("Error loading post records");
 
             let mut post_results = Vec::new();
