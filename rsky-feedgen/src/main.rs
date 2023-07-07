@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate rocket;
 use dotenvy::dotenv;
+use lazy_static::lazy_static;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::figment::{
     util::map,
@@ -11,11 +12,10 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
-use rsky_feedgen::{ReadReplicaConn, WriteDbConn};
-use std::env;
 use rsky_feedgen::models::JwtParts;
+use rsky_feedgen::{ReadReplicaConn, WriteDbConn};
 use std::collections::HashSet;
-use lazy_static::lazy_static;
+use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct CORS;
@@ -74,17 +74,14 @@ impl<'r> FromRequest<'r> for AccessToken {
             Some(token) => {
                 println!("Visited by {token:?}");
                 let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
-                let jwt = token
-                    .split(" ")
-                    .map(String::from)
-                    .collect::<Vec<_>>();
+                let jwt = token.split(" ").map(String::from).collect::<Vec<_>>();
                 if let Some(jwtstr) = jwt.last() {
                     match rsky_feedgen::auth::verify_jwt(&jwtstr, &service_did) {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
                         Err(error) => {
                             eprintln!("Error decoding jwt. {error:?}");
                             Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
-                        },
+                        }
                     }
                 } else {
                     Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
@@ -95,7 +92,8 @@ impl<'r> FromRequest<'r> for AccessToken {
 }
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
-const BLACKSKY_OP: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
+const BLACKSKY_OP: &str =
+    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
@@ -113,12 +111,10 @@ fn get_banned_response() -> rsky_feedgen::models::AlgoResponse {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards");
     let timestamp = since_the_epoch.as_millis();
-    let cursor = Some(format!(
-        "{}::{}",
-        timestamp,
-        banned_notice_cid
-    ));
-    let banned_notice = rsky_feedgen::models::PostResult { post: banned_notice_uri };
+    let cursor = Some(format!("{}::{}", timestamp, banned_notice_cid));
+    let banned_notice = rsky_feedgen::models::PostResult {
+        post: banned_notice_uri,
+    };
     let banned_response = rsky_feedgen::models::AlgoResponse {
         cursor: cursor,
         feed: vec![banned_notice],
@@ -152,10 +148,10 @@ async fn index(
                             is_banned = true;
                         }
                         ()
-                    },
+                    }
                     Err(_) => eprintln!("Failed to write visitor."),
                 }
-            },
+            }
             Err(_) => eprintln!("Failed to parse jwt string."),
         }
     } else {

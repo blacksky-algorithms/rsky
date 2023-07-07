@@ -5,6 +5,8 @@ pub enum Lexicon {
     AppBskyFeedPost(lexicon::app::bsky::feed::Post),
     #[serde(rename(deserialize = "app.bsky.feed.like", serialize = "app.bsky.feed.like"))]
     AppBskyFeedLike(lexicon::app::bsky::feed::Like),
+    #[serde(rename(deserialize = "app.bsky.graph.follow", serialize = "app.bsky.graph.follow"))]
+    AppBskyFeedFollow(lexicon::app::bsky::graph::Follow),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

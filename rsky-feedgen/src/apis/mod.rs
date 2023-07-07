@@ -2,13 +2,13 @@ use crate::db::*;
 use crate::models::*;
 use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{DateTime, NaiveDateTime, Utc}; 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
-use std::time::SystemTime;
 use std::fmt::Write;
+use std::time::SystemTime;
 
 #[allow(deprecated)]
 pub async fn get_blacksky_posts(
@@ -37,14 +37,17 @@ pub async fn get_blacksky_posts(
                 if let [indexed_at_c, cid_c] = &v[..] {
                     if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
                         let nanoseconds = 230 * 1000000;
-                        let datetime = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(timestamp/1000, nanoseconds), Utc);
+                        let datetime = DateTime::<Utc>::from_utc(
+                            NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
+                            Utc,
+                        );
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query
                                     .filter(indexedAt.le(timestr.to_owned()))
                                     .filter(cid.lt(cid_c.to_owned()));
-                            },
+                            }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
                     }
@@ -97,17 +100,16 @@ pub async fn get_blacksky_posts(
     result
 }
 
-pub fn is_included(dids: Vec<&String>, list_: String) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn is_included(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
-    let connection = &mut establish_connection()?;
     let result = membership
         .filter(did.eq_any(dids))
         .filter(list.eq(list_))
         .filter(included.eq(true))
         .limit(1)
         .select(Membership::as_select())
-        .load(connection)?;
+        .load(conn)?;
 
     if result.len() > 0 {
         Ok(result[0].included)
@@ -128,9 +130,11 @@ pub async fn queue_creation(
     body: Vec<CreateRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
+    use crate::schema::like::dsl as LikeSchema;
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
-    use crate::schema::like::dsl as LikeSchema;
+    use crate::schema::follow::dsl as FollowSchema;
+
     let result = connection.run( move |conn| {
         if lex == "posts" {
             let mut new_posts = Vec::new();
@@ -144,7 +148,7 @@ pub async fn queue_creation(
                     let system_time = SystemTime::now();
                     let dt: DateTime<UtcOffset> = system_time.into();
                     let mut is_hellthread = false;
-                    let is_blacksky_author = is_included(vec![&req.author],"blacksky".into()).unwrap_or(false);
+                    let is_blacksky_author = is_included(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
                     let mut new_post = Post {
                         uri: req.uri,
@@ -222,7 +226,7 @@ pub async fn queue_creation(
                 .map(|req| {
                     if let Lexicon::AppBskyFeedLike(like_record) = req.record {
                         let subject_author: &String = &like_record.subject.uri[5..37].into(); // parse DID:PLC from URI
-                        let is_blacksky_author = is_included(vec![&req.author, subject_author],"blacksky".into()).unwrap_or(false);
+                        let is_blacksky_author = is_included(vec![&req.author, subject_author],"blacksky".into(), conn).unwrap_or(false);
                         if is_blacksky_author {
                             let system_time = SystemTime::now();
                             let dt: DateTime<UtcOffset> = system_time.into();
@@ -251,6 +255,41 @@ pub async fn queue_creation(
                 .expect("Error inserting like records");
 
             Ok(())
+        } else if lex == "follows" {
+            let mut new_follows = Vec::new();
+
+            body
+                .into_iter()
+                .map(|req| {
+                    if let Lexicon::AppBskyFeedFollow(follow_record) = req.record {
+                        let is_blacksky_author = is_included(vec![&req.author, &follow_record.subject],"blacksky".into(), conn).unwrap_or(false);
+                        if is_blacksky_author {
+                            let system_time = SystemTime::now();
+                            let dt: DateTime<UtcOffset> = system_time.into();
+                            let new_follow = (
+                                FollowSchema::uri.eq(req.uri),
+                                FollowSchema::cid.eq(req.cid),
+                                FollowSchema::author.eq(req.author),
+                                FollowSchema::subject.eq(follow_record.subject),
+                                FollowSchema::createdAt.eq(follow_record.created_at),
+                                FollowSchema::indexedAt.eq(format!("{}", dt.format("%+"))),
+                                FollowSchema::prev.eq(req.prev),
+                                FollowSchema::sequence.eq(req.sequence)
+                            );
+                            new_follows.push(new_follow);
+                        }
+                    }
+                })
+                .for_each(drop);
+
+            diesel::insert_into(FollowSchema::follow)
+                .values(&new_follows)
+                .on_conflict(FollowSchema::uri)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting like records");
+
+            Ok(())
         } else {
             Err(format!("Unknown lexicon received {lex:?}"))
         }
@@ -263,8 +302,9 @@ pub async fn queue_deletion(
     body: Vec<DeleteRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
-    use crate::schema::post::dsl as PostSchema;
     use crate::schema::like::dsl as LikeSchema;
+    use crate::schema::post::dsl as PostSchema;
+    use crate::schema::follow::dsl as FollowSchema;
 
     let result = connection
         .run(move |conn| {
@@ -282,6 +322,10 @@ pub async fn queue_deletion(
                 diesel::delete(LikeSchema::like.filter(LikeSchema::uri.eq_any(delete_rows)))
                     .execute(conn)
                     .expect("Error deleting like records");
+            } else if lex == "follows" {
+                diesel::delete(FollowSchema::follow.filter(FollowSchema::uri.eq_any(delete_rows)))
+                    .execute(conn)
+                    .expect("Error deleting follow records");
             } else {
                 eprintln!("Unknown lexicon received {lex:?}");
             }
@@ -316,17 +360,18 @@ pub async fn update_cursor(
     result
 }
 
-pub fn add_visitor(
-    user: String,
-    service: String,
-) -> Result<(), Box<dyn std::error::Error>>  {
+pub fn add_visitor(user: String, service: String) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::visitor::dsl::*;
 
     let connection = &mut establish_connection()?;
 
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
-    let new_visitor = (did.eq(user), web.eq(service), visited_at.eq(format!("{}", dt.format("%+"))));
+    let new_visitor = (
+        did.eq(user),
+        web.eq(service),
+        visited_at.eq(format!("{}", dt.format("%+"))),
+    );
 
     diesel::insert_into(visitor)
         .values(&new_visitor)
