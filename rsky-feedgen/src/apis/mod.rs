@@ -97,12 +97,12 @@ pub async fn get_blacksky_posts(
     result
 }
 
-pub fn is_included(did_: &String, list_: String) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn is_included(dids: Vec<&String>, list_: String) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let connection = &mut establish_connection()?;
     let result = membership
-        .filter(did.eq(did_.to_string()))
+        .filter(did.eq_any(dids))
         .filter(list.eq(list_))
         .filter(included.eq(true))
         .limit(1)
@@ -124,119 +124,170 @@ fn extract_hashtags(input: &str) -> HashSet<&str> {
 }
 
 pub async fn queue_creation(
+    lex: String,
     body: Vec<CreateRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
-    use crate::schema::membership::dsl::*;
-    use crate::schema::post::dsl::*;
-
+    use crate::schema::membership::dsl as MembershipSchema;
+    use crate::schema::post::dsl as PostSchema;
+    use crate::schema::like::dsl as LikeSchema;
     let result = connection.run( move |conn| {
+        if lex == "posts" {
+            let mut new_posts = Vec::new();
+            let mut new_members = Vec::new();
+            let mut hellthread_roots = HashSet::new();
+            hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
-        let mut new_posts = Vec::new();
-        let mut new_members = Vec::new();
-        let mut hellthread_roots = HashSet::new();
-        hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
+            body
+                .into_iter()
+                .map(|req| {
+                    let system_time = SystemTime::now();
+                    let dt: DateTime<UtcOffset> = system_time.into();
+                    let mut is_hellthread = false;
+                    let is_blacksky_author = is_included(vec![&req.author],"blacksky".into()).unwrap_or(false);
+                    let mut post_text = String::new();
+                    let mut new_post = Post {
+                        uri: req.uri,
+                        cid: req.cid,
+                        reply_parent: None,
+                        reply_root: None,
+                        indexed_at: format!("{}", dt.format("%+")),
+                        prev: req.prev,
+                        sequence: req.sequence
+                    };
 
-        body
-            .into_iter()
-            .map(|req_post| {
-                let system_time = SystemTime::now();
-                let dt: DateTime<UtcOffset> = system_time.into();
-                let mut is_hellthread = false;
-                let is_blacksky_author = is_included(&req_post.author,"blacksky".into()).unwrap_or(false);
-                let post_text: String = req_post.record.text.to_lowercase();
-                let hashtags = extract_hashtags(&post_text);
-
-                let mut new_post = Post {
-                    uri: req_post.uri,
-                    cid: req_post.cid,
-                    reply_parent: None,
-                    reply_root: None,
-                    indexed_at: format!("{}", dt.format("%+")),
-                    prev: req_post.prev,
-                    sequence: req_post.sequence
-                };
-                if let Some(reply) = req_post.record.reply {
-                    new_post.reply_parent = Some(reply.parent.uri);
-                    new_post.reply_root = Some(reply.root.uri);
-                    is_hellthread = hellthread_roots.contains(&reply.root.cid);
-                }
-
-                if (is_blacksky_author ||
-                    hashtags.contains("#blacksky") ||
-                    hashtags.contains("#blacktechsky") ||
-                    hashtags.contains("#nbablacksky") ||
-                    hashtags.contains("#addtoblacksky")) && !is_hellthread  {
-                    let uri_ = &new_post.uri;
-                    let seq_ = &new_post.sequence;
-                    println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
-
-                    let new_post = (
-                        uri.eq(new_post.uri),
-                        cid.eq(new_post.cid),
-                        replyParent.eq(new_post.reply_parent),
-                        replyRoot.eq(new_post.reply_root),
-                        indexedAt.eq(new_post.indexed_at),
-                        prev.eq(new_post.prev),
-                        sequence.eq(new_post.sequence)
-                    );
-                    new_posts.push(new_post);
-
-                    if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
-                        println!("New member: {:?}", &req_post.author);
-                        let new_member = (
-                            did.eq(req_post.author),
-                            included.eq(true),
-                            excluded.eq(false),
-                            list.eq("blacksky")
-                        );
-                        new_members.push(new_member);
+                    if let Lexicon::AppBskyFeedPost(post_record) = req.record {
+                        post_text = post_record.text.to_lowercase();
+                        if let Some(reply) = post_record.reply {
+                            new_post.reply_parent = Some(reply.parent.uri);
+                            new_post.reply_root = Some(reply.root.uri);
+                            is_hellthread = hellthread_roots.contains(&reply.root.cid);
+                        }
                     }
-                }
-            })
-            .for_each(drop);
+                    let hashtags = extract_hashtags(&post_text);
 
-        diesel::insert_into(post)
-            .values(&new_posts)
-            .on_conflict(uri)
-            .do_nothing()
-            .execute(conn)
-            .expect("Error inserting post records");
+                    if (is_blacksky_author ||
+                        hashtags.contains("#blacksky") ||
+                        hashtags.contains("#blacktechsky") ||
+                        hashtags.contains("#nbablacksky") ||
+                        hashtags.contains("#addtoblacksky")) && !is_hellthread  {
+                        let uri_ = &new_post.uri;
+                        let seq_ = &new_post.sequence;
+                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
 
-        diesel::insert_into(membership)
-            .values(&new_members)
-            .on_conflict(did)
-            .do_nothing()
-            .execute(conn)
-            .expect("Error inserting member records");
-        Ok(())
+                        let new_post = (
+                            PostSchema::uri.eq(new_post.uri),
+                            PostSchema::cid.eq(new_post.cid),
+                            PostSchema::replyParent.eq(new_post.reply_parent),
+                            PostSchema::replyRoot.eq(new_post.reply_root),
+                            PostSchema::indexedAt.eq(new_post.indexed_at),
+                            PostSchema::prev.eq(new_post.prev),
+                            PostSchema::sequence.eq(new_post.sequence)
+                        );
+                        new_posts.push(new_post);
+
+                        if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
+                            println!("New member: {:?}", &req.author);
+                            let new_member = (
+                                MembershipSchema::did.eq(req.author),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky")
+                            );
+                            new_members.push(new_member);
+                        }
+                    }
+                })
+                .for_each(drop);
+
+            diesel::insert_into(PostSchema::post)
+                .values(&new_posts)
+                .on_conflict(PostSchema::uri)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting post records");
+
+            diesel::insert_into(MembershipSchema::membership)
+                .values(&new_members)
+                .on_conflict(MembershipSchema::did)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting member records");
+            Ok(())
+        } else if lex == "likes" {
+            let mut new_likes = Vec::new();
+
+            body
+                .into_iter()
+                .map(|req| {
+                    if let Lexicon::AppBskyFeedLike(like_record) = req.record {
+                        let subject_author: &String = &like_record.subject.uri[5..37].into(); // parse DID:PLC from URI
+                        let is_blacksky_author = is_included(vec![&req.author, subject_author],"blacksky".into()).unwrap_or(false);
+                        if is_blacksky_author {
+                            let system_time = SystemTime::now();
+                            let dt: DateTime<UtcOffset> = system_time.into();
+                            let new_like = (
+                                LikeSchema::uri.eq(req.uri),
+                                LikeSchema::cid.eq(req.cid),
+                                LikeSchema::author.eq(req.author),
+                                LikeSchema::subjectCid.eq(like_record.subject.cid),
+                                LikeSchema::subjectUri.eq(like_record.subject.uri),
+                                LikeSchema::createdAt.eq(like_record.created_at),
+                                LikeSchema::indexedAt.eq(format!("{}", dt.format("%+"))),
+                                LikeSchema::prev.eq(req.prev),
+                                LikeSchema::sequence.eq(req.sequence)
+                            );
+                            new_likes.push(new_like);
+                        }
+                    }
+                })
+                .for_each(drop);
+
+            diesel::insert_into(LikeSchema::like)
+                .values(&new_likes)
+                .on_conflict(LikeSchema::uri)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting like records");
+
+            Ok(())
+        } else {
+            Err(format!("Unknown lexicon received {lex:?}"))
+        }
     }).await;
-
     result
 }
 
 pub async fn queue_deletion(
+    lex: String,
     body: Vec<DeleteRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
-    use crate::schema::post::dsl::*;
+    use crate::schema::post::dsl as PostSchema;
+    use crate::schema::like::dsl as LikeSchema;
 
     let result = connection
         .run(move |conn| {
-            let mut delete_posts = Vec::new();
+            let mut delete_rows = Vec::new();
             body.into_iter()
-                .map(|req_post| {
-                    delete_posts.push(req_post.uri);
+                .map(|req| {
+                    delete_rows.push(req.uri);
                 })
                 .for_each(drop);
-
-            diesel::delete(post.filter(uri.eq_any(delete_posts)))
-                .execute(conn)
-                .expect("Error deleting post records");
+            if lex == "posts" {
+                diesel::delete(PostSchema::post.filter(PostSchema::uri.eq_any(delete_rows)))
+                    .execute(conn)
+                    .expect("Error deleting post records");
+            } else if lex == "likes" {
+                diesel::delete(LikeSchema::like.filter(LikeSchema::uri.eq_any(delete_rows)))
+                    .execute(conn)
+                    .expect("Error deleting like records");
+            } else {
+                eprintln!("Unknown lexicon received {lex:?}");
+            }
             Ok(())
         })
         .await;
-
     result
 }
 

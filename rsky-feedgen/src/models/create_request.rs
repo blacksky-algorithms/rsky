@@ -1,3 +1,12 @@
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+pub enum Lexicon {
+    #[serde(rename(deserialize = "app.bsky.feed.post", serialize = "app.bsky.feed.post"))]
+    AppBskyFeedPost(lexicon::app::bsky::feed::Post),
+    #[serde(rename(deserialize = "app.bsky.feed.like", serialize = "app.bsky.feed.like"))]
+    AppBskyFeedLike(lexicon::app::bsky::feed::Like),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateRequest {
     #[serde(rename = "uri")]
@@ -11,5 +20,5 @@ pub struct CreateRequest {
     #[serde(rename = "author")]
     pub author: String,
     #[serde(rename = "record")]
-    pub record: lexicon::app::bsky::feed::Post,
+    pub record: Lexicon,
 }

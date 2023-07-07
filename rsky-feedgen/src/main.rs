@@ -264,13 +264,14 @@ async fn get_cursor(
     }
 }
 
-#[put("/queue/create", format = "json", data = "<body>")]
+#[put("/queue/<lex>/create", format = "json", data = "<body>")]
 async fn queue_creation(
+    lex: String,
     body: Json<Vec<rsky_feedgen::models::CreateRequest>>,
     _key: ApiKey<'_>,
     connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_creation(body.into_inner(), connection).await {
+    match rsky_feedgen::apis::queue_creation(lex, body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -286,13 +287,14 @@ async fn queue_creation(
     }
 }
 
-#[put("/queue/delete", format = "json", data = "<body>")]
+#[put("/queue/<lex>/delete", format = "json", data = "<body>")]
 async fn queue_deletion(
+    lex: String,
     body: Json<Vec<rsky_feedgen::models::DeleteRequest>>,
     _key: ApiKey<'_>,
     connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_deletion(body.into_inner(), connection).await {
+    match rsky_feedgen::apis::queue_deletion(lex, body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");

@@ -2,7 +2,7 @@
 
 use dotenvy::dotenv;
 use futures::StreamExt as _;
-use lexicon::app::bsky::feed::Post;
+use lexicon::app::bsky::feed::{Post, Like};
 use lexicon::com::atproto::sync::SubscribeRepos;
 use std::env;
 use std::io::Cursor;
@@ -10,6 +10,16 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
+use serde::{Deserialize};
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "$type")]
+enum Lexicon {
+    #[serde(rename(deserialize = "app.bsky.feed.post"))]
+    AppBskyFeedPost(Post),
+    #[serde(rename(deserialize = "app.bsky.feed.like"))]
+    AppBskyFeedLike(Like),
+}
 
 async fn queue_delete(
     url: String,
@@ -74,6 +84,8 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
     if let Ok((_header, body)) = rsky_firehose::firehose::read(&message) {
         let mut posts_to_delete = Vec::new();
         let mut posts_to_create = Vec::new();
+        let mut likes_to_delete = Vec::new();
+        let mut likes_to_create = Vec::new();
 
         match body {
             SubscribeRepos::Commit(commit) => {
@@ -97,7 +109,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                 }
                 commit.operations
                     .into_iter()
-                    .filter(|operation| operation.path.starts_with("app.bsky.feed.post/"))
+                    .filter(|operation| operation.path.starts_with("app.bsky.feed.post/") || operation.path.starts_with("app.bsky.feed.like/"))
                     .map(|operation| {
                         let uri = format!("at://{}/{}",commit.repo,operation.path);
                         match operation.action.as_str() {
@@ -110,12 +122,9 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
 
                                     let record_reader = Cursor::new(car_blocks.get(&cid).unwrap());
                                     match serde_cbor::from_reader(record_reader) {
-                                        Ok(post) => {
-                                            let post: Post = post;
-                                            let _collection = &operation.path // Placeholder. Can be used to filter by lexicon
-                                                .split("/")
-                                                .map(String::from)
-                                                .collect::<Vec<_>>()[0];
+                                        Ok(Lexicon::AppBskyFeedPost(r)) => {
+                                            let mut post: Post = r;
+                                            post.rust_type = Some("app.bsky.feed.post".into());
                                             let mut create = rsky_firehose::models::CreateOp {
                                                 uri: uri.to_owned(),
                                                 cid: cid.to_string(),
@@ -129,6 +138,22 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                                             }
                                             posts_to_create.push(create);
                                         },
+                                        Ok(Lexicon::AppBskyFeedLike(r)) => {
+                                            let mut like: Like = r;
+                                            like.rust_type = Some("app.bsky.feed.like".into());
+                                            let mut create = rsky_firehose::models::CreateOp {
+                                                uri: uri.to_owned(),
+                                                cid: cid.to_string(),
+                                                sequence: commit.sequence,
+                                                prev: None,
+                                                author: commit.repo.to_owned(),
+                                                record: like
+                                            };
+                                            if let Some(prev) = commit.prev {
+                                                create.prev = Some(prev.to_string());
+                                            }
+                                            likes_to_create.push(create);
+                                        },
                                         Err(error) => {
                                             eprintln!("Failed to deserialize record: {uri:?}. Received error {error:?}");
                                         }
@@ -139,7 +164,15 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                                 let del = rsky_firehose::models::DeleteOp {
                                     uri: uri.to_owned()
                                 };
-                                posts_to_delete.push(del);
+                                let collection = &operation.path
+                                    .split("/")
+                                    .map(String::from)
+                                    .collect::<Vec<_>>()[0];
+                                if collection == "app.bsky.feed.post" {
+                                    posts_to_delete.push(del);
+                                } else if collection == "app.bsky.feed.like" {
+                                    likes_to_delete.push(del);
+                                }
                             },
                             _ => {}
                         }
@@ -149,8 +182,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
             _ => {}
         }
         if posts_to_create.len() > 0 {
-            //println!("Create: {posts_to_create:?}");
-            let queue_endpoint = format!("{}/queue/create", default_queue_path);
+            let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "posts");
             let resp = queue_create(queue_endpoint, posts_to_create, client).await;
             match resp {
                 Ok(()) => (),
@@ -158,9 +190,24 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
             };
         }
         if posts_to_delete.len() > 0 {
-            //println!("Delete: {posts_to_delete:?}");
-            let queue_endpoint = format!("{}/queue/delete", default_queue_path);
+            let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "posts");
             let resp = queue_delete(queue_endpoint, posts_to_delete, client).await;
+            match resp {
+                Ok(()) => (),
+                Err(error) => eprintln!("Records failed to queue: {error:?}"),
+            };
+        }
+        if likes_to_create.len() > 0 {
+            let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "likes");
+            let resp = queue_create(queue_endpoint, likes_to_create, client).await;
+            match resp {
+                Ok(()) => (),
+                Err(error) => eprintln!("Records failed to queue: {error:?}"),
+            };
+        }
+        if likes_to_delete.len() > 0 {
+            let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "likes");
+            let resp = queue_delete(queue_endpoint, likes_to_delete, client).await;
             match resp {
                 Ok(()) => (),
                 Err(error) => eprintln!("Records failed to queue: {error:?}"),

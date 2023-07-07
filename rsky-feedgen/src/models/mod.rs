@@ -20,6 +20,7 @@ pub mod sub_state;
 pub use self::sub_state::SubState;
 pub mod create_request;
 pub use self::create_request::CreateRequest;
+pub use self::create_request::Lexicon;
 pub mod delete_request;
 pub use self::delete_request::DeleteRequest;
 pub mod membership;

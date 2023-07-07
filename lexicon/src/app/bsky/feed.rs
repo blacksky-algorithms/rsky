@@ -114,9 +114,11 @@ pub struct AuthorFeed {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Like {
+    #[serde(rename(deserialize = "$type", serialize = "$type"))]
+    pub rust_type: Option<String>,
     #[serde(rename(deserialize = "createdAt"))]
     #[serde(rename(serialize = "createdAt"))]
-    pub created_at: DateTime<Utc>,
+    pub created_at: String,
     pub subject: StrongRef,
 }
 
