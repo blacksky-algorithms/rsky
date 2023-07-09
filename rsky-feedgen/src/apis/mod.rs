@@ -174,7 +174,9 @@ pub async fn queue_creation(
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blacktechsky") ||
                         hashtags.contains("#nbablacksky") ||
-                        hashtags.contains("#addtoblacksky")) && !is_hellthread  {
+                        hashtags.contains("#addtoblacksky")) && 
+                        !is_hellthread &&
+                        !hashtags.contains("#private") {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
                         println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
