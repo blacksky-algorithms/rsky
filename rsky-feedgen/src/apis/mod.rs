@@ -148,6 +148,7 @@ pub async fn queue_creation(
                     let system_time = SystemTime::now();
                     let dt: DateTime<UtcOffset> = system_time.into();
                     let mut is_hellthread = false;
+                    let mut root_author = String::new();
                     let is_blacksky_author = is_included(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
                     let mut new_post = Post {
@@ -163,6 +164,7 @@ pub async fn queue_creation(
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
                         post_text = post_record.text.to_lowercase();
                         if let Some(reply) = post_record.reply {
+                            root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
                             new_post.reply_root = Some(reply.root.uri);
                             is_hellthread = hellthread_roots.contains(&reply.root.cid);
@@ -197,6 +199,19 @@ pub async fn queue_creation(
                             println!("New member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky")
+                            );
+                            new_members.push(new_member);
+                        }
+
+                        if hashtags.contains("#addtoblacksky") && 
+                            is_blacksky_author &&
+                            !root_author.is_empty() {
+                            println!("New member: {:?}", &root_author);
+                            let new_member = (
+                                MembershipSchema::did.eq(root_author),
                                 MembershipSchema::included.eq(true),
                                 MembershipSchema::excluded.eq(false),
                                 MembershipSchema::list.eq("blacksky")
