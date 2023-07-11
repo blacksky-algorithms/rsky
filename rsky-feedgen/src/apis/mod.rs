@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 #[allow(deprecated)]
 pub async fn get_blacksky_posts(
-    _limit: Option<i64>,
+    limit: Option<i64>,
     params_cursor: Option<String>,
     only_posts: bool,
     connection: ReadReplicaConn,
@@ -22,7 +22,7 @@ pub async fn get_blacksky_posts(
     let result = connection
         .run(move |conn| {
             let mut query = post
-                .limit(100)
+                .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
                 .order((indexedAt.desc(), cid.desc()))
                 .into_boxed();
