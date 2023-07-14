@@ -139,6 +139,7 @@ pub async fn queue_creation(
         if lex == "posts" {
             let mut new_posts = Vec::new();
             let mut new_members = Vec::new();
+            let mut members_to_rm = Vec::new();
             let mut hellthread_roots = HashSet::new();
             hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
@@ -179,7 +180,8 @@ pub async fn queue_creation(
                         hashtags.contains("#addtoblacksky")) && 
                         !is_hellthread &&
                         !hashtags.contains("#private") && 
-                        !hashtags.contains("#nofeed") {
+                        !hashtags.contains("#nofeed") && 
+                        !hashtags.contains("#removefromblacksky") {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
                         println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
@@ -198,7 +200,7 @@ pub async fn queue_creation(
                         if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
                             println!("New member: {:?}", &req.author);
                             let new_member = (
-                                MembershipSchema::did.eq(req.author),
+                                MembershipSchema::did.eq(req.author.clone()),
                                 MembershipSchema::included.eq(true),
                                 MembershipSchema::excluded.eq(false),
                                 MembershipSchema::list.eq("blacksky")
@@ -219,6 +221,12 @@ pub async fn queue_creation(
                             new_members.push(new_member);
                         }
                     }
+                    if is_blacksky_author &&
+                        hashtags.contains("#removefromblacksky") &&
+                        !is_hellthread {
+                        println!("Removing member: {:?}", &req.author);
+                        members_to_rm.push(req.author.clone());
+                    }
                 })
                 .for_each(drop);
 
@@ -235,6 +243,11 @@ pub async fn queue_creation(
                 .do_nothing()
                 .execute(conn)
                 .expect("Error inserting member records");
+
+            diesel::delete(MembershipSchema::membership
+                .filter(MembershipSchema::did.eq_any(&members_to_rm)))
+                .execute(conn)
+                .expect("Error deleting member records");
             Ok(())
         } else if lex == "likes" {
             let mut new_likes = Vec::new();
