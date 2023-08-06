@@ -4,11 +4,117 @@ use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
+use diesel::sql_query;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
+
+
+#[allow(deprecated)]
+pub async fn get_blacksky_trending(
+    limit: Option<i64>,
+    params_cursor: Option<String>,
+    connection: ReadReplicaConn,
+) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    use crate::schema::post::dsl as PostSchema;
+
+    let result = connection
+        .run(move |conn| {
+            let query_str = "SELECT
+                hydrated.uri,
+                hydrated.cid,
+                hydrated.\"replyParent\",
+                hydrated.\"replyRoot\",
+                hydrated.\"indexedAt\",
+                hydrated.prev,
+                hydrated.\"sequence\"
+            FROM(
+                SELECT
+                    post.*,
+                    EXTRACT(EPOCH FROM CURRENT_TIMESTAMP-post.\"indexedAt\"::timestamp)/3600 as duration,
+                    coalesce(likes.totalLikes, 0) as totalLikes
+                FROM post
+                LEFT JOIN (
+                    SELECT public.like.\"subjectUri\", Count(uri) as totalLikes FROM public.like WHERE AGE(CURRENT_TIMESTAMP, public.like.\"indexedAt\"::timestamp) < '1 days' group by 1 
+                ) likes
+                    ON likes.\"subjectUri\" = post.uri
+                WHERE AGE(CURRENT_TIMESTAMP, post.\"indexedAt\"::timestamp) < '1 days'
+            ) hydrated
+            WHERE (ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 2";
+
+            if params_cursor.is_some() {
+                let cursor_str = params_cursor.unwrap();
+                let v = cursor_str
+                    .split("::")
+                    .take(2)
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                if let [indexed_at_c, cid_c] = &v[..] {
+                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                        let nanoseconds = 230 * 1000000;
+                        let datetime = DateTime::<Utc>::from_utc(
+                            NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
+                            Utc,
+                        );
+                        let mut timestr = String::new();
+                        match write!(timestr, "{}", datetime.format("%+")) {
+                            Ok(_) => {
+                                let cursor_filter_str = format!(" AND hydrated.\"indexedAt\" <= {} AND hydrated.cid < {}", timestr.to_owned(), cid_c.to_owned());
+                                let query_str = format!("{}{}", &query_str, &cursor_filter_str);
+                            }
+                            Err(error) => eprintln!("Error formatting: {error:?}"),
+                        }
+                    }
+                } else {
+                    let validation_error = ValidationErrorMessageResponse {
+                        code: Some(ErrorCode::ValidationError),
+                        message: Some("malformed cursor".into()),
+                    };
+                    return Err(validation_error);
+                }
+            }
+            let order_str = format!(" ORDER BY hydrated.\"indexedAt\" DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
+            let query_str = format!("{}{}", &query_str, &order_str);
+
+            let results = sql_query(query_str)
+                .load::<crate::models::Post>(conn)
+                .expect("Error loading post records");
+
+            let mut post_results = Vec::new();
+            let mut cursor: Option<String> = None;
+
+            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
+            if let Some(last_post) = results.last() {
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                {
+                    cursor = Some(format!(
+                        "{}::{}",
+                        parsed_time.timestamp_millis(),
+                        last_post.cid
+                    ));
+                }
+            }
+
+            results
+                .into_iter()
+                .map(|result| {
+                    let post_result = PostResult { post: result.uri };
+                    post_results.push(post_result);
+                })
+                .for_each(drop);
+
+            let new_response = AlgoResponse {
+                cursor: cursor,
+                feed: post_results,
+            };
+            Ok(new_response)
+        })
+        .await;
+
+    result
+}
 
 #[allow(deprecated)]
 pub async fn get_blacksky_posts(
@@ -17,14 +123,14 @@ pub async fn get_blacksky_posts(
     only_posts: bool,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    use crate::schema::post::dsl::*;
+    use crate::schema::post::dsl as PostSchema;
 
     let result = connection
         .run(move |conn| {
-            let mut query = post
+            let mut query = PostSchema::post
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
-                .order((indexedAt.desc(), cid.desc()))
+                .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
             if params_cursor.is_some() {
@@ -45,8 +151,8 @@ pub async fn get_blacksky_posts(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query
-                                    .filter(indexedAt.le(timestr.to_owned()))
-                                    .filter(cid.lt(cid_c.to_owned()));
+                                    .filter(PostSchema::indexedAt.le(timestr.to_owned()))
+                                    .filter(PostSchema::cid.lt(cid_c.to_owned()));
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -61,8 +167,8 @@ pub async fn get_blacksky_posts(
             }
             if only_posts {
                 query = query
-                    .filter(replyParent.is_null())
-                    .filter(replyRoot.is_null());
+                    .filter(PostSchema::replyParent.is_null())
+                    .filter(PostSchema::replyRoot.is_null());
             }
             let results = query.load(conn).expect("Error loading post records");
 
