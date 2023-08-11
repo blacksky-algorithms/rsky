@@ -35,7 +35,7 @@ For users, this should feel like visiting a page in the app. Once they subscribe
 -   [x] serde_cbor for deserializing DAG-CBOR
 -   [x] API-token security
 -   [ ] Other lexicons
--   [ ] Visitor tracking
+-   [x] Visitor tracking
 -   [ ] Image decoding
 
 ## User Warning
