@@ -100,6 +100,7 @@ lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
         let mut s = HashSet::new();
         s.insert("did:plc:bqlobp4ngysw3a52gdfnxbne"); // HS
+        s.insert("did:plc:gdvllvjfpamphmnzn2yl4q2w"); // HS/IM
         s
     };
 }
