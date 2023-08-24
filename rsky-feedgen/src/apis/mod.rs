@@ -42,7 +42,8 @@ pub async fn get_blacksky_trending(
                     ON likes.\"subjectUri\" = post.uri
                 WHERE AGE(CURRENT_TIMESTAMP, post.\"indexedAt\"::timestamp) < '1 days'
             ) hydrated
-            WHERE (ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 2";
+            WHERE (ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
+                OR hydrated.totalLikes > 11";
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
