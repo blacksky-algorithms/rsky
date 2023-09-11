@@ -225,6 +225,24 @@ pub fn is_included(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -
     }
 }
 
+pub fn is_excluded(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -> Result<bool, Box<dyn std::error::Error>> {
+    use crate::schema::membership::dsl::*;
+
+    let result = membership
+        .filter(did.eq_any(dids))
+        .filter(list.eq(list_))
+        .filter(excluded.eq(true))
+        .limit(1)
+        .select(Membership::as_select())
+        .load(conn)?;
+
+    if result.len() > 0 {
+        Ok(result[0].excluded)
+    } else {
+        Ok(false)
+    }
+}
+
 fn extract_hashtags(input: &str) -> HashSet<&str> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"\#[a-zA-Z][0-9a-zA-Z_]*").unwrap();
@@ -258,6 +276,7 @@ pub async fn queue_creation(
                     let mut is_hellthread = false;
                     let mut root_author = String::new();
                     let is_blacksky_author = is_included(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
+                    let is_blocked = is_excluded(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
                     let mut new_post = Post {
                         uri: req.uri,
@@ -285,6 +304,7 @@ pub async fn queue_creation(
                         hashtags.contains("#blacktechsky") ||
                         hashtags.contains("#nbablacksky") ||
                         hashtags.contains("#addtoblacksky")) && 
+                        !is_blocked &&
                         !is_hellthread &&
                         !hashtags.contains("#private") && 
                         !hashtags.contains("#nofeed") && 
