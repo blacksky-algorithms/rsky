@@ -10,6 +10,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
+use lexicon::app::bsky::feed::Embeds;
 
 
 #[allow(deprecated)]
@@ -257,11 +258,13 @@ pub async fn queue_creation(
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
     use crate::schema::follow::dsl as FollowSchema;
+    use crate::schema::image::dsl as ImageSchema;
 
     let result = connection.run( move |conn| {
         if lex == "posts" {
             let mut new_posts = Vec::new();
             let mut new_members = Vec::new();
+            let mut new_images = Vec::new();
             let mut members_to_rm = Vec::new();
             let mut hellthread_roots = HashSet::new();
             hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
@@ -276,6 +279,7 @@ pub async fn queue_creation(
                     let is_blacksky_author = is_included(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
                     let is_blocked = is_excluded(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
+                    let mut post_images = Vec::new();
                     let mut new_post = Post {
                         uri: req.uri,
                         cid: req.cid,
@@ -290,6 +294,7 @@ pub async fn queue_creation(
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
                         post_text = post_record.text.to_lowercase();
+                        let post_created_at = format!("{}", post_record.created_at.format("%+"));
                         if let Some(reply) = post_record.reply {
                             root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
@@ -298,6 +303,24 @@ pub async fn queue_creation(
                         }
                         if let Some(langs) = post_record.langs {
                             new_post.lang = Some(langs.join(","));
+                        }
+                        if let Some(embed) = post_record.embed {
+                            match embed {
+                                Embeds::Images(e) => {
+                                    for image in e.images {
+                                        let new_image = (
+                                            ImageSchema::cid.eq(image.image.r#ref.to_string()),
+                                            ImageSchema::alt.eq(image.alt),
+                                            ImageSchema::postCid.eq(new_post.cid.clone()),
+                                            ImageSchema::postUri.eq(new_post.uri.clone()),
+                                            ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                            ImageSchema::createdAt.eq(post_created_at.clone()),
+                                        );
+                                        post_images.push(new_image);
+                                    }
+                                },
+                                _ => (),
+                            }
                         }
                     }
 
@@ -330,6 +353,7 @@ pub async fn queue_creation(
                             PostSchema::lang.eq(new_post.lang)
                         );
                         new_posts.push(new_post);
+                        new_images.extend(post_images);
 
                         if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
                             println!("New member: {:?}", &req.author);
@@ -370,6 +394,13 @@ pub async fn queue_creation(
                 .do_nothing()
                 .execute(conn)
                 .expect("Error inserting post records");
+
+            diesel::insert_into(ImageSchema::image)
+                .values(&new_images)
+                .on_conflict(ImageSchema::cid)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting image records");
 
             diesel::insert_into(MembershipSchema::membership)
                 .values(&new_members)

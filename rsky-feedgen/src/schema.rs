@@ -14,6 +14,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    image (cid) {
+        cid -> Varchar,
+        alt -> Nullable<Varchar>,
+        postCid -> Varchar,
+        postUri -> Varchar,
+        createdAt -> Varchar,
+        indexedAt -> Varchar,
+    }
+}
+
+diesel::table! {
     kysely_migration (name) {
         #[max_length = 255]
         name -> Varchar,
@@ -85,6 +96,7 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(
     follow,
+    image,
     kysely_migration,
     kysely_migration_lock,
     like,
