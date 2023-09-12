@@ -23,6 +23,10 @@ pub struct Post {
     pub prev: Option<String>,
     #[serde(rename = "sequence")]
     pub sequence: Option<i64>,
+    #[serde(rename = "text", skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(rename = "lang", skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 impl Queryable<post::SqlType, DB> for Post {
@@ -34,6 +38,8 @@ impl Queryable<post::SqlType, DB> for Post {
         String,
         Option<String>,
         Option<i64>,
+        Option<String>,
+        Option<String>,
     );
 
     fn build(row: Self::Row) -> deserialize::Result<Self> {
@@ -45,6 +51,8 @@ impl Queryable<post::SqlType, DB> for Post {
             indexed_at: row.4,
             prev: row.5,
             sequence: row.6,
+            text: row.7,
+            lang: row.8,
         })
     }
 }
@@ -61,6 +69,8 @@ where
         post::indexedAt,
         post::prev,
         post::sequence,
+        post::text,
+        post::lang,
     );
 
     fn construct_selection() -> Self::SelectExpression {
@@ -72,6 +82,8 @@ where
             post::indexedAt,
             post::prev,
             post::sequence,
+            post::text,
+            post::lang,
         )
     }
 }
@@ -91,7 +103,9 @@ where
         let indexed_at = NamedRow::get::<diesel::dsl::SqlTypeOf<post::indexedAt>, _>(row, "indexedAt")?;
         let prev = NamedRow::get::<diesel::dsl::SqlTypeOf<post::prev>, _>(row, "prev")?;
         let sequence = NamedRow::get::<diesel::dsl::SqlTypeOf<post::sequence>, _>(row, "sequence")?;
+        let text = NamedRow::get::<diesel::dsl::SqlTypeOf<post::text>, _>(row, "text")?;
+        let lang = NamedRow::get::<diesel::dsl::SqlTypeOf<post::lang>, _>(row, "lang")?;
 
-        Ok(Self { uri, cid, reply_parent, reply_root, indexed_at, prev, sequence })
+        Ok(Self { uri, cid, reply_parent, reply_root, indexed_at, prev, sequence, text, lang })
     }
 }

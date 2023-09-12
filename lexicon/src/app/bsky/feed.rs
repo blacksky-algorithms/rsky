@@ -71,6 +71,8 @@ pub struct Post {
     #[serde(rename(deserialize = "$type", serialize = "$type"))]
     pub rust_type: Option<String>,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub langs: Option<Vec<String>>,
     //#[serde(skip_serializing_if = "Option::is_none")]
     //pub embed: Option<Embeds>,
     #[serde(skip_serializing_if = "Option::is_none")]

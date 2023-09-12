@@ -18,8 +18,6 @@ pub async fn get_blacksky_trending(
     params_cursor: Option<String>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    use crate::schema::post::dsl as PostSchema;
-
     let result = connection
         .run(move |conn| {
             let query_str = "SELECT
@@ -285,7 +283,9 @@ pub async fn queue_creation(
                         reply_root: None,
                         indexed_at: format!("{}", dt.format("%+")),
                         prev: req.prev,
-                        sequence: req.sequence
+                        sequence: req.sequence,
+                        text: None,
+                        lang: None
                     };
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
@@ -296,8 +296,13 @@ pub async fn queue_creation(
                             new_post.reply_root = Some(reply.root.uri);
                             is_hellthread = hellthread_roots.contains(&reply.root.cid);
                         }
+                        if let Some(langs) = post_record.langs {
+                            new_post.lang = Some(langs.join(","));
+                        }
                     }
+
                     let hashtags = extract_hashtags(&post_text);
+                    new_post.text = Some(post_text.clone());
 
                     if (is_blacksky_author ||
                         hashtags.contains("#blacksky") ||
@@ -320,7 +325,9 @@ pub async fn queue_creation(
                             PostSchema::replyRoot.eq(new_post.reply_root),
                             PostSchema::indexedAt.eq(new_post.indexed_at),
                             PostSchema::prev.eq(new_post.prev),
-                            PostSchema::sequence.eq(new_post.sequence)
+                            PostSchema::sequence.eq(new_post.sequence),
+                            PostSchema::text.eq(new_post.text),
+                            PostSchema::lang.eq(new_post.lang)
                         );
                         new_posts.push(new_post);
 

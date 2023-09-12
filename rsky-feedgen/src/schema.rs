@@ -62,6 +62,8 @@ diesel::table! {
         indexedAt -> Varchar,
         prev -> Nullable<Varchar>,
         sequence -> Nullable<Int8>,
+        text -> Nullable<Varchar>,
+        lang -> Nullable<Varchar>,
     }
 }
 
