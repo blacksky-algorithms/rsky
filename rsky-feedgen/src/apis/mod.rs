@@ -118,6 +118,7 @@ pub async fn get_blacksky_trending(
 
 #[allow(deprecated)]
 pub async fn get_blacksky_posts(
+    lang: Option<String>,
     limit: Option<i64>,
     params_cursor: Option<String>,
     only_posts: bool,
@@ -133,6 +134,11 @@ pub async fn get_blacksky_posts(
                 .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
+            if let Some(lang) = lang {
+                query = query
+                    .filter(PostSchema::lang.like(format!("%{}%", lang)));
+            }
+            
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
                 let v = cursor_str

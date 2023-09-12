@@ -95,6 +95,9 @@ const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.gene
 const BLACKSKY_OP: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 const BLACKSKY_TREND: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
+const BLACKSKY_FR: &str =
+    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-fr";
+const BLACKSKY_PT: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-pt";
 
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
@@ -165,7 +168,7 @@ async fn index(
     }
     match feed {
         _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, false, connection).await {
+            match rsky_feedgen::apis::get_blacksky_posts(None, limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -181,7 +184,7 @@ async fn index(
             }
         }
         _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(limit, cursor, true, connection).await {
+            match rsky_feedgen::apis::get_blacksky_posts(None, limit, cursor, true, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -212,6 +215,38 @@ async fn index(
                 }
             }
         }
+        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && !is_banned => {
+            match rsky_feedgen::apis::get_blacksky_posts(Some("fr".into()),limit, cursor, true, connection).await {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
+        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && !is_banned => {
+            match rsky_feedgen::apis::get_blacksky_posts(Some("pt".into()),limit, cursor, true, connection).await {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
         _blacksky if _blacksky.as_str() == BLACKSKY && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
@@ -221,6 +256,14 @@ async fn index(
             Ok(Json(banned_response))
         }
         _blacksky_trend if _blacksky_trend.as_str() == BLACKSKY_TREND && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
