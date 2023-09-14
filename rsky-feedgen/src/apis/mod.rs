@@ -23,7 +23,7 @@ pub async fn get_blacksky_trending(
         .run(move |conn| {
             let system_time = SystemTime::now();
             let dt: DateTime<UtcOffset> = system_time.into();
-            let query_str = format!("SELECT
+            let mut query_str = format!("SELECT
                 hydrated.uri,
                 hydrated.cid,
                 hydrated.\"replyParent\",
@@ -45,8 +45,8 @@ pub async fn get_blacksky_trending(
                     ON likes.\"subjectUri\" = post.uri
                 WHERE post.\"indexedAt\" > '{0}'
             ) hydrated
-            WHERE (ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
-                OR hydrated.totalLikes > 11", dt.format("%F"));
+            WHERE ((ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
+                OR hydrated.totalLikes > 11)", dt.format("%F"));
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
@@ -65,8 +65,8 @@ pub async fn get_blacksky_trending(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                let cursor_filter_str = format!(" AND hydrated.\"indexedAt\" <= {} AND hydrated.cid < {}", timestr.to_owned(), cid_c.to_owned());
-                                let query_str = format!("{}{}", &query_str, &cursor_filter_str);
+                                let cursor_filter_str = format!(" AND hydrated.\"indexedAt\" <= '{}' AND hydrated.cid < '{}'", timestr.to_owned(), cid_c.to_owned());
+                                query_str = format!("{}{}", query_str, cursor_filter_str);
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -81,7 +81,7 @@ pub async fn get_blacksky_trending(
             }
             let order_str = format!(" ORDER BY hydrated.\"indexedAt\" DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
             let query_str = format!("{}{};", &query_str, &order_str);
-
+            println!("{:?}", query_str);
             let results = sql_query(query_str)
                 .load::<crate::models::Post>(conn)
                 .expect("Error loading post records");
