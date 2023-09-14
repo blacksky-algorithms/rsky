@@ -21,14 +21,18 @@ pub async fn get_blacksky_trending(
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     let result = connection
         .run(move |conn| {
-            let query_str = "SELECT
+            let system_time = SystemTime::now();
+            let dt: DateTime<UtcOffset> = system_time.into();
+            let query_str = format!("SELECT
                 hydrated.uri,
                 hydrated.cid,
                 hydrated.\"replyParent\",
                 hydrated.\"replyRoot\",
                 hydrated.\"indexedAt\",
                 hydrated.prev,
-                hydrated.\"sequence\"
+                hydrated.\"sequence\",
+                hydrated.\"text\",
+                hydrated.lang
             FROM(
                 SELECT
                     post.*,
@@ -36,13 +40,13 @@ pub async fn get_blacksky_trending(
                     coalesce(likes.totalLikes, 0) as totalLikes
                 FROM post
                 LEFT JOIN (
-                    SELECT public.like.\"subjectUri\", Count(uri) as totalLikes FROM public.like WHERE AGE(CURRENT_TIMESTAMP, public.like.\"indexedAt\"::timestamp) < '1 days' group by 1 
+                    SELECT public.like.\"subjectUri\", Count(uri) as totalLikes FROM public.like WHERE public.like.\"indexedAt\" > '{0}' group by 1 
                 ) likes
                     ON likes.\"subjectUri\" = post.uri
-                WHERE AGE(CURRENT_TIMESTAMP, post.\"indexedAt\"::timestamp) < '1 days'
+                WHERE post.\"indexedAt\" > '{0}'
             ) hydrated
             WHERE (ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
-                OR hydrated.totalLikes > 11";
+                OR hydrated.totalLikes > 11", dt.format("%F"));
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
@@ -76,7 +80,7 @@ pub async fn get_blacksky_trending(
                 }
             }
             let order_str = format!(" ORDER BY hydrated.\"indexedAt\" DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
-            let query_str = format!("{}{}", &query_str, &order_str);
+            let query_str = format!("{}{};", &query_str, &order_str);
 
             let results = sql_query(query_str)
                 .load::<crate::models::Post>(conn)
@@ -138,7 +142,7 @@ pub async fn get_blacksky_posts(
                 query = query
                     .filter(PostSchema::lang.like(format!("%{}%", lang)));
             }
-            
+
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
                 let v = cursor_str
