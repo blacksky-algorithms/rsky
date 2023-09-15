@@ -2,7 +2,7 @@ use crate::db::*;
 use crate::models::*;
 use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{Duration, DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use lazy_static::lazy_static;
@@ -21,8 +21,7 @@ pub async fn get_blacksky_trending(
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     let result = connection
         .run(move |conn| {
-            let system_time = SystemTime::now();
-            let dt: DateTime<UtcOffset> = system_time.into();
+            let dt = Utc::now() - Duration::days(2);
             let mut query_str = format!("SELECT
                 hydrated.uri,
                 hydrated.cid,
@@ -81,7 +80,7 @@ pub async fn get_blacksky_trending(
             }
             let order_str = format!(" ORDER BY hydrated.\"indexedAt\" DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
             let query_str = format!("{}{};", &query_str, &order_str);
-            println!("{:?}", query_str);
+
             let results = sql_query(query_str)
                 .load::<crate::models::Post>(conn)
                 .expect("Error loading post records");
