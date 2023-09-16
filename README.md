@@ -34,9 +34,8 @@ For users, this should feel like visiting a page in the app. Once they subscribe
 -   [x] Queuable database operations
 -   [x] serde_cbor for deserializing DAG-CBOR
 -   [x] API-token security
--   [ ] Other lexicons
 -   [x] Visitor tracking
--   [ ] Image decoding
+-   [x] Image decoding
 
 ## User Warning
 
@@ -51,5 +50,6 @@ This project would not have been possible without the great work done in:
 
 -   [`feed-gen`](https://github.com/bluesky-social/feed-generator)
 -   [`bisky`](https://github.com/jesopo/bisky)
+-   [`algoz`](https://github.com/whyrusleeping/algoz)
 
 A lot of the code was inspired and adapted from their work.
