@@ -34,6 +34,7 @@ pub async fn get_blacksky_nsfw(
                     PostSchema::uri.eq_any(
                         ImageSchema::image
                             .filter(ImageSchema::labels.contains(vec!["sexy"]))
+                            .filter(ImageSchema::alt.is_not_null())
                             .select(ImageSchema::postUri)
                     )
                 );
