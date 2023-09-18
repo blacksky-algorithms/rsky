@@ -159,7 +159,7 @@ if __name__ == '__main__':
 
 	print('Querying images..')
 	query = Image.select().where(Image.indexedAt > interval.isoformat())
-
+	
 	for img in tqdm(query):
 		did = img.postUri[5:37]
 		rkey = img.postUri.split('/')[-1]
@@ -167,7 +167,7 @@ if __name__ == '__main__':
 			image, fsize = get_blob(did, img.cid)
 			res = openai_classify(image, fsize, args.labels)
 			index = nn_classify(image)
-			if index >= 4 and res['values'][0] >= 80:
+			if index >= 3 and res['values'][0] >= 80:
 				print(f'Image checked is: {img.cid}')
 				print(f'INDEX {index} FOR https://bsky.app/profile/{did}/post/{rkey}')
 				print(json.dumps(res, indent=4))
