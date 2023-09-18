@@ -134,6 +134,18 @@ if __name__ == '__main__':
 		action='append', 
 		required=True,
 		help='<Required> Set labels')
+	parser.add_argument(
+		'-A',
+		'--thresholdA', 
+		type=int, 
+		default=3, 
+		help='Index threshold to use (0-5)')
+	parser.add_argument(
+		'-B',
+		'--thresholdB', 
+		type=int, 
+		default=80, 
+		help='Index threshold to use (0-100)')
 
 	args = parser.parse_args()
 
@@ -167,7 +179,7 @@ if __name__ == '__main__':
 			image, fsize = get_blob(did, img.cid)
 			res = openai_classify(image, fsize, args.labels)
 			index = nn_classify(image)
-			if index >= 3 and res['values'][0] >= 80:
+			if index >= args.thresholdA and res['values'][0] > args.thresholdB:
 				print(f'Image checked is: {img.cid}')
 				print(f'INDEX {index} FOR https://bsky.app/profile/{did}/post/{rkey}')
 				print(json.dumps(res, indent=4))
