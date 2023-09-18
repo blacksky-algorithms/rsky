@@ -123,6 +123,12 @@ if __name__ == '__main__':
 		required=True, 
 		help='<Required> ML model to use for labeling')
 	parser.add_argument(
+		'-H',
+		'--hours', 
+		type=int, 
+		required=True, 
+		help='<Required> Number of hours ago')
+	parser.add_argument(
 		'-l',
 		'--labels', 
 		action='append', 
@@ -144,12 +150,12 @@ if __name__ == '__main__':
 										nn.Dropout(0.2),
 										nn.Linear(512, 10),
 										nn.LogSoftmax(dim=1))
-	modelB.load_state_dict(torch.load('ResNet50_nsfw_model.pth', map_location=torch.device('cpu')))
+	modelB.load_state_dict(torch.load('labeler/ResNet50_nsfw_model.pth', map_location=torch.device('cpu')))
 	modelB.eval()
 
 	print('Connecting to database..')
 	database.connect(reuse_if_open=True)
-	interval = datetime.now() - timedelta(hours=1, minutes=0)
+	interval = datetime.now() - timedelta(hours=args.hours, minutes=0)
 
 	print('Querying images..')
 	query = Image.select().where(Image.indexedAt > interval.isoformat())
