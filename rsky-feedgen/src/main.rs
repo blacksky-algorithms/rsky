@@ -98,6 +98,7 @@ const BLACKSKY_TREND: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.fee
 const BLACKSKY_FR: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-fr";
 const BLACKSKY_PT: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-pt";
+const BLACKSKY_NSFW: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-nsfw";
 
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
@@ -247,6 +248,22 @@ async fn index(
                 }
             }
         }
+        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && !is_banned => {
+            match rsky_feedgen::apis::get_blacksky_nsfw(limit, cursor, connection).await {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
+                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
         _blacksky if _blacksky.as_str() == BLACKSKY && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
@@ -264,6 +281,10 @@ async fn index(
             Ok(Json(banned_response))
         }
         _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }

@@ -12,6 +12,101 @@ use std::fmt::Write;
 use std::time::SystemTime;
 use lexicon::app::bsky::feed::Embeds;
 
+#[allow(deprecated)]
+pub async fn get_blacksky_nsfw(
+    limit: Option<i64>,
+    params_cursor: Option<String>,
+    connection: ReadReplicaConn,
+) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    use crate::schema::post::dsl as PostSchema;
+    use crate::schema::image::dsl as ImageSchema;
+
+    let result = connection
+        .run(move |conn| {
+            let mut query = PostSchema::post
+                .limit(limit.unwrap_or(30))
+                .select(Post::as_select())
+                .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
+                .into_boxed();
+
+            query = query
+                .filter(
+                    PostSchema::uri.eq_any(
+                        ImageSchema::image
+                            .filter(ImageSchema::labels.contains(vec!["sexy"]))
+                            .select(ImageSchema::postUri)
+                    )
+                );
+
+            if params_cursor.is_some() {
+                let cursor_str = params_cursor.unwrap();
+                let v = cursor_str
+                    .split("::")
+                    .take(2)
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                if let [indexed_at_c, cid_c] = &v[..] {
+                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                        let nanoseconds = 230 * 1000000;
+                        let datetime = DateTime::<Utc>::from_utc(
+                            NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
+                            Utc,
+                        );
+                        let mut timestr = String::new();
+                        match write!(timestr, "{}", datetime.format("%+")) {
+                            Ok(_) => {
+                                query = query
+                                    .filter(PostSchema::indexedAt.le(timestr.to_owned()))
+                                    .filter(PostSchema::cid.lt(cid_c.to_owned()));
+                            }
+                            Err(error) => eprintln!("Error formatting: {error:?}"),
+                        }
+                    }
+                } else {
+                    let validation_error = ValidationErrorMessageResponse {
+                        code: Some(ErrorCode::ValidationError),
+                        message: Some("malformed cursor".into()),
+                    };
+                    return Err(validation_error);
+                }
+            }
+
+            let results = query.load(conn).expect("Error loading post records");
+
+            let mut post_results = Vec::new();
+            let mut cursor: Option<String> = None;
+
+            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
+            if let Some(last_post) = results.last() {
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                {
+                    cursor = Some(format!(
+                        "{}::{}",
+                        parsed_time.timestamp_millis(),
+                        last_post.cid
+                    ));
+                }
+            }
+
+            results
+                .into_iter()
+                .map(|result| {
+                    let post_result = PostResult { post: result.uri };
+                    post_results.push(post_result);
+                })
+                .for_each(drop);
+
+            let new_response = AlgoResponse {
+                cursor: cursor,
+                feed: post_results,
+            };
+            Ok(new_response)
+        })
+        .await;
+
+    result
+}
+
 
 #[allow(deprecated)]
 pub async fn get_blacksky_trending(
