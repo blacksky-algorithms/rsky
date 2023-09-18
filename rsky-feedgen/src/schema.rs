@@ -21,6 +21,7 @@ diesel::table! {
         postUri -> Varchar,
         createdAt -> Varchar,
         indexedAt -> Varchar,
+        labels -> Nullable<Array<Nullable<Text>>>,
     }
 }
 

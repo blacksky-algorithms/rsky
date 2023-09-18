@@ -317,6 +317,7 @@ pub async fn queue_creation(
                             match embed {
                                 Embeds::Images(e) => {
                                     for image in e.images {
+                                        let labels: Vec<Option<String>> = vec![];
                                         let new_image = (
                                             ImageSchema::cid.eq(image.image.r#ref.to_string()),
                                             ImageSchema::alt.eq(image.alt),
@@ -324,6 +325,7 @@ pub async fn queue_creation(
                                             ImageSchema::postUri.eq(new_post.uri.clone()),
                                             ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
                                             ImageSchema::createdAt.eq(post_created_at.clone()),
+                                            ImageSchema::labels.eq(labels),
                                         );
                                         post_images.push(new_image);
                                     }
