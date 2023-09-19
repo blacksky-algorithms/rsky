@@ -31,11 +31,11 @@ pub async fn get_blacksky_nsfw(
 
             query = query
                 .filter(
-                    PostSchema::uri.eq_any(
+                    PostSchema::cid.eq_any(
                         ImageSchema::image
                             .filter(ImageSchema::labels.contains(vec!["sexy"]))
                             .filter(ImageSchema::alt.is_not_null())
-                            .select(ImageSchema::postUri)
+                            .select(ImageSchema::postCid)
                     )
                 );
 
@@ -123,7 +123,7 @@ pub async fn get_blacksky_trending(
                 hydrated.cid,
                 hydrated.\"replyParent\",
                 hydrated.\"replyRoot\",
-                hydrated.\"indexedAt\",
+                hydrated.trendingDate as \"indexedAt\",
                 hydrated.prev,
                 hydrated.\"sequence\",
                 hydrated.\"text\",
@@ -132,12 +132,18 @@ pub async fn get_blacksky_trending(
                 SELECT
                     post.*,
                     EXTRACT(EPOCH FROM CURRENT_TIMESTAMP-post.\"indexedAt\"::timestamp)/3600 as duration,
-                    coalesce(likes.totalLikes, 0) as totalLikes
+                    coalesce(likes.totalLikes, 0) as totalLikes,
+                    coalesce(twelfth.\"indexedAt\", post.\"indexedAt\") as trendingDate 
                 FROM post
                 LEFT JOIN (
                     SELECT public.like.\"subjectUri\", Count(uri) as totalLikes FROM public.like WHERE public.like.\"indexedAt\" > '{0}' group by 1 
                 ) likes
                     ON likes.\"subjectUri\" = post.uri
+                LEFT JOIN (
+                    SELECT public.like.*, ROW_NUMBER() OVER (PARTITION BY public.like.\"subjectUri\" ORDER BY public.like.\"indexedAt\") AS RowNum FROM public.like WHERE public.like.\"indexedAt\" > '{0}'
+                ) twelfth
+                    ON twelfth.\"subjectUri\" = post.uri
+                        and twelfth.RowNum = 12
                 WHERE post.\"indexedAt\" > '{0}'
             ) hydrated
             WHERE ((ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
@@ -160,7 +166,7 @@ pub async fn get_blacksky_trending(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                let cursor_filter_str = format!(" AND hydrated.\"indexedAt\" <= '{}' AND hydrated.cid < '{}'", timestr.to_owned(), cid_c.to_owned());
+                                let cursor_filter_str = format!(" AND hydrated.trendingDate <= '{}' AND hydrated.cid < '{}'", timestr.to_owned(), cid_c.to_owned());
                                 query_str = format!("{}{}", query_str, cursor_filter_str);
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
@@ -174,7 +180,7 @@ pub async fn get_blacksky_trending(
                     return Err(validation_error);
                 }
             }
-            let order_str = format!(" ORDER BY hydrated.\"indexedAt\" DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
+            let order_str = format!(" ORDER BY hydrated.trendingDate DESC, hydrated.cid DESC LIMIT {} ", limit.unwrap_or(30));
             let query_str = format!("{}{};", &query_str, &order_str);
 
             let results = sql_query(query_str)
