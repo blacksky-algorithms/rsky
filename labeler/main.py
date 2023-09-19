@@ -44,7 +44,7 @@ class Image(BaseModel):
 	postUri = CharField(null=False)
 	createdAt = CharField(null=False)
 	indexedAt = CharField(null=False)
-	labels = ArrayField(CharField)
+	labels = ArrayField(TextField)
 
 def get_blob(did, cid):
 	url = 'https://bsky.social/xrpc/com.atproto.sync.getBlob'
@@ -170,7 +170,7 @@ if __name__ == '__main__':
 	interval = datetime.now() - timedelta(hours=args.hours, minutes=0)
 
 	print('Querying images..')
-	query = Image.select().where(Image.indexedAt > interval.isoformat())
+	query = Image.select().where((Image.indexedAt > interval.isoformat()) & (Image.labels.is_null(True) | ~Image.labels.contains_any('sexy','nsfw-fp')))
 	
 	for img in tqdm(query):
 		did = img.postUri[5:37]
