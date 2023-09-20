@@ -140,7 +140,7 @@ pub async fn get_blacksky_trending(
                 ) likes
                     ON likes.\"subjectUri\" = post.uri
                 LEFT JOIN (
-                    SELECT public.like.*, ROW_NUMBER() OVER (PARTITION BY public.like.\"subjectUri\" ORDER BY public.like.\"indexedAt\") AS RowNum FROM public.like WHERE public.like.\"indexedAt\" > '{0}'
+                    SELECT public.like.\"subjectUri\", public.like.\"indexedAt\", ROW_NUMBER() OVER (PARTITION BY public.like.\"subjectUri\" ORDER BY public.like.\"indexedAt\" NULLS LAST) AS RowNum FROM public.like
                 ) twelfth
                     ON twelfth.\"subjectUri\" = post.uri
                         and twelfth.RowNum = 12
