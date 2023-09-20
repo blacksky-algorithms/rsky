@@ -10,7 +10,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
-use lexicon::app::bsky::feed::Embeds;
+use lexicon::app::bsky::feed::{Embeds, Media};
 
 #[allow(deprecated)]
 pub async fn get_blacksky_nsfw(
@@ -430,6 +430,26 @@ pub async fn queue_creation(
                                             ImageSchema::labels.eq(labels),
                                         );
                                         post_images.push(new_image);
+                                    }
+                                },
+                                Embeds::RecordWithMedia(e) => {
+                                    match e.media {
+                                        Media::Images(m) => {
+                                            for image in m.images {
+                                                let labels: Vec<Option<String>> = vec![];
+                                                let new_image = (
+                                                    ImageSchema::cid.eq(image.image.r#ref.to_string()),
+                                                    ImageSchema::alt.eq(image.alt),
+                                                    ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                    ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                    ImageSchema::createdAt.eq(post_created_at.clone()),
+                                                    ImageSchema::labels.eq(labels),
+                                                );
+                                                post_images.push(new_image);
+                                            }
+                                        },
+                                        _ => (),
                                     }
                                 },
                                 _ => (),
