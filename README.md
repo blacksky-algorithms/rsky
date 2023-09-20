@@ -36,6 +36,8 @@ For users, this should feel like visiting a page in the app. Once they subscribe
 -   [x] API-token security
 -   [x] Visitor tracking
 -   [x] Image decoding
+-   [x] NSFW image classification
+
 
 ## User Warning
 
