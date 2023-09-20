@@ -22,6 +22,28 @@ pub struct RecordEmbed {
     pub record: Record,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+pub enum Media {
+    #[serde(rename(
+        deserialize = "app.bsky.embed.images",
+        serialize = "app.bsky.embed.images"
+    ))]
+    Images(ImagesEmbed),
+
+    #[serde(rename(
+        deserialize = "app.bsky.embed.external",
+        serialize = "app.bsky.embed.external"
+    ))]
+    External(External),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RecordWithMedia {
+    pub record: RecordEmbed,
+    pub media: Media
+}
+
 // "app.bsky.embed.images",
 // "app.bsky.embed.external",
 // "app.bsky.embed.record",
@@ -35,10 +57,10 @@ pub enum Embeds {
     ))]
     Images(ImagesEmbed),
 
-    #[serde(rename(
-        deserialize = "app.bsky.embed.external",
-        serialize = "app.bsky.embed.external"
-    ))]
+    #[serde(
+        alias="app.bsky.embed.external", 
+        alias="app.bsky.embed.external#main"
+    )]
     External(External),
 
     #[serde(rename(
@@ -51,17 +73,7 @@ pub enum Embeds {
         deserialize = "app.bsky.embed.recordWithMedia",
         serialize = "app.bsky.embed.recordWithMedia",
     ))]
-    TodoRecordWithMedia,
-    // Record(Record),
-    // #[serde(alias = "app.bsky.embed.recordWithMedia")]
-    // RecordWithMedia(RecordWithMedia),
-
-    // "embed": {
-    //     "$type": "app.bsky.embed.images",
-    //     "images": [
-    //         { "image": uploadresp.json()["blob"], "alt": "Alternative text" }
-    //     ]
-    // }
+    RecordWithMedia(RecordWithMedia),
 }
 
 #[derive(Debug, Deserialize, Serialize)]

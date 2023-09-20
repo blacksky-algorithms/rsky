@@ -73,6 +73,8 @@ pub struct OriginalBlob {
     pub rust_type: Option<String>,
     #[serde(deserialize_with = "deserialize_cid_v1")]
     pub r#ref: Cid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
     pub size: usize,
