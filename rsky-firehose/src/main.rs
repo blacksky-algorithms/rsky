@@ -183,7 +183,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                                             follows_to_create.push(create);
                                         },
                                         Err(error) => {
-                                            eprintln!("Failed to deserialize record: {uri:?}. Received error {error:?}");
+                                            eprintln!("Failed to deserialize record: {:?}. Received error {:?}. Sequence {:?}", uri, error, commit.sequence);
                                         }
                                     }
                                 }

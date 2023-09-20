@@ -56,8 +56,10 @@ pub struct Blob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(deserialize_with = "deserialize_cid_v1")]
-    pub r#ref: Cid,
+    #[serde(skip_serializing_if = "Option::is_none", default = "default_resource", deserialize_with = "deserialize_cid_v1")]
+    pub r#ref: Option<Cid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
     pub size: Option<usize>,
@@ -71,8 +73,8 @@ pub struct OriginalBlob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(deserialize_with = "deserialize_cid_v1")]
-    pub r#ref: Cid,
+    #[serde(skip_serializing_if = "Option::is_none", default = "default_resource", deserialize_with = "deserialize_cid_v1")]
+    pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
@@ -80,12 +82,16 @@ pub struct OriginalBlob {
     pub size: usize,
 }
 
+fn default_resource() -> Option<Cid> {
+    None
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlobOutput {
     pub blob: Blob,
 }
 
-fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<cid::Cid, D::Error>
+fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<cid::Cid>, D::Error>
 where D: Deserializer<'de> {
     let buf = Tagged::<serde_bytes::ByteBuf>::deserialize(deserializer)?;
     match buf.tag {
@@ -96,8 +102,8 @@ where D: Deserializer<'de> {
                 bz.remove(0);
             }
 
-            Ok(Cid::try_from(bz)
-                .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e)))?)
+            Ok(Some(Cid::try_from(bz)
+                .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e)))?))
         }
         Some(_) => Err(serde::de::Error::custom("unexpected tag")),
     }

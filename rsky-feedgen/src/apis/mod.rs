@@ -420,16 +420,20 @@ pub async fn queue_creation(
                                 Embeds::Images(e) => {
                                     for image in e.images {
                                         let labels: Vec<Option<String>> = vec![];
-                                        let new_image = (
-                                            ImageSchema::cid.eq(image.image.r#ref.to_string()),
-                                            ImageSchema::alt.eq(image.alt),
-                                            ImageSchema::postCid.eq(new_post.cid.clone()),
-                                            ImageSchema::postUri.eq(new_post.uri.clone()),
-                                            ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                            ImageSchema::createdAt.eq(post_created_at.clone()),
-                                            ImageSchema::labels.eq(labels),
-                                        );
-                                        post_images.push(new_image);
+                                        if let Some(image_cid) = image.image.r#ref {
+                                            let new_image = (
+                                                ImageSchema::cid.eq(image_cid.to_string()),
+                                                ImageSchema::alt.eq(image.alt),
+                                                ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                ImageSchema::createdAt.eq(post_created_at.clone()),
+                                                ImageSchema::labels.eq(labels),
+                                            );
+                                            post_images.push(new_image);
+                                        } else {
+                                            println!("Legacy image: {image:?}")
+                                        };
                                     }
                                 },
                                 Embeds::RecordWithMedia(e) => {
@@ -437,16 +441,20 @@ pub async fn queue_creation(
                                         Media::Images(m) => {
                                             for image in m.images {
                                                 let labels: Vec<Option<String>> = vec![];
-                                                let new_image = (
-                                                    ImageSchema::cid.eq(image.image.r#ref.to_string()),
-                                                    ImageSchema::alt.eq(image.alt),
-                                                    ImageSchema::postCid.eq(new_post.cid.clone()),
-                                                    ImageSchema::postUri.eq(new_post.uri.clone()),
-                                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                    ImageSchema::createdAt.eq(post_created_at.clone()),
-                                                    ImageSchema::labels.eq(labels),
-                                                );
-                                                post_images.push(new_image);
+                                                if let Some(image_cid) = image.image.r#ref {
+                                                    let new_image = (
+                                                        ImageSchema::cid.eq(image_cid.to_string()),
+                                                        ImageSchema::alt.eq(image.alt),
+                                                        ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                        ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                        ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                        ImageSchema::createdAt.eq(post_created_at.clone()),
+                                                        ImageSchema::labels.eq(labels),
+                                                    );
+                                                    post_images.push(new_image);
+                                                } else {
+                                                    println!("Legacy image: {image:?}")
+                                                };
                                             }
                                         },
                                         _ => (),
