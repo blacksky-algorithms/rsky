@@ -669,7 +669,7 @@ pub async fn update_cursor(
     result
 }
 
-pub fn add_visitor(user: String, service: String) -> Result<(), Box<dyn std::error::Error>> {
+pub fn add_visitor(user: String, service: String, requested_feed: String) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::visitor::dsl::*;
 
     let connection = &mut establish_connection()?;
@@ -680,6 +680,7 @@ pub fn add_visitor(user: String, service: String) -> Result<(), Box<dyn std::err
         did.eq(user),
         web.eq(service),
         visited_at.eq(format!("{}", dt.format("%+"))),
+        feed.eq(requested_feed),
     );
 
     diesel::insert_into(visitor)

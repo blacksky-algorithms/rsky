@@ -148,7 +148,7 @@ async fn index(
         match serde_json::from_str::<JwtParts>(&jwt.0) {
             Ok(jwt_obj) => {
                 let did = jwt_obj.iss;
-                match rsky_feedgen::apis::add_visitor(did.clone(), jwt_obj.aud) {
+                match rsky_feedgen::apis::add_visitor(did.clone(), jwt_obj.aud, feed.clone()) {
                     Ok(_) => {
                         if BANNED_FROM_TV.contains(&did.as_str()) {
                             is_banned = true;
@@ -162,7 +162,7 @@ async fn index(
         }
     } else {
         let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
-        match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did) {
+        match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did, feed.clone()) {
             Ok(_) => (),
             Err(_) => eprintln!("Failed to write anonymous visitor."),
         }

@@ -92,6 +92,7 @@ diesel::table! {
         did -> Varchar,
         web -> Varchar,
         visited_at -> Varchar,
+        feed -> Nullable<Varchar>,
     }
 }
 
