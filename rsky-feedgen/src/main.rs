@@ -105,6 +105,8 @@ lazy_static! {
         let mut s = HashSet::new();
         s.insert("did:plc:bqlobp4ngysw3a52gdfnxbne"); // HS
         s.insert("did:plc:gdvllvjfpamphmnzn2yl4q2w"); // HS/IM
+        s.insert("did:plc:aiycw7ixy2quoweotm3bloml"); // HS
+        s.insert("did:plc:4nkcdcu6mltxmootrsvg43q7"); // HS
         s
     };
 }
