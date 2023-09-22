@@ -83,10 +83,6 @@ async fn update_cursor(
 }
 
 async fn process(message: Vec<u8>, client: &reqwest::Client) {
-    match dotenvy::dotenv() {
-        _ => (),
-    };
-    
     let default_queue_path =
         env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("https://[::1]:8081".into());
     let default_subscriber_path =
