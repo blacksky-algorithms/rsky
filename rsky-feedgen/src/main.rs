@@ -91,14 +91,7 @@ impl<'r> FromRequest<'r> for AccessToken {
     }
 }
 
-const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
-const BLACKSKY_OP: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
-const BLACKSKY_TREND: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
-const BLACKSKY_FR: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-fr";
-const BLACKSKY_PT: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-pt";
-const BLACKSKY_NSFW: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-nsfw";
+const SANDSKY: &str = "at://did:plc:hqmafuxb77d6cepxvqwlcekl/app.bsky.feed.generator/sandsky";
 
 lazy_static! {
     static ref BANNED_FROM_TV: HashSet<&'static str> = {
@@ -170,8 +163,8 @@ async fn index(
         }
     }
     match feed {
-        _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(None, limit, cursor, false, connection).await {
+        _sandsky if _sandsky.as_str() == SANDSKY && !is_banned => {
+            match rsky_feedgen::apis::get_posts(None, limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -186,107 +179,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(None, limit, cursor, true, connection).await {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_trend if _blacksky_trend.as_str() == BLACKSKY_TREND && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_trending(limit, cursor, connection).await {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(Some("fr".into()),limit, cursor, true, connection).await {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_posts(Some("pt".into()),limit, cursor, true, connection).await {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && !is_banned => {
-            match rsky_feedgen::apis::get_blacksky_nsfw(limit, cursor, connection).await {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = rsky_feedgen::models::InternalErrorMessageResponse {
-                        code: Some(rsky_feedgen::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky if _blacksky.as_str() == BLACKSKY && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_trend if _blacksky_trend.as_str() == BLACKSKY_TREND && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && is_banned => {
+        _sandsky if _sandsky.as_str() == SANDSKY && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
