@@ -4,6 +4,7 @@ use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
 use lexicon::app::bsky::feed::{Embeds, Media};
@@ -119,98 +120,101 @@ pub async fn queue_creation(
         if lex == "posts" {
             let mut new_posts = Vec::new();
             let mut new_images = Vec::new();
+            let mut ignore_posts = HashSet::new();
+            ignore_posts.insert("did:plc:t4wxvbqiggbugc4lk4vqhwjg".to_string());
 
             body
                 .into_iter()
                 .map(|req| {
-                    let system_time = SystemTime::now();
-                    let dt: DateTime<UtcOffset> = system_time.into();
-                    let mut post_text = String::new();
-                    let mut post_images = Vec::new();
-                    let mut new_post = Post {
-                        uri: req.uri,
-                        cid: req.cid,
-                        reply_parent: None,
-                        reply_root: None,
-                        indexed_at: format!("{}", dt.format("%+")),
-                        prev: req.prev,
-                        sequence: req.sequence,
-                        text: None,
-                        lang: None
-                    };
+                    if !ignore_posts.contains(&req.author) {
+                        let system_time = SystemTime::now();
+                        let dt: DateTime<UtcOffset> = system_time.into();
+                        let mut post_text = String::new();
+                        let mut post_images = Vec::new();
+                        let mut new_post = Post {
+                            uri: req.uri,
+                            cid: req.cid,
+                            reply_parent: None,
+                            reply_root: None,
+                            indexed_at: format!("{}", dt.format("%+")),
+                            prev: req.prev,
+                            sequence: req.sequence,
+                            text: None,
+                            lang: None
+                        };
 
-                    if let Lexicon::AppBskyFeedPost(post_record) = req.record {
-                        post_text = post_record.text.to_lowercase();
-                        let post_created_at = format!("{}", post_record.created_at.format("%+"));
-                        if let Some(langs) = post_record.langs {
-                            new_post.lang = Some(langs.join(","));
-                        }
-                        if let Some(embed) = post_record.embed {
-                            match embed {
-                                Embeds::Images(e) => {
-                                    for image in e.images {
-                                        let labels: Vec<Option<String>> = vec![];
-                                        if let Some(image_cid) = image.image.r#ref {
-                                            let new_image = (
-                                                ImageSchema::cid.eq(image_cid.to_string()),
-                                                ImageSchema::alt.eq(image.alt),
-                                                ImageSchema::postCid.eq(new_post.cid.clone()),
-                                                ImageSchema::postUri.eq(new_post.uri.clone()),
-                                                ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                ImageSchema::createdAt.eq(post_created_at.clone()),
-                                                ImageSchema::labels.eq(labels),
-                                            );
-                                            post_images.push(new_image);
-                                        } else {
-                                            println!("Legacy image: {image:?}")
-                                        };
-                                    }
-                                },
-                                Embeds::RecordWithMedia(e) => {
-                                    match e.media {
-                                        Media::Images(m) => {
-                                            for image in m.images {
-                                                let labels: Vec<Option<String>> = vec![];
-                                                if let Some(image_cid) = image.image.r#ref {
-                                                    let new_image = (
-                                                        ImageSchema::cid.eq(image_cid.to_string()),
-                                                        ImageSchema::alt.eq(image.alt),
-                                                        ImageSchema::postCid.eq(new_post.cid.clone()),
-                                                        ImageSchema::postUri.eq(new_post.uri.clone()),
-                                                        ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                        ImageSchema::createdAt.eq(post_created_at.clone()),
-                                                        ImageSchema::labels.eq(labels),
-                                                    );
-                                                    post_images.push(new_image);
-                                                } else {
-                                                    println!("Legacy image: {image:?}")
-                                                };
-                                            }
-                                        },
-                                        _ => (),
-                                    }
-                                },
-                                _ => (),
+                        if let Lexicon::AppBskyFeedPost(post_record) = req.record {
+                            post_text = post_record.text.to_lowercase();
+                            let post_created_at = format!("{}", post_record.created_at.format("%+"));
+                            if let Some(langs) = post_record.langs {
+                                new_post.lang = Some(langs.join(","));
+                            }
+                            if let Some(embed) = post_record.embed {
+                                match embed {
+                                    Embeds::Images(e) => {
+                                        for image in e.images {
+                                            let labels: Vec<Option<String>> = vec![];
+                                            if let Some(image_cid) = image.image.r#ref {
+                                                let new_image = (
+                                                    ImageSchema::cid.eq(image_cid.to_string()),
+                                                    ImageSchema::alt.eq(image.alt),
+                                                    ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                    ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                    ImageSchema::createdAt.eq(post_created_at.clone()),
+                                                    ImageSchema::labels.eq(labels),
+                                                );
+                                                post_images.push(new_image);
+                                            } else {
+                                                println!("Legacy image: {image:?}")
+                                            };
+                                        }
+                                    },
+                                    Embeds::RecordWithMedia(e) => {
+                                        match e.media {
+                                            Media::Images(m) => {
+                                                for image in m.images {
+                                                    let labels: Vec<Option<String>> = vec![];
+                                                    if let Some(image_cid) = image.image.r#ref {
+                                                        let new_image = (
+                                                            ImageSchema::cid.eq(image_cid.to_string()),
+                                                            ImageSchema::alt.eq(image.alt),
+                                                            ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                            ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                            ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                            ImageSchema::createdAt.eq(post_created_at.clone()),
+                                                            ImageSchema::labels.eq(labels),
+                                                        );
+                                                        post_images.push(new_image);
+                                                    } else {
+                                                        println!("Legacy image: {image:?}")
+                                                    };
+                                                }
+                                            },
+                                            _ => (),
+                                        }
+                                    },
+                                    _ => (),
+                                }
                             }
                         }
+
+                        new_post.text = Some(post_text.clone());
+
+                        let new_post = (
+                            PostSchema::uri.eq(new_post.uri),
+                            PostSchema::cid.eq(new_post.cid),
+                            PostSchema::replyParent.eq(new_post.reply_parent),
+                            PostSchema::replyRoot.eq(new_post.reply_root),
+                            PostSchema::indexedAt.eq(new_post.indexed_at),
+                            PostSchema::prev.eq(new_post.prev),
+                            PostSchema::sequence.eq(new_post.sequence),
+                            PostSchema::text.eq(new_post.text),
+                            PostSchema::lang.eq(new_post.lang)
+                        );
+                        new_posts.push(new_post);
+                        new_images.extend(post_images);
                     }
-
-                    new_post.text = Some(post_text.clone());
-
-                    let new_post = (
-                        PostSchema::uri.eq(new_post.uri),
-                        PostSchema::cid.eq(new_post.cid),
-                        PostSchema::replyParent.eq(new_post.reply_parent),
-                        PostSchema::replyRoot.eq(new_post.reply_root),
-                        PostSchema::indexedAt.eq(new_post.indexed_at),
-                        PostSchema::prev.eq(new_post.prev),
-                        PostSchema::sequence.eq(new_post.sequence),
-                        PostSchema::text.eq(new_post.text),
-                        PostSchema::lang.eq(new_post.lang)
-                    );
-                    new_posts.push(new_post);
-                    new_images.extend(post_images);
-
                 })
                 .for_each(drop);
 
