@@ -1,4 +1,4 @@
-use lexicon::com::atproto::sync::SubscribeRepos;
+use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::io::Cursor;
 

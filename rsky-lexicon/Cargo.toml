@@ -1,11 +1,15 @@
 [package]
-name = "lexicon"
+name = "rsky-lexicon"
 version = "0.1.0"
 edition = "2021"
-publish = false
+publish = true
 description = "Bluesky API library"
-homepage = "https://github.com/rudyfraser/rsky"
-repository = "https://github.com/rudyfraser/rsky"
+homepage = "https://github.com/blacksky-algorithms/rsky"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-lexicon"
+license = "Apache-2.0"
+keywords = ["bluesky", "atproto"]
+readme = "README.md"
+documentation = "https://docs.rs/rsky-lexicon"
 
 [dependencies]
 chrono = { version = "0.4.24", features = ["serde"] }

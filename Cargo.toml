@@ -1,3 +1,3 @@
 [workspace]
-members = ["rsky-feedgen", "rsky-firehose", "lexicon"]
+members = ["rsky-feedgen", "rsky-firehose", "rsky-lexicon"]
 resolver = "2"

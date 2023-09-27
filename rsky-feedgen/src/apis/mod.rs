@@ -2,15 +2,15 @@ use crate::db::*;
 use crate::models::*;
 use crate::{ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{Duration, DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use lazy_static::lazy_static;
 use regex::Regex;
+use rsky_lexicon::app::bsky::feed::{Embeds, Media};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
-use lexicon::app::bsky::feed::{Embeds, Media};
 
 #[allow(deprecated)]
 pub async fn get_blacksky_nsfw(
@@ -18,8 +18,8 @@ pub async fn get_blacksky_nsfw(
     params_cursor: Option<String>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    use crate::schema::post::dsl as PostSchema;
     use crate::schema::image::dsl as ImageSchema;
+    use crate::schema::post::dsl as PostSchema;
 
     let result = connection
         .run(move |conn| {
@@ -29,15 +29,14 @@ pub async fn get_blacksky_nsfw(
                 .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
-            query = query
-                .filter(
-                    PostSchema::cid.eq_any(
-                        ImageSchema::image
-                            .filter(ImageSchema::labels.contains(vec!["sexy"]))
-                            .filter(ImageSchema::alt.is_not_null())
-                            .select(ImageSchema::postCid)
-                    )
-                );
+            query = query.filter(
+                PostSchema::cid.eq_any(
+                    ImageSchema::image
+                        .filter(ImageSchema::labels.contains(vec!["sexy"]))
+                        .filter(ImageSchema::alt.is_not_null())
+                        .select(ImageSchema::postCid),
+                ),
+            );
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
@@ -107,7 +106,6 @@ pub async fn get_blacksky_nsfw(
 
     result
 }
-
 
 #[allow(deprecated)]
 pub async fn get_blacksky_trending(
@@ -240,8 +238,7 @@ pub async fn get_blacksky_posts(
                 .into_boxed();
 
             if let Some(lang) = lang {
-                query = query
-                    .filter(PostSchema::lang.like(format!("%{}%", lang)));
+                query = query.filter(PostSchema::lang.like(format!("%{}%", lang)));
             }
 
             if params_cursor.is_some() {
@@ -317,7 +314,11 @@ pub async fn get_blacksky_posts(
     result
 }
 
-pub fn is_included(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn is_included(
+    dids: Vec<&String>,
+    list_: String,
+    conn: &mut PgConnection,
+) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let result = membership
@@ -335,7 +336,11 @@ pub fn is_included(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -
     }
 }
 
-pub fn is_excluded(dids: Vec<&String>, list_: String, conn: &mut PgConnection) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn is_excluded(
+    dids: Vec<&String>,
+    list_: String,
+    conn: &mut PgConnection,
+) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let result = membership
@@ -365,11 +370,11 @@ pub async fn queue_creation(
     body: Vec<CreateRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
+    use crate::schema::follow::dsl as FollowSchema;
+    use crate::schema::image::dsl as ImageSchema;
     use crate::schema::like::dsl as LikeSchema;
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
-    use crate::schema::follow::dsl as FollowSchema;
-    use crate::schema::image::dsl as ImageSchema;
 
     let result = connection.run( move |conn| {
         if lex == "posts" {
@@ -639,9 +644,9 @@ pub async fn queue_deletion(
     body: Vec<DeleteRequest>,
     connection: WriteDbConn,
 ) -> Result<(), String> {
+    use crate::schema::follow::dsl as FollowSchema;
     use crate::schema::like::dsl as LikeSchema;
     use crate::schema::post::dsl as PostSchema;
-    use crate::schema::follow::dsl as FollowSchema;
 
     let result = connection
         .run(move |conn| {
@@ -697,7 +702,11 @@ pub async fn update_cursor(
     result
 }
 
-pub fn add_visitor(user: String, service: String, requested_feed: String) -> Result<(), Box<dyn std::error::Error>> {
+pub fn add_visitor(
+    user: String,
+    service: String,
+    requested_feed: String,
+) -> Result<(), Box<dyn std::error::Error>> {
     use crate::schema::visitor::dsl::*;
 
     let connection = &mut establish_connection()?;

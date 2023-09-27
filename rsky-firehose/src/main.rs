@@ -2,9 +2,9 @@
 
 use dotenvy::dotenv;
 use futures::StreamExt as _;
-use lexicon::app::bsky::feed::{Like, Post};
-use lexicon::app::bsky::graph::{Follow};
-use lexicon::com::atproto::sync::SubscribeRepos;
+use rsky_lexicon::app::bsky::feed::{Like, Post};
+use rsky_lexicon::app::bsky::graph::Follow;
+use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::env;
 use std::io::Cursor;
@@ -118,7 +118,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                 }
                 commit.operations
                     .into_iter()
-                    .filter(|operation| 
+                    .filter(|operation|
                         operation.path.starts_with("app.bsky.feed.post/") || 
                         operation.path.starts_with("app.bsky.feed.like/") ||
                         operation.path.starts_with("app.bsky.graph.follow/"))

@@ -41,7 +41,7 @@ pub enum Media {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RecordWithMedia {
     pub record: RecordEmbed,
-    pub media: Media
+    pub media: Media,
 }
 
 // "app.bsky.embed.images",
@@ -58,8 +58,8 @@ pub enum Embeds {
     Images(ImagesEmbed),
 
     #[serde(
-        alias="app.bsky.embed.external", 
-        alias="app.bsky.embed.external#main"
+        alias = "app.bsky.embed.external",
+        alias = "app.bsky.embed.external#main"
     )]
     External(External),
 

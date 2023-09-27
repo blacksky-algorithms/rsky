@@ -1,10 +1,9 @@
 use cid::Cid;
-use serde::{Deserializer, Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_cbor::tags::Tagged;
 
 const CBOR_TAG_CID: u64 = 42;
 const MULTIBASE_IDENTITY: u8 = 0;
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StrongRef {
@@ -56,7 +55,11 @@ pub struct Blob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default = "default_resource", deserialize_with = "deserialize_cid_v1")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default = "default_resource",
+        deserialize_with = "deserialize_cid_v1"
+    )]
     pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
@@ -73,7 +76,11 @@ pub struct OriginalBlob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default = "default_resource", deserialize_with = "deserialize_cid_v1")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default = "default_resource",
+        deserialize_with = "deserialize_cid_v1"
+    )]
     pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
@@ -92,7 +99,9 @@ pub struct BlobOutput {
 }
 
 fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<cid::Cid>, D::Error>
-where D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     let buf = Tagged::<serde_bytes::ByteBuf>::deserialize(deserializer)?;
     match buf.tag {
         Some(CBOR_TAG_CID) | None => {
@@ -102,8 +111,9 @@ where D: Deserializer<'de> {
                 bz.remove(0);
             }
 
-            Ok(Some(Cid::try_from(bz)
-                .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e)))?))
+            Ok(Some(Cid::try_from(bz).map_err(|e| {
+                serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
+            })?))
         }
         Some(_) => Err(serde::de::Error::custom("unexpected tag")),
     }

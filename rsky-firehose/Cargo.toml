@@ -6,9 +6,12 @@ description = "A framework for subscribing to the AT Protocol firehose, in Rust.
 license = "Apache-2.0"
 edition = "2021"
 publish = false
+homepage = "https://github.com/blacksky-algorithms/rsky"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-firehose"
+documentation = "https://docs.rs/rsky-firehose"
 
 [dependencies]
-lexicon = { path = "../lexicon" }
+rsky-lexicon = { path = "../rsky-lexicon" }
 
 ciborium = "0.2.0"
 futures = "0.3.28"
