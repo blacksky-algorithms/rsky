@@ -56,8 +56,15 @@ pub async fn get_blacksky_nsfw(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query
-                                    .filter(PostSchema::indexedAt.le(timestr.to_owned()))
-                                    .filter(PostSchema::cid.lt(cid_c.to_owned()));
+                                    .filter(
+                                        PostSchema::indexedAt.lt(timestr.to_owned())
+                                        .or(
+                                            PostSchema::indexedAt.eq(timestr.to_owned())
+                                            .and(
+                                                PostSchema::cid.lt(cid_c.to_owned())
+                                            )
+                                        )
+                                    );
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -164,7 +171,7 @@ pub async fn get_blacksky_trending(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                let cursor_filter_str = format!(" AND hydrated.trendingDate <= '{}' AND hydrated.cid < '{}'", timestr.to_owned(), cid_c.to_owned());
+                                let cursor_filter_str = format!(" AND ((hydrated.trendingDate < '{0}') OR (hydrated.trendingDate = '{0}' AND hydrated.cid < '{1}'))", timestr.to_owned(), cid_c.to_owned());
                                 query_str = format!("{}{}", query_str, cursor_filter_str);
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
@@ -259,8 +266,15 @@ pub async fn get_blacksky_posts(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query
-                                    .filter(PostSchema::indexedAt.le(timestr.to_owned()))
-                                    .filter(PostSchema::cid.lt(cid_c.to_owned()));
+                                    .filter(
+                                        PostSchema::indexedAt.lt(timestr.to_owned())
+                                        .or(
+                                            PostSchema::indexedAt.eq(timestr.to_owned())
+                                            .and(
+                                                PostSchema::cid.lt(cid_c.to_owned())
+                                            )
+                                        )
+                                    );
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
