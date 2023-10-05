@@ -1,5 +1,4 @@
-import bottle, torch, clip, requests, os, json, argparse
-from bottle import auth_basic, route, request, run
+import torch, clip, requests, os, json, argparse
 from PIL import Image as PILImage
 from io import BytesIO
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
