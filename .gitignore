@@ -8,6 +8,8 @@ Cargo.lock
 .cargo
 NOTE.md
 .graveyard/
+/labeler/*.json
+/labeler/*.tsv
 
 # dotenv environment variable files
 .env
