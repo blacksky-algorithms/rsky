@@ -57,7 +57,7 @@ diesel::table! {
 }
 
 diesel::table! {
-    membership (did) {
+    membership (did, list) {
         did -> Varchar,
         included -> Bool,
         excluded -> Bool,
