@@ -34,6 +34,7 @@ pub struct ExternalObject {
     pub description: String,
     #[serde(rename(deserialize = "maxSize", serialize = "maxSize"))]
     pub max_size: Option<usize>,
+    pub thumb: Option<Blob>
 }
 
 ///app.bsky.embed.external

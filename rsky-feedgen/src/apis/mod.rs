@@ -132,7 +132,14 @@ pub async fn get_blacksky_trending(
                 hydrated.prev,
                 hydrated.\"sequence\",
                 hydrated.\"text\",
-                hydrated.lang
+                hydrated.lang,
+                hydrated.author,
+                hydrated.\"externalUri\",
+                hydrated.\"externalTitle\",
+                hydrated.\"externalDescription\",
+                hydrated.\"externalThumb\",
+                hydrated.\"quoteCid\",
+                hydrated.\"quoteUri\"
             FROM(
                 SELECT
                     post.*,
@@ -419,7 +426,14 @@ pub async fn queue_creation(
                         prev: req.prev,
                         sequence: req.sequence,
                         text: None,
-                        lang: None
+                        lang: None,
+                        author: req.author.clone(),
+                        external_uri: None,
+                        external_title: None,
+                        external_description: None,
+                        external_thumb: None,
+                        quote_cid: None,
+                        quote_uri: None
                     };
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
@@ -476,10 +490,32 @@ pub async fn queue_creation(
                                                 };
                                             }
                                         },
-                                        _ => (),
+                                        Media::External(e) => {
+                                            new_post.external_uri = Some(e.external.uri);
+                                            new_post.external_title = Some(e.external.title);
+                                            new_post.external_description = Some(e.external.description);
+                                            if let Some(thumb_blob) = e.external.thumb {
+                                                if let Some(thumb_cid) = thumb_blob.r#ref {
+                                                    new_post.external_thumb = Some(thumb_cid.to_string());
+                                                };
+                                            };
+                                        },
                                     }
                                 },
-                                _ => (),
+                                Embeds::External(e) => {
+                                    new_post.external_uri = Some(e.external.uri);
+                                    new_post.external_title = Some(e.external.title);
+                                    new_post.external_description = Some(e.external.description);
+                                    if let Some(thumb_blob) = e.external.thumb {
+                                        if let Some(thumb_cid) = thumb_blob.r#ref {
+                                            new_post.external_thumb = Some(thumb_cid.to_string());
+                                        };
+                                    };
+                                },
+                                Embeds::Record(e) => {
+                                    new_post.quote_cid = Some(e.record.cid);
+                                    new_post.quote_uri = Some(e.record.uri);
+                                },
                             }
                         }
                     }
@@ -510,7 +546,14 @@ pub async fn queue_creation(
                             PostSchema::prev.eq(new_post.prev),
                             PostSchema::sequence.eq(new_post.sequence),
                             PostSchema::text.eq(new_post.text),
-                            PostSchema::lang.eq(new_post.lang)
+                            PostSchema::lang.eq(new_post.lang),
+                            PostSchema::author.eq(new_post.author),
+                            PostSchema::externalUri.eq(new_post.external_uri),
+                            PostSchema::externalTitle.eq(new_post.external_title),
+                            PostSchema::externalDescription.eq(new_post.external_description),
+                            PostSchema::externalThumb.eq(new_post.external_thumb),
+                            PostSchema::quoteCid.eq(new_post.quote_cid),
+                            PostSchema::quoteUri.eq(new_post.quote_uri),
                         );
                         new_posts.push(new_post);
                         new_images.extend(post_images);

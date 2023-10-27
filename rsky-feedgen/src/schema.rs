@@ -76,6 +76,13 @@ diesel::table! {
         sequence -> Nullable<Int8>,
         text -> Nullable<Varchar>,
         lang -> Nullable<Varchar>,
+        author -> Varchar,
+        externalUri -> Nullable<Varchar>,
+        externalTitle -> Nullable<Varchar>,
+        externalDescription -> Nullable<Varchar>,
+        externalThumb -> Nullable<Varchar>,
+        quoteCid -> Nullable<Varchar>,
+        quoteUri -> Nullable<Varchar>,
     }
 }
 
