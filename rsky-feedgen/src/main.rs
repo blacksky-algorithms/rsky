@@ -179,9 +179,7 @@ async fn index(
     }
     match feed {
         _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
-            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, false, connection)
-                .await
-            {
+            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -197,9 +195,7 @@ async fn index(
             }
         }
         _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && !is_banned => {
-            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, true, connection)
-                .await
-            {
+            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, true, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -231,8 +227,15 @@ async fn index(
             }
         }
         _blacksky_edu if _blacksky_edu.as_str() == BLACKSKY_EDU && !is_banned => {
-            match rsky_feedgen::apis::get_posts_by_membership(None, limit, cursor, true, "blacksky-edu".into(), connection)
-                .await
+            match rsky_feedgen::apis::get_posts_by_membership(
+                None,
+                limit,
+                cursor,
+                true,
+                "blacksky-edu".into(),
+                connection,
+            )
+            .await
             {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {

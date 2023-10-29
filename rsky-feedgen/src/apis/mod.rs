@@ -21,17 +21,18 @@ pub async fn get_posts_by_membership(
     list: String,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    use crate::schema::post::dsl as PostSchema;
     use crate::schema::membership::dsl as MembershipSchema;
+    use crate::schema::post::dsl as PostSchema;
 
     let result = connection
         .run(move |conn| {
             let mut query = PostSchema::post
-                .inner_join(MembershipSchema::membership.on(
-                    PostSchema::author.eq(MembershipSchema::did)
+                .inner_join(
+                    MembershipSchema::membership.on(PostSchema::author
+                        .eq(MembershipSchema::did)
                         .and(MembershipSchema::list.eq(list))
-                        .and(MembershipSchema::included.eq(true))
-                ))
+                        .and(MembershipSchema::included.eq(true))),
+                )
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
                 .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
@@ -58,16 +59,13 @@ pub async fn get_posts_by_membership(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                query = query
-                                    .filter(
-                                        PostSchema::indexedAt.lt(timestr.to_owned())
-                                        .or(
-                                            PostSchema::indexedAt.eq(timestr.to_owned())
-                                            .and(
-                                                PostSchema::cid.lt(cid_c.to_owned())
-                                            )
-                                        )
-                                    );
+                                query = query.filter(
+                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
+                                        PostSchema::indexedAt
+                                            .eq(timestr.to_owned())
+                                            .and(PostSchema::cid.lt(cid_c.to_owned())),
+                                    ),
+                                );
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -164,16 +162,13 @@ pub async fn get_blacksky_nsfw(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                query = query
-                                    .filter(
-                                        PostSchema::indexedAt.lt(timestr.to_owned())
-                                        .or(
-                                            PostSchema::indexedAt.eq(timestr.to_owned())
-                                            .and(
-                                                PostSchema::cid.lt(cid_c.to_owned())
-                                            )
-                                        )
-                                    );
+                                query = query.filter(
+                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
+                                        PostSchema::indexedAt
+                                            .eq(timestr.to_owned())
+                                            .and(PostSchema::cid.lt(cid_c.to_owned())),
+                                    ),
+                                );
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -381,16 +376,13 @@ pub async fn get_all_posts(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                query = query
-                                    .filter(
-                                        PostSchema::indexedAt.lt(timestr.to_owned())
-                                        .or(
-                                            PostSchema::indexedAt.eq(timestr.to_owned())
-                                            .and(
-                                                PostSchema::cid.lt(cid_c.to_owned())
-                                            )
-                                        )
-                                    );
+                                query = query.filter(
+                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
+                                        PostSchema::indexedAt
+                                            .eq(timestr.to_owned())
+                                            .and(PostSchema::cid.lt(cid_c.to_owned())),
+                                    ),
+                                );
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
                         }
@@ -446,14 +438,12 @@ pub async fn get_all_posts(
 
 pub fn is_included(
     dids: Vec<&String>,
-    list_: String,
     conn: &mut PgConnection,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let result = membership
         .filter(did.eq_any(dids))
-        .filter(list.eq(list_))
         .filter(included.eq(true))
         .limit(1)
         .select(Membership::as_select())
@@ -468,14 +458,12 @@ pub fn is_included(
 
 pub fn is_excluded(
     dids: Vec<&String>,
-    list_: String,
     conn: &mut PgConnection,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let result = membership
         .filter(did.eq_any(dids))
-        .filter(list.eq(list_))
         .filter(excluded.eq(true))
         .limit(1)
         .select(Membership::as_select())
@@ -522,8 +510,8 @@ pub async fn queue_creation(
                     let dt: DateTime<UtcOffset> = system_time.into();
                     let mut is_hellthread = false;
                     let mut root_author = String::new();
-                    let is_blacksky_author = is_included(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
-                    let is_blocked = is_excluded(vec![&req.author],"blacksky".into(), conn).unwrap_or(false);
+                    let is_member = is_included(vec![&req.author].into(), conn).unwrap_or(false);
+                    let is_blocked = is_excluded(vec![&req.author].into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
                     let mut post_images = Vec::new();
                     let mut new_post = Post {
@@ -632,7 +620,7 @@ pub async fn queue_creation(
                     let hashtags = extract_hashtags(&post_text);
                     new_post.text = Some(post_text.clone());
 
-                    if (is_blacksky_author ||
+                    if (is_member ||
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blacktechsky") ||
                         hashtags.contains("#nbablacksky") ||
@@ -644,7 +632,7 @@ pub async fn queue_creation(
                         !hashtags.contains("#removefromblacksky") {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
-                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Blacksky: {is_blacksky_author:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
+                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {is_member:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
 
                         let new_post = (
                             PostSchema::uri.eq(new_post.uri),
@@ -667,7 +655,7 @@ pub async fn queue_creation(
                         new_posts.push(new_post);
                         new_images.extend(post_images);
 
-                        if hashtags.contains("#addtoblacksky") && !is_blacksky_author {
+                        if hashtags.contains("#addtoblacksky") && !is_member {
                             println!("New member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
@@ -679,7 +667,7 @@ pub async fn queue_creation(
                         }
 
                         if hashtags.contains("#addtoblacksky") && 
-                            is_blacksky_author &&
+                            is_member &&
                             !root_author.is_empty() {
                             println!("New member: {:?}", &root_author);
                             let new_member = (
@@ -691,7 +679,7 @@ pub async fn queue_creation(
                             new_members.push(new_member);
                         }
                     }
-                    if is_blacksky_author &&
+                    if is_member &&
                         hashtags.contains("#removefromblacksky") &&
                         !is_hellthread {
                         println!("Removing member: {:?}", &req.author);
@@ -734,8 +722,8 @@ pub async fn queue_creation(
                 .map(|req| {
                     if let Lexicon::AppBskyFeedLike(like_record) = req.record {
                         let subject_author: &String = &like_record.subject.uri[5..37].into(); // parse DID:PLC from URI
-                        let is_blacksky_author = is_included(vec![&req.author, subject_author],"blacksky".into(), conn).unwrap_or(false);
-                        if is_blacksky_author {
+                        let is_member = is_included(vec![&req.author, subject_author].into(), conn).unwrap_or(false);
+                        if is_member {
                             let system_time = SystemTime::now();
                             let dt: DateTime<UtcOffset> = system_time.into();
                             let new_like = (
@@ -770,8 +758,8 @@ pub async fn queue_creation(
                 .into_iter()
                 .map(|req| {
                     if let Lexicon::AppBskyFeedFollow(follow_record) = req.record {
-                        let is_blacksky_author = is_included(vec![&req.author, &follow_record.subject],"blacksky".into(), conn).unwrap_or(false);
-                        if is_blacksky_author {
+                        let is_member = is_included(vec![&req.author, &follow_record.subject].into(), conn).unwrap_or(false);
+                        if is_member {
                             let system_time = SystemTime::now();
                             let dt: DateTime<UtcOffset> = system_time.into();
                             let new_follow = (
