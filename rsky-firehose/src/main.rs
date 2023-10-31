@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
+use std::{thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "$type")]
@@ -274,7 +275,7 @@ async fn main() {
         env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT").unwrap_or("wss://bsky.social".into());
     let client = reqwest::Client::new();
     loop {
-        let (mut socket, _response) = tokio_tungstenite::connect_async(
+        match tokio_tungstenite::connect_async(
             Url::parse(
                 format!(
                     "{}/xrpc/com.atproto.sync.subscribeRepos",
@@ -284,14 +285,21 @@ async fn main() {
             )
             .unwrap(),
         )
-        .await
-        .unwrap();
-
-        while let Some(Ok(Message::Binary(message))) = socket.next().await {
-            let client = client.clone();
-            tokio::spawn(async move {
-                process(message, &client).await;
-            });
+        .await {
+            Ok((mut socket, _response)) => {
+                println!("Connected to Big Graph Service firehose.");
+                while let Some(Ok(Message::Binary(message))) = socket.next().await {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        process(message, &client).await;
+                    });
+                }
+            },
+            Err(error) => {
+                eprintln!("Error connecting to firehose. Waiting to reconnect: {error:?}");
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
         }
     }
 }
