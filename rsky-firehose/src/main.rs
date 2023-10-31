@@ -287,7 +287,7 @@ async fn main() {
         )
         .await {
             Ok((mut socket, _response)) => {
-                println!("Connected to Big Graph Service firehose.");
+                println!("Connected to {default_subscriber_path:?}.");
                 while let Some(Ok(Message::Binary(message))) = socket.next().await {
                     let client = client.clone();
                     tokio::spawn(async move {
@@ -296,7 +296,7 @@ async fn main() {
                 }
             },
             Err(error) => {
-                eprintln!("Error connecting to firehose. Waiting to reconnect: {error:?}");
+                eprintln!("Error connecting to {default_subscriber_path:?}. Waiting to reconnect: {error:?}");
                 thread::sleep(Duration::from_millis(500));
                 continue;
             }
