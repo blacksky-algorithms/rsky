@@ -184,7 +184,6 @@ if __name__ == '__main__':
 	
 
 	for img in tqdm(query):
-		print(img.postUri)
 		did = img.postUri[5:37]
 		rkey = img.postUri.split('/')[-1]
 		if not local_config['users'] or did not in local_config['users']:
