@@ -13,6 +13,7 @@ import numpy as np
 from torchvision import models
 from torch.autograd import Variable
 from torch import nn
+from numpy import array
 
 load_dotenv()
 
@@ -191,7 +192,8 @@ if __name__ == '__main__':
 				image, fsize = get_blob(did, img.cid)
 				res = openai_classify(image, fsize, args.labels)
 				index = nn_classify(image)
-				if index >= args.thresholdA and res['values'][0] > args.thresholdB:
+				values = array(res['values'])
+				if index >= args.thresholdA and all(values > args.thresholdB):
 					print(f'Image checked is: {img.cid}')
 					print(f'INDEX {index} FOR https://bsky.app/profile/{did}/post/{rkey}')
 					print(json.dumps(res, indent=4))
@@ -209,7 +211,7 @@ if __name__ == '__main__':
 				# This can happen for deleted posts where the image wasn't deleted in the db
 				print("Error classifying image in post {0}: {1}".format(img.postUri, e))
 		else:
-			print(f'Skipping {img.cid} because {did} is a filtered user')
+			pass
 
 	if not database.is_closed():
 		database.close()
