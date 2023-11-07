@@ -149,6 +149,16 @@ if __name__ == '__main__':
 
 	args = parser.parse_args()
 
+	local_config = {'users':[]}
+
+	try:
+		with open('labeler/config.json', 'r') as config:
+			loaded_config = json.load(config)
+			local_config['users'] = loaded_config.get('users', [])
+			print('found config: ', json.dumps(local_config, indent=4))
+	except OSError as e:
+		print('No config found. No filters will be applied.')
+
 	print('Loading model A..')
 	# Load the CLIP model
 	device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -167,35 +177,40 @@ if __name__ == '__main__':
 
 	print('Connecting to database..')
 	database.connect(reuse_if_open=True)
-	interval = datetime.now() - timedelta(hours=args.hours, minutes=0)
+	interval = datetime.utcnow() - timedelta(hours=args.hours, minutes=0)
 
 	print('Querying images..')
 	query = Image.select().where((Image.indexedAt > interval.isoformat()) & (Image.labels.is_null(True) | ~Image.labels.contains_any('sexy','nsfw-fp')))
 	
+
 	for img in tqdm(query):
+		print(img.postUri)
 		did = img.postUri[5:37]
 		rkey = img.postUri.split('/')[-1]
-		try:
-			image, fsize = get_blob(did, img.cid)
-			res = openai_classify(image, fsize, args.labels)
-			index = nn_classify(image)
-			if index >= args.thresholdA and res['values'][0] > args.thresholdB:
-				print(f'Image checked is: {img.cid}')
-				print(f'INDEX {index} FOR https://bsky.app/profile/{did}/post/{rkey}')
-				print(json.dumps(res, indent=4))
-				if not img.labels:
-					# Initialize label array
-					img.labels = ['sexy']
-					img.save()
-				elif 'sexy' not in img.labels: 
-					# If there are existing labels, append
-					img.labels.append('sexy')
-					img.save()
-				else:
-					pass
-		except Exception as e:
-			# This can happen for deleted posts where the image wasn't deleted in the db
-			print("Error classifying image in post {0}: {1}".format(img.postUri, e))
+		if not local_config['users'] or did not in local_config['users']:
+			try:
+				image, fsize = get_blob(did, img.cid)
+				res = openai_classify(image, fsize, args.labels)
+				index = nn_classify(image)
+				if index >= args.thresholdA and res['values'][0] > args.thresholdB:
+					print(f'Image checked is: {img.cid}')
+					print(f'INDEX {index} FOR https://bsky.app/profile/{did}/post/{rkey}')
+					print(json.dumps(res, indent=4))
+					if not img.labels:
+						# Initialize label array
+						img.labels = ['sexy']
+						img.save()
+					elif 'sexy' not in img.labels: 
+						# If there are existing labels, append
+						img.labels.append('sexy')
+						img.save()
+					else:
+						pass
+			except Exception as e:
+				# This can happen for deleted posts where the image wasn't deleted in the db
+				print("Error classifying image in post {0}: {1}".format(img.postUri, e))
+		else:
+			print(f'Skipping {img.cid} because {did} is a filtered user')
 
 	if not database.is_closed():
 		database.close()
