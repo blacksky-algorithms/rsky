@@ -704,7 +704,7 @@ pub async fn queue_creation(
 
             diesel::insert_into(MembershipSchema::membership)
                 .values(&new_members)
-                .on_conflict(MembershipSchema::did)
+                .on_conflict((MembershipSchema::did,MembershipSchema::list))
                 .do_nothing()
                 .execute(conn)
                 .expect("Error inserting member records");
