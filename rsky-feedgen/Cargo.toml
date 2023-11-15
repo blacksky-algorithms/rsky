@@ -12,7 +12,7 @@ documentation = "https://docs.rs/rsky-feedgen"
 
 [dependencies]
 rsky-lexicon = { path = "../rsky-lexicon", version = "0.1.0" }
-rocket = { version = "=0.5.0-rc.3", features = ["json"] }
+rocket = { version = "=0.5.0-rc.4", features = ["json"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_bytes = "0.11.9"
@@ -28,7 +28,7 @@ lazy_static = "1.4.0"
 base64 = "0.21.2"
 
 [dependencies.rocket_sync_db_pools]
-version = "=0.1.0-rc.3"
+version = "=0.1.0-rc.4"
 features = ["diesel_postgres_pool"]
 
 [dependencies.reqwest]
