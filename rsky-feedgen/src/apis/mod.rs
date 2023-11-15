@@ -247,23 +247,15 @@ pub async fn get_blacksky_trending(
             FROM(
                 SELECT
                     post.*,
-                    EXTRACT(EPOCH FROM CURRENT_TIMESTAMP-post.\"indexedAt\"::timestamp)/3600 as duration,
-                    coalesce(likes.totalLikes, 0) as totalLikes,
-                    coalesce(twelfth.\"indexedAt\", post.\"indexedAt\") as trendingDate 
+                    twelfth.\"indexedAt\" as trendingDate 
                 FROM post
-                LEFT JOIN (
-                    SELECT public.like.\"subjectUri\", Count(uri) as totalLikes FROM public.like WHERE public.like.\"indexedAt\" > '{0}' group by 1 
-                ) likes
-                    ON likes.\"subjectUri\" = post.uri
-                LEFT JOIN (
+                JOIN (
                     SELECT public.like.\"subjectUri\", public.like.\"indexedAt\", ROW_NUMBER() OVER (PARTITION BY public.like.\"subjectUri\" ORDER BY public.like.\"indexedAt\" NULLS LAST) AS RowNum FROM public.like
                 ) twelfth
                     ON twelfth.\"subjectUri\" = post.uri
                         and twelfth.RowNum = 12
                 WHERE post.\"indexedAt\" > '{0}'
-            ) hydrated
-            WHERE ((ceil(hydrated.totalLikes) / (ceil(1 +(hydrated.duration*hydrated.duration*hydrated.duration*hydrated.duration)))) >= 10
-                OR hydrated.totalLikes > 11)", dt.format("%F"));
+            ) hydrated", dt.format("%F"));
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
@@ -282,7 +274,7 @@ pub async fn get_blacksky_trending(
                         let mut timestr = String::new();
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
-                                let cursor_filter_str = format!(" AND ((hydrated.trendingDate < '{0}') OR (hydrated.trendingDate = '{0}' AND hydrated.cid < '{1}'))", timestr.to_owned(), cid_c.to_owned());
+                                let cursor_filter_str = format!(" WHERE ((hydrated.trendingDate < '{0}') OR (hydrated.trendingDate = '{0}' AND hydrated.cid < '{1}'))", timestr.to_owned(), cid_c.to_owned());
                                 query_str = format!("{}{}", query_str, cursor_filter_str);
                             }
                             Err(error) => eprintln!("Error formatting: {error:?}"),
