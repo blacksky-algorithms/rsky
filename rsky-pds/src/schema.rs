@@ -1,32 +1,6 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    app_migration (id) {
-        id -> Varchar,
-        success -> Int2,
-        completedAt -> Nullable<Varchar>,
-    }
-}
-
-diesel::table! {
-    app_password (did, name) {
-        did -> Varchar,
-        name -> Varchar,
-        passwordScrypt -> Varchar,
-        createdAt -> Varchar,
-    }
-}
-
-diesel::table! {
-    backlink (uri, path) {
-        uri -> Varchar,
-        path -> Varchar,
-        linkToUri -> Nullable<Varchar>,
-        linkToDid -> Nullable<Varchar>,
-    }
-}
-
-diesel::table! {
     follow (uri) {
         uri -> Varchar,
         cid -> Varchar,
@@ -130,9 +104,6 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
-    app_migration,
-    app_password,
-    backlink,
     follow,
     image,
     kysely_migration,

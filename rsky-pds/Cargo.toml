@@ -11,11 +11,11 @@ repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-pds"
 documentation = "https://docs.rs/rsky-pds"
 
 [dependencies]
-rocket = { version = "=0.5.0-rc.4", features = ["json"] }
+rocket = { version = "=0.5.0-rc.3", features = ["json"] }
 dotenvy = "0.15"
 rsky-lexicon = { path = "../rsky-lexicon", version = "0.1.0" }
 diesel = { version = "2.1.0", features = ["postgres"] }
 
 [dependencies.rocket_sync_db_pools]
-version = "=0.1.0-rc.4"
+version = "=0.1.0-rc.3"
 features = ["diesel_postgres_pool"]
