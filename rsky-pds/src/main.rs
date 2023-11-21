@@ -15,6 +15,7 @@ use rsky_pds::DbConn;
 use std::env;
 use diesel::sql_types::Int4;
 use diesel::prelude::*;
+use rsky_pds::apis::*;
 
 pub struct CORS;
 
@@ -122,6 +123,8 @@ fn rocket() -> _ {
                 index,
                 robots,
                 health,
+                com::atproto::admin::disable_account_invites::disable_account_invites,
+                com::atproto::admin::disable_invite_codes::disable_invite_codes,
                 all_options
             ],
         )

@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate serde_derive;
-
+extern crate rocket;
 extern crate serde;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
@@ -11,3 +11,4 @@ pub struct DbConn(PgConnection);
 pub mod db;
 pub mod models;
 pub mod schema;
+pub mod apis;
