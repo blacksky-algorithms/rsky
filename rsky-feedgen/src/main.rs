@@ -115,6 +115,7 @@ lazy_static! {
         s.insert("did:plc:xcltkjpurlj2m7zzs6sh74db"); // Hate Campaign
         s.insert("did:plc:xfuejssf6ox7rqafjsm3azqk"); // Hate Campaign
         s.insert("did:plc:qeoub4zavdlnwoufa4ketosn"); // Hate Campaign
+        s.insert("did:plc:tquk7ybcb2tvxv6acgqe4q2e"); // HS
         s
     };
 }
