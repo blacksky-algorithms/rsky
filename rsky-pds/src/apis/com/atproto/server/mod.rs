@@ -18,3 +18,4 @@ pub mod request_password_reset;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
+pub mod reserve_signing_key;

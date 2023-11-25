@@ -6,3 +6,7 @@ pub mod get_repo;
 pub mod list_blobs;
 pub mod list_repos;
 pub mod subscribe_repos;
+pub mod get_checkout;
+pub mod get_head;
+pub mod notify_of_update;
+pub mod request_crawl;

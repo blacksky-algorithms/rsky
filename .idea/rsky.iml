@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/rsky-feedgen/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-firehose/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-lexicon/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-pds/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/venv" />
     </content>
