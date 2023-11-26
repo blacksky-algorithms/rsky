@@ -93,7 +93,7 @@ impl<'r> FromRequest<'r> for AccessToken {
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
 const BLACKSKY_OG: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-og";
+    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 const BLACKSKY_TREND: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
 const BLACKSKY_FR: &str =
