@@ -1,6 +1,7 @@
 use std::env;
 use rand::{distributions::Alphanumeric, Rng}; // 0.8
 
+// Formatted xxxxx-xxxxx
 pub fn get_random_token() -> String {
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -18,7 +19,7 @@ pub fn gen_invite_code() -> String {
     env::var("HOSTNAME").unwrap_or("blacksky.app".to_owned()).replace(".", "-") + "-" + &get_random_token()
 }
 
-pub mod confirm_email;
+pub mod confirm_emaigl;
 pub mod create_account;
 pub mod create_app_password;
 pub mod create_invite_code;
