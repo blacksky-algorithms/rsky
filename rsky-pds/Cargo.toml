@@ -18,6 +18,7 @@ diesel = { version = "2.1.0", features = ["postgres"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
+rand = "0.8.5"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

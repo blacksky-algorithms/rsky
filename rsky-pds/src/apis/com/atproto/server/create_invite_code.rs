@@ -21,8 +21,9 @@ pub async fn create_invite_code(
             let body: CreateInviteCodeInput = body.into_inner();
             let system_time = SystemTime::now();
             let dt: DateTime<UtcOffset> = system_time.into();
+            let new_code = super::gen_invite_code();
             let new_invite_code = (
-                code.eq("blacksky-app-1234".to_string()),
+                code.eq(&new_code),
                 availableUses.eq(body.use_count),
                 disabled.eq(0),
                 forUser.eq(body.for_account.unwrap_or("admin".to_string())),
@@ -33,7 +34,7 @@ pub async fn create_invite_code(
             match diesel::insert_into(invite_code)
                 .values(&new_invite_code)
                 .execute(conn) {
-                Ok(_) => Ok(Json(CreateInviteCodeOutput {code: "blacksky-app-1234".into()})),
+                Ok(_) => Ok(Json(CreateInviteCodeOutput {code: new_code})),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
                     let internal_error = InternalErrorMessageResponse {

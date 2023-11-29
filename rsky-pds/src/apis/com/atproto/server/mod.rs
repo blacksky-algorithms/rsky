@@ -1,3 +1,23 @@
+use std::env;
+use rand::{distributions::Alphanumeric, Rng}; // 0.8
+
+pub fn get_random_token() -> String {
+    let token: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    token[0..5].to_owned() + "-" + &token[5..10]
+}
+
+// generate an invite code preceded by the hostname
+// with '.'s replaced by '-'s so it is not mistakable for a link
+// ex: blacksky-app-abc234-567xy
+// regex: blacksky-app-[a-z2-7]{5}-[a-z2-7]{5}
+pub fn gen_invite_code() -> String {
+    env::var("HOSTNAME").unwrap_or("blacksky.app".to_owned()).replace(".", "-") + "-" + &get_random_token()
+}
+
 pub mod confirm_email;
 pub mod create_account;
 pub mod create_app_password;
