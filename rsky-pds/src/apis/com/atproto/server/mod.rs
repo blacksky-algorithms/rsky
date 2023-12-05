@@ -19,7 +19,17 @@ pub fn gen_invite_code() -> String {
     env::var("HOSTNAME").unwrap_or("blacksky.app".to_owned()).replace(".", "-") + "-" + &get_random_token()
 }
 
-pub mod confirm_emaigl;
+pub fn gen_invite_codes(
+    count: i32
+) -> Vec<String> {
+    let mut codes = Vec::new();
+    for _i in 0..count {
+        codes.push(gen_invite_code());
+    }
+    codes
+}
+
+pub mod confirm_email;
 pub mod create_account;
 pub mod create_app_password;
 pub mod create_invite_code;
