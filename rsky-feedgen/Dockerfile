@@ -5,7 +5,7 @@ FROM rust
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
 COPY . .
-
+RUN ls -alsh # for debugging
 # Install production dependencies and build a release artifact.
 RUN cargo build --release --package rsky-feedgen
 
