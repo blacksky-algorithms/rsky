@@ -11,7 +11,7 @@ repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-firehos
 documentation = "https://docs.rs/rsky-firehose"
 
 [dependencies]
-rsky-lexicon = { path = "../rsky-lexicon", version = "0.1.0" }
+rsky-lexicon = { workspace = true, version = "0.1.0" }
 ciborium = "0.2.0"
 futures = "0.3.28"
 tokio = { version = "1.28.0", features = ["full"] }

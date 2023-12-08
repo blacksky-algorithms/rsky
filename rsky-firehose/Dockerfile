@@ -7,7 +7,7 @@ WORKDIR /usr/src/rsky
 COPY . .
 
 # Install production dependencies and build a release artifact.
-RUN cargo build --release --package rsky-feedgen
+RUN cargo build --release --package rsky-firehose
 
 # Run the web service on container startup.
-CMD ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0 ROCKET_ENV=prod cargo run --release --package rsky-feedgen
+CMD cargo run --package rsky-firehose
