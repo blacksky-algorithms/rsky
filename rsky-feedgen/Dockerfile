@@ -3,9 +3,7 @@
 FROM rust
 
 # Copy local code to the container image.
-WORKDIR /usr/src/app
 COPY . .
-WORKDIR /usr/src/app/rsky-feedgen
 
 # Install production dependencies and build a release artifact.
 RUN cargo build --release --package rsky-feedgen
