@@ -3,6 +3,7 @@
 FROM rust
 
 # Copy local code to the container image.
+WORKDIR /rsky
 COPY . .
 
 # Install production dependencies and build a release artifact.
