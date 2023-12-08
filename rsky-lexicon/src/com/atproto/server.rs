@@ -38,3 +38,8 @@ pub struct AccountCodes {
     pub account: String,
     pub codes: Vec<String>,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GetAccountInviteCodesOutput {
+    pub codes: Vec<InviteCode>,
+}
