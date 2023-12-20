@@ -1,3 +1,6 @@
 [workspace]
 members = ["rsky-feedgen", "rsky-firehose", "rsky-lexicon", "rsky-pds"]
 resolver = "2"
+
+[workspace.dependencies]
+rsky-lexicon = {path = "rsky-lexicon", version = "0.1.0"}

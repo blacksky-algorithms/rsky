@@ -92,7 +92,7 @@ impl<'r> FromRequest<'r> for AccessToken {
 }
 
 const BLACKSKY: &str = "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
-const BLACKSKY_OP: &str =
+const BLACKSKY_OG: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 const BLACKSKY_TREND: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
@@ -115,6 +115,8 @@ lazy_static! {
         s.insert("did:plc:xcltkjpurlj2m7zzs6sh74db"); // Hate Campaign
         s.insert("did:plc:xfuejssf6ox7rqafjsm3azqk"); // Hate Campaign
         s.insert("did:plc:qeoub4zavdlnwoufa4ketosn"); // Hate Campaign
+        s.insert("did:plc:tquk7ybcb2tvxv6acgqe4q2e"); // HS
+        s.insert("did:plc:gyk5exv532seawdowdfwsn2m"); // Anti-Black
         s
     };
 }
@@ -179,7 +181,7 @@ async fn index(
     }
     match feed {
         _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
-            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, false, connection).await {
+            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, true, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -194,8 +196,8 @@ async fn index(
                 }
             }
         }
-        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && !is_banned => {
-            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, true, connection).await {
+        _blacksky_og if _blacksky_og.as_str() == BLACKSKY_OG && !is_banned => {
+            match rsky_feedgen::apis::get_all_posts(None, limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -319,7 +321,7 @@ async fn index(
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_op if _blacksky_op.as_str() == BLACKSKY_OP && is_banned => {
+        _blacksky_og if _blacksky_og.as_str() == BLACKSKY_OG && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }

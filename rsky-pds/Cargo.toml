@@ -13,7 +13,7 @@ documentation = "https://docs.rs/rsky-pds"
 [dependencies]
 rocket = { version = "=0.5.0-rc.3", features = ["json"] }
 dotenvy = "0.15"
-rsky-lexicon = { path = "../rsky-lexicon", version = "0.1.0" }
+rsky-lexicon = { workspace = true, version = "0.1.0" }
 diesel = { version = "2.1.0", features = ["postgres"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
