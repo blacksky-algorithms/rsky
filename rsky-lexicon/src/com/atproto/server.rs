@@ -3,16 +3,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize)]
 pub struct InviteCode {
     pub code: String,
+    #[serde(rename(deserialize = "availableUses", serialize = "availableUses"))]
     pub available_uses: i32,
     pub disabled: bool,
+    #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
     pub for_account: String,
+    #[serde(rename(deserialize = "createdBy", serialize = "createdBy"))]
     pub created_by: String,
+    #[serde(rename(deserialize = "createdAt", serialize = "createdAt"))]
     pub created_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeInput {
+    #[serde(rename(deserialize = "useCount", serialize = "useCount"))]
     pub use_count: i32,
+    #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
     pub for_account: Option<String>,
 }
 
@@ -23,8 +29,11 @@ pub struct CreateInviteCodeOutput {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodesInput {
+    #[serde(rename(deserialize = "codeCount", serialize = "codeCount"))]
     pub code_count: i32,
+    #[serde(rename(deserialize = "useCount", serialize = "useCount"))]
     pub use_count: i32,
+    #[serde(rename(deserialize = "forAccounts", serialize = "forAccounts"))]
     pub for_accounts: Option<Vec<String>>,
 }
 
@@ -42,4 +51,18 @@ pub struct AccountCodes {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GetAccountInviteCodesOutput {
     pub codes: Vec<InviteCode>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreateAccountInput {
+    pub email: Option<String>,
+    pub handle: String,
+    pub did: Option<String>,
+    #[serde(rename(deserialize = "inviteCode", serialize = "inviteCode"))]
+    pub invite_code: Option<String>,
+    pub password: Option<String>,
+    #[serde(rename(deserialize = "recoveryKey", serialize = "recoveryKey"))]
+    pub recovery_key: Option<String>,
+    #[serde(rename(deserialize = "plcOp", serialize = "plcOp"))]
+    pub plc_op: Option<String>,
 }
