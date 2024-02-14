@@ -1,4 +1,5 @@
 pub mod models;
+pub use self::models::Actor;
 pub use self::models::AppMigration;
 pub use self::models::AppPassword;
 pub use self::models::Backlink;

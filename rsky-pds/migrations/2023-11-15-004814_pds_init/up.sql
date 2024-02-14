@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS pds.app_migration (
 CREATE TABLE IF NOT EXISTS pds.app_password (
     did character varying NOT NULL,
     name character varying NOT NULL,
-    "passwordScrypt" character varying NOT NULL,
+    "password" character varying NOT NULL,
     "createdAt" character varying NOT NULL
 );
 
@@ -21,7 +21,7 @@ ALTER TABLE ONLY pds.app_password
 ALTER TABLE ONLY pds.app_password
     ADD CONSTRAINT app_password_pkey PRIMARY KEY (did, name);
 
--- Create App Password Table
+-- Create Backlink Table
 CREATE TABLE IF NOT EXISTS pds.backlink (
     uri character varying NOT NULL,
     "path" character varying NOT NULL,
@@ -264,11 +264,24 @@ CREATE INDEX repo_seq_event_type_idx -- for filtering seqs based on event type
 CREATE INDEX repo_seq_sequenced_at_index -- for entering into the seq stream at a particular time
 	ON pds.repo_seq("sequencedAt");
 
+-- Create Actor Table
+CREATE TABLE IF NOT EXISTS pds.actor (
+    did character varying PRIMARY KEY,
+    handle character varying,
+    "createdAt" character varying NOT NULL,
+    "takedownRef" character varying
+);
+CREATE UNIQUE INDEX actor_handle_lower_idx
+    ON pds.actor (LOWER(handle));
+CREATE INDEX actor_cursor_idx
+    ON pds.actor("createdAt", did);
+
 -- Create User Account Table
 CREATE TABLE IF NOT EXISTS pds.user_account (
     did character varying PRIMARY KEY,
     email character varying NOT NULL,
-    "passwordScrypt" character varying NOT NULL,
+    "recoveryKey" character varying,
+    "password" character varying NOT NULL,
     "createdAt" character varying NOT NULL,
 	"invitesDisabled" smallint NOT NULL DEFAULT 0,
 	"inviteNote" character varying,

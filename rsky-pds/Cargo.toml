@@ -19,6 +19,21 @@ chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 rand = "0.8.5"
+email_address = "0.2.4"
+anyhow = "1.0.79"
+multibase = "0.9.1"
+unsigned-varint = "0.8.0"
+serde_cbor = "0.11.2"
+base64 = "0.21.7"
+data-encoding = "2.5.0"
+reqwest = { version = "0.11.24", features = ["json","blocking"] }
+serde_json = { version = "1.0.96",features = ["preserve_order"] }
+serde_ipld_dagcbor = {  version = "0.4.2" }
+base64-url = "2.0.2"
+secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes"] }
+rand_core = "0.6.4"
+sha2 = "0.11.0-pre.3"
+indexmap = { version = "1.9.3",features = ["serde-1"] }
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

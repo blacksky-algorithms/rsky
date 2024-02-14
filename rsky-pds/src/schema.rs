@@ -2,6 +2,15 @@
 
 pub mod pds {
     diesel::table! {
+        pds.actor (did) {
+            did -> Varchar,
+            handle -> Nullable<Varchar>,
+            createdAt -> Varchar,
+            takedownRef -> Nullable<Varchar>,
+        }
+    }
+
+    diesel::table! {
         pds.app_migration (id) {
             id -> Varchar,
             success -> Int2,
@@ -13,7 +22,7 @@ pub mod pds {
         pds.app_password (did, name) {
             did -> Varchar,
             name -> Varchar,
-            passwordScrypt -> Varchar,
+            password -> Varchar,
             createdAt -> Varchar,
         }
     }
@@ -212,7 +221,8 @@ pub mod pds {
         pds.user_account (did) {
             did -> Varchar,
             email -> Varchar,
-            passwordScrypt -> Varchar,
+            recoveryKey -> Nullable<Varchar>,
+            password -> Varchar,
             createdAt -> Varchar,
             invitesDisabled -> Int2,
             inviteNote -> Nullable<Varchar>,
@@ -234,6 +244,7 @@ pub mod pds {
     diesel::joinable!(moderation_report_resolution -> moderation_report (reportId));
 
     diesel::allow_tables_to_appear_in_same_query!(
+        actor,
         app_migration,
         app_password,
         backlink,

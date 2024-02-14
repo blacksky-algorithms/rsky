@@ -2,6 +2,7 @@
 DROP TABLE pds.email_token;
 DROP TABLE pds.runtime_flag;
 DROP TABLE pds.user_pref;
+DROP TABLE pds.actor;
 DROP TABLE pds.user_account;
 DROP TABLE pds.repo_seq;
 DROP TABLE pds.repo_root;

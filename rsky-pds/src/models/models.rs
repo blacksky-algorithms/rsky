@@ -7,6 +7,22 @@ use chrono::DateTime;
 use chrono::offset::Utc;
 use diesel::prelude::*;
 
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(did))]
+#[diesel(table_name = crate::schema::pds::actor)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Actor {
+    pub did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[diesel(column_name = createdAt)]
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[diesel(column_name = takedownRef)]
+    #[serde(rename = "takedownRef", skip_serializing_if = "Option::is_none")]
+    pub takedown_ref: Option<String>,
+}
+
 #[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(table_name = crate::schema::pds::app_migration)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -24,8 +40,7 @@ pub struct AppMigration {
 pub struct AppPassword {
     pub did: String,
     pub name: String,
-    #[serde(rename = "passwordScrypt")]
-    pub password_scrypt: String,
+    pub password: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
 }
@@ -318,8 +333,9 @@ pub struct RuntimeFlag {
 pub struct UserAccount {
     pub did: String,
     pub email: String,
-    #[serde(rename = "passwordScrypt")]
-    pub password_scrypt: String,
+    pub password: String,
+    #[serde(rename = "recoveryKey", skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "invitesDisabled")]
