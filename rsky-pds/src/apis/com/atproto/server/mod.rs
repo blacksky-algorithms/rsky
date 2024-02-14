@@ -16,7 +16,8 @@ use reqwest;
 use serde_json::{Value};
 use indexmap::IndexMap;
 
-
+// Important to user `preserve_order` with serde_json so these bytes are ordered
+// correctly when encoding.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AtprotoPdsService {
     #[serde(rename(deserialize = "type", serialize = "type"))]

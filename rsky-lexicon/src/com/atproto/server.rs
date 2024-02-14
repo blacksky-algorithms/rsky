@@ -60,9 +60,22 @@ pub struct CreateAccountInput {
     pub did: Option<String>,
     #[serde(rename(deserialize = "inviteCode", serialize = "inviteCode"))]
     pub invite_code: Option<String>,
+    #[serde(rename(deserialize = "verificationCode", serialize = "verificationCode"))]
+    pub verification_code: Option<String>,
+    #[serde(rename(deserialize = "verificationPhone", serialize = "verificationPhone"))]
+    pub verification_phone: Option<String>,
     pub password: Option<String>,
     #[serde(rename(deserialize = "recoveryKey", serialize = "recoveryKey"))]
     pub recovery_key: Option<String>,
     #[serde(rename(deserialize = "plcOp", serialize = "plcOp"))]
     pub plc_op: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreateAccountOutput {
+    pub access_jwt: String,
+    pub refresh_jwt: String,
+    pub handle: String,
+    pub did: String,
+    pub did_doc: Option<String>
 }
