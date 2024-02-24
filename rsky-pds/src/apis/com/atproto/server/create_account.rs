@@ -1,4 +1,5 @@
 /*{"handle":"rudy-alt-3.blacksky.app","password":"H5r%FH@%hhg6rvYF","email":"him+testcreate@rudyfraser.com","inviteCode":"blacksky-app-fqytt-7473e"}*/
+use std::env;
 use rocket::serde::json::Json;
 use rocket::response::status;
 use rocket::http::Status;
@@ -7,10 +8,10 @@ use std::time::SystemTime;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use crate::DbConn;
-use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput, CreateInviteCodeOutput};
+use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use crate::models::{InternalErrorMessageResponse, InternalErrorCode};
 use email_address::*;
-use secp256k1::{Secp256k1, Keypair};
+use secp256k1::{Secp256k1, Keypair, SecretKey};
 
 #[rocket::post("/xrpc/com.atproto.server.createAccount", format = "json", data = "<body>")]
 pub async fn create_account(
@@ -28,6 +29,9 @@ pub async fn create_account(
     };
     if body.password.is_none() {
         error_msg = Some("Password is required".to_owned());
+    };
+    if body.did.is_some() {
+        error_msg = Some("Not yet allowing people to bring their own DID".to_owned());
     };
     if let Some(email) = &body.email {
         let e_slice: &str = &email[..];  // take a full slice of the string
@@ -72,18 +76,16 @@ pub async fn create_account(
             }
             // TO DO: Lookup user by email as well
 
-            // TO DO: If not DID provided in input, use recovery key to create a new one
-            // determine the did & any plc ops we need to send
-            // if the provided did document is poorly setup, we throw
-            // const signingKey = await Secp256k1Keypair.create({ exportable: true })
-            // const { did, plcOp } = input.did
-            //     ? await validateExistingDid(ctx, handle, input.did, signingKey)
-            //     : await createDidAndPlcOp(ctx, handle, input, signingKey)
+            // TO DO: Create Repo in storage
+
             let did;
             let secp = Secp256k1::new();
-            let signing_key = Keypair::new(&secp, &mut rand::thread_rng());
+            let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+            let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+            let signing_key = Keypair::from_secret_key(&secp, &secret_key);
             match super::create_did_and_plc_op(
                 &body.handle,
+                &body,
                 signing_key) {
                 Ok(did_resp) => did = did_resp,
                 Err(error) => {
@@ -98,12 +100,6 @@ pub async fn create_account(
                     ));
                 }
             }
-            /*
-            if let Some(input_did) = &body.did {
-                did = super::validate_existing_did(&body.handle, input_did, signing_key);
-            } else {
-                did = super::create_did_and_plc_op(&body.handle, body.into_inner(), signing_key).await?;
-            }*/
 
             let system_time = SystemTime::now();
             let dt: DateTime<UtcOffset> = system_time.into();

@@ -3,9 +3,44 @@
 #![allow(unused)]
 #![allow(clippy::all)]
 
+
 use chrono::DateTime;
 use chrono::offset::Utc;
 use diesel::prelude::*;
+
+
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(did))]
+#[diesel(table_name = crate::schema::pds::account)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Account {
+    pub did: String,
+    pub email: String,
+    #[diesel(column_name = recoveryKey)]
+    #[serde(rename = "recoveryKey")]
+    pub recovery_key: Option<String>,
+    pub password: String,
+    #[diesel(column_name = createdAt)]
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[diesel(column_name = invitesDisabled)]
+    #[serde(rename = "invitesDisabled")]
+    pub invites_disabled: i16,
+    #[diesel(column_name = emailConfirmedAt)]
+    #[serde(rename = "emailConfirmedAt")]
+    pub email_confirmed_at: Option<String>,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(table_name = crate::schema::pds::account_pref)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct AccountPref {
+    pub id: i32,
+    pub name: String,
+    #[diesel(column_name = valueJson)]
+    #[serde(rename = "valueJson")]
+    pub value_json: Option<String>,
+}
 
 #[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(did))]
@@ -13,27 +48,16 @@ use diesel::prelude::*;
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Actor {
     pub did: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
     #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[diesel(column_name = takedownRef)]
-    #[serde(rename = "takedownRef", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "takedownRef")]
     pub takedown_ref: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::pds::app_migration)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct AppMigration {
-    pub id: String,
-    pub success: i16,
-    #[serde(rename = "completedAt", skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<String>,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(did, name))]
 #[diesel(table_name = crate::schema::pds::app_password)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -41,65 +65,59 @@ pub struct AppPassword {
     pub did: String,
     pub name: String,
     pub password: String,
+    #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
     pub created_at: String,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(uri, path))]
 #[diesel(table_name = crate::schema::pds::backlink)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Backlink {
     pub uri: String,
     pub path: String,
-    #[serde(rename = "linkToUri", skip_serializing_if = "Option::is_none")]
-    pub link_to_uri: Option<String>,
-    #[serde(rename = "linkToDid", skip_serializing_if = "Option::is_none")]
-    pub link_to_did: Option<String>,
+    #[diesel(column_name = linkTo)]
+    #[serde(rename = "linkTo")]
+    pub link_to: String,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(creator, cid))]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(cid))]
 #[diesel(table_name = crate::schema::pds::blob)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Blob {
-    pub creator: String,
     pub cid: String,
+    #[diesel(column_name = mimeType)]
     #[serde(rename = "mimeType")]
     pub mime_type: String,
     pub size: i32,
-    #[serde(rename = "tempKey", skip_serializing_if = "Option::is_none")]
+    #[diesel(column_name = tempKey)]
+    #[serde(rename = "tempKey")]
     pub temp_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<i32>,
+    #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    #[diesel(column_name = takedownRef)]
+    #[serde(rename = "takedownRef")]
+    pub takedown_ref: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(did))]
-#[diesel(table_name = crate::schema::pds::did_cache)]
+#[diesel(table_name = crate::schema::pds::did_doc)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct DidCache {
+pub struct DidDoc {
     pub did: String,
     pub doc: String,
+    #[diesel(column_name = updatedAt)]
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(did))]
-#[diesel(table_name = crate::schema::pds::did_handle)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct DidHandle {
-    pub did: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(purpose, did))]
 #[diesel(table_name = crate::schema::pds::email_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -107,252 +125,135 @@ pub struct EmailToken {
     pub purpose: String,
     pub did: String,
     pub token: String,
+    #[diesel(column_name = requestedAt)]
     #[serde(rename = "requestedAt")]
     pub requested_at: DateTime<Utc>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(code))]
 #[diesel(table_name = crate::schema::pds::invite_code)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct InviteCode {
     pub code: String,
+    #[diesel(column_name = availableUses)]
     #[serde(rename = "availableUses")]
     pub available_uses: i32,
     pub disabled: i16,
-    #[serde(rename = "forUser")]
-    pub for_user: String,
+    #[diesel(column_name = forAccount)]
+    #[serde(rename = "forAccount")]
+    pub for_account: String,
+    #[diesel(column_name = createdBy)]
     #[serde(rename = "createdBy")]
     pub created_by: String,
+    #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
     pub created_at: String,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(code, used_by))]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(code, usedBy))]
 #[diesel(table_name = crate::schema::pds::invite_code_use)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct InviteCodeUse {
     pub code: String,
+    #[diesel(column_name = usedBy)]
     #[serde(rename = "usedBy")]
     pub used_by: String,
+    #[diesel(column_name = usedAt)]
     #[serde(rename = "usedAt")]
     pub used_at: String,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(creator, cid))]
-#[diesel(table_name = crate::schema::pds::ipld_block)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct IpldBlock {
-    pub creator: String,
-    pub cid: String,
-    pub size: i32,
-    pub content: Vec<u8>,
-    #[serde(rename = "repoRev", skip_serializing_if = "Option::is_none")]
-    pub repo_rev: Option<String>,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::pds::moderation_action)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ModerationAction {
-    pub id: i32,
-    pub action: String,
-    #[serde(rename = "subjectType")]
-    pub subject_type: String,
-    #[serde(rename = "subjectDid")]
-    pub subject_did: String,
-    #[serde(rename = "subjectUri", skip_serializing_if = "Option::is_none")]
-    pub subject_uri: Option<String>,
-    #[serde(rename = "subjectCid", skip_serializing_if = "Option::is_none")]
-    pub subject_cid: Option<String>,
-    pub reason: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "createdBy")]
-    pub created_by: String,
-    #[serde(rename = "reversedAt", skip_serializing_if = "Option::is_none")]
-    pub reversed_at: Option<String>,
-    #[serde(rename = "reversedBy", skip_serializing_if = "Option::is_none")]
-    pub reversed_by: Option<String>,
-    #[serde(rename = "reversedReason", skip_serializing_if = "Option::is_none")]
-    pub reversed_reason: Option<String>,
-    #[serde(rename = "createLabelVals", skip_serializing_if = "Option::is_none")]
-    pub create_label_vals: Option<String>,
-    #[serde(rename = "negateLabelVals", skip_serializing_if = "Option::is_none")]
-    pub negate_label_vals: Option<String>,
-    #[serde(rename = "durationInHours", skip_serializing_if = "Option::is_none")]
-    pub duration_in_hours: Option<i32>,
-    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(action_id, cid, record_uri))]
-#[diesel(table_name = crate::schema::pds::moderation_action_subject_blob)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ModerationActionSubjectBlob {
-    pub id: i32,
-    #[serde(rename = "actionId")]
-    pub action_id: i32,
-    pub cid: String,
-    #[serde(rename = "recordUri")]
-    pub record_uri: String,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::pds::moderation_report)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ModerationReport {
-    pub id: i32,
-    #[serde(rename = "subjectType")]
-    pub subject_type: String,
-    #[serde(rename = "subjectDid")]
-    pub subject_did: String,
-    #[serde(rename = "subjectUri", skip_serializing_if = "Option::is_none")]
-    pub subject_uri: Option<String>,
-    #[serde(rename = "subjectCid", skip_serializing_if = "Option::is_none")]
-    pub subject_cid: Option<String>,
-    #[serde(rename = "reasonType")]
-    pub reason_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(rename = "reportedByDid")]
-    pub reported_by_did: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(report_id, action_id))]
-#[diesel(table_name = crate::schema::pds::moderation_report_resolution)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ModerationReportResolution {
-    #[serde(rename = "reportId")]
-    pub report_id: i32,
-    #[serde(rename = "actionId")]
-    pub action_id: i32,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "createdBy")]
-    pub created_by: String,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(uri))]
 #[diesel(table_name = crate::schema::pds::record)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Record {
     pub uri: String,
     pub cid: String,
-    pub did: String,
     pub collection: String,
     pub rkey: String,
+    #[diesel(column_name = repoRev)]
+    #[serde(rename = "repoRev")]
+    pub repo_rev: Option<String>,
+    #[diesel(column_name = indexedAt)]
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,
-    #[serde(rename = "takedownRef", skip_serializing_if = "Option::is_none")]
+    #[diesel(column_name = takedownRef)]
+    #[serde(rename = "takedownRef")]
     pub takedown_ref: Option<String>,
-    #[serde(rename = "repoRev", skip_serializing_if = "Option::is_none")]
-    pub repo_rev: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(blobCid, recordUri))]
+#[diesel(table_name = crate::schema::pds::record_blob)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct RecordBlob {
+    #[diesel(column_name = blobCid)]
+    #[serde(rename = "blobCid")]
+    pub blob_cid: String,
+    #[diesel(column_name = recordUri)]
+    #[serde(rename = "recordUri")]
+    pub record_uri: i32,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(table_name = crate::schema::pds::refresh_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RefreshToken {
     pub id: String,
     pub did: String,
+    #[diesel(column_name = expiresAt)]
     #[serde(rename = "expiresAt")]
     pub expires_at: String,
-    #[serde(rename = "nextId", skip_serializing_if = "Option::is_none")]
+    #[diesel(column_name = nextId)]
+    #[serde(rename = "nextId")]
     pub next_id: Option<String>,
-    #[serde(rename = "appPasswordName", skip_serializing_if = "Option::is_none")]
+    #[diesel(column_name = appPasswordName)]
+    #[serde(rename = "appPasswordName")]
     pub app_password_name: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(cid, record_uri))]
-#[diesel(table_name = crate::schema::pds::repo_blob)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(cid))]
+#[diesel(table_name = crate::schema::pds::repo_block)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct RepoBlob {
+pub struct RepoBlock {
     pub cid: String,
-    #[serde(rename = "recordUri")]
-    pub record_uri: String,
-    pub did: String,
-    #[serde(rename = "takedownRef", skip_serializing_if = "Option::is_none")]
-    pub takedown_ref: Option<String>,
-    #[serde(rename = "repoRev", skip_serializing_if = "Option::is_none")]
-    pub repo_rev: Option<String>,
+    #[diesel(column_name = repoRev)]
+    #[serde(rename = "repoRev")]
+    pub repo_rev: String,
+    pub size: i32,
+    pub content: Vec<u8>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::repo_root)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RepoRoot {
     pub did: String,
-    pub root: String,
+    pub cid: String,
+    pub rev: Option<String>,
+    #[diesel(column_name = indexedAt)]
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,
-    #[serde(rename = "takedownRef", skip_serializing_if = "Option::is_none")]
-    pub takedown_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[diesel(primary_key(seq))]
 #[diesel(table_name = crate::schema::pds::repo_seq)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RepoSeq {
-    pub id: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seq: Option<i64>,
+    pub seq: i64,
     pub did: String,
+    #[diesel(column_name = eventType)]
     #[serde(rename = "eventType")]
     pub event_type: String,
     pub event: Vec<u8>,
     pub invalidated: i16,
+    #[diesel(column_name = sequencedAt)]
     #[serde(rename = "sequencedAt")]
     pub sequenced_at: String,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(name))]
-#[diesel(table_name = crate::schema::pds::runtime_flag)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct RuntimeFlag {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(primary_key(did))]
-#[diesel(table_name = crate::schema::pds::user_account)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct UserAccount {
-    pub did: String,
-    pub email: String,
-    pub password: String,
-    #[serde(rename = "recoveryKey", skip_serializing_if = "Option::is_none")]
-    pub recovery_key: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "invitesDisabled")]
-    pub invites_disabled: i16,
-    #[serde(rename = "inviteNote", skip_serializing_if = "Option::is_none")]
-    pub invite_note: Option<String>,
-    #[serde(rename = "emailConfirmedAt", skip_serializing_if = "Option::is_none")]
-    pub email_confirmed_at: Option<String>,
-}
-
-#[derive(Queryable, Identifiable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::pds::user_pref)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct UserPref {
-    pub id: i64,
-    pub did: String,
-    pub name: String,
-    #[serde(rename = "valueJson")]
-    pub value_json: String,
 }

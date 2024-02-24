@@ -6,7 +6,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use crate::models::*;
 use anyhow::{Result};
 use secp256k1::{
-    generate_keypair, Keypair, Message, SecretKey, PublicKey
+    Secp256k1, Keypair, Message, SecretKey, PublicKey
 };
 use sha2::{Sha256, Digest};
 use multibase::Base::Base58Btc;
@@ -15,6 +15,7 @@ use data_encoding::BASE32;
 use reqwest;
 use serde_json::{Value};
 use indexmap::IndexMap;
+use rsky_lexicon::com::atproto::server::CreateAccountInput;
 
 // Important to user `preserve_order` with serde_json so these bytes are ordered
 // correctly when encoding.
@@ -113,7 +114,7 @@ pub fn sign(
     // Encode object to json before dag-cbor because serde_ipld_dagcbor doesn't properly
     // sort by keys
     let json = serde_json::to_string(&genesis).unwrap();
-    // Deserialize to IndexMap to preserve key order. serde_ipld_dagcbor does not sort nested
+    // Deserialize to IndexMap with preserve key order enabled. serde_ipld_dagcbor does not sort nested
     // objects properly by keys
     let map_genesis: IndexMap<String, Value> = serde_json::from_str(&json).unwrap();
 
@@ -160,17 +161,34 @@ pub fn encode_did_key(
 
 pub fn create_did_and_plc_op(
     handle: &str,
-    //input: CreateAccountInput,
-    _signing_key: Keypair
+    input: &CreateAccountInput,
+    signing_key: Keypair
 ) -> Result<String> {
-    let (secret_key, public_key) = generate_keypair(&mut rand::thread_rng());
+    let secp = Secp256k1::new();
+    let private_key: String;
+    if let Some(recovery_key) = &input.recovery_key {
+        private_key = recovery_key.clone();
+    } else {
+        private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    }
+    let decoded_key = hex::decode(private_key.as_bytes())
+        .map_err(|error| {
+            let context = format!("Issue decoding hex '{}'", private_key);
+            anyhow::Error::new(error).context(context)
+        })?;
+    let secret_key = SecretKey::from_slice(&decoded_key)
+        .map_err(|error| {
+            let context = format!("Issue creating secret key from input '{}'", private_key);
+            anyhow::Error::new(error).context(context)
+        })?;
+    let public_key = secret_key.public_key(&secp);
 
     println!("Generating and signing PLC directory genesis operation...");
     let mut create_op = PlcGenesisOperation {
         r#type:  "plc_operation".to_owned(),
         rotation_keys: vec![encode_did_key(&public_key)],
         verification_methods: PlcGenesisVerificationMethods {
-            atproto: encode_did_key(&public_key)
+            atproto: encode_did_key(&signing_key.public_key())
         },
         also_known_as: vec![format!("at://{handle}")],
         services: PlcGenesisServices {
@@ -202,21 +220,28 @@ pub fn create_did_and_plc_op(
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
         did_plc);
     let client = reqwest::blocking::Client::new();
-    let response = client
+    let mut response = client
         .post(plc_url)
         .json(&create_op)
         .header("Connection", "Keep-Alive")
         .header("Keep-Alive", "timeout=5, max=1000")
         .send()?;
-    println!("Response from server: {:#?}", response.text()?);
-    Ok(did_plc.into())
+    let mut buf: Vec<u8> = vec![];
+    response.copy_to(&mut buf)?;
+    let resp_msg = String::from_utf8(buf).unwrap();
+    match response.error_for_status() {
+        Ok(_res) => Ok(did_plc.into()),
+        Err(error) => Err(anyhow::Error::new(error).context(resp_msg))
+    }
 }
 
-/*pub fn validate_existing_did(
+/*
+pub fn validate_existing_did(
     handle: &str,
     input_did: &str,
     signing_key: Keypair
 ) -> Result<String> {
+    todo!()
 }*/
 
 pub mod confirm_email;

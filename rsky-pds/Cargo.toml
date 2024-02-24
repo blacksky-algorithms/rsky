@@ -14,7 +14,7 @@ documentation = "https://docs.rs/rsky-pds"
 rocket = { version = "=0.5.0-rc.3", features = ["json"] }
 dotenvy = "0.15"
 rsky-lexicon = { workspace = true, version = "0.1.0" }
-diesel = { version = "2.1.0", features = ["postgres"] }
+diesel = { version = "2.1.0", features = ["postgres","chrono"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
@@ -34,6 +34,7 @@ secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand",
 rand_core = "0.6.4"
 sha2 = "0.11.0-pre.3"
 indexmap = { version = "1.9.3",features = ["serde-1"] }
+hex = "0.4.3"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"
