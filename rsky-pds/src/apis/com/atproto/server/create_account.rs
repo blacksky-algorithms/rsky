@@ -18,7 +18,7 @@ pub async fn create_account(
     body: Json<CreateAccountInput>,
     connection: DbConn
 ) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    use crate::schema::pds::user_account::dsl as UserSchema;
+    use crate::schema::pds::account::dsl as UserSchema;
     use crate::schema::pds::actor::dsl as ActorSchema;
     // TO DO: Check if there is an invite code
     // TO DO: Throw error for any plcOp input
@@ -77,6 +77,7 @@ pub async fn create_account(
             // TO DO: Lookup user by email as well
 
             // TO DO: Create Repo in storage
+            // https://github.com/DavidBuchanan314/picopds/blob/main/repo.py#L154
 
             let did;
             let secp = Secp256k1::new();
@@ -116,7 +117,7 @@ pub async fn create_account(
                 ActorSchema::handle.eq(body.handle.clone()),
                 ActorSchema::createdAt.eq(format!("{}", dt.format("%+"))),
             );
-            match diesel::insert_into(UserSchema::user_account)
+            match diesel::insert_into(UserSchema::account)
                 .values(&new_user_account)
                 .execute(conn) {
                     Ok(_) =>(),

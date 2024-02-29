@@ -35,6 +35,9 @@ rand_core = "0.6.4"
 sha2 = "0.11.0-pre.3"
 indexmap = { version = "1.9.3",features = ["serde-1"] }
 hex = "0.4.3"
+libipld = "0.16.0"
+lazy_static = "1.4.0"
+regex = "1.10.3"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

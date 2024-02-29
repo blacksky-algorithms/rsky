@@ -26,7 +26,7 @@ pub async fn create_invite_code(
                 code.eq(&new_code),
                 availableUses.eq(body.use_count),
                 disabled.eq(0),
-                forUser.eq(body.for_account.unwrap_or("admin".to_string())),
+                forAccount.eq(body.for_account.unwrap_or("admin".to_string())),
                 createdBy.eq("admin".to_string()),
                 createdAt.eq(format!("{}", dt.format("%+"))),
             );

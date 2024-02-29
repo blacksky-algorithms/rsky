@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS pds.repo_block (
     size integer NOT NULL,
     content bytea NOT NULL
 );
-CREATE INDEX ipld_block_repo_rev_idx
+CREATE INDEX repo_block_repo_rev_idx
 	ON pds.repo_block("repoRev", cid);
 
 -- Create Record Table

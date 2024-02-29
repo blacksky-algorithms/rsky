@@ -124,7 +124,6 @@ pub fn sign(
     // Sign sha256 hash using private key
     let message = Message::from_digest_slice(hash.as_ref()).unwrap();
     let mut sig = private_key.sign_ecdsa(message);
-    //let mut sig = private_key.sign_ecdsa(message);
     // Convert to low-s
     sig.normalize_s();
     // ASN.1 encoded per decode_dss_signature
