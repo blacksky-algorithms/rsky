@@ -27,6 +27,14 @@ pub fn get_bytes (
     Ok(result)
 }
 
+pub fn has (
+    conn: &mut PgConnection,
+    cid: Cid
+) -> Result<bool> {
+    let got = get_bytes(conn, &cid)?;
+    Ok(!got.is_empty())
+}
+
 pub fn attempt_read<'de, T: DeserializeTrait<'de>>(
     conn: &mut PgConnection,
     cid: &Cid

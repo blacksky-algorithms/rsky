@@ -14,6 +14,6 @@ pub mod db;
 pub mod models;
 pub mod schema;
 pub mod apis;
-pub mod mst;
+pub mod repo;
 pub mod common;
 pub mod storage;
