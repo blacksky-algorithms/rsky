@@ -1,19 +1,25 @@
-use rocket::serde::json::Json;
-use rocket::response::status;
-use rocket::http::Status;
-use std::time::SystemTime;
+use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::DbConn;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use diesel::prelude::*;
-use crate::DbConn;
-use rsky_lexicon::com::atproto::server::{CreateInviteCodesInput, CreateInviteCodesOutput, AccountCodes};
-use crate::models::{InternalErrorMessageResponse, InternalErrorCode};
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::serde::json::Json;
+use rsky_lexicon::com::atproto::server::{
+    AccountCodes, CreateInviteCodesInput, CreateInviteCodesOutput,
+};
+use std::time::SystemTime;
 
-#[rocket::post("/xrpc/com.atproto.server.createInviteCodes", format = "json", data = "<body>")]
+#[rocket::post(
+    "/xrpc/com.atproto.server.createInviteCodes",
+    format = "json",
+    data = "<body>"
+)]
 pub async fn create_invite_codes(
     body: Json<CreateInviteCodesInput>,
-    connection: DbConn
-) -> Result<Json<CreateInviteCodesOutput>, status::Custom<Json<InternalErrorMessageResponse>>>  {
+    connection: DbConn,
+) -> Result<Json<CreateInviteCodesOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
 
     let result = connection
@@ -50,14 +56,17 @@ pub async fn create_invite_codes(
                     }
                     account_codes.push(AccountCodes {
                         account: account.clone(),
-                        codes
+                        codes,
                     });
                 })
                 .for_each(drop);
             match diesel::insert_into(InviteCodeSchema::invite_code)
                 .values(&new_invite_codes)
-                .execute(conn) {
-                Ok(_) => Ok(Json(CreateInviteCodesOutput {codes: account_codes})),
+                .execute(conn)
+            {
+                Ok(_) => Ok(Json(CreateInviteCodesOutput {
+                    codes: account_codes,
+                })),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
                     let internal_error = InternalErrorMessageResponse {

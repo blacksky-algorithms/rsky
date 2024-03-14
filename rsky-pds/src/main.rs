@@ -1,21 +1,21 @@
 #[macro_use]
 extern crate rocket;
+use diesel::prelude::*;
+use diesel::sql_types::Int4;
 use dotenvy::dotenv;
 use rocket::fairing::{Fairing, Info, Kind};
-use rocket::http::Header;
-use rocket::{Request, Response};
-use rocket::serde::json::Json;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::figment::{
     util::map,
     value::{Map, Value},
 };
+use rocket::http::Header;
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::serde::json::Json;
+use rocket::{Request, Response};
+use rsky_pds::apis::*;
 use rsky_pds::DbConn;
 use std::env;
-use diesel::sql_types::Int4;
-use diesel::prelude::*;
-use rsky_pds::apis::*;
 
 pub struct CORS;
 
@@ -31,7 +31,7 @@ async fn robots() -> &'static str {
 
 #[get("/xrpc/_health")]
 async fn health(
-    connection: DbConn
+    connection: DbConn,
 ) -> Result<
     Json<rsky_pds::models::ServerVersion>,
     status::Custom<Json<rsky_pds::models::InternalErrorMessageResponse>>,
@@ -41,16 +41,18 @@ async fn health(
             diesel::select(diesel::dsl::sql::<Int4>("1")) // SELECT 1;
                 .load::<i32>(conn)
                 .map(|v| v.into_iter().next().expect("no results"))
-        }).await;
+        })
+        .await;
     match result {
         Ok(_) => {
             let env_version = env::var("VERSION").unwrap_or("0.3.0-beta.3".into());
             let version = rsky_pds::models::ServerVersion {
-                version: env_version
+                version: env_version,
             };
             Ok(Json(version))
         }
-        Err(error) => { // TO DO: Throw 503
+        Err(error) => {
+            // TO DO: Throw 503
             eprintln!("Internal Error: {error}");
             let internal_error = rsky_pds::models::InternalErrorMessageResponse {
                 code: Some(rsky_pds::models::InternalErrorCode::InternalError),
@@ -111,10 +113,7 @@ fn rocket() -> _ {
         "timeout" => 30.into(),
     };
 
-    let figment = rocket::Config::figment().merge((
-        "databases",
-        map!["pg_db" => db],
-    ));
+    let figment = rocket::Config::figment().merge(("databases", map!["pg_db" => db]));
 
     rocket::custom(figment)
         .mount(
@@ -229,12 +228,7 @@ fn rocket() -> _ {
                 all_options
             ],
         )
-        .register(
-            "/",
-            catchers![
-                default_catcher
-            ],
-        )
+        .register("/", catchers![default_catcher])
         .attach(CORS)
         .attach(DbConn::fairing())
 }

@@ -1,21 +1,19 @@
 extern crate unsigned_varint;
-use std::env;
-use diesel::PgConnection;
-use diesel::prelude::*;
-use rand::{distributions::Alphanumeric, Rng};
 use crate::models::*;
-use anyhow::{Result};
-use secp256k1::{
-    Secp256k1, Keypair, Message, SecretKey, PublicKey
-};
-use sha2::{Sha256, Digest};
-use multibase::Base::Base58Btc;
-use unsigned_varint::{encode::u16 as encode_varint};
+use anyhow::Result;
 use data_encoding::BASE32;
-use reqwest;
-use serde_json::{Value};
+use diesel::prelude::*;
+use diesel::PgConnection;
 use indexmap::IndexMap;
+use multibase::Base::Base58Btc;
+use rand::{distributions::Alphanumeric, Rng};
+use reqwest;
 use rsky_lexicon::com::atproto::server::CreateAccountInput;
+use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::env;
+use unsigned_varint::encode::u16 as encode_varint;
 
 // Important to user `preserve_order` with serde_json so these bytes are ordered
 // correctly when encoding.
@@ -49,7 +47,7 @@ pub struct PlcGenesisOperation {
     pub services: PlcGenesisServices,
     pub prev: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sig: Option<String>
+    pub sig: Option<String>,
 }
 
 // Formatted xxxxx-xxxxx
@@ -70,9 +68,7 @@ pub fn gen_invite_code() -> String {
     env::var("HOSTNAME").unwrap().replace(".", "-") + "-" + &get_random_token()
 }
 
-pub fn gen_invite_codes(
-    count: i32
-) -> Vec<String> {
+pub fn gen_invite_codes(count: i32) -> Vec<String> {
     let mut codes = Vec::new();
     for _i in 0..count {
         codes.push(gen_invite_code());
@@ -80,19 +76,14 @@ pub fn gen_invite_codes(
     codes
 }
 
-pub fn validate_handle(
-    handle: &str
-) -> bool {
+pub fn validate_handle(handle: &str) -> bool {
     let suffix: String = env::var("HOSTNAME").unwrap();
-    let s_slice: &str = &suffix[..];  // take a full slice of the string
+    let s_slice: &str = &suffix[..]; // take a full slice of the string
     handle.ends_with(s_slice)
     // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
 }
 
-pub fn lookup_user_by_handle(
-    handle: &str,
-    conn: &mut PgConnection,
-) -> Result<Actor> {
+pub fn lookup_user_by_handle(handle: &str, conn: &mut PgConnection) -> Result<Actor> {
     use crate::schema::pds::actor::dsl as ActorSchema;
 
     let result = ActorSchema::actor
@@ -106,11 +97,7 @@ pub fn lookup_user_by_handle(
     Ok(result)
 }
 
-pub fn sign(
-    mut genesis: PlcGenesisOperation,
-    private_key: &SecretKey
-) -> PlcGenesisOperation {
-
+pub fn sign(mut genesis: PlcGenesisOperation, private_key: &SecretKey) -> PlcGenesisOperation {
     // Encode object to json before dag-cbor because serde_ipld_dagcbor doesn't properly
     // sort by keys
     let json = serde_json::to_string(&genesis).unwrap();
@@ -134,24 +121,22 @@ pub fn sign(
 }
 
 // https://github.com/gnunicorn/rust-multicodec/blob/master/src/lib.rs#L249-L260
-pub fn multicodec_wrap(
-    bytes: Vec<u8>
-) -> Vec<u8> {
+pub fn multicodec_wrap(bytes: Vec<u8>) -> Vec<u8> {
     let mut buf = [0u8; 3];
     encode_varint(0xe7, &mut buf);
-    let mut v : Vec<u8> = Vec::new();
+    let mut v: Vec<u8> = Vec::new();
     for b in &buf {
         v.push(*b);
         // varint uses first bit to indicate another byte follows, stop if not the case
-        if *b <= 127 { break }
+        if *b <= 127 {
+            break;
+        }
     }
     v.extend(bytes);
     v
 }
 
-pub fn encode_did_key(
-    pubkey: &PublicKey
-) -> String {
+pub fn encode_did_key(pubkey: &PublicKey) -> String {
     let pk_compact = pubkey.serialize();
     let pk_wrapped = multicodec_wrap(pk_compact.to_vec());
     let pk_multibase = multibase::encode(Base58Btc, pk_wrapped.as_slice());
@@ -161,7 +146,7 @@ pub fn encode_did_key(
 pub fn create_did_and_plc_op(
     handle: &str,
     input: &CreateAccountInput,
-    signing_key: Keypair
+    signing_key: Keypair,
 ) -> Result<String> {
     let secp = Secp256k1::new();
     let private_key: String;
@@ -170,34 +155,32 @@ pub fn create_did_and_plc_op(
     } else {
         private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     }
-    let decoded_key = hex::decode(private_key.as_bytes())
-        .map_err(|error| {
-            let context = format!("Issue decoding hex '{}'", private_key);
-            anyhow::Error::new(error).context(context)
-        })?;
-    let secret_key = SecretKey::from_slice(&decoded_key)
-        .map_err(|error| {
-            let context = format!("Issue creating secret key from input '{}'", private_key);
-            anyhow::Error::new(error).context(context)
-        })?;
+    let decoded_key = hex::decode(private_key.as_bytes()).map_err(|error| {
+        let context = format!("Issue decoding hex '{}'", private_key);
+        anyhow::Error::new(error).context(context)
+    })?;
+    let secret_key = SecretKey::from_slice(&decoded_key).map_err(|error| {
+        let context = format!("Issue creating secret key from input '{}'", private_key);
+        anyhow::Error::new(error).context(context)
+    })?;
     let public_key = secret_key.public_key(&secp);
 
     println!("Generating and signing PLC directory genesis operation...");
     let mut create_op = PlcGenesisOperation {
-        r#type:  "plc_operation".to_owned(),
+        r#type: "plc_operation".to_owned(),
         rotation_keys: vec![encode_did_key(&public_key)],
         verification_methods: PlcGenesisVerificationMethods {
-            atproto: encode_did_key(&signing_key.public_key())
+            atproto: encode_did_key(&signing_key.public_key()),
         },
         also_known_as: vec![format!("at://{handle}")],
         services: PlcGenesisServices {
             atproto_pds: AtprotoPdsService {
                 r#type: "AtprotoPersonalDataServer".to_owned(),
-                endpoint: format!("https://{}",env::var("HOSTNAME").unwrap())
-            }
+                endpoint: format!("https://{}", env::var("HOSTNAME").unwrap()),
+            },
         },
         prev: None,
-        sig: None
+        sig: None,
     };
     create_op = sign(create_op, &secret_key);
     let json = serde_json::to_string(&create_op).unwrap();
@@ -206,18 +189,15 @@ pub fn create_did_and_plc_op(
     let mut hasher: Sha256 = Digest::new();
     hasher.update(signed_genesis_bytes.as_slice());
     let hash = hasher.finalize();
-    let did_plc = &format!(
-        "did:plc:{}",
-        BASE32.encode(&hash[..])
-    )[..32]
-        .to_lowercase();
+    let did_plc = &format!("did:plc:{}", BASE32.encode(&hash[..]))[..32].to_lowercase();
     println!("Created DID {did_plc:#}");
     println!("publishing......");
 
     let plc_url = format!(
         "https://{0}/{1}",
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
-        did_plc);
+        did_plc
+    );
     let client = reqwest::blocking::Client::new();
     let mut response = client
         .post(plc_url)
@@ -230,7 +210,7 @@ pub fn create_did_and_plc_op(
     let resp_msg = String::from_utf8(buf).unwrap();
     match response.error_for_status() {
         Ok(_res) => Ok(did_plc.into()),
-        Err(error) => Err(anyhow::Error::new(error).context(resp_msg))
+        Err(error) => Err(anyhow::Error::new(error).context(resp_msg)),
     }
 }
 
@@ -260,7 +240,7 @@ pub mod request_account_delete;
 pub mod request_email_confirmation;
 pub mod request_email_update;
 pub mod request_password_reset;
+pub mod reserve_signing_key;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
-pub mod reserve_signing_key;

@@ -38,6 +38,7 @@ hex = "0.4.3"
 libipld = "0.16.0"
 lazy_static = "1.4.0"
 regex = "1.10.3"
+thiserror = "1.0.40"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

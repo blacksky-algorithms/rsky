@@ -3,13 +3,13 @@
 #![allow(unused)]
 #![allow(clippy::all)]
 
-
-use chrono::DateTime;
 use chrono::offset::Utc;
+use chrono::DateTime;
 use diesel::prelude::*;
 
-
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::account)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -31,7 +31,9 @@ pub struct Account {
     pub email_confirmed_at: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(table_name = crate::schema::pds::account_pref)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct AccountPref {
@@ -42,7 +44,9 @@ pub struct AccountPref {
     pub value_json: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::actor)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -57,7 +61,9 @@ pub struct Actor {
     pub takedown_ref: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(did, name))]
 #[diesel(table_name = crate::schema::pds::app_password)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -70,7 +76,9 @@ pub struct AppPassword {
     pub created_at: String,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(uri, path))]
 #[diesel(table_name = crate::schema::pds::backlink)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -82,7 +90,9 @@ pub struct Backlink {
     pub link_to: String,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(cid))]
 #[diesel(table_name = crate::schema::pds::blob)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -105,7 +115,9 @@ pub struct Blob {
     pub takedown_ref: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::did_doc)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -117,7 +129,9 @@ pub struct DidDoc {
     pub updated_at: i64,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(purpose, did))]
 #[diesel(table_name = crate::schema::pds::email_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -130,7 +144,9 @@ pub struct EmailToken {
     pub requested_at: DateTime<Utc>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(code))]
 #[diesel(table_name = crate::schema::pds::invite_code)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -151,7 +167,9 @@ pub struct InviteCode {
     pub created_at: String,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(code, usedBy))]
 #[diesel(table_name = crate::schema::pds::invite_code_use)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -165,7 +183,9 @@ pub struct InviteCodeUse {
     pub used_at: String,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(uri))]
 #[diesel(table_name = crate::schema::pds::record)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -185,7 +205,9 @@ pub struct Record {
     pub takedown_ref: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(blobCid, recordUri))]
 #[diesel(table_name = crate::schema::pds::record_blob)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -198,7 +220,9 @@ pub struct RecordBlob {
     pub record_uri: i32,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(table_name = crate::schema::pds::refresh_token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RefreshToken {
@@ -215,20 +239,26 @@ pub struct RefreshToken {
     pub app_password_name: Option<String>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(cid))]
 #[diesel(table_name = crate::schema::pds::repo_block)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RepoBlock {
+    #[diesel(sql_type = Text)]
     pub cid: String,
     #[diesel(column_name = repoRev)]
     #[serde(rename = "repoRev")]
     pub repo_rev: String,
     pub size: i32,
+    #[diesel(sql_type = Bytea)]
     pub content: Vec<u8>,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::repo_root)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -241,7 +271,9 @@ pub struct RepoRoot {
     pub indexed_at: String,
 }
 
-#[derive(Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
 #[diesel(primary_key(seq))]
 #[diesel(table_name = crate::schema::pds::repo_seq)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
