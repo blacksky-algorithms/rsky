@@ -4,7 +4,7 @@ use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::NodeData;
 use crate::repo::parse;
-use crate::repo::types::{RepoRecord, VersionedCommit};
+use crate::repo::types::{CommitData, RepoRecord, VersionedCommit};
 use crate::repo::util::cbor_to_lex_record;
 use anyhow::Result;
 use diesel::prelude::*;
@@ -67,14 +67,24 @@ pub struct ObjAndBytes {
 pub struct SqlRepoReader<'a> {
     pub cache: BlockMap,
     pub conn: &'a PgConnection,
+    pub blocks: BlockMap,
+    pub root: Option<Cid>,
+    pub rev: Option<String>
 }
 
 impl<'a> SqlRepoReader<'a> {
-    pub fn new(conn: &mut PgConnection) -> SqlRepoReader<'a> {
-        SqlRepoReader {
+    pub fn new(conn: &mut PgConnection, blocks: Option<BlockMap>) -> Self {
+        let mut this = SqlRepoReader {
             cache: BlockMap::new(),
             conn,
+            blocks: BlockMap::new(),
+            root: None,
+            rev: None
+        };
+        if let Some(blocks) = blocks {
+            this.blocks.add_map(blocks).unwrap();
         }
+        this
     }
 
     pub fn get_blocks(
@@ -154,5 +164,21 @@ impl<'a> SqlRepoReader<'a> {
     pub fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
         let bytes = self.get_bytes(&mut self.conn, cid)?;
         Ok(cbor_to_lex_record(bytes)?)
+    }
+
+    pub fn apply_commit(&mut self, commit: CommitData) -> Result<()> {
+        self.root = Some(commit.cid);
+        let rm_cids = commit.removed_cids.to_list();
+        for cid in rm_cids {
+            self.blocks.delete(cid)?;
+        }
+        commit.new_blocks.for_each(|bytes, cid| {
+            self.blocks.set(cid, bytes.clone());
+        })?;
+        Ok(())
+    }
+    
+    pub fn get_root(&self) -> Option<Cid> {
+        self.root
     }
 }

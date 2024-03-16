@@ -12,3 +12,13 @@ pub enum DataStoreError {
     #[error("unknown data store error")]
     Unknown,
 }
+
+#[derive(Error, Debug)]
+pub enum RepoError {
+    #[error("Commit was at`{0}`")]
+    BadCommitSwapError(Cid),
+    #[error("Record was at`{0:?}`")]
+    BadRecordSwapError(Option<Cid>),
+    #[error("Invalid record error")]
+    InvalidRecordError
+}
