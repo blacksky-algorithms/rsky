@@ -1,19 +1,19 @@
 use crate::common;
 use crate::common::ipld;
+use crate::repo::mst::CidAndBytes;
 use anyhow::Result;
 use libipld::Cid;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use crate::repo::mst::CidAndBytes;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BlockMap {
     pub map: BTreeMap<String, Vec<u8>>,
 }
 
 impl BlockMap {
-    pub fn new() -> BlockMap {
+    pub fn new() -> Self {
         BlockMap {
             map: BTreeMap::new(),
         }

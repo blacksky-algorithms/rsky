@@ -7,7 +7,6 @@ use crate::repo::parse;
 use crate::storage::{Ipld, ObjAndBytes, SqlRepoReader};
 use anyhow::{anyhow, Result};
 use libipld::Cid;
-use serde::Deserialize as DeserializeTrait;
 use std::mem;
 
 struct NodeIter<'a> {
@@ -29,9 +28,9 @@ impl Default for NodeIter<'_> {
     }
 }
 
-// We want to traverse (i.e. iterate over) this kind of tree depth-first. This means that
-// when a node has multiple children, we first traverse the first child and all its descendants
-// before moving on to the second child.
+/// We want to traverse (i.e. iterate over) this kind of tree depth-first. This means that
+/// when a node has multiple children, we first traverse the first child and all its descendants
+/// before moving on to the second child.
 impl<'a> Iterator for NodeIter<'a> {
     type Item = &'a NodeEntry<'a>;
 
@@ -83,7 +82,7 @@ impl<'a> Iterator for NodeIter<'a> {
     }
 }
 
-// Alternative implementation of iterator
+/// Alternative implementation of iterator
 struct NodeIterReachable<'a> {
     entries: &'a [NodeEntry<'a>],
     parent: Option<Box<NodeIterReachable<'a>>>,
@@ -149,7 +148,7 @@ impl<'a> Iterator for NodeIterReachable<'a> {
     }
 }
 
-// treeEntry are elements of nodeData's Entries.
+/// treeEntry are elements of nodeData's Entries.
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct TreeEntry {
     pub p: u8,          // count of characters shared with previous path/key in tree
@@ -158,8 +157,8 @@ pub struct TreeEntry {
     pub t: Option<Cid>, // [optional] pointer to lower-level subtree to the "right" of this path/key entry
 }
 
-// MST tree node as gets serialized to CBOR. Note that the CBOR fields are all
-// single-character.
+/// MST tree node as gets serialized to CBOR. Note that the CBOR fields are all
+/// single-character.
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct NodeData {
     pub l: Option<Cid>, // [optional] pointer to lower-level subtree to the "left" of this path/key
@@ -172,11 +171,11 @@ pub struct Leaf {
     pub value: Cid,
 }
 
-// nodeEntry is a node in the MST.
-//
-// Following the Typescript implementation, this is basically a flexible
-// "TreeEntry" (aka "leaf") which might also be the "Left" pointer on a
-// NodeData (aka "tree").
+/// nodeEntry is a node in the MST.
+///
+/// Following the Typescript implementation, this is basically a flexible
+/// "TreeEntry" (aka "leaf") which might also be the "Left" pointer on a
+/// NodeData (aka "tree").
 #[derive(Clone)]
 pub enum NodeEntry<'a> {
     MST(MST<'a>),
@@ -251,12 +250,12 @@ pub struct UnstoredBlocks {
     blocks: BlockMap,
 }
 
-// MST represents a MerkleSearchTree tree node (NodeData type). It can be in
-// several levels of hydration: fully hydrated (entries and "pointer" (CID)
-// computed); dirty (entries correct, but pointer (CID) not valid); virtual
-// (pointer is defined, no entries have been pulled from block store)
-//
-// MerkleSearchTree values are immutable. Methods return copies with changes.
+/// MST represents a MerkleSearchTree tree node (NodeData type). It can be in
+/// several levels of hydration: fully hydrated (entries and "pointer" (CID)
+/// computed); dirty (entries correct, but pointer (CID) not valid); virtual
+/// (pointer is defined, no entries have been pulled from block store)
+///
+/// MerkleSearchTree values are immutable. Methods return copies with changes.
 #[derive(Clone)]
 pub struct MST<'a> {
     pub entries: Option<Vec<NodeEntry<'a>>>,
@@ -302,8 +301,8 @@ impl<'a> MST<'a> {
         Ok(MST::new(storage, pointer, Some(entries), layer))
     }
 
-    // This is poorly named in both implementations, because it is lazy
-    // this is really a *lazy* load, doesn't actually touch storage
+    /// This is poorly named in both implementations, because it is lazy
+    /// this is really a *lazy* load, doesn't actually touch storage
     pub fn load(storage: SqlRepoReader, cid: Cid, layer: Option<u32>) -> Result<MST<'a>> {
         Ok(MST::new(storage, cid, None, layer))
     }
@@ -311,7 +310,7 @@ impl<'a> MST<'a> {
     // Immutability
     // -------------------
 
-    // We never mutate an MST, we just return a new MST with updated values
+    /// We never mutate an MST, we just return a new MST with updated values
     pub fn new_tree(&mut self, entries: Vec<NodeEntry>) -> Result<MST<'a>> {
         let mut mst = MST::new(
             self.storage.clone(),
@@ -325,7 +324,7 @@ impl<'a> MST<'a> {
 
     // === "Getters (lazy load)" ===
 
-    // "We don't want to load entries of every subtree, just the ones we need"
+    /// "We don't want to load entries of every subtree, just the ones we need"
     pub fn get_entries(&mut self) -> Result<&Vec<NodeEntry>> {
         // if we are "hydrated", entries are available
         if let Some(entries) = &self.entries {
@@ -382,10 +381,10 @@ impl<'a> MST<'a> {
         })
     }
 
-    // In most cases, we get the layer of a node from a hint on creation
-    // In the case of the topmost node in the tree, we look for a key in the node & determine the layer
-    // In the case where we don't find one, we recurse down until we do.
-    // If we still can't find one, then we have an empty tree and the node is layer 0
+    /// In most cases, we get the layer of a node from a hint on creation
+    /// In the case of the topmost node in the tree, we look for a key in the node & determine the layer
+    /// In the case where we don't find one, we recurse down until we do.
+    /// If we still can't find one, then we have an empty tree and the node is layer 0
     pub fn get_layer(&mut self) -> Result<u32> {
         self.layer = self.attempt_get_layer()?;
         if self.layer.is_none() {
@@ -419,7 +418,7 @@ impl<'a> MST<'a> {
     // Core functionality
     // -------------------
 
-    // Return the necessary blocks to persist the MST to repo storage
+    /// Return the necessary blocks to persist the MST to repo storage
     pub fn get_unstored_blocks(&mut self) -> Result<UnstoredBlocks> {
         let mut blocks = BlockMap::new();
         let pointer = self.get_pointer()?;
@@ -445,8 +444,8 @@ impl<'a> MST<'a> {
         })
     }
 
-    // Adds a new leaf for the given key/value pair
-    // Throws if a leaf with that key already exists
+    /// Adds a new leaf for the given key/value pair
+    /// Throws if a leaf with that key already exists
     pub fn add(&mut self, key: &String, value: Cid, known_zeros: Option<u32>) -> Result<MST> {
         util::ensure_valid_mst_key(&key)?;
         let key_zeros: u32;
@@ -537,7 +536,7 @@ impl<'a> MST<'a> {
         };
     }
 
-    // Gets the value at the given key
+    /// Gets the value at the given key
     pub fn get(&mut self, key: &String) -> Result<Option<Cid>> {
         let index = self.find_gt_or_equal_leaf_index(key)?;
         let found = self.at_index(index)?;
@@ -553,8 +552,8 @@ impl<'a> MST<'a> {
         return Ok(None);
     }
 
-    // Edits the value at the given key
-    // Throws if the given key does not exist
+    /// Edits the value at the given key
+    /// Throws if the given key does not exist
     pub fn update(&mut self, key: &String, value: Cid) -> Result<MST> {
         util::ensure_valid_mst_key(key)?;
         let index = self.find_gt_or_equal_leaf_index(key)?;
@@ -578,7 +577,7 @@ impl<'a> MST<'a> {
         Err(anyhow!("Could not find a record with key: {}", key))
     }
 
-    // Deletes the value at the given key
+    /// Deletes the value at the given key
     pub fn delete(&mut self, key: &String) -> Result<MST> {
         let mut altered = self.delete_recurse(key)?;
         Ok(altered.trim_top()?)
@@ -624,7 +623,7 @@ impl<'a> MST<'a> {
     // Simple Operations
     // -------------------
 
-    // update entry in place
+    /// update entry in place
     pub fn update_entry<'b>(&mut self, index: usize, entry: NodeEntry) -> Result<MST<'b>> {
         let mut update = Vec::new();
         for e in self.slice(Some(0), Some(index))? {
@@ -637,7 +636,7 @@ impl<'a> MST<'a> {
         Ok(self.new_tree(update)?)
     }
 
-    // remove entry at index
+    /// remove entry at index
     pub fn remove_entry<'b>(&mut self, index: usize) -> Result<MST<'b>> {
         let mut updated = Vec::new();
         updated.append(&mut self.slice(Some(0), Some(index))?.to_vec());
@@ -646,27 +645,27 @@ impl<'a> MST<'a> {
         Ok(self.new_tree(updated)?)
     }
 
-    // append entry to end of the node
+    /// append entry to end of the node
     pub fn append(&mut self, entry: NodeEntry) -> Result<MST> {
         let mut entries = self.get_entries()?;
         entries.push(entry);
         Ok(self.new_tree(entries.clone())?)
     }
 
-    // prepend entry to end of the node
+    /// prepend entry to end of the node
     pub fn prepend(&mut self, entry: NodeEntry) -> Result<MST> {
         let mut entries = self.get_entries()?;
         entries.splice(0..0, vec![entry]);
         Ok(self.new_tree(entries.clone())?)
     }
 
-    // returns entry at index
+    /// returns entry at index
     pub fn at_index(&mut self, index: usize) -> Result<Option<&NodeEntry>> {
         let entries = self.get_entries()?;
         Ok(entries.get(index))
     }
 
-    // returns a slice of the node
+    /// returns a slice of the node
     pub fn slice(&mut self, start: Option<usize>, end: Option<usize>) -> Result<&[NodeEntry]> {
         let entries = self.get_entries()?;
         if start.is_some() && end.is_some() {
@@ -680,7 +679,7 @@ impl<'a> MST<'a> {
         }
     }
 
-    // inserts entry at index
+    /// inserts entry at index
     pub fn splice_in(&mut self, entry: NodeEntry, index: usize) -> Result<MST> {
         let mut update = Vec::new();
         for e in self.slice(Some(0), Some(index))? {
@@ -693,7 +692,7 @@ impl<'a> MST<'a> {
         Ok(self.new_tree(update)?)
     }
 
-    // replaces an entry with [ Some(tree), Leaf, Some(tree) ]
+    /// replaces an entry with [ Some(tree), Leaf, Some(tree) ]
     pub fn replace_with_split<'b>(
         &mut self,
         index: usize,
@@ -716,7 +715,7 @@ impl<'a> MST<'a> {
         Ok(self.new_tree(update)?)
     }
 
-    // if the topmost node in the tree only points to another tree, trim the top and return the subtree
+    /// if the topmost node in the tree only points to another tree, trim the top and return the subtree
     pub fn trim_top(&mut self) -> Result<MST> {
         let entries = self.get_entries()?;
         return if entries.len() == 1 {
@@ -732,7 +731,7 @@ impl<'a> MST<'a> {
     // Subtree & Splits
     // -------------------
 
-    // Recursively splits a subtree around a given key
+    /// Recursively splits a subtree around a given key
     pub fn split_around<'b>(&mut self, key: &String) -> Result<(Option<MST<'b>>, Option<MST<'b>>)> {
         let index = self.find_gt_or_equal_leaf_index(key)?;
         // split tree around key
@@ -768,8 +767,8 @@ impl<'a> MST<'a> {
         Ok((left_output, right_output))
     }
 
-    // The simple merge case where every key in the right tree is greater than every key in the left tree
-    // (used primarily for deletes)
+    /// The simple merge case where every key in the right tree is greater than every key in the left tree
+    /// (used primarily for deletes)
     pub fn append_merge(&mut self, mut to_merge: MST) -> Result<MST> {
         if self.get_layer()? != to_merge.get_layer()? {
             return Err(anyhow!(
@@ -823,7 +822,7 @@ impl<'a> MST<'a> {
     // Finding insertion points
     // -------------------
 
-    // finds index of first leaf node that is greater than or equal to the value
+    /// finds index of first leaf node that is greater than or equal to the value
     pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<usize> {
         let entries = self.get_entries()?;
         let maybe_index = entries
@@ -847,9 +846,9 @@ impl<'a> MST<'a> {
     // List operations (partial tree traversal)
     // -------------------
 
-    // Walk tree starting at key
-    // @Rudy Note: This may be suboptimal since we always traverse the tree even though external
-    // controls might stop earlier.
+    /// Walk tree starting at key
+    /// @Rudy Note: This may be suboptimal since we always traverse the tree even though external
+    /// controls might stop earlier.
     pub fn walk_leaves_from(&mut self, key: &String) -> impl Iterator<Item = Leaf> {
         let mut iter: Vec<Leaf> = Vec::new();
         let index = self.find_gt_or_equal_leaf_index(key).unwrap();
@@ -876,7 +875,7 @@ impl<'a> MST<'a> {
 
     pub fn list(
         &mut self,
-        count: usize,
+        count: Option<usize>,
         after: Option<String>,
         before: Option<String>,
     ) -> Result<Vec<Leaf>> {
@@ -886,7 +885,7 @@ impl<'a> MST<'a> {
             if leaf.key == after {
                 continue;
             }
-            if vals.len() >= count {
+            if vals.len() >= count.unwrap_or(usize::MAX) {
                 break;
             }
             if let Some(b) = &before {
@@ -913,12 +912,12 @@ impl<'a> MST<'a> {
     // Full tree traversal
     // -------------------
 
-    // Walk full tree & emit nodes, consumer can bail at any point by returning None
+    /// Walk full tree & emit nodes, consumer can bail at any point by returning None
     pub fn walk(self) -> NodeIter<'a> {
         NodeEntry::MST(self).iter()
     }
 
-    // Walk full tree & emit nodes, consumer can bail at any point by returning None
+    /// Walk full tree & emit nodes, consumer can bail at any point by returning None
     pub fn paths(self) -> Result<Vec<Vec<&'a NodeEntry<'a>>>> {
         let mut paths: Vec<Vec<&'a NodeEntry<'a>>> = Vec::new();
         for entry in self.walk() {
@@ -940,7 +939,7 @@ impl<'a> MST<'a> {
         Ok(paths)
     }
 
-    // Walks tree & returns all nodes
+    /// Walks tree & returns all nodes
     pub fn all_nodes(self) -> Result<Vec<&'a NodeEntry<'a>>> {
         let mut nodes: Vec<&NodeEntry> = Vec::new();
         for entry in self.walk() {
@@ -949,23 +948,23 @@ impl<'a> MST<'a> {
         Ok(nodes)
     }
 
-    // Walks tree & returns all cids
+    /// Walks tree & returns all cids
     pub fn all_cids(self) -> Result<CidSet> {
         let mut cids = CidSet::new(None);
         for entry in self.walk() {
             match entry {
-                NodeEntry::Leaf(leaf) => cids = cids.add(leaf.value),
+                NodeEntry::Leaf(leaf) => cids.add(leaf.value),
                 NodeEntry::MST(m) => {
                     let subtree_cids = m.clone().all_cids()?;
                     cids = cids.add_set(subtree_cids);
                 }
             }
         }
-        cids = cids.add(self.clone().get_pointer()?);
+        cids.add(self.clone().get_pointer()?);
         Ok(cids)
     }
 
-    // Walks tree & returns all leaves
+    /// Walks tree & returns all leaves
     pub fn leaves(self) -> Result<Vec<&'a Leaf>> {
         let mut leaves: Vec<&'a Leaf> = Vec::new();
         for entry in self.walk() {
@@ -976,7 +975,7 @@ impl<'a> MST<'a> {
         Ok(leaves)
     }
 
-    // Returns total leaf count
+    /// Returns total leaf count
     pub fn leaf_count(self) -> Result<usize> {
         let leaves = self.leaves()?;
         Ok(leaves.len())
@@ -985,8 +984,8 @@ impl<'a> MST<'a> {
     // Reachable tree traversal
     // -------------------
 
-    // Walk reachable branches of tree & emit nodes, consumer can bail at any point
-    // by returning false
+    /// Walk reachable branches of tree & emit nodes, consumer can bail at any point
+    /// by returning false
     pub fn walk_reachable(self) -> NodeIterReachable<'a> {
         NodeEntry::MST(self).iter_reachable()
     }
@@ -1001,14 +1000,11 @@ impl<'a> MST<'a> {
         Ok(leaves)
     }
 
-    // Sync Protocol
-    pub fn write_to_car_stream(
-        &mut self,
-        car: &mut BlockWriter,
-    ) -> Result<()> {
+    /// Sync Protocol
+    pub fn write_to_car_stream(&mut self, car: &mut BlockWriter) -> Result<()> {
         let mut leaves = CidSet::new(None);
         let mut to_fetch = CidSet::new(None);
-        to_fetch = to_fetch.add(self.get_pointer()?);
+        to_fetch.add(self.get_pointer()?);
         while to_fetch.size() > 0 {
             let mut next_layer = CidSet::new(None);
             let fetched = self
@@ -1031,17 +1027,19 @@ impl<'a> MST<'a> {
                 });
                 let node_date: NodeData = found.obj.node();
                 let entries = util::deserialize_node_data(&self.storage, &node_date, None)?;
-                
+
                 for entry in entries {
                     match entry {
-                        NodeEntry::Leaf(l) => leaves = leaves.add(l.value),
-                        NodeEntry::MST(mut m) => next_layer = next_layer.add(m.get_pointer()?)
+                        NodeEntry::Leaf(l) => leaves.add(l.value),
+                        NodeEntry::MST(mut m) => next_layer.add(m.get_pointer()?),
                     }
                 }
             }
             to_fetch = next_layer;
         }
-        let leaf_data = self.storage.get_blocks(&mut self.storage.conn, leaves.to_list())?;
+        let leaf_data = self
+            .storage
+            .get_blocks(&mut self.storage.conn, leaves.to_list())?;
         if leaf_data.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "mst leaf".to_owned(),
@@ -1073,4 +1071,6 @@ impl<'a> MST<'a> {
     }
 }
 
+pub mod diff;
 pub mod util;
+pub mod walker;

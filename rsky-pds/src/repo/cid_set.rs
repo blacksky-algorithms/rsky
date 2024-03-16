@@ -2,12 +2,12 @@ use libipld::Cid;
 use std::collections::HashSet;
 use std::str::FromStr;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CidSet {
     pub set: HashSet<String>,
 }
 impl CidSet {
-    pub fn new(arr: Option<Vec<Cid>>) -> CidSet {
+    pub fn new(arr: Option<Vec<Cid>>) -> Self {
         let str_arr: Vec<String> = arr
             .unwrap_or(Vec::new())
             .into_iter()
@@ -18,28 +18,28 @@ impl CidSet {
         }
     }
 
-    pub fn add(mut self, cid: Cid) -> CidSet {
+    pub fn add(&mut self, cid: Cid) -> () {
         self.set.insert(cid.to_string());
-        self
+        ()
     }
 
-    pub fn add_set(mut self, to_merge: CidSet) -> CidSet {
+    pub fn add_set(mut self, to_merge: CidSet) -> () {
         for cid in to_merge.to_list() {
-            self = self.add(cid);
+            self.add(cid);
         }
-        self
+        ()
     }
 
-    pub fn subtract_set(mut self, to_subtract: CidSet) -> CidSet {
+    pub fn subtract_set(mut self, to_subtract: CidSet) -> () {
         for cid in to_subtract.to_list() {
-            self = self.delete(cid);
+            self.delete(cid);
         }
-        self
+        ()
     }
 
-    pub fn delete(mut self, cid: Cid) -> CidSet {
+    pub fn delete(&mut self, cid: Cid) -> () {
         self.set.remove(&cid.to_string());
-        self
+        ()
     }
 
     pub fn has(&self, cid: Cid) -> bool {
@@ -50,9 +50,9 @@ impl CidSet {
         self.set.len()
     }
 
-    pub fn clear(mut self) -> CidSet {
+    pub fn clear(mut self) -> () {
         self.set.clear();
-        self
+        ()
     }
 
     pub fn to_list(&self) -> Vec<Cid> {

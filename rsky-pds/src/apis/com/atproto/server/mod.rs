@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use std::env;
 use unsigned_varint::encode::u16 as encode_varint;
 
-// Important to user `preserve_order` with serde_json so these bytes are ordered
-// correctly when encoding.
+/// Important to user `preserve_order` with serde_json so these bytes are ordered
+/// correctly when encoding.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AtprotoPdsService {
     #[serde(rename(deserialize = "type", serialize = "type"))]
@@ -50,7 +50,7 @@ pub struct PlcGenesisOperation {
     pub sig: Option<String>,
 }
 
-// Formatted xxxxx-xxxxx
+/// Formatted xxxxx-xxxxx
 pub fn get_random_token() -> String {
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -60,10 +60,10 @@ pub fn get_random_token() -> String {
     token[0..5].to_owned() + "-" + &token[5..10]
 }
 
-// generate an invite code preceded by the hostname
-// with '.'s replaced by '-'s so it is not mistakable for a link
-// ex: blacksky-app-abc234-567xy
-// regex: blacksky-app-[a-z2-7]{5}-[a-z2-7]{5}
+/// generate an invite code preceded by the hostname
+/// with '.'s replaced by '-'s so it is not mistakable for a link
+/// ex: blacksky-app-abc234-567xy
+/// regex: blacksky-app-[a-z2-7]{5}-[a-z2-7]{5}
 pub fn gen_invite_code() -> String {
     env::var("HOSTNAME").unwrap().replace(".", "-") + "-" + &get_random_token()
 }
@@ -120,7 +120,7 @@ pub fn sign(mut genesis: PlcGenesisOperation, private_key: &SecretKey) -> PlcGen
     genesis
 }
 
-// https://github.com/gnunicorn/rust-multicodec/blob/master/src/lib.rs#L249-L260
+/// https://github.com/gnunicorn/rust-multicodec/blob/master/src/lib.rs#L249-L260
 pub fn multicodec_wrap(bytes: Vec<u8>) -> Vec<u8> {
     let mut buf = [0u8; 3];
     encode_varint(0xe7, &mut buf);

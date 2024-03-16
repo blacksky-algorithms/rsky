@@ -1,8 +1,30 @@
 use crate::repo::block_map::BlockMap;
 use crate::repo::error::DataStoreError;
+use crate::repo::types::RepoRecord;
+use crate::repo::util::cbor_to_lex_record;
 use crate::storage::{Ipld, ObjAndBytes};
 use anyhow::Result;
 use libipld::Cid;
+
+pub struct RecordAndBytes {
+    pub record: RepoRecord,
+    pub bytes: Vec<u8>,
+}
+
+pub fn get_and_parse_record(blocks: &BlockMap, cid: Cid) -> Result<RecordAndBytes> {
+    let bytes = blocks.get(cid);
+    return if let Some(b) = bytes {
+        let record = cbor_to_lex_record(b.clone())?;
+        Ok(RecordAndBytes {
+            record,
+            bytes: b.clone(),
+        })
+    } else {
+        Err(anyhow::Error::new(DataStoreError::MissingBlock(
+            cid.to_string(),
+        )))
+    };
+}
 
 pub fn get_and_parse_by_kind(
     blocks: &BlockMap,

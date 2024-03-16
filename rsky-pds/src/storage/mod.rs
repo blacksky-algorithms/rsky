@@ -4,6 +4,8 @@ use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::NodeData;
 use crate::repo::parse;
+use crate::repo::types::{RepoRecord, VersionedCommit};
+use crate::repo::util::cbor_to_lex_record;
 use anyhow::Result;
 use diesel::prelude::*;
 use libipld::Cid;
@@ -33,14 +35,24 @@ pub enum Ipld {
     Link(Cid),
     /// Represents MST Node.
     Node(NodeData),
+    /// Represents a commit,
+    VersionedCommit(VersionedCommit),
 }
 
 impl Ipld {
     pub fn node(self) -> NodeData {
-        if let Ipld::Node(n) = self {
-            n
+        if let Ipld::Node(s) = self {
+            s
         } else {
             panic!("Not a NodeData")
+        }
+    }
+
+    pub fn commit(self) -> VersionedCommit {
+        if let Ipld::VersionedCommit(s) = self {
+            s
+        } else {
+            panic!("Not a VersionedCommit")
         }
     }
 }
@@ -137,5 +149,10 @@ impl<'a> SqlRepoReader<'a> {
     pub fn read_obj(&mut self, cid: &Cid, check: impl Fn(&'_ Ipld) -> bool) -> Result<Ipld> {
         let obj = self.read_obj_and_bytes(cid, check)?;
         Ok(obj.obj)
+    }
+
+    pub fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
+        let bytes = self.get_bytes(&mut self.conn, cid)?;
+        Ok(cbor_to_lex_record(bytes)?)
     }
 }

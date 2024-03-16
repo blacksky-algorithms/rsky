@@ -16,3 +16,4 @@ pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
 }
 
 pub mod ipld;
+pub mod tid;
