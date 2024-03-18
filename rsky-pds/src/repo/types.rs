@@ -113,7 +113,7 @@ pub enum RecordWriteOp {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum RecordWriteEnum {
     List(Vec<RecordWriteOp>),
-    Single(RecordWriteOp)
+    Single(RecordWriteOp),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -212,31 +212,31 @@ pub type CarBlock = CidAndBytes;
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BlobConstraint {
     pub max_size: Option<usize>,
-    pub accept: Option<Vec<String>>
+    pub accept: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PreparedBlobRef {
-    cid: Cid,
-    mime_type: String,
-    contraints: BlobConstraint
+    pub cid: Cid,
+    pub mime_type: String,
+    pub contraints: BlobConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PreparedCreateOrUpdate {
-    action: WriteOpAction,
-    uri: String,
-    cid: Cid,
-    swap_cid: Option<Cid>,
-    record: RepoRecord,
-    blobs: Vec<PreparedBlobRef>
+    pub action: WriteOpAction,
+    pub uri: String,
+    pub cid: Cid,
+    pub swap_cid: Option<Cid>,
+    pub record: RepoRecord,
+    pub blobs: Vec<PreparedBlobRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PreparedDelete {
-    action: WriteOpAction,
-    uri: String,
-    swap_cid: Option<Cid>
+    pub action: WriteOpAction,
+    pub uri: String,
+    pub swap_cid: Option<Cid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -249,7 +249,7 @@ pub enum PreparedWrite {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StatusAttr {
     pub applied: bool,
-    pub r#ref: Option<String>
+    pub r#ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -411,7 +411,7 @@ pub enum Ids {
     ToolsOzoneModerationGetRepo,
     ToolsOzoneModerationQueryEvents,
     ToolsOzoneModerationQueryStatuses,
-    ToolsOzoneModerationSearchRepos
+    ToolsOzoneModerationSearchRepos,
 }
 
 impl Ids {
@@ -431,8 +431,12 @@ impl Ids {
             Ids::ComAtprotoAdminUpdateAccountHandle => "com.atproto.admin.updateAccountHandle",
             Ids::ComAtprotoAdminUpdateAccountPassword => "com.atproto.admin.updateAccountPassword",
             Ids::ComAtprotoAdminUpdateSubjectStatus => "com.atproto.admin.updateSubjectStatus",
-            Ids::ComAtprotoIdentityGetRecommendedDidCredentials => "com.atproto.identity.getRecommendedDidCredentials",
-            Ids::ComAtprotoIdentityRequestPlcOperationSignature => "com.atproto.identity.requestPlcOperationSignature",
+            Ids::ComAtprotoIdentityGetRecommendedDidCredentials => {
+                "com.atproto.identity.getRecommendedDidCredentials"
+            }
+            Ids::ComAtprotoIdentityRequestPlcOperationSignature => {
+                "com.atproto.identity.requestPlcOperationSignature"
+            }
             Ids::ComAtprotoIdentityResolveHandle => "com.atproto.identity.resolveHandle",
             Ids::ComAtprotoIdentitySignPlcOperation => "com.atproto.identity.signPlcOperation",
             Ids::ComAtprotoIdentitySubmitPlcOperation => "com.atproto.identity.submitPlcOperation",
@@ -466,13 +470,17 @@ impl Ids {
             Ids::ComAtprotoServerDeleteAccount => "com.atproto.server.deleteAccount",
             Ids::ComAtprotoServerDeleteSession => "com.atproto.server.deleteSession",
             Ids::ComAtprotoServerDescribeServer => "com.atproto.server.describeServer",
-            Ids::ComAtprotoServerGetAccountInviteCodes => "com.atproto.server.getAccountInviteCodes",
+            Ids::ComAtprotoServerGetAccountInviteCodes => {
+                "com.atproto.server.getAccountInviteCodes"
+            }
             Ids::ComAtprotoServerGetServiceAuth => "com.atproto.server.getServiceAuth",
             Ids::ComAtprotoServerGetSession => "com.atproto.server.getSession",
             Ids::ComAtprotoServerListAppPasswords => "com.atproto.server.listAppPasswords",
             Ids::ComAtprotoServerRefreshSession => "com.atproto.server.refreshSession",
             Ids::ComAtprotoServerRequestAccountDelete => "com.atproto.server.requestAccountDelete",
-            Ids::ComAtprotoServerRequestEmailConfirmation => "com.atproto.server.requestEmailConfirmation",
+            Ids::ComAtprotoServerRequestEmailConfirmation => {
+                "com.atproto.server.requestEmailConfirmation"
+            }
             Ids::ComAtprotoServerRequestEmailUpdate => "com.atproto.server.requestEmailUpdate",
             Ids::ComAtprotoServerRequestPasswordReset => "com.atproto.server.requestPasswordReset",
             Ids::ComAtprotoServerReserveSigningKey => "com.atproto.server.reserveSigningKey",
@@ -493,7 +501,9 @@ impl Ids {
             Ids::ComAtprotoSyncSubscribeRepos => "com.atproto.sync.subscribeRepos",
             Ids::ComAtprotoTempCheckSignupQueue => "com.atproto.temp.checkSignupQueue",
             Ids::ComAtprotoTempFetchLabels => "com.atproto.temp.fetchLabels",
-            Ids::ComAtprotoTempRequestPhoneVerification => "com.atproto.temp.requestPhoneVerification",
+            Ids::ComAtprotoTempRequestPhoneVerification => {
+                "com.atproto.temp.requestPhoneVerification"
+            }
             Ids::AppBskyActorDefs => "app.bsky.actor.defs",
             Ids::AppBskyActorGetPreferences => "app.bsky.actor.getPreferences",
             Ids::AppBskyActorGetProfile => "app.bsky.actor.getProfile",
@@ -541,7 +551,9 @@ impl Ids {
             Ids::AppBskyGraphGetLists => "app.bsky.graph.getLists",
             Ids::AppBskyGraphGetMutes => "app.bsky.graph.getMutes",
             Ids::AppBskyGraphGetRelationships => "app.bsky.graph.getRelationships",
-            Ids::AppBskyGraphGetSuggestedFollowsByActor => "app.bsky.graph.getSuggestedFollowsByActor",
+            Ids::AppBskyGraphGetSuggestedFollowsByActor => {
+                "app.bsky.graph.getSuggestedFollowsByActor"
+            }
             Ids::AppBskyGraphList => "app.bsky.graph.list",
             Ids::AppBskyGraphListblock => "app.bsky.graph.listblock",
             Ids::AppBskyGraphListitem => "app.bsky.graph.listitem",
@@ -558,15 +570,23 @@ impl Ids {
             Ids::AppBskyNotificationUpdateSeen => "app.bsky.notification.updateSeen",
             Ids::AppBskyRichtextFacet => "app.bsky.richtext.facet",
             Ids::AppBskyUnspeccedDefs => "app.bsky.unspecced.defs",
-            Ids::AppBskyUnspeccedGetPopularFeedGenerators => "app.bsky.unspecced.getPopularFeedGenerators",
+            Ids::AppBskyUnspeccedGetPopularFeedGenerators => {
+                "app.bsky.unspecced.getPopularFeedGenerators"
+            }
             Ids::AppBskyUnspeccedGetTaggedSuggestions => "app.bsky.unspecced.getTaggedSuggestions",
             Ids::AppBskyUnspeccedSearchActorsSkeleton => "app.bsky.unspecced.searchActorsSkeleton",
             Ids::AppBskyUnspeccedSearchPostsSkeleton => "app.bsky.unspecced.searchPostsSkeleton",
-            Ids::ToolsOzoneCommunicationCreateTemplate => "tools.ozone.communication.createTemplate",
+            Ids::ToolsOzoneCommunicationCreateTemplate => {
+                "tools.ozone.communication.createTemplate"
+            }
             Ids::ToolsOzoneCommunicationDefs => "tools.ozone.communication.defs",
-            Ids::ToolsOzoneCommunicationDeleteTemplate => "tools.ozone.communication.deleteTemplate",
+            Ids::ToolsOzoneCommunicationDeleteTemplate => {
+                "tools.ozone.communication.deleteTemplate"
+            }
             Ids::ToolsOzoneCommunicationListTemplates => "tools.ozone.communication.listTemplates",
-            Ids::ToolsOzoneCommunicationUpdateTemplate => "tools.ozone.communication.updateTemplate",
+            Ids::ToolsOzoneCommunicationUpdateTemplate => {
+                "tools.ozone.communication.updateTemplate"
+            }
             Ids::ToolsOzoneModerationDefs => "tools.ozone.moderation.defs",
             Ids::ToolsOzoneModerationEmitEvent => "tools.ozone.moderation.emitEvent",
             Ids::ToolsOzoneModerationGetEvent => "tools.ozone.moderation.getEvent",
@@ -574,7 +594,7 @@ impl Ids {
             Ids::ToolsOzoneModerationGetRepo => "tools.ozone.moderation.getRepo",
             Ids::ToolsOzoneModerationQueryEvents => "tools.ozone.moderation.queryEvents",
             Ids::ToolsOzoneModerationQueryStatuses => "tools.ozone.moderation.queryStatuses",
-            Ids::ToolsOzoneModerationSearchRepos => "tools.ozone.moderation.searchRepos"
+            Ids::ToolsOzoneModerationSearchRepos => "tools.ozone.moderation.searchRepos",
         }
     }
 }

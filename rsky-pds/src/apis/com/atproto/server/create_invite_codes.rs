@@ -49,7 +49,7 @@ pub async fn create_invite_codes(
                             InviteCodeSchema::code.eq(code.clone()),
                             InviteCodeSchema::availableUses.eq(&body.use_count),
                             InviteCodeSchema::disabled.eq(0),
-                            InviteCodeSchema::forUser.eq(account.clone()),
+                            InviteCodeSchema::forAccount.eq(account.clone()),
                             InviteCodeSchema::createdBy.eq("admin".to_string()),
                             InviteCodeSchema::createdAt.eq(format!("{}", dt.format("%+"))),
                         ))

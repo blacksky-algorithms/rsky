@@ -20,5 +20,11 @@ pub enum RepoError {
     #[error("Record was at`{0:?}`")]
     BadRecordSwapError(Option<Cid>),
     #[error("Invalid record error")]
-    InvalidRecordError
+    InvalidRecordError,
+}
+
+#[derive(Error, Debug)]
+pub enum BlobError {
+    #[error("Blob not found")]
+    BlobNotFoundError,
 }

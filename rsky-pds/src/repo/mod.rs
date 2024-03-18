@@ -1,15 +1,30 @@
+// based on https://github.com/bluesky-social/atproto/blob/main/packages/repo/src/repo.ts
+// also adds components from https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/repo/transactor.ts
+
 use crate::common::tid::{Ticker, TID};
+use crate::repo::blob::BlobReader;
 use crate::repo::block_map::BlockMap;
+use crate::repo::cid_set::CidSet;
 use crate::repo::data_diff::DataDiff;
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::MST;
-use crate::repo::types::{CollectionContents, Commit, CommitData, RecordCreateOrUpdateOp, RepoContents, RepoRecord, UnsignedCommit, VersionedCommit, RecordWriteEnum, RecordWriteOp};
+use crate::repo::record::RecordReader;
+use crate::repo::types::{
+    CollectionContents, Commit, CommitData, PreparedCreateOrUpdate, PreparedWrite,
+    RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp, RepoContents, RepoRecord,
+    UnsignedCommit, VersionedCommit, WriteOpAction,
+};
 use crate::storage::{Ipld, SqlRepoReader};
 use anyhow::{bail, Result};
+use chrono::offset::Utc as UtcOffset;
+use chrono::DateTime;
 use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;
-use crate::repo::cid_set::CidSet;
+use std::time::SystemTime;
+use aws_sdk_s3::config::BehaviorVersion;
+use crate::repo::aws::s3::S3BlobStore;
+use futures::executor;
 
 pub struct CommitRecord {
     collection: String,
@@ -19,16 +34,20 @@ pub struct CommitRecord {
 }
 
 pub struct Repo<'a> {
-    storage: SqlRepoReader<'a>,
+    storage: SqlRepoReader<'a>, // get ipld blocks from db
+    record: RecordReader<'a>,   // get lexicon records from db
+    blob: BlobReader<'a>,       // get blobs
     data: MST<'a>,
     commit: Commit,
     cid: Cid,
 }
 
 impl<'a> Repo<'a> {
-    pub fn new(storage: SqlRepoReader, data: MST, commit: Commit, cid: Cid) -> Self {
+    pub fn new(storage: SqlRepoReader, blobstore: S3BlobStore, data: MST, commit: Commit, cid: Cid) -> Self {
         Repo {
             storage,
+            record: RecordReader::new(&mut storage.conn.clone()),
+            blob: BlobReader::new(&mut storage.conn.clone(), blobstore),
             data,
             commit,
             cid,
@@ -41,7 +60,7 @@ impl<'a> Repo<'a> {
         } else {
             storage.get_root()
         };
-        match commit_cid { 
+        match commit_cid {
             Some(commit_cid) => {
                 let commit: VersionedCommit = storage
                     .read_obj(&commit_cid, |obj: &'a Ipld| match obj {
@@ -52,16 +71,20 @@ impl<'a> Repo<'a> {
                     .commit();
                 let data = MST::load(storage.clone(), commit.data(), None)?;
                 println!("Loaded repo for did: `{:?}`", commit.did());
-                Ok(Repo {
-                    storage: storage.clone(),
+                let config = async {
+                    return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+                };
+                let config = executor::block_on(config);
+                Ok(Repo::new(
+                    storage.clone(),
+                    S3BlobStore::new(commit.did().to_owned(), &config),
                     data,
-                    commit: util::ensure_v3_commit(commit),
-                    cid: commit_cid,
-                })
-            },
-            None => bail!("No cid provided and none in storage")
+                    util::ensure_v3_commit(commit),
+                    commit_cid,
+                ))
+            }
+            None => bail!("No cid provided and none in storage"),
         }
-
     }
 
     pub fn did(&self) -> String {
@@ -151,9 +174,9 @@ impl<'a> Repo<'a> {
                 version: 3,
                 rev: rev.0.clone(),
                 prev: None, // added for backwards compatibility with v2
-                data: data_cid
+                data: data_cid,
             },
-            keypair
+            keypair,
         )?;
         let commit_cid = new_blocks.add(commit)?;
         Ok(CommitData {
@@ -162,7 +185,7 @@ impl<'a> Repo<'a> {
             since: None,
             prev: None,
             new_blocks,
-            removed_cids: diff.removed_cids
+            removed_cids: diff.removed_cids,
         })
     }
 
@@ -175,28 +198,23 @@ impl<'a> Repo<'a> {
         mut storage: SqlRepoReader,
         did: String,
         keypair: Keypair,
-        initial_writes: Option<Vec<RecordCreateOrUpdateOp>>
+        initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
-        let commit = Repo::format_init_commit(
-            storage,
-            did,
-            keypair,
-            initial_writes
-        )?;
+        let commit = Repo::format_init_commit(storage, did, keypair, initial_writes)?;
         Repo::create_from_commit(&mut storage, commit)
     }
-    
+
     pub fn format_commit(
         &mut self,
         to_write: RecordWriteEnum,
-        keypair: Keypair
+        keypair: Keypair,
     ) -> Result<CommitData> {
         let writes = match to_write {
             RecordWriteEnum::List(to_write) => to_write,
-            RecordWriteEnum::Single(to_write) => vec![to_write]
+            RecordWriteEnum::Single(to_write) => vec![to_write],
         };
         let mut leaves = BlockMap::new();
-        
+
         let mut data = self.data.clone();
         for write in writes {
             match write {
@@ -204,30 +222,30 @@ impl<'a> Repo<'a> {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
                     data = data.add(&data_key, cid, None)?;
-                },
+                }
                 RecordWriteOp::Update(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
                     data = data.update(&data_key, cid)?;
-                },
+                }
                 RecordWriteOp::Delete(write) => {
                     let data_key = util::format_data_key(write.collection, write.rkey);
                     data = data.delete(&data_key)?;
-                },
+                }
             }
         }
-        
+
         let data_cid = data.get_pointer()?;
         let diff = DataDiff::of(data, Some(self.data.clone()))?;
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
-        
+
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
         if added_leaves.missing.len() > 0 {
-            bail!("Missing leaf blocks: {:?}",added_leaves.missing);
+            bail!("Missing leaf blocks: {:?}", added_leaves.missing);
         }
         new_blocks.add_map(added_leaves.blocks)?;
-        
+
         let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
         let commit = util::sign_commit(
             UnsignedCommit {
@@ -235,9 +253,9 @@ impl<'a> Repo<'a> {
                 version: 3,
                 rev: rev.0.clone(),
                 prev: None, // added for backwards compatibility with v2
-                data: data_cid
+                data: data_cid,
             },
-            keypair
+            keypair,
         )?;
         let commit_cid = new_blocks.add(commit)?;
 
@@ -247,46 +265,38 @@ impl<'a> Repo<'a> {
         } else {
             removed_cids.add(self.cid);
         }
-        
-       Ok(CommitData{
-           cid: commit_cid,
-           rev: rev.0,
-           since: Some(self.commit.rev.clone()),
-           prev: Some(self.cid),
-           new_blocks,
-           removed_cids
-       })
+
+        Ok(CommitData {
+            cid: commit_cid,
+            rev: rev.0,
+            since: Some(self.commit.rev.clone()),
+            prev: Some(self.cid),
+            new_blocks,
+            removed_cids,
+        })
     }
-    
+
     pub fn apply_commit(&mut self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
         self.storage.apply_commit(commit_data)?;
         Repo::load(&mut self.storage, Some(commit_data_cid))
     }
-    
-    pub fn apply_writes(
-        &mut self,
-        to_write: RecordWriteEnum,
-        keypair: Keypair
-    ) -> Result<Self> {
+
+    pub fn apply_writes(&mut self, to_write: RecordWriteEnum, keypair: Keypair) -> Result<Self> {
         let commit = self.format_commit(to_write, keypair)?;
         self.apply_commit(commit)
     }
-    
-    pub fn format_resign_commit(
-        &self,
-        rev: String,
-        keypair: Keypair
-    ) -> Result<CommitData> {
+
+    pub fn format_resign_commit(&self, rev: String, keypair: Keypair) -> Result<CommitData> {
         let commit = util::sign_commit(
             UnsignedCommit {
                 did: self.did(),
                 version: 3,
                 rev: rev.clone(),
                 prev: None, // added for backwards compatibility with v2
-                data: self.commit.data
+                data: self.commit.data,
             },
-            keypair
+            keypair,
         )?;
         let mut new_blocks = BlockMap::new();
         let commit_cid = new_blocks.add(commit)?;
@@ -296,16 +306,77 @@ impl<'a> Repo<'a> {
             since: None,
             prev: None,
             new_blocks,
-            removed_cids: CidSet::new(Some(vec![self.cid]))
+            removed_cids: CidSet::new(Some(vec![self.cid])),
         })
     }
-    
+
     pub fn resign_commit(&mut self, rev: String, keypair: Keypair) -> Result<Self> {
         let formatted = self.format_resign_commit(rev, keypair)?;
         self.apply_commit(formatted)
     }
+
+    // Transactors
+    // -------------------
+
+    // TO DO: Update to use AtUri
+    pub fn create_repo(
+        &mut self,
+        did: String,
+        keypair: Keypair,
+        writes: Vec<PreparedCreateOrUpdate>,
+    ) -> Result<CommitData> {
+        let write_ops = writes
+            .into_iter()
+            .map(|prepare| {
+                let parts = prepare.uri.split("/").collect::<Vec<&str>>();
+                let collection = *parts.get(0).unwrap_or(&"");
+                let rkey = *parts.get(1).unwrap_or(&"");
+
+                RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: collection.to_owned(),
+                    rkey: rkey.to_owned(),
+                    record: prepare.record,
+                }
+            })
+            .collect::<Vec<RecordCreateOrUpdateOp>>();
+        let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
+        self.storage.apply_commit(commit)?;
+        // this.blob.processWriteBlobs(commit.rev, writes)
+        todo!()
+    }
+
+    pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
+        let system_time = SystemTime::now();
+        let dt: DateTime<UtcOffset> = system_time.into();
+        let now = format!("{}", dt.format("%+"));
+        writes
+            .into_iter()
+            .map(|write| match write {
+                PreparedWrite::Create(write) => Ok(self.record.index_record(
+                    write.uri,
+                    write.cid,
+                    Some(write.record),
+                    Some(write.action),
+                    rev,
+                    now,
+                )?),
+                PreparedWrite::Update(write) => Ok(self.record.index_record(
+                    write.uri,
+                    write.cid,
+                    Some(write.record),
+                    Some(write.action),
+                    rev,
+                    now,
+                )?),
+                PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
+            })
+            .collect::<Result<()>>()
+    }
 }
 
+pub mod aws;
+pub mod blob;
 pub mod blob_refs;
 pub mod block_map;
 pub mod cid_set;
@@ -313,7 +384,6 @@ pub mod data_diff;
 pub mod error;
 pub mod mst;
 pub mod parse;
+pub mod record;
 pub mod types;
 pub mod util;
-mod reader;
-mod record;

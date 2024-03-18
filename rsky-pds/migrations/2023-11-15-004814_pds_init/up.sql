@@ -148,7 +148,7 @@ CREATE INDEX blob_tempkey_idx
 -- Create Record Blob Table
 CREATE TABLE IF NOT EXISTS pds.record_blob (
     "blobCid" character varying NOT NULL,
-    "recordUri" integer NOT NULL
+    "recordUri" character varying NOT NULL
 );
 ALTER TABLE ONLY pds.record_blob
     DROP CONSTRAINT IF EXISTS record_blob_pkey;

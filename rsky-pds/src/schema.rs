@@ -111,7 +111,7 @@ pub mod pds {
     diesel::table! {
         pds.record_blob (blobCid, recordUri) {
             blobCid -> Varchar,
-            recordUri -> Int4,
+            recordUri -> Varchar,
         }
     }
 

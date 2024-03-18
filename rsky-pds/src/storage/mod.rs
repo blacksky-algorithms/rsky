@@ -69,9 +69,10 @@ pub struct SqlRepoReader<'a> {
     pub conn: &'a PgConnection,
     pub blocks: BlockMap,
     pub root: Option<Cid>,
-    pub rev: Option<String>
+    pub rev: Option<String>,
 }
 
+// Basically handles getting ipld blocks from db
 impl<'a> SqlRepoReader<'a> {
     pub fn new(conn: &mut PgConnection, blocks: Option<BlockMap>) -> Self {
         let mut this = SqlRepoReader {
@@ -79,7 +80,7 @@ impl<'a> SqlRepoReader<'a> {
             conn,
             blocks: BlockMap::new(),
             root: None,
-            rev: None
+            rev: None,
         };
         if let Some(blocks) = blocks {
             this.blocks.add_map(blocks).unwrap();
@@ -166,6 +167,9 @@ impl<'a> SqlRepoReader<'a> {
         Ok(cbor_to_lex_record(bytes)?)
     }
 
+    // Transactors
+    // -------------------
+
     pub fn apply_commit(&mut self, commit: CommitData) -> Result<()> {
         self.root = Some(commit.cid);
         let rm_cids = commit.removed_cids.to_list();
@@ -177,7 +181,7 @@ impl<'a> SqlRepoReader<'a> {
         })?;
         Ok(())
     }
-    
+
     pub fn get_root(&self) -> Option<Cid> {
         self.root
     }

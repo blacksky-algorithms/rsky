@@ -2,11 +2,11 @@ use crate::common::tid::Ticker;
 use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
-use std::collections::BTreeMap;
 use indexmap::IndexMap;
 use secp256k1::{Keypair, Message};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
     let json = serde_json::to_string(&unsigned).unwrap();
@@ -17,13 +17,13 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
     let mut sig = keypair.secret_key().sign_ecdsa(message);
     sig.normalize_s();
     let commit_sig = sig.serialize_compact();
-    Ok(Commit{
+    Ok(Commit {
         did: unsigned.did,
         version: unsigned.version,
         data: unsigned.data,
         rev: unsigned.rev,
         prev: unsigned.prev,
-        sig: commit_sig.to_vec()
+        sig: commit_sig.to_vec(),
     })
 }
 
