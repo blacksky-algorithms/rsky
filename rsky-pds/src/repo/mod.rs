@@ -35,31 +35,117 @@ pub struct CommitRecord {
 
 pub struct Repo {
     storage: SqlRepoReader, // get ipld blocks from db
-    record: RecordReader,   // get lexicon records from db
-    blob: BlobReader,       // get blobs
     data: MST,
     commit: Commit,
     cid: Cid,
 }
 
-impl Repo {
+pub struct ActorStore {
+    storage: SqlRepoReader, // get ipld blocks from db
+    record: RecordReader,   // get lexicon records from db
+    blob: BlobReader,       // get blobs
+}
+
+impl ActorStore {
+    // static
     pub fn new(
         storage: SqlRepoReader,
-        blobstore: S3BlobStore,
+        blobstore: S3BlobStore
+    ) -> Self {
+        /* Useful example of creating config for blobstore
+        let config = async {
+            return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+        };
+        let config = executor::block_on(config);*/
+        ActorStore {
+            storage: storage.clone(),
+            record: RecordReader::new(),
+            blob: BlobReader::new(blobstore),
+        }
+    }
+
+    // Transactors
+    // -------------------
+
+    // TO DO: Update to use AtUri
+    pub fn create_repo(
+        &mut self,
+        did: String,
+        keypair: Keypair,
+        writes: Vec<PreparedCreateOrUpdate>,
+    ) -> Result<CommitData> {
+        let write_ops = writes.clone()
+            .into_iter()
+            .map(|prepare| {
+                let parts = prepare.uri.split("/").collect::<Vec<&str>>();
+                let collection = *parts.get(0).unwrap_or(&"");
+                let rkey = *parts.get(1).unwrap_or(&"");
+
+                RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: collection.to_owned(),
+                    rkey: rkey.to_owned(),
+                    record: prepare.record,
+                }
+            })
+            .collect::<Vec<RecordCreateOrUpdateOp>>();
+        let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
+        self.storage.apply_commit(commit.clone())?;
+        let writes = writes.into_iter().map(|w| PreparedWrite::Create(w)).collect::<Vec<PreparedWrite>>();
+        self.blob.process_writes_blob(writes)?;
+        Ok(commit)
+    }
+
+    pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
+        let system_time = SystemTime::now();
+        let dt: DateTime<UtcOffset> = system_time.into();
+        let now = format!("{}", dt.format("%+"));
+        writes
+            .into_iter()
+            .map(|write| match write {
+                PreparedWrite::Create(write) => Ok(self.record.index_record(
+                    write.uri,
+                    write.cid,
+                    Some(write.record),
+                    Some(write.action),
+                    rev.clone(),
+                    now.clone(),
+                )?),
+                PreparedWrite::Update(write) => Ok(self.record.index_record(
+                    write.uri,
+                    write.cid,
+                    Some(write.record),
+                    Some(write.action),
+                    rev.clone(),
+                    now.clone(),
+                )?),
+                PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
+            })
+            .collect::<Result<()>>()
+    }
+    
+    // TO DO
+    // process_writes()
+    // format_commit()
+}
+
+impl Repo {
+    // static
+    pub fn new(
+        storage: SqlRepoReader,
         data: MST,
         commit: Commit,
         cid: Cid,
     ) -> Self {
         Repo {
             storage: storage.clone(),
-            record: RecordReader::new(),
-            blob: BlobReader::new(blobstore),
             data,
             commit,
             cid,
         }
     }
 
+    // static
     pub fn load(storage: &mut SqlRepoReader, cid: Option<Cid>) -> Result<Self> {
         let commit_cid = if let Some(cid) = cid {
             Some(cid)
@@ -77,13 +163,8 @@ impl Repo {
                     .commit();
                 let data = MST::load(storage.clone(), commit.data(), None)?;
                 println!("Loaded repo for did: `{:?}`", commit.did());
-                let config = async {
-                    return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
-                };
-                let config = executor::block_on(config);
                 Ok(Repo::new(
                     storage.clone(),
-                    S3BlobStore::new(commit.did().to_owned(), &config),
                     data,
                     util::ensure_v3_commit(commit),
                     commit_cid,
@@ -156,6 +237,7 @@ impl Repo {
         Ok(contents.to_owned())
     }
 
+    // static
     pub fn format_init_commit(
         storage: SqlRepoReader,
         did: String,
@@ -195,11 +277,13 @@ impl Repo {
         })
     }
 
+    // static
     pub fn create_from_commit(storage: &mut SqlRepoReader, commit: CommitData) -> Result<Self> {
         storage.apply_commit(commit.clone())?;
         Repo::load(storage, Some(commit.cid))
     }
 
+    // static
     pub fn create(
         mut storage: SqlRepoReader,
         did: String,
@@ -320,66 +404,7 @@ impl Repo {
         let formatted = self.format_resign_commit(rev, keypair)?;
         self.apply_commit(formatted)
     }
-
-    // Transactors
-    // -------------------
-
-    // TO DO: Update to use AtUri
-    pub fn create_repo(
-        &mut self,
-        did: String,
-        keypair: Keypair,
-        writes: Vec<PreparedCreateOrUpdate>,
-    ) -> Result<CommitData> {
-        let write_ops = writes.clone()
-            .into_iter()
-            .map(|prepare| {
-                let parts = prepare.uri.split("/").collect::<Vec<&str>>();
-                let collection = *parts.get(0).unwrap_or(&"");
-                let rkey = *parts.get(1).unwrap_or(&"");
-
-                RecordCreateOrUpdateOp {
-                    action: WriteOpAction::Create,
-                    collection: collection.to_owned(),
-                    rkey: rkey.to_owned(),
-                    record: prepare.record,
-                }
-            })
-            .collect::<Vec<RecordCreateOrUpdateOp>>();
-        let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
-        self.storage.apply_commit(commit.clone())?;
-        let writes = writes.into_iter().map(|w| PreparedWrite::Create(w)).collect::<Vec<PreparedWrite>>();
-        self.blob.process_writes_blob(writes)?;
-        Ok(commit)
-    }
-
-    pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
-        let system_time = SystemTime::now();
-        let dt: DateTime<UtcOffset> = system_time.into();
-        let now = format!("{}", dt.format("%+"));
-        writes
-            .into_iter()
-            .map(|write| match write {
-                PreparedWrite::Create(write) => Ok(self.record.index_record(
-                    write.uri,
-                    write.cid,
-                    Some(write.record),
-                    Some(write.action),
-                    rev.clone(),
-                    now.clone(),
-                )?),
-                PreparedWrite::Update(write) => Ok(self.record.index_record(
-                    write.uri,
-                    write.cid,
-                    Some(write.record),
-                    Some(write.action),
-                    rev.clone(),
-                    now.clone(),
-                )?),
-                PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
-            })
-            .collect::<Result<()>>()
-    }
+    
 }
 
 pub mod aws;

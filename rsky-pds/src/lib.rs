@@ -17,3 +17,5 @@ pub mod models;
 pub mod repo;
 pub mod schema;
 pub mod storage;
+pub mod account_manager;
+pub mod auth_verifier;

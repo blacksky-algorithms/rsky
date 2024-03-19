@@ -42,6 +42,8 @@ thiserror = "1.0.40"
 aws-sdk-s3 = "1.19.1"
 aws-config = "1.1.8"
 futures = "0.3.28"
+scrypt = "0.11.0"
+jwt-simple = "0.12.9"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0-rc.3"

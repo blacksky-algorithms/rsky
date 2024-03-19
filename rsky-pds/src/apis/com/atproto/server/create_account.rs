@@ -12,6 +12,11 @@ use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::time::SystemTime;
+use aws_sdk_s3::config::BehaviorVersion;
+use futures::executor;
+use crate::repo::{ActorStore, Repo};
+use crate::repo::aws::s3::S3BlobStore;
+use crate::storage::SqlRepoReader;
 
 #[rocket::post(
     "/xrpc/com.atproto.server.createAccount",
@@ -82,9 +87,7 @@ pub async fn create_account(
                 recovery_key = Some(input_recovery_key.to_owned());
             }
             // TO DO: Lookup user by email as well
-
-            // TO DO: Create Repo in storage
-            // https://github.com/DavidBuchanan314/picopds/blob/main/repo.py#L154
+            
 
             let did;
             let secp = Secp256k1::new();
@@ -106,7 +109,36 @@ pub async fn create_account(
                     ));
                 }
             }
-
+            
+            // TO DO: Move this to main.rs
+            let config = async {
+                return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+            };
+            let config = executor::block_on(config);
+            
+            let mut actor_store = ActorStore::new(
+                SqlRepoReader::new(None),
+                S3BlobStore::new(did.clone(), &config)
+            );
+            let commit = match actor_store.create_repo(
+                did.clone(),
+                signing_key,
+                Vec::new()
+            ) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    eprintln!("{:?}", error);
+                    let internal_error = InternalErrorMessageResponse {
+                        code: Some(InternalErrorCode::InternalError),
+                        message: Some("Failed to create account.".to_owned()),
+                    };
+                    return Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ));
+                }
+            };
+            
             let system_time = SystemTime::now();
             let dt: DateTime<UtcOffset> = system_time.into();
 
