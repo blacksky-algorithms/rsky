@@ -44,7 +44,7 @@ impl DataDiff {
         }
     }
 
-    pub fn of(curr: MST, prev: Option<MST>) -> Result<DataDiff> {
+    pub fn of(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
         mst_diff(curr, prev)
     }
 

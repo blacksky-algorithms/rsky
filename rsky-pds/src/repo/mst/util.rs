@@ -42,7 +42,7 @@ pub fn ensure_valid_mst_key(key: &String) -> Result<()> {
     }
 }
 
-pub fn cid_for_entries(entries: &Vec<NodeEntry>) -> Result<Cid> {
+pub fn cid_for_entries(entries: Vec<NodeEntry>) -> Result<Cid> {
     todo!()
 }
 
@@ -57,7 +57,7 @@ pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
     Ok(x)
 }
 
-pub fn serialize_node_data(entries: &Vec<NodeEntry>) -> Result<NodeData> {
+pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
     let mut data = NodeData {
         l: None,
         e: Vec::new(),
@@ -98,11 +98,11 @@ pub fn serialize_node_data(entries: &Vec<NodeEntry>) -> Result<NodeData> {
     Ok(data)
 }
 
-pub fn deserialize_node_data<'a>(
+pub fn deserialize_node_data(
     storage: &SqlRepoReader,
-    data: &NodeData,
+    data: NodeData,
     layer: Option<u32>,
-) -> Result<Vec<NodeEntry<'a>>> {
+) -> Result<Vec<NodeEntry>> {
     let mut entries: Vec<NodeEntry> = Vec::new();
     if let Some(l) = data.l {
         let new_layer: Option<u32>;
@@ -115,17 +115,17 @@ pub fn deserialize_node_data<'a>(
         let mst = NodeEntry::MST(mst);
         entries.push(mst)
     }
-    let mut last_key = "";
+    let mut last_key: String = "".to_owned();
     for entry in data.e {
         let key_str = str::from_utf8(entry.k.as_ref())?;
         let p = usize::try_from(entry.p)?;
         let key = format!("{}{}", &last_key[0..p], key_str);
         ensure_valid_mst_key(&key)?;
         entries.push(NodeEntry::Leaf(Leaf {
-            key,
+            key: key.clone(),
             value: entry.v,
         }));
-        last_key = key.as_str();
+        last_key = key;
         if let Some(t) = entry.t {
             let new_layer: Option<u32>;
             if let Some(layer) = layer {
@@ -141,7 +141,7 @@ pub fn deserialize_node_data<'a>(
     Ok(entries)
 }
 
-pub fn layer_for_entries(entries: &Vec<NodeEntry>) -> Result<Option<u32>> {
+pub fn layer_for_entries(entries: Vec<NodeEntry>) -> Result<Option<u32>> {
     let first_leaf = entries.into_iter().find(|entry| entry.is_leaf());
     if let Some(f) = first_leaf {
         match f {
@@ -154,7 +154,8 @@ pub fn layer_for_entries(entries: &Vec<NodeEntry>) -> Result<Option<u32>> {
 }
 
 pub fn leading_zeros_on_hash(key: &Vec<u8>) -> Result<u32> {
-    let hash: &[u8] = Sha256::digest(&*key).as_ref();
+    let digest = Sha256::digest(&*key);
+    let hash: &[u8] = digest.as_ref();
     let mut leading_zeros = 0;
     for byte in hash {
         if *byte < 64 {

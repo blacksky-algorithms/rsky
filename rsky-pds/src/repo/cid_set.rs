@@ -19,18 +19,18 @@ impl CidSet {
     }
 
     pub fn add(&mut self, cid: Cid) -> () {
-        self.set.insert(cid.to_string());
+        let _ = &self.set.insert(cid.to_string());
         ()
     }
 
-    pub fn add_set(mut self, to_merge: CidSet) -> () {
+    pub fn add_set(&mut self, to_merge: CidSet) -> () {
         for cid in to_merge.to_list() {
-            self.add(cid);
+            let _ = &self.add(cid);
         }
         ()
     }
 
-    pub fn subtract_set(mut self, to_subtract: CidSet) -> () {
+    pub fn subtract_set(&mut self, to_subtract: CidSet) -> () {
         for cid in to_subtract.to_list() {
             self.delete(cid);
         }

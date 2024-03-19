@@ -52,7 +52,7 @@ impl TID {
     }
 
     // newer > older
-    pub fn compare_to(&self, other: TID) -> i8 {
+    pub fn compare_to(&self, other: &TID) -> i8 {
         if self.0 > other.0 {
             return 1;
         }
@@ -62,15 +62,15 @@ impl TID {
         0
     }
 
-    pub fn equals(&self, other: TID) -> bool {
+    pub fn equals(&self, other: &TID) -> bool {
         self.0 == other.0
     }
 
-    pub fn newer_than(&self, other: TID) -> bool {
+    pub fn newer_than(&self, other: &TID) -> bool {
         self.compare_to(other) > 0
     }
 
-    pub fn older_than(&self, other: TID) -> bool {
+    pub fn older_than(&self, other: &TID) -> bool {
         self.compare_to(other) < 0
     }
 }
@@ -112,7 +112,7 @@ impl Ticker {
 
         let tid = TID::from_time(micros, clock_id);
         match prev {
-            Some(prev) if tid.newer_than(prev) => tid,
+            Some(ref prev) if tid.newer_than(prev) => tid,
             Some(prev) => TID::from_time(prev.timestamp() + 1, clock_id),
             None => tid,
         }

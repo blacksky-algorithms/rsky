@@ -11,6 +11,7 @@ use diesel::prelude::*;
 use libipld::Cid;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use crate::db::establish_connection;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -64,20 +65,18 @@ pub struct ObjAndBytes {
 }
 
 #[derive(Clone)]
-pub struct SqlRepoReader<'a> {
+pub struct SqlRepoReader {
     pub cache: BlockMap,
-    pub conn: &'a PgConnection,
     pub blocks: BlockMap,
     pub root: Option<Cid>,
     pub rev: Option<String>,
 }
 
 // Basically handles getting ipld blocks from db
-impl<'a> SqlRepoReader<'a> {
-    pub fn new(conn: &mut PgConnection, blocks: Option<BlockMap>) -> Self {
+impl SqlRepoReader {
+    pub fn new(blocks: Option<BlockMap>) -> Self {
         let mut this = SqlRepoReader {
             cache: BlockMap::new(),
-            conn,
             blocks: BlockMap::new(),
             root: None,
             rev: None,
@@ -90,10 +89,10 @@ impl<'a> SqlRepoReader<'a> {
 
     pub fn get_blocks(
         &mut self,
-        conn: &mut PgConnection,
         cids: Vec<Cid>,
     ) -> Result<BlocksAndMissing> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
 
         let cached = self.cache.get_many(cids);
         if let Ok(cached_result) = cached {
@@ -117,8 +116,9 @@ impl<'a> SqlRepoReader<'a> {
         })
     }
 
-    pub fn get_bytes(&mut self, conn: &mut PgConnection, cid: &Cid) -> Result<Vec<u8>> {
+    pub fn get_bytes(&mut self, cid: &Cid) -> Result<Vec<u8>> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
 
         let cached = self.cache.get(*cid);
         if let Some(cached_result) = cached {
@@ -129,13 +129,13 @@ impl<'a> SqlRepoReader<'a> {
             .filter(RepoBlockSchema::cid.eq(cid.to_string()))
             .select(RepoBlockSchema::content)
             .first(conn)
-            .map_err(|error| anyhow::Error::new(DataStoreError::MissingBlock(cid.to_string())))?;
+            .map_err(|_| anyhow::Error::new(DataStoreError::MissingBlock(cid.to_string())))?;
         self.cache.set(*cid, result.clone());
         Ok(result)
     }
 
     pub fn has(&mut self, cid: Cid) -> Result<bool> {
-        let got = self.get_bytes(&mut self.conn, &cid)?;
+        let got = self.get_bytes(&cid)?;
         Ok(!got.is_empty())
     }
 
@@ -144,7 +144,7 @@ impl<'a> SqlRepoReader<'a> {
         cid: &Cid,
         check: impl Fn(&'_ Ipld) -> bool,
     ) -> Result<ObjAndBytes> {
-        let bytes = self.get_bytes(&mut self.conn, cid)?;
+        let bytes = self.get_bytes(cid)?;
         Ok(parse::parse_obj_by_kind(bytes, *cid, check)?)
     }
 
@@ -163,7 +163,7 @@ impl<'a> SqlRepoReader<'a> {
     }
 
     pub fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
-        let bytes = self.get_bytes(&mut self.conn, cid)?;
+        let bytes = self.get_bytes(cid)?;
         Ok(cbor_to_lex_record(bytes)?)
     }
 
@@ -176,9 +176,10 @@ impl<'a> SqlRepoReader<'a> {
         for cid in rm_cids {
             self.blocks.delete(cid)?;
         }
-        commit.new_blocks.for_each(|bytes, cid| {
-            self.blocks.set(cid, bytes.clone());
-        })?;
+
+        for (cid, bytes) in commit.new_blocks.map.iter() {
+            self.blocks.set(Cid::from_str(cid)?, bytes.clone());
+        }
         Ok(())
     }
 

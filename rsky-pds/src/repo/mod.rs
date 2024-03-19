@@ -2,6 +2,7 @@
 // also adds components from https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/repo/transactor.ts
 
 use crate::common::tid::{Ticker, TID};
+use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
 use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
@@ -16,15 +17,14 @@ use crate::repo::types::{
 };
 use crate::storage::{Ipld, SqlRepoReader};
 use anyhow::{bail, Result};
+use aws_sdk_s3::config::BehaviorVersion;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
+use futures::executor;
 use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
-use aws_sdk_s3::config::BehaviorVersion;
-use crate::repo::aws::s3::S3BlobStore;
-use futures::executor;
 
 pub struct CommitRecord {
     collection: String,
@@ -33,21 +33,27 @@ pub struct CommitRecord {
     record: RepoRecord,
 }
 
-pub struct Repo<'a> {
-    storage: SqlRepoReader<'a>, // get ipld blocks from db
-    record: RecordReader<'a>,   // get lexicon records from db
-    blob: BlobReader<'a>,       // get blobs
-    data: MST<'a>,
+pub struct Repo {
+    storage: SqlRepoReader, // get ipld blocks from db
+    record: RecordReader,   // get lexicon records from db
+    blob: BlobReader,       // get blobs
+    data: MST,
     commit: Commit,
     cid: Cid,
 }
 
-impl<'a> Repo<'a> {
-    pub fn new(storage: SqlRepoReader, blobstore: S3BlobStore, data: MST, commit: Commit, cid: Cid) -> Self {
+impl Repo {
+    pub fn new(
+        storage: SqlRepoReader,
+        blobstore: S3BlobStore,
+        data: MST,
+        commit: Commit,
+        cid: Cid,
+    ) -> Self {
         Repo {
-            storage,
-            record: RecordReader::new(&mut storage.conn.clone()),
-            blob: BlobReader::new(&mut storage.conn.clone(), blobstore),
+            storage: storage.clone(),
+            record: RecordReader::new(),
+            blob: BlobReader::new(blobstore),
             data,
             commit,
             cid,
@@ -63,7 +69,7 @@ impl<'a> Repo<'a> {
         match commit_cid {
             Some(commit_cid) => {
                 let commit: VersionedCommit = storage
-                    .read_obj(&commit_cid, |obj: &'a Ipld| match obj {
+                    .read_obj(&commit_cid, |obj: &Ipld| match obj {
                         Ipld::VersionedCommit(VersionedCommit::Commit(_)) => true,
                         Ipld::VersionedCommit(VersionedCommit::LegacyV2Commit(_)) => true,
                         _ => false,
@@ -125,10 +131,11 @@ impl<'a> Repo<'a> {
     pub fn get_content(&mut self) -> Result<RepoContents> {
         let entries = self.data.list(None, None, None)?;
         let cids = entries
+            .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let found = self.storage.get_blocks(&mut self.storage.conn, cids)?;
+        let found = self.storage.get_blocks(cids)?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -139,15 +146,14 @@ impl<'a> Repo<'a> {
         for entry in entries {
             let path = util::parse_data_key(&entry.key)?;
             if contents.get(&path.collection).is_none() {
-                contents.insert(path.collection, CollectionContents::new());
+                contents.insert(path.collection.clone(), CollectionContents::new());
             }
             let parsed = parse::get_and_parse_record(&found.blocks, entry.value)?;
-            contents
-                .get(&path.collection)
-                .unwrap()
-                .insert(path.rkey, parsed.record);
+            if let Some(collection_contents) = contents.get_mut(&path.collection) {
+                collection_contents.insert(path.rkey, parsed.record);
+            }
         }
-        Ok(contents)
+        Ok(contents.to_owned())
     }
 
     pub fn format_init_commit(
@@ -164,7 +170,7 @@ impl<'a> Repo<'a> {
             data = data.add(&data_key, cid, None)?;
         }
         let data_cid = data.get_pointer()?;
-        let diff = DataDiff::of(data, None)?;
+        let diff = DataDiff::of(&mut data, None)?;
         new_blocks.add_map(diff.new_mst_blocks)?;
 
         let rev = Ticker::new().next(None);
@@ -200,7 +206,7 @@ impl<'a> Repo<'a> {
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
-        let commit = Repo::format_init_commit(storage, did, keypair, initial_writes)?;
+        let commit = Repo::format_init_commit(storage.clone(), did, keypair, initial_writes)?;
         Repo::create_from_commit(&mut storage, commit)
     }
 
@@ -236,7 +242,7 @@ impl<'a> Repo<'a> {
         }
 
         let data_cid = data.get_pointer()?;
-        let diff = DataDiff::of(data, Some(self.data.clone()))?;
+        let diff = DataDiff::of(&mut data, Some(&mut self.data.clone()))?;
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
 
@@ -358,16 +364,16 @@ impl<'a> Repo<'a> {
                     write.cid,
                     Some(write.record),
                     Some(write.action),
-                    rev,
-                    now,
+                    rev.clone(),
+                    now.clone(),
                 )?),
                 PreparedWrite::Update(write) => Ok(self.record.index_record(
                     write.uri,
                     write.cid,
                     Some(write.record),
                     Some(write.action),
-                    rev,
-                    now,
+                    rev.clone(),
+                    now.clone(),
                 )?),
                 PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
             })

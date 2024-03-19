@@ -63,6 +63,7 @@ impl BlockMap {
         self.map.clear()
     }
 
+    // Not really using. Issues with closures
     pub fn for_each(&self, cb: impl Fn(&Vec<u8>, Cid) -> ()) -> Result<()> {
         for (key, val) in self.map.iter() {
             cb(val, Cid::from_str(&key)?);
@@ -72,12 +73,9 @@ impl BlockMap {
 
     pub fn entries(&self) -> Result<Vec<CidAndBytes>> {
         let mut entries: Vec<CidAndBytes> = Vec::new();
-        self.for_each(|bytes, cid| {
-            entries.push(CidAndBytes {
-                cid,
-                bytes: bytes.clone(),
-            })
-        })?;
+        for (cid, bytes) in self.map.iter() {
+            entries.push(CidAndBytes { cid: Cid::from_str(cid)?, bytes: bytes.clone()});
+        }
         Ok(entries)
     }
 
@@ -86,9 +84,9 @@ impl BlockMap {
     }
 
     pub fn add_map(&mut self, to_add: BlockMap) -> Result<()> {
-        let results = to_add.for_each(|bytes, cid| {
-            self.set(cid, bytes.clone());
-        })?;
+        let results = for (cid, bytes) in to_add.map.iter() {
+            self.set(Cid::from_str(cid)?, bytes.clone());
+        };
         Ok(results)
     }
 
@@ -98,9 +96,9 @@ impl BlockMap {
 
     pub fn byte_size(&self) -> Result<usize> {
         let mut size = 0;
-        self.for_each(|bytes, _| {
+        for (_, bytes) in self.map.iter() {
             size += bytes.len();
-        })?;
+        }
         Ok(size)
     }
 

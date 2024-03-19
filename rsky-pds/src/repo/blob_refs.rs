@@ -67,7 +67,7 @@ impl BlobRef {
             TypedJsonBlobRef {
                 r#type: "blob".to_owned(),
                 r#ref: j.r#ref,
-                mime_type: j.mime_type,
+                mime_type: j.mime_type.clone(),
                 size: j.size,
             }
         } else {

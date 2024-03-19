@@ -5,26 +5,26 @@ use anyhow::{bail, Result};
 pub struct WalkerStatusDone(bool);
 
 #[derive(Clone)]
-pub struct WalkerStatusProgress<'a> {
+pub struct WalkerStatusProgress {
     pub done: bool,
-    pub curr: NodeEntry<'a>,
-    pub walking: Option<MST<'a>>, // walking set to null if `curr` is the root of the tree
+    pub curr: NodeEntry,
+    pub walking: Option<MST>, // walking set to null if `curr` is the root of the tree
     pub index: usize,
 }
 
 #[derive(Clone)]
-pub enum WalkerStatus<'a> {
+pub enum WalkerStatus {
     WalkerStatusDone(WalkerStatusDone),
-    WalkerStatusProgress(WalkerStatusProgress<'a>),
+    WalkerStatusProgress(WalkerStatusProgress),
 }
 
 #[derive(Clone)]
-pub struct MstWalker<'a> {
-    pub stack: Vec<WalkerStatus<'a>>,
-    pub status: WalkerStatus<'a>,
+pub struct MstWalker {
+    pub stack: Vec<WalkerStatus>,
+    pub status: WalkerStatus,
 }
 
-impl<'a> MstWalker<'a> {
+impl MstWalker {
     pub fn new(root: MST) -> Self {
         MstWalker {
             stack: Vec::new(),
@@ -63,7 +63,7 @@ impl<'a> MstWalker<'a> {
                 if let Some(ref mut mst) = p.walking {
                     let entries = mst.get_entries()?;
                     p.index += 1;
-                    let next = entries.get(p.index);
+                    let next = entries.into_iter().nth(p.index);
                     if let Some(next) = next {
                         p.curr = next.clone();
                     } else {
@@ -89,13 +89,13 @@ impl<'a> MstWalker<'a> {
         match self.status {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
-                if let Some(ref mut mst) = p.walking {
+                if let Some(_) = p.walking {
                     if let NodeEntry::MST(ref mut mst) = p.curr {
                         let next = mst.at_index(0)?;
                         if let Some(next) = next {
+                            p.walking = Some(mst.clone());
                             self.stack
                                 .push(WalkerStatus::WalkerStatusProgress(p.clone()));
-                            p.walking = Some(mst.clone());
                             p.curr = next.clone();
                             p.index = 0;
                         } else {

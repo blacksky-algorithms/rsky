@@ -59,14 +59,12 @@ pub fn get_backlinks(uri: String, record: RepoRecord) -> Result<Vec<models::Back
     Ok(Vec::new())
 }
 
-pub struct RecordReader<'a> {
-    pub conn: &'a PgConnection,
-}
+pub struct RecordReader{}
 
 // Basically handles getting lexicon records from db
-impl<'a> RecordReader<'a> {
-    pub fn new(conn: &mut PgConnection) -> Self {
-        RecordReader { conn }
+impl RecordReader {
+    pub fn new() -> Self {
+        RecordReader {}
     }
 
     pub fn record_count(&mut self, conn: &mut PgConnection) -> Result<i64> {
@@ -284,8 +282,13 @@ impl<'a> RecordReader<'a> {
         uri: String,
         record: RepoRecord,
     ) -> Result<Vec<String>> {
-        let record_backlinks = get_backlinks(uri, record)?;
-        let collection = *uri.split("/").collect::<Vec<&str>>().get(0).unwrap_or(&"");
+        let record_backlinks = get_backlinks(uri.clone(), record)?;
+        let collection = uri
+            .split("/")
+            .collect::<Vec<&str>>()
+            .into_iter()
+            .nth(0)
+            .unwrap_or("");
         let conflicts: Vec<Vec<models::Record>> = record_backlinks
             .into_iter()
             .map(|backlink| {
@@ -316,19 +319,19 @@ impl<'a> RecordReader<'a> {
 
     pub fn index_record(
         &mut self,
-        uri: String, // TO DO: Use AtUri
-        cid: Cid,
-        record: Option<RepoRecord>,
-        action: Option<WriteOpAction>, // Create or update with a default of create
-        repo_rev: String,
-        timestamp: String,
+        _uri: String, // TO DO: Use AtUri
+        _cid: Cid,
+        _record: Option<RepoRecord>,
+        _action: Option<WriteOpAction>, // Create or update with a default of create
+        _repo_rev: String,
+        _timestamp: String,
     ) -> Result<()> {
         todo!()
     }
 
     pub fn delete_record(
         &mut self,
-        uri: String, // TO DO: Use AtUri
+        _uri: String, // TO DO: Use AtUri
     ) -> Result<()> {
         todo!()
     }

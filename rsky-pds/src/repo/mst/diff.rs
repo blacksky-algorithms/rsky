@@ -3,7 +3,7 @@ use crate::repo::mst::walker::{MstWalker, WalkerStatus};
 use crate::repo::mst::{NodeEntry, MST};
 use anyhow::{bail, Result};
 
-pub fn null_diff(mut tree: MST) -> Result<DataDiff> {
+pub fn null_diff(tree: MST) -> Result<DataDiff> {
     let mut diff = DataDiff::new();
     for entry in tree.walk() {
         diff.node_add(entry.clone())?;
@@ -11,14 +11,14 @@ pub fn null_diff(mut tree: MST) -> Result<DataDiff> {
     Ok(diff)
 }
 
-pub fn mst_diff(mut curr: MST, prev: Option<MST>) -> Result<DataDiff> {
+pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
     curr.get_pointer()?;
-    return if let Some(mut prev) = prev {
+    return if let Some(prev) = prev {
         prev.get_pointer()?;
         let mut diff = DataDiff::new();
 
-        let mut left_walker = MstWalker::new(prev);
-        let mut right_walker = MstWalker::new(curr);
+        let mut left_walker = MstWalker::new(prev.clone());
+        let mut right_walker = MstWalker::new(curr.clone());
         while !matches!(&left_walker.status, WalkerStatus::WalkerStatusDone(_))
             || !matches!(&right_walker.status, WalkerStatus::WalkerStatusDone(_))
         {
@@ -128,6 +128,6 @@ pub fn mst_diff(mut curr: MST, prev: Option<MST>) -> Result<DataDiff> {
         }
         Ok(diff)
     } else {
-        Ok(null_diff(curr)?)
+        Ok(null_diff(curr.clone())?)
     };
 }

@@ -1,3 +1,4 @@
+use std::str::FromStr;
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
 use anyhow::Result;
 use aws_config::SdkConfig;
@@ -21,9 +22,10 @@ struct MoveObject {
     to: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct S3BlobStore {
     client: s3::Client,
-    bucket: String,
+    pub bucket: String,
 }
 
 // Intended to work with DigitalOcean Spaces Object Storage which is an
@@ -37,7 +39,7 @@ impl S3BlobStore {
         }
     }
 
-    pub fn creator(cfg: &SdkConfig) -> Box<dyn Fn(String) -> S3BlobStore> {
+    pub fn creator(cfg: &SdkConfig) -> Box<dyn Fn(String) -> S3BlobStore+ '_> {
         Box::new(move |did: String| {
             return S3BlobStore::new(did, cfg);
         })
@@ -138,8 +140,8 @@ impl S3BlobStore {
         Ok(self.get_object(cid).await?)
     }
 
-    pub async fn delete(&self, cid: Cid) -> Result<()> {
-        Ok(self.delete_key(self.get_stored_path(cid)).await?)
+    pub async fn delete(&self, cid: String) -> Result<()> {
+        Ok(self.delete_key(self.get_stored_path(Cid::from_str(&cid)?)).await?)
     }
 
     pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
