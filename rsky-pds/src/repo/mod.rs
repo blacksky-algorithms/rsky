@@ -331,7 +331,7 @@ impl Repo {
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitData> {
-        let write_ops = writes
+        let write_ops = writes.clone()
             .into_iter()
             .map(|prepare| {
                 let parts = prepare.uri.split("/").collect::<Vec<&str>>();
@@ -347,9 +347,10 @@ impl Repo {
             })
             .collect::<Vec<RecordCreateOrUpdateOp>>();
         let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
-        self.storage.apply_commit(commit)?;
-        // this.blob.processWriteBlobs(commit.rev, writes)
-        todo!()
+        self.storage.apply_commit(commit.clone())?;
+        let writes = writes.into_iter().map(|w| PreparedWrite::Create(w)).collect::<Vec<PreparedWrite>>();
+        self.blob.process_writes_blob(writes)?;
+        Ok(commit)
     }
 
     pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {

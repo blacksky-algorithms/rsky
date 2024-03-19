@@ -93,6 +93,7 @@ pub struct Backlink {
 #[derive(
     Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
 )]
+#[diesel(treat_none_as_null = true)]
 #[diesel(primary_key(cid))]
 #[diesel(table_name = crate::schema::pds::blob)]
 #[diesel(check_for_backend(diesel::pg::Pg))]

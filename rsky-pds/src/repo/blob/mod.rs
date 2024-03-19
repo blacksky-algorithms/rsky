@@ -1,13 +1,15 @@
+use std::fmt::format;
 use crate::models::models;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
-use anyhow::Result;
-use diesel::PgConnection;
+use anyhow::{bail, Result};
 use diesel::*;
 use futures::executor;
 use futures::stream::{self, StreamExt};
 use libipld::Cid;
 use std::str::FromStr;
+use rocket::form::validate::Contains;
+use crate::db::establish_connection;
 
 pub struct BlobReader {
     pub blobstore: S3BlobStore,
@@ -19,13 +21,41 @@ impl BlobReader {
         BlobReader { blobstore }
     }
 
+    pub fn process_writes_blob(
+        &self,
+        writes: Vec<PreparedWrite>
+    ) -> Result<()> {
+        self.delete_dereferenced_blobs(writes.clone())?;
+        writes
+            .into_iter()
+            .map(|write| {
+                Ok(match write {
+                    PreparedWrite::Create(w) => { 
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone())?;
+                            self.associate_blob(blob, w.uri.clone())?;
+                        }
+                    },
+                    PreparedWrite::Update(w) => {
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone())?;
+                            self.associate_blob(blob, w.uri.clone())?;
+                        }
+                    },
+                    _ => ()
+                })
+            })
+            .collect::<Result<Vec<()>>>()?;
+        Ok(())
+    }
+
     pub fn delete_dereferenced_blobs(
-        &mut self,
-        conn: &mut PgConnection,
+        &self,
         writes: Vec<PreparedWrite>,
     ) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
 
         let uris: Vec<String> = writes
             .clone()
@@ -100,4 +130,89 @@ impl BlobReader {
         let _ = executor::block_on(res);
         Ok(())
     }
+
+    pub fn verify_blob_and_make_permanent(
+        &self,
+        blob: PreparedBlobRef
+    ) -> Result<()> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let found = BlobSchema::blob
+            .filter(
+                BlobSchema::cid.eq(blob.cid.to_string())
+                    .and(BlobSchema::takedownRef.is_null()))
+            .select(models::Blob::as_select())
+            .first(conn)
+            .optional()?;
+        if let Some(found) = found {
+            verify_blob(&blob, &found)?;
+            if let Some(ref temp_key) = found.temp_key {
+                let res = async {
+                    Ok::<(), anyhow::Error>(self.blobstore.make_permanent(temp_key.clone(),blob.cid).await?)
+                };
+                let _ = executor::block_on(res);
+            }
+            update(BlobSchema::blob)
+                .filter(BlobSchema::tempKey.eq(found.temp_key))
+                .set(BlobSchema::tempKey.eq::<Option<String>>(None))
+                .execute(conn)?;
+            Ok(())
+        } else {
+            bail!("Cound not find blob: {:?}",blob.cid.to_string())
+        }
+    }
+
+    pub fn associate_blob(&self, blob: PreparedBlobRef, record_uri: String) -> Result<()> {
+        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
+
+        insert_into(RecordBlobSchema::record_blob)
+            .values((
+                RecordBlobSchema::blobCid.eq(blob.cid.to_string()),
+                RecordBlobSchema::recordUri.eq(record_uri)))
+            .on_conflict_do_nothing()
+            .execute(conn)?;
+        Ok(())
+
+    }
+}
+
+pub fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
+    if accepted.contains("*/*".to_owned()) {return true;}
+    let globs: Vec<String> = accepted
+        .clone()
+        .into_iter()
+        .filter(|a| a.ends_with("/*"))
+        .collect::<Vec<String>>();
+    for glob in globs {
+        let start = glob
+            .split("/")
+            .collect::<Vec<&str>>()
+            .first()
+            .copied();
+        if let Some(start) = start {
+            if mime.starts_with(&format!("{start:?}/")) {
+                return true;
+            }
+        }
+    }
+    return accepted.contains(mime);
+}
+
+pub fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result<()> {
+    if let Some(max_size) = blob.contraints.max_size {
+        if found.size as usize > max_size {
+            bail!("BlobTooLarge: This file is too large. It is {:?} but the maximum size is {:?}", found.size, max_size)
+        }
+    }
+    if blob.mime_type != found.mime_type {
+        bail!("InvalidMimeType: Referenced MimeTy[e does not match stored blob. Expected: {:?}, Got: {:?}",found.mime_type, blob.mime_type)
+    }
+    if let Some(ref accept) = blob.contraints.accept {
+        if !accepted_mime(blob.mime_type.clone(), accept.clone()) {
+            bail!("Wrong type of file. It is {:?} but it must match {:?}.",blob.mime_type, accept)
+        }
+    }
+    Ok(())
 }
