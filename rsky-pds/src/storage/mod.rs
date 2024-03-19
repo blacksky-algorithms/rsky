@@ -1,5 +1,6 @@
 // based on atproto/packages/pds/src/actor-store/repo/sql-repo-reader.ts
 
+use crate::db::establish_connection;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::NodeData;
@@ -11,7 +12,6 @@ use diesel::prelude::*;
 use libipld::Cid;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use crate::db::establish_connection;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -87,10 +87,7 @@ impl SqlRepoReader {
         this
     }
 
-    pub fn get_blocks(
-        &mut self,
-        cids: Vec<Cid>,
-    ) -> Result<BlocksAndMissing> {
+    pub fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 

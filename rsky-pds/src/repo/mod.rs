@@ -48,10 +48,7 @@ pub struct ActorStore {
 
 impl ActorStore {
     // static
-    pub fn new(
-        storage: SqlRepoReader,
-        blobstore: S3BlobStore
-    ) -> Self {
+    pub fn new(storage: SqlRepoReader, blobstore: S3BlobStore) -> Self {
         /* Useful example of creating config for blobstore
         let config = async {
             return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
@@ -74,7 +71,8 @@ impl ActorStore {
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitData> {
-        let write_ops = writes.clone()
+        let write_ops = writes
+            .clone()
             .into_iter()
             .map(|prepare| {
                 let parts = prepare.uri.split("/").collect::<Vec<&str>>();
@@ -91,7 +89,10 @@ impl ActorStore {
             .collect::<Vec<RecordCreateOrUpdateOp>>();
         let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
         self.storage.apply_commit(commit.clone())?;
-        let writes = writes.into_iter().map(|w| PreparedWrite::Create(w)).collect::<Vec<PreparedWrite>>();
+        let writes = writes
+            .into_iter()
+            .map(|w| PreparedWrite::Create(w))
+            .collect::<Vec<PreparedWrite>>();
         self.blob.process_writes_blob(writes)?;
         Ok(commit)
     }
@@ -123,7 +124,7 @@ impl ActorStore {
             })
             .collect::<Result<()>>()
     }
-    
+
     // TO DO
     // process_writes()
     // format_commit()
@@ -131,12 +132,7 @@ impl ActorStore {
 
 impl Repo {
     // static
-    pub fn new(
-        storage: SqlRepoReader,
-        data: MST,
-        commit: Commit,
-        cid: Cid,
-    ) -> Self {
+    pub fn new(storage: SqlRepoReader, data: MST, commit: Commit, cid: Cid) -> Self {
         Repo {
             storage: storage.clone(),
             data,
@@ -404,7 +400,6 @@ impl Repo {
         let formatted = self.format_resign_commit(rev, keypair)?;
         self.apply_commit(formatted)
     }
-    
 }
 
 pub mod aws;

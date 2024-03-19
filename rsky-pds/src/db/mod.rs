@@ -1,7 +1,7 @@
+use anyhow::Result;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use dotenvy::dotenv;
-use anyhow::Result;
 use std::env;
 
 pub fn establish_connection() -> Result<PgConnection> {

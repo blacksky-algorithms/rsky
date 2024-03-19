@@ -70,7 +70,7 @@ impl Iterator for NodeIter {
                 let mut subtree = mst.clone();
                 let this = self.entries.get(0).unwrap().clone();
                 self.entries = self.entries[1..].to_vec();
-                
+
                 // start iterating the child trees
                 *self = NodeIter {
                     entries: subtree.get_entries().unwrap(),
@@ -298,11 +298,7 @@ impl MST {
         Ok(MST::new(storage, pointer, Some(entries), layer))
     }
 
-    pub fn from_data(
-        storage: SqlRepoReader,
-        data: NodeData,
-        layer: Option<u32>,
-    ) -> Result<MST> {
+    pub fn from_data(storage: SqlRepoReader, data: NodeData, layer: Option<u32>) -> Result<MST> {
         let entries = util::deserialize_node_data(&storage, data.clone(), layer)?;
         let pointer = ipld::cid_for_cbor(&data)?;
         Ok(MST::new(storage, pointer, Some(entries), layer))
@@ -349,7 +345,11 @@ impl MST {
         let leaf = &data.e[0];
         let layer = Some(util::leading_zeros_on_hash(&leaf.k)?);
 
-        self.entries = Some(util::deserialize_node_data(&self.storage, data.clone(), layer)?);
+        self.entries = Some(util::deserialize_node_data(
+            &self.storage,
+            data.clone(),
+            layer,
+        )?);
 
         if let Some(entries) = self.entries.clone() {
             Ok(entries)
@@ -357,7 +357,7 @@ impl MST {
             bail!("No entries")
         }
     }
-    
+
     pub fn get_pointer(&mut self) -> Result<Cid> {
         if !self.outdated_pointer {
             return Ok(self.pointer);
@@ -679,11 +679,7 @@ impl MST {
     }
 
     /// returns a slice of the node
-    pub fn slice(
-        &mut self,
-        start: Option<usize>,
-        end: Option<usize>,
-    ) -> Result<Vec<NodeEntry>> {
+    pub fn slice(&mut self, start: Option<usize>, end: Option<usize>) -> Result<Vec<NodeEntry>> {
         let entries = self.get_entries()?;
         if start.is_some() && end.is_some() {
             Ok(entries[start.unwrap()..end.unwrap()].to_vec())
@@ -845,7 +841,8 @@ impl MST {
     /// finds index of first leaf node that is greater than or equal to the value
     pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<usize> {
         let entries = self.get_entries()?;
-        let maybe_index = entries.clone()
+        let maybe_index = entries
+            .clone()
             .into_iter()
             .filter_map(|entry| {
                 if let NodeEntry::Leaf(l) = entry {
@@ -1028,9 +1025,7 @@ impl MST {
         to_fetch.add(self.get_pointer()?);
         while to_fetch.size() > 0 {
             let mut next_layer = CidSet::new(None);
-            let fetched = self
-                .storage
-                .get_blocks(to_fetch.to_list())?;
+            let fetched = self.storage.get_blocks(to_fetch.to_list())?;
             if fetched.missing.len() > 0 {
                 return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                     "mst node".to_owned(),
@@ -1058,9 +1053,7 @@ impl MST {
             }
             to_fetch = next_layer;
         }
-        let leaf_data = self
-            .storage
-            .get_blocks(leaves.to_list())?;
+        let leaf_data = self.storage.get_blocks(leaves.to_list())?;
         if leaf_data.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "mst leaf".to_owned(),

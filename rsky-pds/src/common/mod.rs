@@ -1,7 +1,17 @@
 use anyhow::Result;
 use indexmap::IndexMap;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
 use serde_json::Value;
+
+pub fn get_random_str() -> String {
+    let token: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    token
+}
 
 pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
     // Encode object to json before dag-cbor because serde_ipld_dagcbor doesn't properly

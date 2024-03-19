@@ -74,7 +74,10 @@ impl BlockMap {
     pub fn entries(&self) -> Result<Vec<CidAndBytes>> {
         let mut entries: Vec<CidAndBytes> = Vec::new();
         for (cid, bytes) in self.map.iter() {
-            entries.push(CidAndBytes { cid: Cid::from_str(cid)?, bytes: bytes.clone()});
+            entries.push(CidAndBytes {
+                cid: Cid::from_str(cid)?,
+                bytes: bytes.clone(),
+            });
         }
         Ok(entries)
     }

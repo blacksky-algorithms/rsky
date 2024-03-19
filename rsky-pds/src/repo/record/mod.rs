@@ -59,7 +59,7 @@ pub fn get_backlinks(uri: String, record: RepoRecord) -> Result<Vec<models::Back
     Ok(Vec::new())
 }
 
-pub struct RecordReader{}
+pub struct RecordReader {}
 
 // Basically handles getting lexicon records from db
 impl RecordReader {

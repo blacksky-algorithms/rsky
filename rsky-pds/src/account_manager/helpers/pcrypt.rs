@@ -1,11 +1,8 @@
-use scrypt::{
-    password_hash::{
-        rand_core::OsRng,
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
-    },
-    Scrypt
-};
 use anyhow::Result;
+use scrypt::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Scrypt,
+};
 
 pub fn gen_salt_and_hash(password: String) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -16,5 +13,7 @@ pub fn gen_salt_and_hash(password: String) -> Result<String> {
 
 pub fn verify(password: String, stored_hash: String) -> Result<bool> {
     let parsed_hash = PasswordHash::new(&stored_hash)?;
-    Ok(Scrypt.verify_password(password.as_ref(), &parsed_hash).is_ok())
+    Ok(Scrypt
+        .verify_password(password.as_ref(), &parsed_hash)
+        .is_ok())
 }

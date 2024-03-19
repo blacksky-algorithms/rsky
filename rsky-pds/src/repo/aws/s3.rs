@@ -1,21 +1,12 @@
 use std::str::FromStr;
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
+use crate::common::get_random_str;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use aws_sdk_s3 as s3;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use libipld::Cid;
-use rand::{distributions::Alphanumeric, Rng};
-
-fn get_random_str() -> String {
-    let token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
-    token
-}
 
 struct MoveObject {
     from: String,
@@ -39,7 +30,7 @@ impl S3BlobStore {
         }
     }
 
-    pub fn creator(cfg: &SdkConfig) -> Box<dyn Fn(String) -> S3BlobStore+ '_> {
+    pub fn creator(cfg: &SdkConfig) -> Box<dyn Fn(String) -> S3BlobStore + '_> {
         Box::new(move |did: String| {
             return S3BlobStore::new(did, cfg);
         })
@@ -141,7 +132,9 @@ impl S3BlobStore {
     }
 
     pub async fn delete(&self, cid: String) -> Result<()> {
-        Ok(self.delete_key(self.get_stored_path(Cid::from_str(&cid)?)).await?)
+        Ok(self
+            .delete_key(self.get_stored_path(Cid::from_str(&cid)?))
+            .await?)
     }
 
     pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
