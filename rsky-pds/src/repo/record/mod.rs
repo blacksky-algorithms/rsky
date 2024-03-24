@@ -306,7 +306,7 @@ impl RecordReader {
             .map(|record| {
                 format!(
                     "at://{0}/{1}/{2}",
-                    env::var("HOSTNAME").unwrap(),
+                    env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
                     collection,
                     record.rkey
                 )

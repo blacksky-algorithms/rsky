@@ -7,6 +7,8 @@ use secp256k1::{Keypair, Message};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::str::FromStr;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
     let json = serde_json::to_string(&unsigned).unwrap();
@@ -27,8 +29,8 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
     })
 }
 
-pub fn format_data_key(collection: String, rkey: String) -> String {
-    format!("{collection}/{rkey}")
+pub fn format_data_key<T: FromStr + Debug>(collection: T, rkey: T) -> String {
+    format!("{collection:?}/{rkey:?}")
 }
 
 pub fn ipld_to_lex(val: Ipld) -> Lex {

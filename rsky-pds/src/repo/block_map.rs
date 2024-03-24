@@ -1,6 +1,6 @@
 use crate::common;
 use crate::common::ipld;
-use crate::repo::mst::CidAndBytes;
+use crate::repo::types::CidAndBytes;
 use anyhow::Result;
 use libipld::Cid;
 use serde::Serialize;

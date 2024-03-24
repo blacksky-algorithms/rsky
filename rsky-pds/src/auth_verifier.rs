@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 pub enum AuthScope {
     Access,
@@ -16,14 +16,14 @@ impl AuthScope {
             AuthScope::Deactivated => "com.atproto.deactivated",
         }
     }
-    
+
     pub fn from_str(scope: &str) -> Result<Self> {
         match scope {
             "com.atproto.access" => Ok(AuthScope::Access),
             "com.atproto.refresh" => Ok(AuthScope::Refresh),
             "com.atproto.appPass" => Ok(AuthScope::AppPass),
             "com.atproto.deactivated" => Ok(AuthScope::Deactivated),
-            _ => bail!("Invalid AuthScope: `{scope:?}` is not a valid auth scope")
+            _ => bail!("Invalid AuthScope: `{scope:?}` is not a valid auth scope"),
         }
     }
 }

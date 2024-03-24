@@ -1,7 +1,6 @@
 use crate::repo::blob_refs::BlobRef;
 use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
-use crate::repo::mst::CidAndBytes;
 use crate::storage::Ipld;
 use libipld::Cid;
 use std::collections::BTreeMap;
@@ -246,11 +245,28 @@ pub enum PreparedWrite {
     Delete(PreparedDelete),
 }
 
+impl PreparedWrite {
+    pub fn uri(&self) -> &String {
+        match self {
+            PreparedWrite::Create(w) => &w.uri,
+            PreparedWrite::Update(w) => &w.uri,
+            PreparedWrite::Delete(w) => &w.uri,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StatusAttr {
     pub applied: bool,
     pub r#ref: Option<String>,
 }
+
+pub struct CidAndBytes {
+    pub cid: Cid,
+    pub bytes: Vec<u8>,
+}
+
+pub type BlockWriter = Vec<CidAndBytes>;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum Ids {

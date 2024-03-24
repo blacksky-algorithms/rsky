@@ -27,6 +27,8 @@ pub mod pds {
             handle -> Nullable<Varchar>,
             createdAt -> Varchar,
             takedownRef -> Nullable<Varchar>,
+            deactivatedAt -> Nullable<Varchar>,
+            deleteAfter -> Nullable<Varchar>,
         }
     }
 

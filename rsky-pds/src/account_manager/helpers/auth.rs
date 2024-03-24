@@ -1,6 +1,9 @@
 use crate::auth_verifier::AuthScope;
 use crate::common::get_random_str;
+use crate::db::establish_connection;
 use anyhow::Result;
+use chrono::{DateTime, NaiveDateTime, Utc};
+use diesel::*;
 use jwt_simple::prelude::*;
 use secp256k1::Keypair;
 
@@ -79,7 +82,7 @@ pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
     .with_audience(service_did)
     .with_subject(did);
     // alg ES256K
-    let key = ES256kKeyPair::from_bytes(&*jwt_key.secret_bytes())?;
+    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let token = key.sign(claims)?;
     Ok(token)
 }
@@ -105,21 +108,48 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     .with_subject(did)
     .with_jwt_id(jti);
     // alg ES256K
-    let key = ES256kKeyPair::from_bytes(&*jwt_key.secret_bytes())?;
+    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let token = key.sign(claims)?;
     Ok(token)
 }
 
 // @NOTE unsafe for verification, should only be used w/ direct output from createRefreshToken() or createTokens()
 pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToken> {
-    let key = ES256kKeyPair::from_bytes(&*jwt_key.secret_bytes())?;
+    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let public_key = key.public_key();
     let claims = public_key.verify_token::<CustomClaimObj>(&jwt, None)?;
-    assert_eq!(claims.custom.scope, AuthScope::Refresh.as_str().to_owned(), "not a refresh token");
-    Ok(RefreshToken{
+    assert_eq!(
+        claims.custom.scope,
+        AuthScope::Refresh.as_str().to_owned(),
+        "not a refresh token"
+    );
+    Ok(RefreshToken {
         scope: AuthScope::from_str(&claims.custom.scope)?,
         sub: claims.subject.unwrap(),
         exp: claims.expires_at.unwrap(),
-        jti: claims.jwt_id.unwrap()
+        jti: claims.jwt_id.unwrap(),
     })
+}
+
+#[allow(deprecated)]
+pub fn store_refresh_token(payload: RefreshToken, app_password_name: Option<String>) -> Result<()> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    let nanoseconds = 230 * 1000000;
+    let exp = DateTime::<Utc>::from_utc(
+        NaiveDateTime::from_timestamp((payload.exp.as_millis() / 1000) as i64, nanoseconds),
+        Utc,
+    );
+
+    insert_into(RefreshTokenSchema::refresh_token)
+        .values((
+            RefreshTokenSchema::id.eq(payload.jti),
+            RefreshTokenSchema::did.eq(payload.sub),
+            RefreshTokenSchema::appPasswordName.eq(app_password_name),
+            RefreshTokenSchema::expiresAt.eq(format!("{}", exp.format("%+"))),
+        ))
+        .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
+        .execute(conn)?;
+    Ok(())
 }

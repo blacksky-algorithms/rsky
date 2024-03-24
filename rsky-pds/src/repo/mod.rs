@@ -17,10 +17,8 @@ use crate::repo::types::{
 };
 use crate::storage::{Ipld, SqlRepoReader};
 use anyhow::{bail, Result};
-use aws_sdk_s3::config::BehaviorVersion;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use futures::executor;
 use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;

@@ -1,34 +1,124 @@
 /*{"handle":"rudy-alt-3.blacksky.app","password":"H5r%FH@%hhg6rvYF","email":"him+testcreate@rudyfraser.com","inviteCode":"blacksky-app-fqytt-7473e"}*/
+use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::{ActorStore, Repo};
+use crate::repo::{ActorStore};
 use crate::storage::SqlRepoReader;
 use crate::DbConn;
+use crate::SharedSequencer;
+use anyhow::{Result, bail};
 use aws_sdk_s3::config::BehaviorVersion;
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
-use diesel::prelude::*;
 use email_address::*;
 use futures::executor;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use std::time::SystemTime;
+
+#[allow(unused_assignments)]
+async fn create(
+    mut body: Json<CreateAccountInput>,
+    connection: DbConn,
+    sequencer: &State<SharedSequencer>,
+) -> Result<CreateAccountOutput, anyhow::Error> {
+    let CreateAccountInput {
+        email,
+        handle,
+        mut did,
+        invite_code,
+        password,
+        ..
+    } = body.clone().into_inner();
+    let deactivated = false;
+    let cloned_handle = handle.clone();
+    connection
+        .run(move |conn| {
+            match super::lookup_user_by_handle(&cloned_handle, conn) {
+                Ok(_) => bail!("User already exists with handle '{}'", cloned_handle),
+                Err(error) => {
+                    println!("Handle is available: {error:?}");
+                    Ok(())
+                }, // handle is available, lets go
+            }
+        }).await?;
+    if let Some(input_recovery_key) = &body.recovery_key {
+        body.recovery_key = Some(input_recovery_key.to_owned());
+    }
+    // TO DO: Lookup user by email as well
+    
+    let secp = Secp256k1::new();
+    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let secret_key =
+        SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let signing_key = Keypair::from_secret_key(&secp, &secret_key);
+    match super::create_did_and_plc_op(&handle, &body, signing_key) {
+        Ok(did_resp) => {
+            did = Some(did_resp);
+        }
+        Err(error) => {
+            eprintln!("{:?}", error);
+            bail!("Failed to create DID")
+        }
+    }
+    let did = did.unwrap();
+    
+    // TO DO: Move this to main.rs
+    let config = async {
+        return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+    };
+    let config = executor::block_on(config);
+    
+    let mut actor_store = ActorStore::new(
+        SqlRepoReader::new(None),
+        S3BlobStore::new(did.clone(), &config),
+    );
+    let commit = match actor_store.create_repo(did.clone(), signing_key, Vec::new()) {
+        Ok(commit) => commit,
+        Err(error) => {
+            eprintln!("{:?}", error);
+            bail!("Failed to create account")
+        }
+    };
+    
+    let (access_jwt, refresh_jwt) = AccountManager::create_account(CreateAccountOpts {
+        did: did.clone(),
+        handle: handle.clone(),
+        email,
+        password,
+        repo_cid: commit.cid,
+        repo_rev: commit.rev.clone(),
+        invite_code,
+        deactivated: Some(deactivated),
+    })?;
+    
+    if !deactivated {
+        let mut lock = sequencer.sequencer.write().expect("lock shared data");
+        lock.sequence_commit(did.clone(), commit.clone(), vec![])?;
+        lock.sequence_identity_evt(did.clone())?;
+    }
+    AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev)?;
+    Ok(CreateAccountOutput {
+        access_jwt,
+        refresh_jwt,
+        handle,
+        did,
+        did_doc: None,
+    })
+}
 
 #[rocket::post(
     "/xrpc/com.atproto.server.createAccount",
     format = "json",
     data = "<body>"
 )]
-pub async fn create_account(
+pub async fn server_create_account(
     body: Json<CreateAccountInput>,
     connection: DbConn,
+    sequencer: &State<SharedSequencer>,
 ) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    use crate::schema::pds::account::dsl as UserSchema;
-    use crate::schema::pds::actor::dsl as ActorSchema;
     // TO DO: Check if there is an invite code
     // TO DO: Throw error for any plcOp input
 
@@ -64,110 +154,19 @@ pub async fn create_account(
             Json(internal_error),
         ));
     };
-    let result = connection
-        .run(move |conn| {
-            match super::lookup_user_by_handle(&body.handle, conn) {
-                Ok(_) => {
-                    let internal_error = InternalErrorMessageResponse {
-                        code: Some(InternalErrorCode::InternalError),
-                        message: Some(format!(
-                            "User already exists with handle '{}'",
-                            &body.handle
-                        )),
-                    };
-                    return Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ));
-                }
-                Err(error) => println!("Handle is available: {error:?}"), // handle is available, lets go
-            }
-            let mut recovery_key: Option<String> = None;
-            if let Some(input_recovery_key) = &body.recovery_key {
-                recovery_key = Some(input_recovery_key.to_owned());
-            }
-            // TO DO: Lookup user by email as well
 
-            let did;
-            let secp = Secp256k1::new();
-            let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-            let secret_key =
-                SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-            let signing_key = Keypair::from_secret_key(&secp, &secret_key);
-            match super::create_did_and_plc_op(&body.handle, &body, signing_key) {
-                Ok(did_resp) => did = did_resp,
-                Err(error) => {
-                    eprintln!("{:?}", error);
-                    let internal_error = InternalErrorMessageResponse {
-                        code: Some(InternalErrorCode::InternalError),
-                        message: Some("Failed to create DID.".to_owned()),
-                    };
-                    return Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ));
-                }
-            }
-
-            // TO DO: Move this to main.rs
-            let config = async {
-                return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+    match create(body, connection, sequencer).await {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let internal_error = InternalErrorMessageResponse {
+                code: Some(InternalErrorCode::InternalError),
+                message: Some("Internal error".to_string()),
             };
-            let config = executor::block_on(config);
-
-            let mut actor_store = ActorStore::new(
-                SqlRepoReader::new(None),
-                S3BlobStore::new(did.clone(), &config),
-            );
-            let commit = match actor_store.create_repo(did.clone(), signing_key, Vec::new()) {
-                Ok(commit) => commit,
-                Err(error) => {
-                    eprintln!("{:?}", error);
-                    let internal_error = InternalErrorMessageResponse {
-                        code: Some(InternalErrorCode::InternalError),
-                        message: Some("Failed to create account.".to_owned()),
-                    };
-                    return Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ));
-                }
-            };
-
-            let system_time = SystemTime::now();
-            let dt: DateTime<UtcOffset> = system_time.into();
-
-            let new_user_account = (
-                UserSchema::did.eq(did.clone()),
-                UserSchema::email.eq(body.email.clone().unwrap()),
-                UserSchema::password.eq(body.password.clone().unwrap()),
-                UserSchema::recoveryKey.eq(&recovery_key),
-                UserSchema::createdAt.eq(format!("{}", dt.format("%+"))),
-            );
-            let new_actor = (
-                ActorSchema::did.eq(did.clone()),
-                ActorSchema::handle.eq(body.handle.clone()),
-                ActorSchema::createdAt.eq(format!("{}", dt.format("%+"))),
-            );
-            match diesel::insert_into(UserSchema::account)
-                .values(&new_user_account)
-                .execute(conn)
-            {
-                Ok(_) => (),
-                Err(error) => eprintln!("Internal Error: {error}"),
-            };
-            match diesel::insert_into(ActorSchema::actor)
-                .values(&new_actor)
-                .execute(conn)
-            {
-                Ok(_) => (),
-                Err(error) => eprintln!("Internal Error: {error}"),
-            };
-            todo!();
-        })
-        .await;
-    // TO DO: repoman.InitNewActor?
-    // TO DO: Create auth token for user
-    // TO DO: Return output
-    result
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
 }

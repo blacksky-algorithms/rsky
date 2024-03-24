@@ -14,8 +14,12 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
 use rsky_pds::apis::*;
+use rsky_pds::crawlers::Crawlers;
+use rsky_pds::SharedSequencer;
+use rsky_pds::sequencer::Sequencer;
 use rsky_pds::DbConn;
 use std::env;
+use std::sync::RwLock;
 
 pub struct CORS;
 
@@ -114,6 +118,15 @@ fn rocket() -> _ {
     };
 
     let figment = rocket::Config::figment().merge(("databases", map!["pg_db" => db]));
+    let sequencer = SharedSequencer {
+        sequencer: RwLock::new(Sequencer::new(
+            Crawlers::new(
+                env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
+                vec![env::var("PDS_CRAWLER").unwrap_or("https://bgs.bsky-sandbox.dev".to_owned())],
+            ),
+            None,
+        ))
+    };
 
     rocket::custom(figment)
         .mount(
@@ -156,7 +169,7 @@ fn rocket() -> _ {
                 com::atproto::repo::put_record::put_record,
                 com::atproto::repo::upload_blob::upload_blob,
                 com::atproto::server::confirm_email::confirm_email,
-                com::atproto::server::create_account::create_account,
+                com::atproto::server::create_account::server_create_account,
                 com::atproto::server::create_app_password::create_app_password,
                 com::atproto::server::create_invite_code::create_invite_code,
                 com::atproto::server::create_invite_codes::create_invite_codes,
@@ -231,4 +244,5 @@ fn rocket() -> _ {
         .register("/", catchers![default_catcher])
         .attach(CORS)
         .attach(DbConn::fairing())
+        .manage(sequencer)
 }

@@ -273,20 +273,44 @@ pub struct RepoRoot {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Selectable,
+    Insertable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(seq))]
 #[diesel(table_name = crate::schema::pds::repo_seq)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RepoSeq {
-    pub seq: i64,
+    #[diesel(deserialize_as = i64)]
+    pub seq: Option<i64>,
     pub did: String,
     #[diesel(column_name = eventType)]
     #[serde(rename = "eventType")]
     pub event_type: String,
     pub event: Vec<u8>,
-    pub invalidated: i16,
+    #[diesel(deserialize_as = i16)]
+    pub invalidated: Option<i16>,
     #[diesel(column_name = sequencedAt)]
     #[serde(rename = "sequencedAt")]
     pub sequenced_at: String,
+}
+
+impl RepoSeq {
+    pub fn new(did: String, event_type: String, event: Vec<u8>, sequenced_at: String) -> Self {
+        RepoSeq {
+            did,
+            event_type,
+            event,
+            sequenced_at,
+            invalidated: None, // default values used on insert
+            seq: None,         // default values used on insert
+        }
+    }
 }

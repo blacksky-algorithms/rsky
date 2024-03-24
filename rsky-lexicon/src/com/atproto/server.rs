@@ -53,7 +53,7 @@ pub struct GetAccountInviteCodesOutput {
     pub codes: Vec<InviteCode>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateAccountInput {
     pub email: Option<String>,
     pub handle: String,

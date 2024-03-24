@@ -4,6 +4,7 @@ use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
 use crate::repo::parse;
+use crate::repo::types::{BlockWriter, CidAndBytes};
 use crate::storage::{Ipld, ObjAndBytes, SqlRepoReader};
 use anyhow::{anyhow, bail, Result};
 use libipld::Cid;
@@ -244,13 +245,6 @@ impl NodeEntry {
         self.iter()
     }
 }*/
-
-pub struct CidAndBytes {
-    pub cid: Cid,
-    pub bytes: Vec<u8>,
-}
-
-type BlockWriter = Vec<CidAndBytes>;
 
 pub struct UnstoredBlocks {
     root: Cid,
@@ -1019,6 +1013,7 @@ impl MST {
     }
 
     /// Sync Protocol
+    /// @TODO: This needs to implement an actual CarWriter
     pub fn write_to_car_stream(&mut self, car: &mut BlockWriter) -> Result<()> {
         let mut leaves = CidSet::new(None);
         let mut to_fetch = CidSet::new(None);

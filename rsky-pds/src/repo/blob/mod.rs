@@ -6,10 +6,7 @@ use anyhow::{bail, Result};
 use diesel::*;
 use futures::executor;
 use futures::stream::{self, StreamExt};
-use libipld::Cid;
 use rocket::form::validate::Contains;
-use std::fmt::format;
-use std::str::FromStr;
 
 pub struct BlobReader {
     pub blobstore: S3BlobStore,

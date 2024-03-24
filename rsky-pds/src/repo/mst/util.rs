@@ -1,7 +1,6 @@
 use super::{Leaf, NodeData, NodeEntry, TreeEntry, MST};
 use crate::storage::SqlRepoReader;
 use anyhow::{anyhow, Result};
-use diesel::PgConnection;
 use lazy_static::lazy_static;
 use libipld::Cid;
 use regex::Regex;

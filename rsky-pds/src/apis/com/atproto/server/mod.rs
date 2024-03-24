@@ -65,7 +65,11 @@ pub fn get_random_token() -> String {
 /// ex: blacksky-app-abc234-567xy
 /// regex: blacksky-app-[a-z2-7]{5}-[a-z2-7]{5}
 pub fn gen_invite_code() -> String {
-    env::var("HOSTNAME").unwrap().replace(".", "-") + "-" + &get_random_token()
+    env::var("PDS_HOSTNAME")
+        .unwrap_or("localhost".to_owned())
+        .replace(".", "-")
+        + "-"
+        + &get_random_token()
 }
 
 pub fn gen_invite_codes(count: i32) -> Vec<String> {
@@ -77,7 +81,7 @@ pub fn gen_invite_codes(count: i32) -> Vec<String> {
 }
 
 pub fn validate_handle(handle: &str) -> bool {
-    let suffix: String = env::var("HOSTNAME").unwrap();
+    let suffix: String = env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
     let s_slice: &str = &suffix[..]; // take a full slice of the string
     handle.ends_with(s_slice)
     // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
@@ -176,7 +180,10 @@ pub fn create_did_and_plc_op(
         services: PlcGenesisServices {
             atproto_pds: AtprotoPdsService {
                 r#type: "AtprotoPersonalDataServer".to_owned(),
-                endpoint: format!("https://{}", env::var("HOSTNAME").unwrap()),
+                endpoint: format!(
+                    "https://{}",
+                    env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned())
+                ),
             },
         },
         prev: None,
