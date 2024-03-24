@@ -73,9 +73,12 @@ pub struct CreateAccountInput {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateAccountOutput {
-    pub access_jwt: String,
-    pub refresh_jwt: String,
     pub handle: String,
     pub did: String,
-    pub did_doc: Option<String>
+    #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
+    pub did_doc: Option<String>,
+    #[serde(rename = "accessJwt")]
+    pub access_jwt: String,
+    #[serde(rename = "refreshJwt")]
+    pub refresh_jwt: String,
 }

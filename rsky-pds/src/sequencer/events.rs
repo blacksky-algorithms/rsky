@@ -44,7 +44,7 @@ pub struct IdentityEvt {
     pub did: String,
 }
 
-pub fn format_seq_commit(
+pub async fn format_seq_commit(
     did: String,
     commit_data: CommitData,
     writes: Vec<PreparedWrite>,
@@ -58,7 +58,7 @@ pub fn format_seq_commit(
         too_big = true;
         let mut just_root = BlockMap::new();
         just_root.add(commit_data.new_blocks.get(commit_data.cid))?;
-        car_slice = read_car_bytes(&commit_data.cid, just_root)?;
+        car_slice = read_car_bytes(&commit_data.cid, just_root).await?;
     } else {
         too_big = false;
         for w in writes {
@@ -90,7 +90,7 @@ pub fn format_seq_commit(
             }
             ops.push(CommitEvtOp { action, path, cid });
         }
-        car_slice = read_car_bytes(&commit_data.cid, commit_data.new_blocks)?;
+        car_slice = read_car_bytes(&commit_data.cid, commit_data.new_blocks).await?;
     }
 
     let evt = CommitEvt {
@@ -115,7 +115,7 @@ pub fn format_seq_commit(
     ))
 }
 
-pub fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
+pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
     let evt = IdentityEvt { did: did.clone() };
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();

@@ -22,7 +22,7 @@ pub fn ensure_invite_is_available(invite_code: String) -> Result<()> {
         .optional()?;
 
     if invite.is_none() || invite.clone().unwrap().disabled > 0 {
-        bail!("InvalidInviteCode: Provided invite code not available `{invite_code:?}`")
+        bail!("InvalidInviteCode: None or disabled. Provided invite code not available `{invite_code:?}`")
     }
 
     let uses: i64 = InviteCodeUseSchema::invite_code_use
@@ -31,7 +31,7 @@ pub fn ensure_invite_is_available(invite_code: String) -> Result<()> {
         .first(conn)?;
 
     if invite.unwrap().available_uses as i64 <= uses {
-        bail!("InvalidInviteCode: Provided invite code not available `{invite_code:?}`")
+        bail!("InvalidInviteCode: Not enough uses. Provided invite code not available `{invite_code:?}`")
     }
     Ok(())
 }

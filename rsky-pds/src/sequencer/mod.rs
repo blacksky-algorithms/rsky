@@ -24,7 +24,7 @@ impl Sequencer {
         }
     }
 
-    pub fn sequence_evt(&mut self, evt: models::RepoSeq) -> Result<()> {
+    pub async fn sequence_evt(&mut self, evt: models::RepoSeq) -> Result<()> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
         let conn = &mut establish_connection()?;
 
@@ -36,25 +36,22 @@ impl Sequencer {
                 RepoSeqSchema::sequencedAt.eq(evt.sequenced_at),
             ))
             .execute(conn)?;
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        rt.block_on(self.crawlers.notify_of_update())
+        self.crawlers.notify_of_update().await
     }
 
-    pub fn sequence_commit(
+    pub async fn sequence_commit(
         &mut self,
         did: String,
         commit_data: CommitData,
         writes: Vec<PreparedWrite>,
     ) -> Result<()> {
-        let evt = format_seq_commit(did, commit_data, writes)?;
-        Ok(self.sequence_evt(evt)?)
+        let evt = format_seq_commit(did, commit_data, writes).await?;
+        self.sequence_evt(evt).await
     }
 
-    pub fn sequence_identity_evt(&mut self, did: String) -> Result<()> {
-        let evt = format_seq_identity_evt(did)?;
-        Ok(self.sequence_evt(evt)?)
+    pub async fn sequence_identity_evt(&mut self, did: String) -> Result<()> {
+        let evt = format_seq_identity_evt(did).await?;
+        self.sequence_evt(evt).await
     }
 }
 

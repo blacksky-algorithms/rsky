@@ -43,11 +43,17 @@ pub fn register_account(did: String, email: String, password: String) -> Result<
     use crate::schema::pds::account::dsl as AccountSchema;
     let conn = &mut establish_connection()?;
 
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    let created_at = format!("{}", dt.format("%+"));
+
+    // @TODO record recovery key for bring your own recovery key
     let _: String = insert_into(AccountSchema::account)
         .values((
             AccountSchema::did.eq(did),
             AccountSchema::email.eq(email),
             AccountSchema::password.eq(password),
+            AccountSchema::createdAt.eq(created_at),
         ))
         .on_conflict_do_nothing()
         .returning(AccountSchema::did)

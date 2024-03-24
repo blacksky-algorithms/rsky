@@ -69,7 +69,7 @@ pub fn gen_invite_code() -> String {
         .unwrap_or("localhost".to_owned())
         .replace(".", "-")
         + "-"
-        + &get_random_token()
+        + &get_random_token().to_lowercase()
 }
 
 pub fn gen_invite_codes(count: i32) -> Vec<String> {
@@ -147,7 +147,7 @@ pub fn encode_did_key(pubkey: &PublicKey) -> String {
     format!("did:key:{pk_multibase}")
 }
 
-pub fn create_did_and_plc_op(
+pub async fn create_did_and_plc_op(
     handle: &str,
     input: &CreateAccountInput,
     signing_key: Keypair,
@@ -205,19 +205,18 @@ pub fn create_did_and_plc_op(
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
         did_plc
     );
-    let client = reqwest::blocking::Client::new();
-    let mut response = client
+    let client = reqwest::Client::new(); // fix
+    let response = client
         .post(plc_url)
         .json(&create_op)
         .header("Connection", "Keep-Alive")
         .header("Keep-Alive", "timeout=5, max=1000")
-        .send()?;
-    let mut buf: Vec<u8> = vec![];
-    response.copy_to(&mut buf)?;
-    let resp_msg = String::from_utf8(buf).unwrap();
-    match response.error_for_status() {
+        .send()
+        .await?;
+    let res = &response;
+    match res.error_for_status_ref() {
         Ok(_res) => Ok(did_plc.into()),
-        Err(error) => Err(anyhow::Error::new(error).context(resp_msg)),
+        Err(error) => Err(anyhow::Error::new(error).context(response.text().await?)),
     }
 }
 

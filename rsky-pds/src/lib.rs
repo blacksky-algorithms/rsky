@@ -4,7 +4,7 @@ extern crate core;
 extern crate rocket;
 extern crate serde;
 
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
 use crate::sequencer::Sequencer;

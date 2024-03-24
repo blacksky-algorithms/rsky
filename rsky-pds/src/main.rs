@@ -19,7 +19,7 @@ use rsky_pds::SharedSequencer;
 use rsky_pds::sequencer::Sequencer;
 use rsky_pds::DbConn;
 use std::env;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 pub struct CORS;
 

@@ -6,6 +6,7 @@ use libipld::Cid;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::str;
+use crate::common::ipld;
 
 fn is_valid_chars(input: String) -> bool {
     lazy_static! {
@@ -42,7 +43,8 @@ pub fn ensure_valid_mst_key(key: &String) -> Result<()> {
 }
 
 pub fn cid_for_entries(entries: Vec<NodeEntry>) -> Result<Cid> {
-    todo!()
+    let data = serialize_node_data(entries)?;
+    ipld::cid_for_cbor(&data)
 }
 
 pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
@@ -62,7 +64,7 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
         e: Vec::new(),
     };
     let mut i = 0;
-    if let NodeEntry::MST(e) = &entries[0] {
+    if let Some(NodeEntry::MST(e)) = &entries.get(0) {
         i += 1;
         data.l = Some(e.pointer);
     }

@@ -9,7 +9,6 @@ use crate::SharedSequencer;
 use anyhow::{Result, bail};
 use aws_sdk_s3::config::BehaviorVersion;
 use email_address::*;
-use futures::executor;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -47,14 +46,14 @@ async fn create(
     if let Some(input_recovery_key) = &body.recovery_key {
         body.recovery_key = Some(input_recovery_key.to_owned());
     }
-    // TO DO: Lookup user by email as well
-    
+    //@TODO: Lookup user by email as well
+
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let secret_key =
         SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
     let signing_key = Keypair::from_secret_key(&secp, &secret_key);
-    match super::create_did_and_plc_op(&handle, &body, signing_key) {
+    match super::create_did_and_plc_op(&handle, &body, signing_key).await {
         Ok(did_resp) => {
             did = Some(did_resp);
         }
@@ -64,13 +63,8 @@ async fn create(
         }
     }
     let did = did.unwrap();
-    
-    // TO DO: Move this to main.rs
-    let config = async {
-        return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
-    };
-    let config = executor::block_on(config);
-    
+    let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+
     let mut actor_store = ActorStore::new(
         SqlRepoReader::new(None),
         S3BlobStore::new(did.clone(), &config),
@@ -82,7 +76,7 @@ async fn create(
             bail!("Failed to create account")
         }
     };
-    
+
     let (access_jwt, refresh_jwt) = AccountManager::create_account(CreateAccountOpts {
         did: did.clone(),
         handle: handle.clone(),
@@ -93,11 +87,11 @@ async fn create(
         invite_code,
         deactivated: Some(deactivated),
     })?;
-    
+
     if !deactivated {
-        let mut lock = sequencer.sequencer.write().expect("lock shared data");
-        lock.sequence_commit(did.clone(), commit.clone(), vec![])?;
-        lock.sequence_identity_evt(did.clone())?;
+        let mut lock = sequencer.sequencer.write().await;
+        lock.sequence_commit(did.clone(), commit.clone(), vec![]).await?;
+        lock.sequence_identity_evt(did.clone()).await?;
     }
     AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev)?;
     Ok(CreateAccountOutput {
@@ -119,8 +113,7 @@ pub async fn server_create_account(
     connection: DbConn,
     sequencer: &State<SharedSequencer>,
 ) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    // TO DO: Check if there is an invite code
-    // TO DO: Throw error for any plcOp input
+    // @TODO: Throw error for any plcOp input
 
     let mut error_msg: Option<String> = None;
     if body.email.is_none() {
@@ -138,11 +131,12 @@ pub async fn server_create_account(
             error_msg = Some("Invalid email".to_owned());
         }
     }
-    // TO DO: Normalize handle as well
+    // @TODO: Normalize handle as well
     if !super::validate_handle(&body.handle) {
         error_msg = Some("Invalid handle".to_owned());
     };
-    // TO DO: Check that the invite code still has uses
+
+    // @TODO: Check that the invite code still has uses
 
     if error_msg.is_some() {
         let internal_error = InternalErrorMessageResponse {
