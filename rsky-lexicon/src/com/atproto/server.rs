@@ -120,3 +120,15 @@ pub struct CreateSessionOutput {
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,
 }
+
+/// Get information about the current auth session. Requires auth.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GetSessionOutput {
+    pub handle: String,
+    pub did: String,
+    pub email: Option<String>,
+    #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
+    pub email_confirmed: Option<bool>,
+    #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
+    pub did_doc: Option<String>,
+}

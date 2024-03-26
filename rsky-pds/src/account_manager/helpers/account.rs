@@ -65,7 +65,7 @@ pub fn select_account_qb(flags: Option<AvailabilityFlags>) -> BoxedQuery<'static
 }
 
 pub async fn get_account(
-    handle_or_did: String,
+    handle_or_did: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
     let conn = &mut establish_connection()?;
@@ -114,7 +114,7 @@ pub async fn get_account(
 }
 
 pub async fn get_account_by_email(
-    email: String,
+    email: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
     let conn = &mut establish_connection()?;

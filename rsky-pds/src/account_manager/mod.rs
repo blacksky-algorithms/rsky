@@ -27,14 +27,14 @@ pub struct AccountManager {}
 
 impl AccountManager {
     pub async fn get_account(
-        handle_or_did: String,
+        handle_or_did: &String,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<ActorAccount>> {
         account::get_account(handle_or_did, flags).await
     }
 
     pub async fn get_account_by_email(
-        email: String,
+        email: &String,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<ActorAccount>> {
         account::get_account_by_email(email, flags).await

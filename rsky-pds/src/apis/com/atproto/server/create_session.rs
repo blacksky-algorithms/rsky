@@ -19,7 +19,7 @@ async fn inner_create_session(
     let user = match identifier.contains("@") {
         true => {
             AccountManager::get_account_by_email(
-                identifier,
+                &identifier,
                 Some(AvailabilityFlags {
                     include_deactivated: Some(true),
                     include_taken_down: Some(true),
@@ -29,7 +29,7 @@ async fn inner_create_session(
         }
         false => {
             AccountManager::get_account(
-                identifier,
+                &identifier,
                 Some(AvailabilityFlags {
                     include_deactivated: Some(true),
                     include_taken_down: Some(true),

@@ -109,6 +109,30 @@ impl<'r> FromRequest<'r> for AccessNotAppPassword {
     }
 }
 
+pub struct AccessDeactivated {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessDeactivated {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match validate_access_token(
+            req, 
+            vec![
+                AuthScope::Access, 
+                AuthScope::AppPass, 
+                AuthScope::Deactivated]
+        ).await {
+            Ok(access) => Outcome::Success(AccessDeactivated { access }),
+            Err(error) => {
+                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+            }
+        }
+    }
+}
+
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
