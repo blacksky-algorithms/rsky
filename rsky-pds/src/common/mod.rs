@@ -25,5 +25,6 @@ pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
     Ok(cbor_bytes)
 }
 
+pub mod env;
 pub mod ipld;
 pub mod tid;

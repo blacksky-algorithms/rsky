@@ -119,12 +119,15 @@ impl<'r> FromRequest<'r> for AccessDeactivated {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         match validate_access_token(
-            req, 
+            req,
             vec![
-                AuthScope::Access, 
-                AuthScope::AppPass, 
-                AuthScope::Deactivated]
-        ).await {
+                AuthScope::Access,
+                AuthScope::AppPass,
+                AuthScope::Deactivated,
+            ],
+        )
+        .await
+        {
             Ok(access) => Outcome::Success(AccessDeactivated { access }),
             Err(error) => {
                 Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
