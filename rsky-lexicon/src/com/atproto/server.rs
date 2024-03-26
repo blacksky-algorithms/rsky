@@ -42,7 +42,7 @@ pub struct CreateInviteCodesOutput {
     pub codes: Vec<AccountCodes>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountCodes {
     pub account: String,
     pub codes: Vec<String>,
@@ -71,6 +71,29 @@ pub struct CreateAccountInput {
     pub plc_op: Option<String>,
 }
 
+/// Create an App Password
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CreateAppPasswordInput {
+    /// A short name for the App Password, to help distinguish them.
+    pub name: String,
+}
+
+/// Create an authentication session.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CreateSessionInput {
+    /// Handle or other identifier supported by the server for the authenticating user.
+    pub identifier: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CreateAppPasswordOutput {
+    pub name: String,
+    pub password: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateAccountOutput {
     pub handle: String,
@@ -81,4 +104,19 @@ pub struct CreateAccountOutput {
     pub access_jwt: String,
     #[serde(rename = "refreshJwt")]
     pub refresh_jwt: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CreateSessionOutput {
+    #[serde(rename = "accessJwt")]
+    pub access_jwt: String,
+    #[serde(rename = "refreshJwt")]
+    pub refresh_jwt: String,
+    pub handle: String,
+    pub did: String,
+    #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
+    pub did_doc: Option<String>,
+    pub email: Option<String>,
+    #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
+    pub email_confirmed: Option<bool>,
 }

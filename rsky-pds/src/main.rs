@@ -15,9 +15,9 @@ use rocket::serde::json::Json;
 use rocket::{Request, Response};
 use rsky_pds::apis::*;
 use rsky_pds::crawlers::Crawlers;
-use rsky_pds::SharedSequencer;
 use rsky_pds::sequencer::Sequencer;
 use rsky_pds::DbConn;
+use rsky_pds::SharedSequencer;
 use std::env;
 use tokio::sync::RwLock;
 
@@ -125,7 +125,7 @@ fn rocket() -> _ {
                 vec![env::var("PDS_CRAWLER").unwrap_or("https://bgs.bsky-sandbox.dev".to_owned())],
             ),
             None,
-        ))
+        )),
     };
 
     rocket::custom(figment)

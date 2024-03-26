@@ -12,7 +12,7 @@ pub fn update_root(did: String, cid: Cid, rev: String) -> Result<()> {
     let conn = &mut establish_connection()?;
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
-    let now = format!("{}", dt.format("%+"));
+    let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
 
     insert_into(RepoRootSchema::repo_root)
         .values((

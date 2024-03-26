@@ -111,7 +111,7 @@ pub async fn format_seq_commit(
         did,
         "append".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%+")),
+        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
     ))
 }
 
@@ -123,6 +123,6 @@ pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
         did,
         "identity".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%+")),
+        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
     ))
 }

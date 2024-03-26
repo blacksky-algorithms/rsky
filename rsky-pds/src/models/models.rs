@@ -59,6 +59,12 @@ pub struct Actor {
     #[diesel(column_name = takedownRef)]
     #[serde(rename = "takedownRef")]
     pub takedown_ref: Option<String>,
+    #[diesel(column_name = deactivatedAt)]
+    #[serde(rename = "deactivatedAt")]
+    pub deactivated_at: Option<String>,
+    #[diesel(column_name = deleteAfter)]
+    #[serde(rename = "deleteAfter")]
+    pub delete_after: Option<String>,
 }
 
 #[derive(
@@ -146,7 +152,16 @@ pub struct EmailToken {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(code))]
 #[diesel(table_name = crate::schema::pds::invite_code)]

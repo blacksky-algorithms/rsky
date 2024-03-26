@@ -147,7 +147,7 @@ pub fn store_refresh_token(payload: RefreshToken, app_password_name: Option<Stri
             RefreshTokenSchema::id.eq(payload.jti),
             RefreshTokenSchema::did.eq(payload.sub),
             RefreshTokenSchema::appPasswordName.eq(app_password_name),
-            RefreshTokenSchema::expiresAt.eq(format!("{}", exp.format("%+"))),
+            RefreshTokenSchema::expiresAt.eq(format!("{}", exp.format("%Y-%m-%dT%H:%M:%S%.3fZ"))),
         ))
         .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
         .execute(conn)?;

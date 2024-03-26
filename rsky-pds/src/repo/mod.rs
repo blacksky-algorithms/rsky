@@ -98,7 +98,7 @@ impl ActorStore {
     pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
         let system_time = SystemTime::now();
         let dt: DateTime<UtcOffset> = system_time.into();
-        let now = format!("{}", dt.format("%+"));
+        let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
         writes
             .into_iter()
             .map(|write| match write {

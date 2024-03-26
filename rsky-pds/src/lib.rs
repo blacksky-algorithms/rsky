@@ -4,16 +4,16 @@ extern crate core;
 extern crate rocket;
 extern crate serde;
 
-use tokio::sync::RwLock;
+use crate::sequencer::Sequencer;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
-use crate::sequencer::Sequencer;
+use tokio::sync::RwLock;
 
 #[database("pg_db")]
 pub struct DbConn(PgConnection);
 
 pub struct SharedSequencer {
-    pub sequencer: RwLock<Sequencer>
+    pub sequencer: RwLock<Sequencer>,
 }
 
 pub mod account_manager;

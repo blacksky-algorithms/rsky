@@ -2,11 +2,11 @@
 use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::{ActorStore};
+use crate::repo::ActorStore;
 use crate::storage::SqlRepoReader;
 use crate::DbConn;
 use crate::SharedSequencer;
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use aws_sdk_s3::config::BehaviorVersion;
 use email_address::*;
 use rocket::http::Status;
@@ -40,9 +40,10 @@ async fn create(
                 Err(error) => {
                     println!("Handle is available: {error:?}");
                     Ok(())
-                }, // handle is available, lets go
+                } // handle is available, lets go
             }
-        }).await?;
+        })
+        .await?;
     if let Some(input_recovery_key) = &body.recovery_key {
         body.recovery_key = Some(input_recovery_key.to_owned());
     }
@@ -50,8 +51,7 @@ async fn create(
 
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let secret_key =
-        SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
     let signing_key = Keypair::from_secret_key(&secp, &secret_key);
     match super::create_did_and_plc_op(&handle, &body, signing_key).await {
         Ok(did_resp) => {
@@ -90,7 +90,8 @@ async fn create(
 
     if !deactivated {
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_commit(did.clone(), commit.clone(), vec![]).await?;
+        lock.sequence_commit(did.clone(), commit.clone(), vec![])
+            .await?;
         lock.sequence_identity_evt(did.clone()).await?;
     }
     AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev)?;

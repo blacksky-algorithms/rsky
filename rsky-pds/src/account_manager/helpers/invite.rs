@@ -1,7 +1,11 @@
 use crate::db::establish_connection;
 use crate::models::models;
 use anyhow::{bail, Result};
+use chrono::offset::Utc as UtcOffset;
+use chrono::DateTime;
 use diesel::*;
+use rsky_lexicon::com::atproto::server::AccountCodes;
+use std::time::SystemTime;
 
 pub fn ensure_invite_is_available(invite_code: String) -> Result<()> {
     use crate::schema::pds::actor::dsl as ActorSchema;
@@ -49,5 +53,37 @@ pub fn record_invite_use(did: String, invite_code: Option<String>, now: String) 
             ))
             .execute(conn)?;
     }
+    Ok(())
+}
+
+pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
+    use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
+    let conn = &mut establish_connection()?;
+
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    let created_at = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+
+    let rows: Vec<models::InviteCode> = to_create
+        .into_iter()
+        .flat_map(|account| {
+            let for_account = account.account;
+            account
+                .codes
+                .iter()
+                .map(|code| models::InviteCode {
+                    code: code.clone(),
+                    available_uses: use_count.clone(),
+                    disabled: 0,
+                    for_account: for_account.clone(),
+                    created_by: "admin".to_owned(),
+                    created_at: created_at.clone(),
+                })
+                .collect::<Vec<models::InviteCode>>()
+        })
+        .collect();
+    insert_into(InviteCodeSchema::invite_code)
+        .values(rows)
+        .execute(conn)?;
     Ok(())
 }
