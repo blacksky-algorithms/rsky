@@ -8,6 +8,8 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use thiserror::Error;
 
+const INFINITY: u64 = u64::MAX;
+
 #[derive(PartialEq, Clone)]
 pub enum AuthScope {
     Access,
@@ -81,8 +83,11 @@ pub struct AuthVerifierOpts {
 #[derive(Clone)]
 pub struct JwtPayload {
     pub scope: AuthScope,
-    pub sub: String,
-    pub aud: Audiences,
+    pub sub: Option<String>,
+    pub aud: Option<Audiences>,
+    pub exp: Option<Duration>,
+    pub iat: Option<Duration>,
+    pub jti: Option<String>
 }
 
 #[derive(Error, Debug)]
@@ -136,9 +141,42 @@ impl<'r> FromRequest<'r> for AccessDeactivated {
     }
 }
 
+pub struct RevokeRefreshToken {
+    pub id: String
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for RevokeRefreshToken {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let mut options = VerificationOptions::default();
+        options.max_validity = Some(Duration::from_secs(INFINITY));
+        match validate_bearer_token(
+            req,
+            vec![AuthScope::Refresh],
+            Some(options)
+        )
+            .await
+        {
+            Ok(result) => match result.payload.jti {
+                Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
+                None => Outcome::Failure(
+                    (Status::BadRequest,
+                     AuthError::BadJwt("Unexpected missing refresh token id".to_owned()))
+                )
+            }
+            Err(error) => {
+                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+            }
+        }
+    }
+}
+
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
+    verify_options: Option<VerificationOptions>
 ) -> Result<ValidatedBearer> {
     let token = bearer_token_from_req(request)?;
     if let Some(token) = token {
@@ -147,8 +185,10 @@ pub async fn validate_bearer_token<'r>(
         let secret_key =
             SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
         let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-        let payload = verify_jwt(token.clone(), jwt_key).await?;
-        let JwtPayload { sub, aud, scope } = payload.clone();
+        let payload = verify_jwt(token.clone(), jwt_key, verify_options).await?;
+        let JwtPayload { sub, aud, scope, .. } = payload.clone();
+        let sub = sub.unwrap();
+        let aud = aud.unwrap();
         if !sub.starts_with("did:") {
             bail!("Malformed token")
         }
@@ -158,6 +198,10 @@ pub async fn validate_bearer_token<'r>(
             }
             if scopes.len() > 0 && !scopes.contains(&scope) {
                 bail!("Bad token scope")
+                /*{
+                    "error": "InvalidToken",
+                    "message": "Bad token scope"
+                }*/
             }
             Ok(ValidatedBearer {
                 did: sub,
@@ -178,13 +222,15 @@ pub async fn validate_access_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
 ) -> Result<AccessOutput> {
+    let mut options = VerificationOptions::default();
+    options.allowed_audiences = Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID").unwrap()]));
     let ValidatedBearer {
         did,
         scope,
         token,
         audience,
         ..
-    } = validate_bearer_token(request, scopes).await?;
+    } = validate_bearer_token(request, scopes, Some(options)).await?;
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -210,14 +256,17 @@ pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
     }
 }
 
-pub async fn verify_jwt(jwt: String, jwt_key: Keypair) -> Result<JwtPayload> {
+pub async fn verify_jwt(jwt: String, jwt_key: Keypair, verify_options: Option<VerificationOptions>) -> Result<JwtPayload> {
     let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let public_key = key.public_key();
-    let claims = public_key.verify_token::<CustomClaimObj>(&jwt, None)?;
+    let claims = public_key.verify_token::<CustomClaimObj>(&jwt, verify_options)?;
 
     Ok(JwtPayload {
         scope: AuthScope::from_str(&claims.custom.scope)?,
-        sub: claims.subject.unwrap(),
-        aud: claims.audiences.unwrap(),
+        sub: claims.subject,
+        aud: claims.audiences,
+        exp: claims.expires_at,
+        iat: claims.issued_at,
+        jti: claims.jwt_id
     })
 }

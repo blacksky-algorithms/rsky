@@ -120,6 +120,9 @@ impl AccountManager {
         Ok((access_jwt, refresh_jwt))
     }
 
+    pub async fn revoke_refresh_token(id: String) -> Result<bool> {
+        auth::revoke_refresh_token(id).await
+    }
     // Invites
     // ----------
 

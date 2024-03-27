@@ -6,6 +6,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::*;
 use jwt_simple::prelude::*;
 use secp256k1::Keypair;
+use crate::models;
 
 pub struct CreateTokensOpts {
     pub did: String,
@@ -152,4 +153,15 @@ pub fn store_refresh_token(payload: RefreshToken, app_password_name: Option<Stri
         .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
         .execute(conn)?;
     Ok(())
+}
+
+pub async fn revoke_refresh_token(id: String) -> Result<bool> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    let deleted_rows = delete(RefreshTokenSchema::refresh_token)
+        .filter(RefreshTokenSchema::id.eq(id))
+        .get_results::<models::RefreshToken>(conn)?;
+    
+    Ok(deleted_rows.len() > 0)
 }
