@@ -86,6 +86,15 @@ pub struct CreateSessionInput {
     pub password: String,
 }
 
+/// Delete an actor's account with a token and password. Can only be called after
+/// requesting a deletion token. Requires auth
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DeleteAccountInput {
+    pub did: String,
+    pub password: String,
+    pub token: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateAppPasswordOutput {
     pub name: String,

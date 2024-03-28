@@ -1,9 +1,8 @@
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use std::time::SystemTime;
+use crate::common::time::MINUTE;
 
-const SECOND: i32 = 1000;
-const MINUTE: i32 = SECOND * 60;
 const NOTIFY_THRESHOLD: i32 = 20 * MINUTE; // 20 minutes;
 
 #[derive(Debug)]

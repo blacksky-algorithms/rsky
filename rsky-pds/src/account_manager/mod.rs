@@ -4,12 +4,13 @@ use crate::auth_verifier::AuthScope;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use helpers::{account, auth, invite, password};
+use helpers::{account, auth, invite, password, email_token};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::time::SystemTime;
+use crate::models::models::EmailTokenPurpose;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -146,6 +147,16 @@ impl AccountManager {
         password_str: &String,
     ) -> Result<Option<String>> {
         password::verify_app_password(did, password_str).await
+    }
+
+    // Email Tokens
+    // ----------
+    pub async fn assert_valid_email_token(
+        did: &String,
+        purpose: EmailTokenPurpose,
+        token: &String
+    ) -> Result<()> {
+        email_token::assert_valid_token(did, purpose, token, None).await
     }
 }
 

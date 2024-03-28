@@ -47,11 +47,6 @@ pub struct ActorStore {
 impl ActorStore {
     // static
     pub fn new(storage: SqlRepoReader, blobstore: S3BlobStore) -> Self {
-        /* Useful example of creating config for blobstore
-        let config = async {
-            return aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
-        };
-        let config = executor::block_on(config);*/
         ActorStore {
             storage: storage.clone(),
             record: RecordReader::new(),
@@ -62,7 +57,7 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    // TO DO: Update to use AtUri
+    // @TODO: Update to use AtUri
     pub fn create_repo(
         &mut self,
         did: String,
@@ -122,10 +117,6 @@ impl ActorStore {
             })
             .collect::<Result<()>>()
     }
-
-    // TO DO
-    // process_writes()
-    // format_commit()
 }
 
 impl Repo {
