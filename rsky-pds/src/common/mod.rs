@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64ct::{Base64, Encoding};
 use indexmap::IndexMap;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
@@ -23,6 +24,10 @@ pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
     let cbor_bytes = serde_ipld_dagcbor::to_vec(&map)?;
 
     Ok(cbor_bytes)
+}
+
+pub fn json_to_b64url<T: Serialize>(obj: &T) -> Result<String> {
+    Ok(Base64::encode_string((&serde_json::to_string(obj)?).as_ref()).replace("=", ""))
 }
 
 pub mod env;

@@ -11,7 +11,7 @@ pub struct InviteCode {
     pub created_by: String,
     #[serde(rename(deserialize = "createdAt", serialize = "createdAt"))]
     pub created_at: String,
-    pub uses: Vec<InviteCodeUse>
+    pub uses: Vec<InviteCodeUse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,7 +21,6 @@ pub struct InviteCodeUse {
     #[serde(rename(deserialize = "usedAt", serialize = "usedAt"))]
     pub used_at: String,
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeInput {
@@ -185,4 +184,10 @@ pub struct DescribeServerRefLinks {
 pub struct DescribeServerRefContact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+}
+
+/// Get a signed token on behalf of the requesting DID for the requested service.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GetServiceAuthOutput {
+    pub token: String,
 }

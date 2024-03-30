@@ -1,12 +1,15 @@
 use crate::auth_verifier::AuthScope;
-use crate::common::get_random_str;
+use crate::common::time::MINUTE;
+use crate::common::{get_random_str, json_to_b64url};
 use crate::db::establish_connection;
 use crate::models;
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::*;
 use jwt_simple::prelude::*;
-use secp256k1::Keypair;
+use secp256k1::{Keypair, Message, SecretKey};
+use sha2::{Digest, Sha256};
+use std::time::SystemTime;
 
 pub struct CreateTokensOpts {
     pub did: String,
@@ -28,6 +31,26 @@ pub struct RefreshToken {
     pub sub: String,
     pub exp: Duration,
     pub jti: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServiceJwtPayload {
+    pub iss: String,
+    pub aud: String,
+    pub exp: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServiceJwtHeader {
+    pub typ: String,
+    pub alg: String,
+}
+
+pub struct ServiceJwtParams {
+    pub iss: String,
+    pub aud: String,
+    pub exp: Option<u64>,
+    pub keypair: SecretKey,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -112,6 +135,45 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let token = key.sign(claims)?;
     Ok(token)
+}
+
+pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
+    let ServiceJwtParams {
+        iss, aud, keypair, ..
+    } = params;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("timestamp in micros since UNIX epoch")
+        .as_micros() as usize;
+    let exp = params
+        .exp
+        .unwrap_or(((now + MINUTE as usize) / 1000) as u64);
+    let header = ServiceJwtHeader {
+        typ: "JWT".to_string(),
+        alg: "ES256K".to_string(),
+    };
+    let payload = ServiceJwtPayload {
+        iss,
+        aud,
+        exp: Some(exp),
+    };
+    let to_sign_str = format!(
+        "{0}.{1}",
+        json_to_b64url(&header)?,
+        json_to_b64url(&payload)?
+    );
+    let hash = Sha256::digest(to_sign_str.clone());
+    let message = Message::from_digest_slice(hash.as_ref())?;
+    let mut sig = keypair.sign_ecdsa(message);
+    // Convert to low-s
+    sig.normalize_s();
+    // ASN.1 encoded per decode_dss_signature
+    let compact_sig = sig.serialize_compact();
+    Ok(format!(
+        "{0}.{1}",
+        to_sign_str,
+        base64_url::encode(&compact_sig).replace("=", "") // Base 64 encode signature bytes
+    ))
 }
 
 // @NOTE unsafe for verification, should only be used w/ direct output from createRefreshToken() or createTokens()

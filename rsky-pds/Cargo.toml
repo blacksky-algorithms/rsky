@@ -19,7 +19,7 @@ tokio = { version = "1.28.2",features = ["full"] }
 # for everything else
 rocket = { version = "=0.5.0-rc.3", features = ["json"] }
 dotenvy = "0.15"
-rsky-lexicon = { workspace = true, version = "0.1.0" }
+rsky-lexicon = { workspace = true }
 diesel = { version = "2.1.4", features = ["chrono","postgres"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }

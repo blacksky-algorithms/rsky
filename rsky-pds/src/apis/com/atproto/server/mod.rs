@@ -239,6 +239,7 @@ pub mod delete_account;
 pub mod delete_session;
 pub mod describe_server;
 pub mod get_account_invite_codes;
+pub mod get_service_auth;
 pub mod get_session;
 pub mod list_app_passwords;
 pub mod refresh_session;

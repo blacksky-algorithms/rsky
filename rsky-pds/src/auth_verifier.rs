@@ -96,6 +96,26 @@ pub enum AuthError {
     BadJwt(String),
 }
 
+// verifier guards
+
+pub struct Access {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Access {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match validate_access_token(req, vec![AuthScope::Access]).await {
+            Ok(access) => Outcome::Success(Access { access }),
+            Err(error) => {
+                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+            }
+        }
+    }
+}
+
 pub struct AccessNotAppPassword {
     pub access: AccessOutput,
 }
@@ -105,7 +125,7 @@ impl<'r> FromRequest<'r> for AccessNotAppPassword {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match validate_access_token(req, vec![AuthScope::Access]).await {
+        match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
             Ok(access) => Outcome::Success(AccessNotAppPassword { access }),
             Err(error) => {
                 Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
