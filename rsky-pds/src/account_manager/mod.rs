@@ -1,16 +1,17 @@
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
+use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use helpers::{account, auth, invite, password, email_token};
+use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::time::SystemTime;
-use crate::models::models::EmailTokenPurpose;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -92,6 +93,10 @@ impl AccountManager {
         Ok(repo::update_root(did, cid, rev)?)
     }
 
+    pub async fn delete_account(did: &String) -> Result<()> {
+        account::delete_account(did).await
+    }
+
     // Auth
     // ----------
     pub async fn create_session(
@@ -131,6 +136,19 @@ impl AccountManager {
         invite::create_invite_codes(to_create, use_count).await
     }
 
+    pub async fn create_account_invite_codes(
+        for_account: &String,
+        codes: Vec<String>,
+        expected_total: usize,
+        disabled: bool,
+    ) -> Result<Vec<CodeDetail>> {
+        invite::create_account_invite_codes(for_account, codes, expected_total, disabled).await
+    }
+
+    pub async fn get_account_invite_codes(did: &String) -> Result<Vec<CodeDetail>> {
+        invite::get_account_invite_codes(did).await
+    }
+
     // Passwords
     // ----------
 
@@ -154,7 +172,7 @@ impl AccountManager {
     pub async fn assert_valid_email_token(
         did: &String,
         purpose: EmailTokenPurpose,
-        token: &String
+        token: &String,
     ) -> Result<()> {
         email_token::assert_valid_token(did, purpose, token, None).await
     }

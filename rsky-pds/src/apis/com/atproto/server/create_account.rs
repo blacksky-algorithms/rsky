@@ -66,10 +66,11 @@ async fn create(
     let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
     let mut actor_store = ActorStore::new(
+        did.clone(),
         SqlRepoReader::new(None),
         S3BlobStore::new(did.clone(), &config),
     );
-    let commit = match actor_store.create_repo(did.clone(), signing_key, Vec::new()) {
+    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
             eprintln!("{:?}", error);

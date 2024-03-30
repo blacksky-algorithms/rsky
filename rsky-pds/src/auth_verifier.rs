@@ -87,7 +87,7 @@ pub struct JwtPayload {
     pub aud: Option<Audiences>,
     pub exp: Option<Duration>,
     pub iat: Option<Duration>,
-    pub jti: Option<String>
+    pub jti: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -142,7 +142,7 @@ impl<'r> FromRequest<'r> for AccessDeactivated {
 }
 
 pub struct RevokeRefreshToken {
-    pub id: String
+    pub id: String,
 }
 
 #[rocket::async_trait]
@@ -152,20 +152,14 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         let mut options = VerificationOptions::default();
         options.max_validity = Some(Duration::from_secs(INFINITY));
-        match validate_bearer_token(
-            req,
-            vec![AuthScope::Refresh],
-            Some(options)
-        )
-            .await
-        {
+        match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
             Ok(result) => match result.payload.jti {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
-                None => Outcome::Failure(
-                    (Status::BadRequest,
-                     AuthError::BadJwt("Unexpected missing refresh token id".to_owned()))
-                )
-            }
+                None => Outcome::Failure((
+                    Status::BadRequest,
+                    AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
+                )),
+            },
             Err(error) => {
                 Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
@@ -176,7 +170,7 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
-    verify_options: Option<VerificationOptions>
+    verify_options: Option<VerificationOptions>,
 ) -> Result<ValidatedBearer> {
     let token = bearer_token_from_req(request)?;
     if let Some(token) = token {
@@ -186,7 +180,9 @@ pub async fn validate_bearer_token<'r>(
             SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
         let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
         let payload = verify_jwt(token.clone(), jwt_key, verify_options).await?;
-        let JwtPayload { sub, aud, scope, .. } = payload.clone();
+        let JwtPayload {
+            sub, aud, scope, ..
+        } = payload.clone();
         let sub = sub.unwrap();
         let aud = aud.unwrap();
         if !sub.starts_with("did:") {
@@ -223,7 +219,9 @@ pub async fn validate_access_token<'r>(
     scopes: Vec<AuthScope>,
 ) -> Result<AccessOutput> {
     let mut options = VerificationOptions::default();
-    options.allowed_audiences = Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID").unwrap()]));
+    options.allowed_audiences = Some(HashSet::from_strings(&[
+        env::var("PDS_SERVICE_DID").unwrap()
+    ]));
     let ValidatedBearer {
         did,
         scope,
@@ -256,7 +254,11 @@ pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
     }
 }
 
-pub async fn verify_jwt(jwt: String, jwt_key: Keypair, verify_options: Option<VerificationOptions>) -> Result<JwtPayload> {
+pub async fn verify_jwt(
+    jwt: String,
+    jwt_key: Keypair,
+    verify_options: Option<VerificationOptions>,
+) -> Result<JwtPayload> {
     let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
     let public_key = key.public_key();
     let claims = public_key.verify_token::<CustomClaimObj>(&jwt, verify_options)?;
@@ -267,6 +269,6 @@ pub async fn verify_jwt(jwt: String, jwt_key: Keypair, verify_options: Option<Ve
         aud: claims.audiences,
         exp: claims.expires_at,
         iat: claims.issued_at,
-        jti: claims.jwt_id
+        jti: claims.jwt_id,
     })
 }

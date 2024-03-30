@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InviteCode {
     pub code: String,
-    #[serde(rename(deserialize = "availableUses", serialize = "availableUses"))]
-    pub available_uses: i32,
+    pub available: i32,
     pub disabled: bool,
     #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
     pub for_account: String,
@@ -12,7 +11,17 @@ pub struct InviteCode {
     pub created_by: String,
     #[serde(rename(deserialize = "createdAt", serialize = "createdAt"))]
     pub created_at: String,
+    pub uses: Vec<InviteCodeUse>
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InviteCodeUse {
+    #[serde(rename(deserialize = "usedBy", serialize = "usedBy"))]
+    pub used_by: String,
+    #[serde(rename(deserialize = "usedAt", serialize = "usedAt"))]
+    pub used_at: String,
+}
+
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeInput {
@@ -20,11 +29,6 @@ pub struct CreateInviteCodeInput {
     pub use_count: i32,
     #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
     pub for_account: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CreateInviteCodeOutput {
-    pub code: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -37,20 +41,10 @@ pub struct CreateInviteCodesInput {
     pub for_accounts: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CreateInviteCodesOutput {
-    pub codes: Vec<AccountCodes>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountCodes {
     pub account: String,
     pub codes: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct GetAccountInviteCodesOutput {
-    pub codes: Vec<InviteCode>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -84,6 +78,21 @@ pub struct CreateSessionInput {
     /// Handle or other identifier supported by the server for the authenticating user.
     pub identifier: String,
     pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreateInviteCodeOutput {
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CreateInviteCodesOutput {
+    pub codes: Vec<AccountCodes>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GetAccountInviteCodesOutput {
+    pub codes: Vec<InviteCode>,
 }
 
 /// Delete an actor's account with a token and password. Can only be called after

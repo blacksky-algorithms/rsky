@@ -2,7 +2,7 @@ use crate::crawlers::Crawlers;
 use crate::db::establish_connection;
 use crate::models;
 use crate::repo::types::{CommitData, PreparedWrite};
-use crate::sequencer::events::{format_seq_commit, format_seq_identity_evt};
+use crate::sequencer::events::{format_seq_commit, format_seq_identity_evt, format_seq_tombstone};
 use anyhow::Result;
 use diesel::*;
 
@@ -53,6 +53,21 @@ impl Sequencer {
         let evt = format_seq_identity_evt(did).await?;
         self.sequence_evt(evt).await
     }
+
+    pub async fn sequence_tombstone(&mut self, did: String) -> Result<()> {
+        let evt = format_seq_tombstone(did).await?;
+        self.sequence_evt(evt).await
+    }
+}
+
+pub async fn delete_all_for_user(did: &String) -> Result<()> {
+    use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
+    let conn = &mut establish_connection()?;
+
+    delete(RepoSeqSchema::repo_seq)
+        .filter(RepoSeqSchema::did.eq(did))
+        .execute(conn)?;
+    Ok(())
 }
 
 pub mod events;

@@ -1,13 +1,13 @@
-use rocket::http::Status;
-use rocket::response::status;
-use rocket::serde::json::Json;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::RevokeRefreshToken;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::serde::json::Json;
 
 #[rocket::post("/xrpc/com.atproto.server.deleteSession")]
 pub async fn delete_session(
-    auth: RevokeRefreshToken
+    auth: RevokeRefreshToken,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     match AccountManager::revoke_refresh_token(auth.id).await {
         Ok(_) => Ok(()),

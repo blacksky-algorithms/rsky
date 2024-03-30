@@ -2,6 +2,7 @@
 // also adds components from https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/repo/transactor.ts
 
 use crate::common::tid::{Ticker, TID};
+use crate::db::establish_connection;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
 use crate::repo::block_map::BlockMap;
@@ -19,9 +20,12 @@ use crate::storage::{Ipld, SqlRepoReader};
 use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
+use diesel::*;
+use futures::stream::{self, StreamExt};
 use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 pub struct CommitRecord {
@@ -39,18 +43,21 @@ pub struct Repo {
 }
 
 pub struct ActorStore {
+    did: String,
     storage: SqlRepoReader, // get ipld blocks from db
     record: RecordReader,   // get lexicon records from db
     blob: BlobReader,       // get blobs
 }
 
+// Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
 impl ActorStore {
-    // static
-    pub fn new(storage: SqlRepoReader, blobstore: S3BlobStore) -> Self {
+    /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
+    pub fn new(did: String, storage: SqlRepoReader, blobstore: S3BlobStore) -> Self {
         ActorStore {
-            storage: storage.clone(),
+            did,
+            storage,
             record: RecordReader::new(),
-            blob: BlobReader::new(blobstore),
+            blob: BlobReader::new(blobstore), // Unlike TS impl, just use blob reader vs generator
         }
     }
 
@@ -58,9 +65,8 @@ impl ActorStore {
     // -------------------
 
     // @TODO: Update to use AtUri
-    pub fn create_repo(
+    pub async fn create_repo(
         &mut self,
-        did: String,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitData> {
@@ -80,17 +86,22 @@ impl ActorStore {
                 }
             })
             .collect::<Vec<RecordCreateOrUpdateOp>>();
-        let commit = Repo::format_init_commit(self.storage.clone(), did, keypair, Some(write_ops))?;
+        let commit = Repo::format_init_commit(
+            self.storage.clone(),
+            self.did.clone(),
+            keypair,
+            Some(write_ops),
+        )?;
         self.storage.apply_commit(commit.clone())?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_writes_blob(writes)?;
+        self.blob.process_writes_blob(writes).await?;
         Ok(commit)
     }
 
-    pub fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
+    pub async fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
         let system_time = SystemTime::now();
         let dt: DateTime<UtcOffset> = system_time.into();
         let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
@@ -116,6 +127,24 @@ impl ActorStore {
                 PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
             })
             .collect::<Result<()>>()
+    }
+
+    pub async fn destroy(&mut self) -> Result<()> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let blob_rows: Vec<String> = BlobSchema::blob
+            .filter(BlobSchema::did.eq(&self.did))
+            .select(BlobSchema::cid)
+            .get_results(conn)?;
+        let cids = blob_rows
+            .into_iter()
+            .map(|row| Ok(Cid::from_str(&row)?))
+            .collect::<Result<Vec<Cid>>>()?;
+        let _ = stream::iter(cids.chunks(500)).then(|chunk| async {
+            Ok::<(), anyhow::Error>(self.blob.blobstore.delete_many(chunk.to_vec()).await?)
+        });
+        Ok(())
     }
 }
 

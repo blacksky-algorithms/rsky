@@ -16,7 +16,7 @@ struct MoveObject {
 #[derive(Debug, Clone)]
 pub struct S3BlobStore {
     client: s3::Client,
-    pub bucket: String,
+    bucket: String,
 }
 
 // Intended to work with DigitalOcean Spaces Object Storage which is an

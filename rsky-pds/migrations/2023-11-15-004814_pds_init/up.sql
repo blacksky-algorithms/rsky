@@ -134,6 +134,7 @@ CREATE INDEX record_repo_rev_idx
 -- Create Blob Table
 CREATE TABLE IF NOT EXISTS pds.blob (
     cid character varying PRIMARY KEY,
+    did character varying NOT NULL,
     "mimeType" character varying NOT NULL,
     size integer NOT NULL,
     "tempKey" character varying,

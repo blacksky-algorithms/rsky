@@ -4,7 +4,6 @@ use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use anyhow::{bail, Result};
 use diesel::*;
-use futures::executor;
 use futures::stream::{self, StreamExt};
 use rocket::form::validate::Contains;
 
@@ -18,32 +17,29 @@ impl BlobReader {
         BlobReader { blobstore }
     }
 
-    pub fn process_writes_blob(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        self.delete_dereferenced_blobs(writes.clone())?;
-        writes
-            .into_iter()
-            .map(|write| {
-                Ok(match write {
-                    PreparedWrite::Create(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone())?;
-                            self.associate_blob(blob, w.uri.clone())?;
-                        }
+    pub async fn process_writes_blob(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+        self.delete_dereferenced_blobs(writes.clone()).await?;
+        let _ = stream::iter(writes).then(|write| async move {
+            Ok::<(), anyhow::Error>(match write {
+                PreparedWrite::Create(w) => {
+                    for blob in w.blobs {
+                        self.verify_blob_and_make_permanent(blob.clone()).await?;
+                        self.associate_blob(blob, w.uri.clone()).await?;
                     }
-                    PreparedWrite::Update(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone())?;
-                            self.associate_blob(blob, w.uri.clone())?;
-                        }
+                }
+                PreparedWrite::Update(w) => {
+                    for blob in w.blobs {
+                        self.verify_blob_and_make_permanent(blob.clone()).await?;
+                        self.associate_blob(blob, w.uri.clone()).await?;
                     }
-                    _ => (),
-                })
+                }
+                _ => (),
             })
-            .collect::<Result<Vec<()>>>()?;
+        });
         Ok(())
     }
 
-    pub fn delete_dereferenced_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+    pub async fn delete_dereferenced_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
         let conn = &mut establish_connection()?;
@@ -112,15 +108,12 @@ impl BlobReader {
             .execute(conn)?;
 
         // Original code queues a background job to delete by CID from S3 compatible blobstore
-        let res = async {
-            stream::iter(cids_to_delete)
-                .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) })
-        };
-        let _ = executor::block_on(res);
+        let _ = stream::iter(cids_to_delete)
+            .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) });
         Ok(())
     }
 
-    pub fn verify_blob_and_make_permanent(&self, blob: PreparedBlobRef) -> Result<()> {
+    pub async fn verify_blob_and_make_permanent(&self, blob: PreparedBlobRef) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         let conn = &mut establish_connection()?;
 
@@ -134,16 +127,11 @@ impl BlobReader {
             .first(conn)
             .optional()?;
         if let Some(found) = found {
-            verify_blob(&blob, &found)?;
+            verify_blob(&blob, &found).await?;
             if let Some(ref temp_key) = found.temp_key {
-                let res = async {
-                    Ok::<(), anyhow::Error>(
-                        self.blobstore
-                            .make_permanent(temp_key.clone(), blob.cid)
-                            .await?,
-                    )
-                };
-                let _ = executor::block_on(res);
+                self.blobstore
+                    .make_permanent(temp_key.clone(), blob.cid)
+                    .await?;
             }
             update(BlobSchema::blob)
                 .filter(BlobSchema::tempKey.eq(found.temp_key))
@@ -155,7 +143,7 @@ impl BlobReader {
         }
     }
 
-    pub fn associate_blob(&self, blob: PreparedBlobRef, record_uri: String) -> Result<()> {
+    pub async fn associate_blob(&self, blob: PreparedBlobRef, record_uri: String) -> Result<()> {
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
         let conn = &mut establish_connection()?;
 
@@ -170,7 +158,7 @@ impl BlobReader {
     }
 }
 
-pub fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
+pub async fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
     if accepted.contains("*/*".to_owned()) {
         return true;
     }
@@ -190,7 +178,7 @@ pub fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
     return accepted.contains(mime);
 }
 
-pub fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result<()> {
+pub async fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result<()> {
     if let Some(max_size) = blob.contraints.max_size {
         if found.size as usize > max_size {
             bail!(
@@ -204,7 +192,7 @@ pub fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result<()> {
         bail!("InvalidMimeType: Referenced MimeTy[e does not match stored blob. Expected: {:?}, Got: {:?}",found.mime_type, blob.mime_type)
     }
     if let Some(ref accept) = blob.contraints.accept {
-        if !accepted_mime(blob.mime_type.clone(), accept.clone()) {
+        if !accepted_mime(blob.mime_type.clone(), accept.clone()).await {
             bail!(
                 "Wrong type of file. It is {:?} but it must match {:?}.",
                 blob.mime_type,

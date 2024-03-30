@@ -1,12 +1,12 @@
 use crate::auth_verifier::AuthScope;
 use crate::common::get_random_str;
 use crate::db::establish_connection;
+use crate::models;
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::*;
 use jwt_simple::prelude::*;
 use secp256k1::Keypair;
-use crate::models;
 
 pub struct CreateTokensOpts {
     pub did: String,
@@ -162,6 +162,6 @@ pub async fn revoke_refresh_token(id: String) -> Result<bool> {
     let deleted_rows = delete(RefreshTokenSchema::refresh_token)
         .filter(RefreshTokenSchema::id.eq(id))
         .get_results::<models::RefreshToken>(conn)?;
-    
+
     Ok(deleted_rows.len() > 0)
 }

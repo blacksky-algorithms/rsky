@@ -52,6 +52,7 @@ pub mod pds {
     diesel::table! {
         pds.blob (cid) {
             cid -> Varchar,
+            did -> Varchar,
             mimeType -> Varchar,
             size -> Int4,
             tempKey -> Nullable<Varchar>,

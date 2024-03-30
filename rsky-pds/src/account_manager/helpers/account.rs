@@ -210,3 +210,27 @@ pub fn register_account(did: String, email: String, password: String) -> Result<
         .get_result(conn)?;
     Ok(())
 }
+
+pub async fn delete_account(did: &String) -> Result<()> {
+    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    use crate::schema::pds::repo_root::dsl as RepoRootSchema;
+
+    let conn = &mut establish_connection()?;
+    delete(RepoRootSchema::repo_root)
+        .filter(RepoRootSchema::did.eq(did))
+        .execute(conn)?;
+    delete(EmailTokenSchema::email_token)
+        .filter(EmailTokenSchema::did.eq(did))
+        .execute(conn)?;
+    delete(RefreshTokenSchema::refresh_token)
+        .filter(RefreshTokenSchema::did.eq(did))
+        .execute(conn)?;
+    delete(AccountSchema::account)
+        .filter(AccountSchema::did.eq(did))
+        .execute(conn)?;
+    delete(ActorSchema::actor)
+        .filter(ActorSchema::did.eq(did))
+        .execute(conn)?;
+    Ok(())
+}

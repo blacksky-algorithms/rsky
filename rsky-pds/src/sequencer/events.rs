@@ -44,6 +44,11 @@ pub struct IdentityEvt {
     pub did: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TombstoneEvt {
+    pub did: String,
+}
+
 pub async fn format_seq_commit(
     did: String,
     commit_data: CommitData,
@@ -122,6 +127,18 @@ pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
     Ok(models::RepoSeq::new(
         did,
         "identity".to_string(),
+        struct_to_cbor(evt)?,
+        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+    ))
+}
+
+pub async fn format_seq_tombstone(did: String) -> Result<models::RepoSeq> {
+    let evt = TombstoneEvt { did: did.clone() };
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    Ok(models::RepoSeq::new(
+        did,
+        "tombstone".to_string(),
         struct_to_cbor(evt)?,
         format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
     ))

@@ -1,15 +1,15 @@
+use crate::common::time::{less_than_ago_ms, MINUTE};
+use crate::db::establish_connection;
+use crate::models::models::EmailTokenPurpose;
+use crate::models::EmailToken;
 use anyhow::{bail, Result};
 use diesel::*;
-use crate::common::time::{MINUTE, less_than_ago_ms};
-use crate::db::establish_connection;
-use crate::models::EmailToken;
-use crate::models::models::EmailTokenPurpose;
 
 pub async fn assert_valid_token(
     did: &String,
     purpose: EmailTokenPurpose,
     token: &String,
-    expiration_len: Option<i32>
+    expiration_len: Option<i32>,
 ) -> Result<()> {
     let expiration_len = expiration_len.unwrap_or(MINUTE * 15);
     use crate::schema::pds::email_token::dsl as EmailTokenSchema;

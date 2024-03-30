@@ -3,15 +3,15 @@
 #![allow(unused)]
 #![allow(clippy::all)]
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use chrono::offset::Utc;
 use chrono::DateTime;
-use diesel::prelude::*;
-use diesel::*;
 use diesel::backend::Backend;
 use diesel::deserialize::FromSql;
+use diesel::prelude::*;
 use diesel::serialize::{Output, ToSql};
 use diesel::sql_types::Text;
+use diesel::*;
 
 #[derive(
     Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
@@ -111,6 +111,7 @@ pub struct Backlink {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Blob {
     pub cid: String,
+    pub did: String,
     #[diesel(column_name = mimeType)]
     #[serde(rename = "mimeType")]
     pub mime_type: String,
@@ -129,15 +130,7 @@ pub struct Blob {
 }
 
 #[derive(
-    Queryable,
-    Identifiable,
-    Selectable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize
+    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
 )]
 #[diesel(primary_key(did))]
 #[diesel(table_name = crate::schema::pds::did_doc)]
@@ -150,7 +143,9 @@ pub struct DidDoc {
     pub updated_at: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize, AsExpression)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize, AsExpression,
+)]
 #[diesel(sql_type = Text)]
 pub enum EmailTokenPurpose {
     #[default]
@@ -158,7 +153,7 @@ pub enum EmailTokenPurpose {
     UpdateEmail,
     ResetPassword,
     DeleteAccount,
-    PlcOperation
+    PlcOperation,
 }
 
 impl EmailTokenPurpose {
@@ -168,7 +163,7 @@ impl EmailTokenPurpose {
             EmailTokenPurpose::UpdateEmail => "update_email",
             EmailTokenPurpose::ResetPassword => "reset_password",
             EmailTokenPurpose::DeleteAccount => "delete_account",
-            EmailTokenPurpose::PlcOperation => "plc_operation"
+            EmailTokenPurpose::PlcOperation => "plc_operation",
         }
     }
 
@@ -179,15 +174,15 @@ impl EmailTokenPurpose {
             "reset_password" => Ok(EmailTokenPurpose::ResetPassword),
             "delete_account" => Ok(EmailTokenPurpose::DeleteAccount),
             "plc_operation" => Ok(EmailTokenPurpose::PlcOperation),
-            _ => bail!("Unable to parse as EmailTokenPurpose: `{s:?}`")
+            _ => bail!("Unable to parse as EmailTokenPurpose: `{s:?}`"),
         }
     }
 }
 
 impl<DB> Queryable<Text, DB> for EmailTokenPurpose
-    where
-        DB: Backend,
-        String: FromSql<Text, DB>,
+where
+    DB: Backend,
+    String: FromSql<Text, DB>,
 {
     type Row = String;
 
@@ -197,8 +192,8 @@ impl<DB> Queryable<Text, DB> for EmailTokenPurpose
 }
 
 impl ToSql<Text, pg::Pg> for EmailTokenPurpose
-    where
-        String: ToSql<Text, pg::Pg>,
+where
+    String: ToSql<Text, pg::Pg>,
 {
     fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, pg::Pg>) -> serialize::Result {
         let v = self.as_str().to_owned();

@@ -1,7 +1,7 @@
+use crate::common::time::MINUTE;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use std::time::SystemTime;
-use crate::common::time::MINUTE;
 
 const NOTIFY_THRESHOLD: i32 = 20 * MINUTE; // 20 minutes;
 
