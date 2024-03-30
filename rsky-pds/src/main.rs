@@ -177,6 +177,7 @@ fn rocket() -> _ {
                 com::atproto::server::delete_account::delete_account,
                 com::atproto::server::delete_session::delete_session,
                 com::atproto::server::describe_server::describe_server,
+                com::atproto::server::activate_account::activate_account,
                 com::atproto::server::get_service_auth::get_service_auth,
                 com::atproto::server::get_account_invite_codes::get_account_invite_codes,
                 com::atproto::server::get_session::get_session,

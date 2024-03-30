@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
 use serde_json::Value;
+use url::form_urlencoded;
 
 pub fn get_random_str() -> String {
     let token: String = rand::thread_rng()
@@ -28,6 +29,10 @@ pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
 
 pub fn json_to_b64url<T: Serialize>(obj: &T) -> Result<String> {
     Ok(Base64::encode_string((&serde_json::to_string(obj)?).as_ref()).replace("=", ""))
+}
+
+pub fn encode_uri_component(input: &String) -> String {
+    form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }
 
 pub mod env;

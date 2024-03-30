@@ -1,6 +1,6 @@
 extern crate unsigned_varint;
 use crate::models::*;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use data_encoding::BASE32;
 use diesel::prelude::*;
 use diesel::PgConnection;
@@ -13,7 +13,12 @@ use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
+use rocket::form::validate::Contains;
 use unsigned_varint::encode::u16 as encode_varint;
+use crate::common::env::{env_int, env_str};
+use crate::plc;
+
+const DID_KEY_PREFIX: &str = "did:key:";
 
 /// Important to user `preserve_order` with serde_json so these bytes are ordered
 /// correctly when encoding.
@@ -48,6 +53,13 @@ pub struct PlcGenesisOperation {
     pub prev: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AssertionContents {
+    pub signing_key: Option<String>,
+    pub pds_endpoint: Option<String>,
+    pub rotation_keys: Option<Vec<String>>
 }
 
 /// Formatted xxxxx-xxxxx
@@ -147,18 +159,10 @@ pub fn encode_did_key(pubkey: &PublicKey) -> String {
     format!("did:key:{pk_multibase}")
 }
 
-pub async fn create_did_and_plc_op(
-    handle: &str,
-    input: &CreateAccountInput,
-    signing_key: Keypair,
-) -> Result<String> {
+pub fn get_keys_from_private_key_str(
+    private_key: String
+) -> Result<(SecretKey, PublicKey)> {
     let secp = Secp256k1::new();
-    let private_key: String;
-    if let Some(recovery_key) = &input.recovery_key {
-        private_key = recovery_key.clone();
-    } else {
-        private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    }
     let decoded_key = hex::decode(private_key.as_bytes()).map_err(|error| {
         let context = format!("Issue decoding hex '{}'", private_key);
         anyhow::Error::new(error).context(context)
@@ -168,6 +172,21 @@ pub async fn create_did_and_plc_op(
         anyhow::Error::new(error).context(context)
     })?;
     let public_key = secret_key.public_key(&secp);
+    Ok((secret_key, public_key))
+}
+
+pub async fn create_did_and_plc_op(
+    handle: &str,
+    input: &CreateAccountInput,
+    signing_key: Keypair,
+) -> Result<String> {
+    let private_key: String;
+    if let Some(recovery_key) = &input.recovery_key {
+        private_key = recovery_key.clone();
+    } else {
+        private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    }
+    let (secret_key, public_key) = get_keys_from_private_key_str(private_key)?;
 
     println!("Generating and signing PLC directory genesis operation...");
     let mut create_op = PlcGenesisOperation {
@@ -200,12 +219,13 @@ pub async fn create_did_and_plc_op(
     println!("Created DID {did_plc:#}");
     println!("publishing......");
 
+    // @TODO: Use plc::Client instead
     let plc_url = format!(
         "https://{0}/{1}",
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
         did_plc
     );
-    let client = reqwest::Client::new(); // fix
+    let client = reqwest::Client::new();
     let response = client
         .post(plc_url)
         .json(&create_op)
@@ -218,6 +238,62 @@ pub async fn create_did_and_plc_op(
         Ok(_res) => Ok(did_plc.into()),
         Err(error) => Err(anyhow::Error::new(error).context(response.text().await?)),
     }
+}
+
+pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
+    if did.starts_with("did:plc") {
+        let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
+        let plc_client = plc::Client::new(plc_url);
+        let resolved = plc_client.get_document_data(&did).await?;
+        let pds_endpoint = match resolved.services.get("atproto_pds") {
+            Some(service) => Some(service.endpoint.clone()),
+            None => None
+        };
+        let signing_key = match resolved.verification_methods.get("atproto") {
+            Some(key) => Some(key.clone()),
+            None => None
+        };
+        assert_valid_doc_contents(AssertionContents{
+            pds_endpoint,
+            signing_key,
+            rotation_keys: Some(resolved.rotation_keys)
+        }).await?;
+    } else {
+        bail!("Not yet supporting did:web")
+    }
+    Ok(())
+}
+
+pub async fn assert_valid_doc_contents(
+    contents: AssertionContents
+) -> Result<()> {
+    let AssertionContents { signing_key, pds_endpoint, rotation_keys } = contents;
+    let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let (_, plc_rotation_key) = get_keys_from_private_key_str(private_key)?;
+    let plc_rotation_key = encode_did_key(&plc_rotation_key);
+
+    if let Some(rotation_keys) = rotation_keys {
+        if !rotation_keys.contains(plc_rotation_key) {
+            bail!("Server rotation key not included in PLC DID data")
+        }
+    }
+    // @TODO: Move next 3 lines to a shared config context
+    let port = env_int("PDS_PORT").unwrap_or(2583);
+    let hostname = env_str("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
+    let public_url = if hostname == "localhost" { format!("http://localhost:{port}") } else { format!("https://{hostname}") };
+    
+    if pds_endpoint.is_none() || pds_endpoint.unwrap() != public_url {
+        bail!("DID document atproto_pds service endpoint does not match PDS public url")
+    }
+
+    let repo_signing_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let repo_signing_keypair = SecretKey::from_slice(&hex::decode(repo_signing_key.as_bytes()).unwrap()).unwrap();
+    let secp = Secp256k1::new();
+    let repo_public_key = repo_signing_keypair.public_key(&secp);
+    if signing_key.is_none() || signing_key.unwrap() != encode_did_key(&repo_public_key) {
+        bail!("DID document verification method does not match expected signing key")
+    }
+    Ok(())
 }
 
 /*
@@ -251,3 +327,4 @@ pub mod reserve_signing_key;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
+pub mod activate_account;

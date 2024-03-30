@@ -3,6 +3,7 @@ extern crate serde_derive;
 extern crate core;
 extern crate rocket;
 extern crate serde;
+extern crate url;
 
 use crate::sequencer::Sequencer;
 use diesel::pg::PgConnection;
@@ -28,4 +29,5 @@ pub mod repo;
 pub mod schema;
 pub mod sequencer;
 pub mod storage;
+pub mod plc;
 mod vendored;
