@@ -9,7 +9,7 @@ use secp256k1::SecretKey;
 use std::env;
 
 #[rocket::get("/xrpc/com.atproto.server.getServiceAuth?<aud>")]
-pub async fn get_session(
+pub async fn get_service_auth(
     aud: String,
     auth: Access,
 ) -> Result<Json<GetServiceAuthOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
