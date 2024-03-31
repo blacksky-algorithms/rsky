@@ -4,6 +4,7 @@ use crate::db::establish_connection;
 use crate::models;
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
+use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::NodeData;
 use crate::repo::parse;
@@ -113,25 +114,32 @@ impl SqlRepoReader {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
-        let cached = self.cache.get_many(cids);
-        if let Ok(cached_result) = cached {
-            if cached_result.missing.len() < 1 {
-                return Ok(cached_result);
-            }
+        let cached = self.cache.get_many(cids)?;
+        if cached.missing.len() < 1 {
+            return Ok(cached);
         }
+        let missing = CidSet::new(Some(cached.missing.clone()));
+        let missing_strings: Vec<String> =
+            cached.missing.into_iter().map(|c| c.to_string()).collect();
         let mut blocks = BlockMap::new();
-        RepoBlockSchema::repo_block
-            .select((RepoBlockSchema::cid, RepoBlockSchema::content))
-            .load::<(String, Vec<u8>)>(conn)?
-            .into_iter()
-            .map(|row: (String, Vec<u8>)| {
-                let cid = Cid::from_str(&row.0).unwrap();
-                blocks.set(cid, row.1);
-            })
-            .for_each(drop);
+
+        let _ = missing_strings.chunks(500).map(|batch| {
+            let _ = RepoBlockSchema::repo_block
+                .filter(RepoBlockSchema::cid.eq_any(batch))
+                .select((RepoBlockSchema::cid, RepoBlockSchema::content))
+                .load::<(String, Vec<u8>)>(conn)?
+                .into_iter()
+                .map(|row: (String, Vec<u8>)| {
+                    let cid = Cid::from_str(&row.0).unwrap();
+                    blocks.set(cid, row.1);
+                });
+            Ok::<(), anyhow::Error>(())
+        });
+        self.cache.add_map(blocks.clone())?;
+        blocks.add_map(cached.blocks)?;
         Ok(BlocksAndMissing {
             blocks,
-            missing: Vec::new(),
+            missing: missing.to_list(),
         })
     }
 

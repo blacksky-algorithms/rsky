@@ -1014,13 +1014,13 @@ impl MST {
 
     /// Sync Protocol
     /// @TODO: This needs to implement an actual CarWriter
-    pub fn write_to_car_stream(&mut self, car: &mut BlockWriter) -> Result<()> {
+    pub async fn write_to_car_stream(&mut self, car: &mut BlockWriter) -> Result<()> {
         let mut leaves = CidSet::new(None);
         let mut to_fetch = CidSet::new(None);
         to_fetch.add(self.get_pointer()?);
         while to_fetch.size() > 0 {
             let mut next_layer = CidSet::new(None);
-            let fetched = self.storage.get_blocks(to_fetch.to_list())?;
+            let fetched = self.storage.get_blocks(to_fetch.to_list()).await?;
             if fetched.missing.len() > 0 {
                 return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                     "mst node".to_owned(),
@@ -1048,7 +1048,7 @@ impl MST {
             }
             to_fetch = next_layer;
         }
-        let leaf_data = self.storage.get_blocks(leaves.to_list())?;
+        let leaf_data = self.storage.get_blocks(leaves.to_list()).await?;
         if leaf_data.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "mst leaf".to_owned(),
