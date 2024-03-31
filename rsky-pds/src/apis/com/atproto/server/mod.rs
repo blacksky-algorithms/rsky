@@ -1,5 +1,7 @@
 extern crate unsigned_varint;
+use crate::common::env::{env_int, env_str};
 use crate::models::*;
+use crate::plc;
 use anyhow::{bail, Result};
 use data_encoding::BASE32;
 use diesel::prelude::*;
@@ -8,15 +10,13 @@ use indexmap::IndexMap;
 use multibase::Base::Base58Btc;
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest;
+use rocket::form::validate::Contains;
 use rsky_lexicon::com::atproto::server::CreateAccountInput;
 use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
-use rocket::form::validate::Contains;
 use unsigned_varint::encode::u16 as encode_varint;
-use crate::common::env::{env_int, env_str};
-use crate::plc;
 
 const DID_KEY_PREFIX: &str = "did:key:";
 
@@ -59,7 +59,7 @@ pub struct PlcGenesisOperation {
 pub struct AssertionContents {
     pub signing_key: Option<String>,
     pub pds_endpoint: Option<String>,
-    pub rotation_keys: Option<Vec<String>>
+    pub rotation_keys: Option<Vec<String>>,
 }
 
 /// Formatted xxxxx-xxxxx
@@ -159,9 +159,7 @@ pub fn encode_did_key(pubkey: &PublicKey) -> String {
     format!("did:key:{pk_multibase}")
 }
 
-pub fn get_keys_from_private_key_str(
-    private_key: String
-) -> Result<(SecretKey, PublicKey)> {
+pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {
     let secp = Secp256k1::new();
     let decoded_key = hex::decode(private_key.as_bytes()).map_err(|error| {
         let context = format!("Issue decoding hex '{}'", private_key);
@@ -247,27 +245,30 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
         let resolved = plc_client.get_document_data(&did).await?;
         let pds_endpoint = match resolved.services.get("atproto_pds") {
             Some(service) => Some(service.endpoint.clone()),
-            None => None
+            None => None,
         };
         let signing_key = match resolved.verification_methods.get("atproto") {
             Some(key) => Some(key.clone()),
-            None => None
+            None => None,
         };
-        assert_valid_doc_contents(AssertionContents{
+        assert_valid_doc_contents(AssertionContents {
             pds_endpoint,
             signing_key,
-            rotation_keys: Some(resolved.rotation_keys)
-        }).await?;
+            rotation_keys: Some(resolved.rotation_keys),
+        })
+        .await?;
     } else {
         bail!("Not yet supporting did:web")
     }
     Ok(())
 }
 
-pub async fn assert_valid_doc_contents(
-    contents: AssertionContents
-) -> Result<()> {
-    let AssertionContents { signing_key, pds_endpoint, rotation_keys } = contents;
+pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()> {
+    let AssertionContents {
+        signing_key,
+        pds_endpoint,
+        rotation_keys,
+    } = contents;
     let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let (_, plc_rotation_key) = get_keys_from_private_key_str(private_key)?;
     let plc_rotation_key = encode_did_key(&plc_rotation_key);
@@ -280,14 +281,19 @@ pub async fn assert_valid_doc_contents(
     // @TODO: Move next 3 lines to a shared config context
     let port = env_int("PDS_PORT").unwrap_or(2583);
     let hostname = env_str("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
-    let public_url = if hostname == "localhost" { format!("http://localhost:{port}") } else { format!("https://{hostname}") };
-    
+    let public_url = if hostname == "localhost" {
+        format!("http://localhost:{port}")
+    } else {
+        format!("https://{hostname}")
+    };
+
     if pds_endpoint.is_none() || pds_endpoint.unwrap() != public_url {
         bail!("DID document atproto_pds service endpoint does not match PDS public url")
     }
 
     let repo_signing_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let repo_signing_keypair = SecretKey::from_slice(&hex::decode(repo_signing_key.as_bytes()).unwrap()).unwrap();
+    let repo_signing_keypair =
+        SecretKey::from_slice(&hex::decode(repo_signing_key.as_bytes()).unwrap()).unwrap();
     let secp = Secp256k1::new();
     let repo_public_key = repo_signing_keypair.public_key(&secp);
     if signing_key.is_none() || signing_key.unwrap() != encode_did_key(&repo_public_key) {
@@ -305,6 +311,7 @@ pub fn validate_existing_did(
     todo!()
 }*/
 
+pub mod activate_account;
 pub mod confirm_email;
 pub mod create_account;
 pub mod create_app_password;
@@ -327,4 +334,3 @@ pub mod reserve_signing_key;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
-pub mod activate_account;

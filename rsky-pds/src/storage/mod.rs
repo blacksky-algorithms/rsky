@@ -1,6 +1,8 @@
 // based on atproto/packages/pds/src/actor-store/repo/sql-repo-reader.ts
 
 use crate::db::establish_connection;
+use crate::models;
+use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::NodeData;
@@ -8,10 +10,15 @@ use crate::repo::parse;
 use crate::repo::types::{CommitData, RepoRecord, VersionedCommit};
 use crate::repo::util::cbor_to_lex_record;
 use anyhow::Result;
+use chrono::offset::Utc as UtcOffset;
+use chrono::DateTime;
 use diesel::prelude::*;
+use diesel::*;
+use futures::try_join;
 use libipld::Cid;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::time::SystemTime;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -64,22 +71,37 @@ pub struct ObjAndBytes {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CidAndRev {
+    pub cid: Cid,
+    pub rev: String,
+}
+
 #[derive(Clone)]
 pub struct SqlRepoReader {
     pub cache: BlockMap,
     pub blocks: BlockMap,
     pub root: Option<Cid>,
     pub rev: Option<String>,
+    pub now: String,
+    pub did: String, // @TODO: Refactor so SQL Repo Reader reads from one repo
 }
 
 // Basically handles getting ipld blocks from db
 impl SqlRepoReader {
-    pub fn new(blocks: Option<BlockMap>) -> Self {
+    pub fn new(blocks: Option<BlockMap>, did: String, now: Option<String>) -> Self {
+        let now = now.unwrap_or_else(|| {
+            let system_time = SystemTime::now();
+            let dt: DateTime<UtcOffset> = system_time.into();
+            format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"))
+        });
         let mut this = SqlRepoReader {
             cache: BlockMap::new(),
             blocks: BlockMap::new(),
             root: None,
             rev: None,
+            now,
+            did,
         };
         if let Some(blocks) = blocks {
             this.blocks.add_map(blocks).unwrap();
@@ -87,7 +109,7 @@ impl SqlRepoReader {
         this
     }
 
-    pub fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
+    pub async fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
@@ -167,6 +189,7 @@ impl SqlRepoReader {
     // Transactors
     // -------------------
 
+    /* @Todo: Remove this old apply_commit code from memory-blockstore
     pub fn apply_commit(&mut self, commit: CommitData) -> Result<()> {
         self.root = Some(commit.cid);
         let rm_cids = commit.removed_cids.to_list();
@@ -178,9 +201,105 @@ impl SqlRepoReader {
             self.blocks.set(Cid::from_str(cid)?, bytes.clone());
         }
         Ok(())
+    }*/
+
+    pub async fn apply_commit(
+        &mut self,
+        commit: CommitData,
+        is_create: Option<bool>,
+    ) -> Result<()> {
+        try_join!(
+            self.update_root(commit.cid, commit.rev.clone(), is_create),
+            self.put_many(commit.new_blocks, commit.rev),
+            self.delete_many(commit.removed_cids.to_list())
+        );
+        Ok(())
     }
 
-    pub fn get_root(&self) -> Option<Cid> {
-        self.root
+    pub async fn put_many(&self, to_put: BlockMap, rev: String) -> Result<()> {
+        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
+        let mut blocks: Vec<RepoBlock> = Vec::new();
+        for (cid, bytes) in to_put.map.iter() {
+            blocks.push(RepoBlock {
+                cid: cid.to_string(),
+                repo_rev: rev.clone(),
+                size: bytes.len() as i32,
+                content: bytes.clone(),
+            });
+        }
+        let _ = blocks
+            .chunks(50)
+            .map(|batch| {
+                Ok(insert_into(RepoBlockSchema::repo_block)
+                    .values(batch)
+                    .on_conflict_do_nothing()
+                    .execute(conn)?)
+            })
+            .collect::<Result<Vec<usize>>>()?;
+        Ok(())
+    }
+
+    pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
+        if cids.len() < 1 {
+            return Ok(());
+        }
+        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
+        let cid_strings: Vec<String> = cids.into_iter().map(|c| c.to_string()).collect();
+        delete(RepoBlockSchema::repo_block)
+            .filter(RepoBlockSchema::cid.eq_any(cid_strings))
+            .execute(conn)?;
+        Ok(())
+    }
+
+    pub async fn update_root(&self, cid: Cid, rev: String, is_create: Option<bool>) -> Result<()> {
+        use crate::schema::pds::repo_root::dsl as RepoRootSchema;
+        let conn = &mut establish_connection()?;
+
+        let is_create = is_create.unwrap_or(false);
+        if is_create {
+            insert_into(RepoRootSchema::repo_root)
+                .values((
+                    RepoRootSchema::did.eq(&self.did),
+                    RepoRootSchema::cid.eq(cid.to_string()),
+                    RepoRootSchema::rev.eq(rev),
+                    RepoRootSchema::indexedAt.eq(&self.now),
+                ))
+                .execute(conn)?;
+        } else {
+            update(RepoRootSchema::repo_root)
+                .set((
+                    RepoRootSchema::cid.eq(cid.to_string()),
+                    RepoRootSchema::rev.eq(rev),
+                    RepoRootSchema::indexedAt.eq(&self.now),
+                ))
+                .execute(conn)?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_root(&self) -> Option<Cid> {
+        match self.get_root_detailed().await {
+            Ok(root) => Some(root.cid),
+            Err(_) => None,
+        }
+    }
+
+    pub async fn get_root_detailed(&self) -> Result<CidAndRev> {
+        use crate::schema::pds::repo_root::dsl as RepoRootSchema;
+        let conn = &mut establish_connection()?;
+
+        let res = RepoRootSchema::repo_root
+            .filter(RepoRootSchema::did.eq(&self.did))
+            .select(models::RepoRoot::as_select())
+            .first(conn)?;
+
+        Ok(CidAndRev {
+            cid: Cid::from_str(&res.cid)?,
+            rev: res.rev,
+        })
     }
 }

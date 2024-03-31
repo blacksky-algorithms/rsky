@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX email_token_purpose_token_unique
 CREATE TABLE IF NOT EXISTS pds.repo_root (
     did character varying PRIMARY KEY,
     cid character varying NOT NULL,
-    rev character varying,
+    rev character varying NOT NULL,
     "indexedAt" character varying NOT NULL
 );
 

@@ -321,7 +321,16 @@ pub struct RefreshToken {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Selectable,
+    Insertable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(cid))]
 #[diesel(table_name = crate::schema::pds::repo_block)]
@@ -346,7 +355,7 @@ pub struct RepoBlock {
 pub struct RepoRoot {
     pub did: String,
     pub cid: String,
-    pub rev: Option<String>,
+    pub rev: String,
     #[diesel(column_name = indexedAt)]
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,

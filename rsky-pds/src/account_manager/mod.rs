@@ -97,6 +97,10 @@ impl AccountManager {
         account::delete_account(did).await
     }
 
+    pub async fn activate_account(did: &String) -> Result<()> {
+        account::activate_account(did).await
+    }
+
     // Auth
     // ----------
     pub async fn create_session(

@@ -141,7 +141,7 @@ pub mod pds {
         pds.repo_root (did) {
             did -> Varchar,
             cid -> Varchar,
-            rev -> Nullable<Varchar>,
+            rev -> Varchar,
             indexedAt -> Varchar,
         }
     }

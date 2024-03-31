@@ -40,6 +40,12 @@ pub struct CommitEvt {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct HandleEvt {
+    pub did: String,
+    pub handle: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IdentityEvt {
     pub did: String,
 }
@@ -115,6 +121,21 @@ pub async fn format_seq_commit(
     Ok(models::RepoSeq::new(
         did,
         "append".to_string(),
+        struct_to_cbor(evt)?,
+        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+    ))
+}
+
+pub async fn format_seq_handle_update(did: String, handle: String) -> Result<models::RepoSeq> {
+    let evt = HandleEvt {
+        did: did.clone(),
+        handle,
+    };
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    Ok(models::RepoSeq::new(
+        did,
+        "handle".to_string(),
         struct_to_cbor(evt)?,
         format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
     ))

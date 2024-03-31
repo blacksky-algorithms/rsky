@@ -2,7 +2,9 @@ use crate::crawlers::Crawlers;
 use crate::db::establish_connection;
 use crate::models;
 use crate::repo::types::{CommitData, PreparedWrite};
-use crate::sequencer::events::{format_seq_commit, format_seq_identity_evt, format_seq_tombstone};
+use crate::sequencer::events::{
+    format_seq_commit, format_seq_handle_update, format_seq_identity_evt, format_seq_tombstone,
+};
 use anyhow::Result;
 use diesel::*;
 
@@ -46,6 +48,11 @@ impl Sequencer {
         writes: Vec<PreparedWrite>,
     ) -> Result<()> {
         let evt = format_seq_commit(did, commit_data, writes).await?;
+        self.sequence_evt(evt).await
+    }
+
+    pub async fn sequence_handle_update(&mut self, did: String, handle: String) -> Result<()> {
+        let evt = format_seq_handle_update(did, handle).await?;
         self.sequence_evt(evt).await
     }
 

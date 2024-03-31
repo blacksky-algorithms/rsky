@@ -234,3 +234,16 @@ pub async fn delete_account(did: &String) -> Result<()> {
         .execute(conn)?;
     Ok(())
 }
+
+pub async fn activate_account(did: &String) -> Result<()> {
+    let conn = &mut establish_connection()?;
+
+    update(ActorSchema::actor)
+        .filter(ActorSchema::did.eq(did))
+        .set((
+            ActorSchema::deactivatedAt.eq::<Option<String>>(None),
+            ActorSchema::deleteAfter.eq::<Option<String>>(None),
+        ))
+        .execute(conn)?;
+    Ok(())
+}

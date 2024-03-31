@@ -44,18 +44,18 @@ pub struct Repo {
 
 pub struct ActorStore {
     did: String,
-    storage: SqlRepoReader, // get ipld blocks from db
-    record: RecordReader,   // get lexicon records from db
-    blob: BlobReader,       // get blobs
+    pub storage: SqlRepoReader, // get ipld blocks from db
+    record: RecordReader,       // get lexicon records from db
+    blob: BlobReader,           // get blobs
 }
 
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
 impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
-    pub fn new(did: String, storage: SqlRepoReader, blobstore: S3BlobStore) -> Self {
+    pub fn new(did: String, blobstore: S3BlobStore) -> Self {
         ActorStore {
+            storage: SqlRepoReader::new(None, did.clone(), None),
             did,
-            storage,
             record: RecordReader::new(),
             blob: BlobReader::new(blobstore), // Unlike TS impl, just use blob reader vs generator
         }
@@ -92,7 +92,7 @@ impl ActorStore {
             keypair,
             Some(write_ops),
         )?;
-        self.storage.apply_commit(commit.clone())?;
+        self.storage.apply_commit(commit.clone(), None).await?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
@@ -160,11 +160,11 @@ impl Repo {
     }
 
     // static
-    pub fn load(storage: &mut SqlRepoReader, cid: Option<Cid>) -> Result<Self> {
+    pub async fn load(storage: &mut SqlRepoReader, cid: Option<Cid>) -> Result<Self> {
         let commit_cid = if let Some(cid) = cid {
             Some(cid)
         } else {
-            storage.get_root()
+            storage.get_root().await
         };
         match commit_cid {
             Some(commit_cid) => {
@@ -223,14 +223,14 @@ impl Repo {
         }
     }
 
-    pub fn get_content(&mut self) -> Result<RepoContents> {
+    pub async fn get_content(&mut self) -> Result<RepoContents> {
         let entries = self.data.list(None, None, None)?;
         let cids = entries
             .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let found = self.storage.get_blocks(cids)?;
+        let found = self.storage.get_blocks(cids).await?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -292,20 +292,23 @@ impl Repo {
     }
 
     // static
-    pub fn create_from_commit(storage: &mut SqlRepoReader, commit: CommitData) -> Result<Self> {
-        storage.apply_commit(commit.clone())?;
-        Repo::load(storage, Some(commit.cid))
+    pub async fn create_from_commit(
+        storage: &mut SqlRepoReader,
+        commit: CommitData,
+    ) -> Result<Self> {
+        storage.apply_commit(commit.clone(), None).await?;
+        Repo::load(storage, Some(commit.cid)).await
     }
 
     // static
-    pub fn create(
+    pub async fn create(
         mut storage: SqlRepoReader,
         did: String,
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
         let commit = Repo::format_init_commit(storage.clone(), did, keypair, initial_writes)?;
-        Repo::create_from_commit(&mut storage, commit)
+        Repo::create_from_commit(&mut storage, commit).await
     }
 
     pub fn format_commit(
@@ -380,15 +383,19 @@ impl Repo {
         })
     }
 
-    pub fn apply_commit(&mut self, commit_data: CommitData) -> Result<Self> {
+    pub async fn apply_commit(&mut self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
-        self.storage.apply_commit(commit_data)?;
-        Repo::load(&mut self.storage, Some(commit_data_cid))
+        self.storage.apply_commit(commit_data, None).await?;
+        Repo::load(&mut self.storage, Some(commit_data_cid)).await
     }
 
-    pub fn apply_writes(&mut self, to_write: RecordWriteEnum, keypair: Keypair) -> Result<Self> {
+    pub async fn apply_writes(
+        &mut self,
+        to_write: RecordWriteEnum,
+        keypair: Keypair,
+    ) -> Result<Self> {
         let commit = self.format_commit(to_write, keypair)?;
-        self.apply_commit(commit)
+        self.apply_commit(commit).await
     }
 
     pub fn format_resign_commit(&self, rev: String, keypair: Keypair) -> Result<CommitData> {
@@ -414,9 +421,9 @@ impl Repo {
         })
     }
 
-    pub fn resign_commit(&mut self, rev: String, keypair: Keypair) -> Result<Self> {
+    pub async fn resign_commit(&mut self, rev: String, keypair: Keypair) -> Result<Self> {
         let formatted = self.format_resign_commit(rev, keypair)?;
-        self.apply_commit(formatted)
+        self.apply_commit(formatted).await
     }
 }
 
