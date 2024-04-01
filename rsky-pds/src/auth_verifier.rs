@@ -124,6 +124,62 @@ impl<'r> FromRequest<'r> for Access {
     }
 }
 
+pub struct Refresh {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Refresh {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let mut options = VerificationOptions::default();
+        options.allowed_audiences = Some(HashSet::from_strings(&[
+            env::var("PDS_SERVICE_DID").unwrap()
+        ]));
+        let ValidatedBearer {
+            did,
+            scope,
+            token,
+            payload,
+            audience,
+        } = match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
+            Ok(result) => {
+                let payload = result.payload.clone();
+                match payload.jti {
+                    Some(_) => result,
+                    None => {
+                        return Outcome::Failure((
+                            Status::BadRequest,
+                            AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Outcome::Failure((
+                    Status::BadRequest,
+                    AuthError::BadJwt(error.to_string()),
+                ));
+            }
+        };
+        Outcome::Success(Refresh {
+            access: AccessOutput {
+                credentials: Some(Credentials {
+                    r#type: "refresh".to_string(),
+                    did: Some(did),
+                    scope: Some(scope),
+                    audience,
+                    token_id: payload.jti,
+                    aud: None,
+                    iss: None,
+                }),
+                artifacts: Some(token),
+            },
+        })
+    }
+}
+
 pub struct AccessNotAppPassword {
     pub access: AccessOutput,
 }

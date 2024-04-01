@@ -1,15 +1,15 @@
 use crate::auth_verifier::AuthScope;
-use crate::common::time::MINUTE;
+use crate::common::time::{from_micros_to_utc, MINUTE};
 use crate::common::{get_random_str, json_to_b64url, RFC3339_VARIANT};
 use crate::db::establish_connection;
 use crate::models;
 use anyhow::Result;
-use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::*;
 use jwt_simple::prelude::*;
 use secp256k1::{Keypair, Message, SecretKey};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
+use thiserror::Error;
 
 pub struct CreateTokensOpts {
     pub did: String,
@@ -18,6 +18,12 @@ pub struct CreateTokensOpts {
     pub scope: Option<AuthScope>,
     pub jti: Option<String>,
     pub expires_in: Option<Duration>,
+}
+
+pub struct RefreshGracePeriodOpts {
+    pub id: String,
+    pub expires_at: String,
+    pub next_id: String,
 }
 
 pub struct AuthToken {
@@ -56,6 +62,12 @@ pub struct ServiceJwtParams {
 #[derive(Serialize, Deserialize)]
 pub struct CustomClaimObj {
     pub scope: String,
+}
+
+#[derive(Error, Debug)]
+pub enum AuthHelperError {
+    #[error("ConcurrentRefreshError")]
+    ConcurrentRefresh,
 }
 
 pub fn create_tokens(opts: CreateTokensOpts) -> Result<(String, String)> {
@@ -195,15 +207,14 @@ pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToke
 }
 
 #[allow(deprecated)]
-pub fn store_refresh_token(payload: RefreshToken, app_password_name: Option<String>) -> Result<()> {
+pub async fn store_refresh_token(
+    payload: RefreshToken,
+    app_password_name: Option<String>,
+) -> Result<()> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
     let conn = &mut establish_connection()?;
 
-    let nanoseconds = 230 * 1000000;
-    let exp = DateTime::<Utc>::from_utc(
-        NaiveDateTime::from_timestamp((payload.exp.as_millis() / 1000) as i64, nanoseconds),
-        Utc,
-    );
+    let exp = from_micros_to_utc((payload.exp.as_millis() / 1000) as i64);
 
     insert_into(RefreshTokenSchema::refresh_token)
         .values((
@@ -226,4 +237,55 @@ pub async fn revoke_refresh_token(id: String) -> Result<bool> {
         .get_results::<models::RefreshToken>(conn)?;
 
     Ok(deleted_rows.len() > 0)
+}
+
+pub async fn get_refresh_token(id: &String) -> Result<Option<models::RefreshToken>> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    Ok(RefreshTokenSchema::refresh_token
+        .find(id)
+        .first(conn)
+        .optional()?)
+}
+
+pub async fn delete_expired_refresh_tokens(did: &String, now: String) -> Result<()> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    delete(RefreshTokenSchema::refresh_token)
+        .filter(RefreshTokenSchema::did.eq(did))
+        .filter(RefreshTokenSchema::expiresAt.le(now))
+        .execute(conn)?;
+    Ok(())
+}
+
+pub async fn add_refresh_grace_period(opts: RefreshGracePeriodOpts) -> Result<()> {
+    let RefreshGracePeriodOpts {
+        id,
+        expires_at,
+        next_id,
+    } = opts;
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    update(RefreshTokenSchema::refresh_token)
+        .filter(RefreshTokenSchema::id.eq(id))
+        .filter(
+            RefreshTokenSchema::nextId
+                .is_null()
+                .or(RefreshTokenSchema::nextId.eq(&next_id)),
+        )
+        .set((
+            RefreshTokenSchema::expiresAt.eq(expires_at),
+            RefreshTokenSchema::nextId.eq(&next_id),
+        ))
+        .returning(models::RefreshToken::as_select())
+        .get_results(conn)
+        .map_err(|error| anyhow::Error::new(AuthHelperError::ConcurrentRefresh).context(error))?;
+    Ok(())
+}
+
+pub fn get_refresh_token_id() -> String {
+    get_random_str()
 }

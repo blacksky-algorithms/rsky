@@ -1,16 +1,24 @@
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::helpers::auth::{
+    AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
+};
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
 use crate::common;
+use crate::common::time::{from_micros_to_str, from_str_to_micros, HOUR};
+use crate::common::RFC3339_VARIANT;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
+use chrono::offset::Utc as UtcOffset;
+use chrono::DateTime;
 use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
+use std::time::SystemTime;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -62,7 +70,7 @@ impl AccountManager {
         }
     }
 
-    pub fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
+    pub async fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
         let CreateAccountOpts {
             did,
             handle,
@@ -102,7 +110,7 @@ impl AccountManager {
             account::register_account(did.clone(), email, password_encrypted)?;
         }
         invite::record_invite_use(did.clone(), invite_code, now)?;
-        auth::store_refresh_token(refresh_payload, None)?;
+        auth::store_refresh_token(refresh_payload, None).await?;
         repo::update_root(did, repo_cid, repo_rev)?;
         Ok((access_jwt, refresh_jwt))
     }
@@ -139,7 +147,7 @@ impl AccountManager {
         } else {
             AuthScope::AppPass
         };
-        let (access_jwt, refresh_jwt) = auth::create_tokens(auth::CreateTokensOpts {
+        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did,
             jwt_key,
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
@@ -148,8 +156,82 @@ impl AccountManager {
             expires_in: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
-        auth::store_refresh_token(refresh_payload, app_password_name)?;
+        auth::store_refresh_token(refresh_payload, app_password_name).await?;
         Ok((access_jwt, refresh_jwt))
+    }
+
+    pub async fn rotate_refresh_token(id: &String) -> Result<Option<(String, String)>> {
+        let token = auth::get_refresh_token(id).await?;
+        if let Some(token) = token {
+            let system_time = SystemTime::now();
+            let dt: DateTime<UtcOffset> = system_time.into();
+            let now = format!("{}", dt.format(RFC3339_VARIANT));
+
+            // take the chance to tidy all of a user's expired tokens
+            // does not need to be transactional since this is just best-effort
+            auth::delete_expired_refresh_tokens(&token.did, now).await?;
+
+            // Shorten the refresh token lifespan down from its
+            // original expiration time to its revocation grace period.
+            let prev_expires_at = from_str_to_micros(&token.expires_at);
+
+            const REFRESH_GRACE_MS: i32 = 2 * HOUR;
+            let grace_expires_at = dt.timestamp_micros() + REFRESH_GRACE_MS as i64;
+
+            let expires_at = if grace_expires_at < prev_expires_at {
+                grace_expires_at
+            } else {
+                prev_expires_at
+            };
+
+            if expires_at <= dt.timestamp_micros() {
+                return Ok(None);
+            }
+
+            // Determine the next refresh token id: upon refresh token
+            // reuse you always receive a refresh token with the same id.
+            let next_id = token
+                .next_id
+                .unwrap_or_else(|| auth::get_refresh_token_id());
+
+            let secp = Secp256k1::new();
+            let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+            let secret_key =
+                SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+            let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+
+            let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
+                did: token.did,
+                jwt_key,
+                service_did: env::var("PDS_SERVICE_DID").unwrap(),
+                scope: Some(if token.app_password_name.is_none() {
+                    AuthScope::Access
+                } else {
+                    AuthScope::AppPass
+                }),
+                jti: Some(next_id.clone()),
+                expires_in: None,
+            })?;
+            let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+            match try_join!(
+                auth::add_refresh_grace_period(RefreshGracePeriodOpts {
+                    id: id.clone(),
+                    expires_at: from_micros_to_str(expires_at),
+                    next_id
+                }),
+                auth::store_refresh_token(refresh_payload, token.app_password_name)
+            ) {
+                Ok(_) => Ok(Some((access_jwt, refresh_jwt))),
+                Err(e) => match e.downcast_ref() {
+                    Some(AuthHelperError::ConcurrentRefresh) => {
+                        Box::pin(Self::rotate_refresh_token(id)).await
+                    }
+                    _ => Err(e),
+                },
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn revoke_refresh_token(id: String) -> Result<bool> {

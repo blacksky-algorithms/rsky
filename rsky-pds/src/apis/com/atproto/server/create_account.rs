@@ -82,7 +82,8 @@ async fn create(
         repo_rev: commit.rev.clone(),
         invite_code,
         deactivated: Some(deactivated),
-    })?;
+    })
+    .await?;
 
     if !deactivated {
         let mut lock = sequencer.sequencer.write().await;
