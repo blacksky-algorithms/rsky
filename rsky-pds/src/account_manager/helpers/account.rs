@@ -11,9 +11,19 @@ use chrono::DateTime;
 use diesel::dsl::LeftJoinOn;
 use diesel::helper_types::{Eq, IntoBoxed};
 use diesel::pg::Pg;
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::*;
 use std::ops::Add;
 use std::time::SystemTime;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AccountHelperError {
+    #[error("UserAlreadyExistsError")]
+    UserAlreadyExistsError,
+    #[error("DatabaseError: `{0}`")]
+    DieselError(String),
+}
 
 pub struct AvailabilityFlags {
     pub include_taken_down: Option<bool>,
@@ -259,6 +269,31 @@ pub async fn activate_account(did: &String) -> Result<()> {
         ))
         .execute(conn)?;
     Ok(())
+}
+
+pub async fn update_email(did: &String, email: &String) -> Result<()> {
+    let conn = &mut establish_connection()?;
+
+    let res = update(AccountSchema::account)
+        .filter(AccountSchema::did.eq(did))
+        .set((
+            AccountSchema::email.eq(email.to_lowercase()),
+            AccountSchema::emailConfirmedAt.eq::<Option<String>>(None),
+        ))
+        .execute(conn);
+
+    match res {
+        Ok(_) => Ok(()),
+        Err(DieselError::DatabaseError(kind, _)) => match kind {
+            DatabaseErrorKind::UniqueViolation => Err(anyhow::Error::new(
+                AccountHelperError::UserAlreadyExistsError,
+            )),
+            _ => Err(anyhow::Error::new(AccountHelperError::DieselError(
+                format!("{:?}", kind),
+            ))),
+        },
+        Err(e) => Err(anyhow::Error::new(e)),
+    }
 }
 
 pub async fn set_email_confirmed_at(did: &String, email_confirmed_at: String) -> Result<()> {

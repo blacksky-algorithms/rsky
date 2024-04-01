@@ -97,10 +97,19 @@ pub struct ResetPasswordInput {
     pub password: String,
 }
 
-/// Reset a user account password using a token.
+/// Revoke an App Password by name.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RevokeAppPasswordInput {
     pub name: String,
+}
+
+/// Update an account's email.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpdateEmailInput {
+    pub email: String,
+    /// Requires a token from com.atproto.sever.requestEmailUpdate
+    /// if the account's email has been confirmed.
+    pub token: Option<String>,
 }
 
 // Outputs

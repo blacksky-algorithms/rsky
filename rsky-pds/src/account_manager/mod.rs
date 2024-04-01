@@ -48,6 +48,11 @@ pub struct UpdateAccountPasswordOpts {
     pub password: String,
 }
 
+pub struct UpdateEmailOpts {
+    pub did: String,
+    pub email: String,
+}
+
 pub struct AccountManager {}
 
 impl AccountManager {
@@ -335,6 +340,15 @@ impl AccountManager {
         try_join!(
             email_token::delete_email_token(did, EmailTokenPurpose::ConfirmEmail),
             account::set_email_confirmed_at(did, now)
+        )?;
+        Ok(())
+    }
+
+    pub async fn update_email(opts: UpdateEmailOpts) -> Result<()> {
+        let UpdateEmailOpts { did, email } = opts;
+        try_join!(
+            account::update_email(&did, &email),
+            email_token::delete_all_email_tokens(&did)
         )?;
         Ok(())
     }

@@ -96,3 +96,13 @@ pub async fn delete_email_token(did: &String, purpose: EmailTokenPurpose) -> Res
         .execute(conn)?;
     Ok(())
 }
+
+pub async fn delete_all_email_tokens(did: &String) -> Result<()> {
+    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    delete(EmailTokenSchema::email_token)
+        .filter(EmailTokenSchema::did.eq(did))
+        .execute(conn)?;
+    Ok(())
+}

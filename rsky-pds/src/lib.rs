@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
 extern crate core;
+extern crate mailchecker;
 extern crate rocket;
 extern crate serde;
 extern crate url;
