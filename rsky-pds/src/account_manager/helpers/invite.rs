@@ -1,8 +1,6 @@
 use crate::db::establish_connection;
 use crate::models::models;
 use anyhow::{bail, Result};
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use diesel::*;
 use rsky_lexicon::com::atproto::server::AccountCodes;
 use rsky_lexicon::com::atproto::server::{
@@ -10,7 +8,7 @@ use rsky_lexicon::com::atproto::server::{
 };
 use std::collections::BTreeMap;
 use std::mem;
-use std::time::SystemTime;
+use crate::common;
 
 pub type CodeUse = LexiconInviteCodeUse;
 pub type CodeDetail = LexiconInviteCode;
@@ -67,10 +65,8 @@ pub fn record_invite_use(did: String, invite_code: Option<String>, now: String) 
 pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
-
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
-    let created_at = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+    
+    let created_at = common::now();
 
     let rows: Vec<models::InviteCode> = to_create
         .into_iter()
@@ -104,10 +100,8 @@ pub async fn create_account_invite_codes(
 ) -> Result<Vec<CodeDetail>> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
-
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
-    let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+    
+    let now = common::now();
 
     let rows: Vec<models::InviteCode> = codes
         .into_iter()

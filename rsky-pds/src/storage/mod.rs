@@ -1,7 +1,7 @@
 // based on atproto/packages/pds/src/actor-store/repo/sql-repo-reader.ts
 
 use crate::db::establish_connection;
-use crate::models;
+use crate::{common, models};
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::cid_set::CidSet;
@@ -11,15 +11,12 @@ use crate::repo::parse;
 use crate::repo::types::{CommitData, RepoRecord, VersionedCommit};
 use crate::repo::util::cbor_to_lex_record;
 use anyhow::Result;
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use diesel::prelude::*;
 use diesel::*;
 use futures::try_join;
 use libipld::Cid;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::time::SystemTime;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -91,11 +88,7 @@ pub struct SqlRepoReader {
 // Basically handles getting ipld blocks from db
 impl SqlRepoReader {
     pub fn new(blocks: Option<BlockMap>, did: String, now: Option<String>) -> Self {
-        let now = now.unwrap_or_else(|| {
-            let system_time = SystemTime::now();
-            let dt: DateTime<UtcOffset> = system_time.into();
-            format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"))
-        });
+        let now = now.unwrap_or_else(|| { common::now() });
         let mut this = SqlRepoReader {
             cache: BlockMap::new(),
             blocks: BlockMap::new(),

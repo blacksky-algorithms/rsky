@@ -6,10 +6,8 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::util::format_data_key;
 use anyhow::Result;
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use libipld::Cid;
-use std::time::SystemTime;
+use crate::common;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum CommitEvtOpAction {
@@ -116,13 +114,11 @@ pub async fn format_seq_commit(
         blocks: car_slice,
         blobs: blobs.to_list(),
     };
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
     Ok(models::RepoSeq::new(
         did,
         "append".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+        common::now(),
     ))
 }
 
@@ -131,36 +127,30 @@ pub async fn format_seq_handle_update(did: String, handle: String) -> Result<mod
         did: did.clone(),
         handle,
     };
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
     Ok(models::RepoSeq::new(
         did,
         "handle".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+        common::now(),
     ))
 }
 
 pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
     let evt = IdentityEvt { did: did.clone() };
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
     Ok(models::RepoSeq::new(
         did,
         "identity".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+        common::now(),
     ))
 }
 
 pub async fn format_seq_tombstone(did: String) -> Result<models::RepoSeq> {
     let evt = TombstoneEvt { did: did.clone() };
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
     Ok(models::RepoSeq::new(
         did,
         "tombstone".to_string(),
         struct_to_cbor(evt)?,
-        format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+        common::now(),
     ))
 }

@@ -12,6 +12,8 @@ use diesel::pg::Pg;
 use diesel::*;
 use std::ops::Add;
 use std::time::SystemTime;
+use crate::common;
+use crate::common::RFC3339_VARIANT;
 
 pub struct AvailabilityFlags {
     pub include_taken_down: Option<bool>,
@@ -163,7 +165,7 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
 
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
-    let created_at = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+    let created_at = format!("{}", dt.format(RFC3339_VARIANT));
     let deactivate_at = match deactivated {
         Some(true) => Some(created_at.clone()),
         _ => None,
@@ -171,7 +173,7 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
     let deactivate_after = match deactivated {
         Some(true) => {
             let exp = dt.add(chrono::Duration::days(3));
-            Some(format!("{}", exp.format("%Y-%m-%dT%H:%M:%S%.3fZ")))
+            Some(format!("{}", exp.format(RFC3339_VARIANT)))
         }
         _ => None,
     };
@@ -192,10 +194,8 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
 
 pub fn register_account(did: String, email: String, password: String) -> Result<()> {
     let conn = &mut establish_connection()?;
-
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
-    let created_at = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+    
+    let created_at = common::now();
 
     // @TODO record recovery key for bring your own recovery key
     let _: String = insert_into(AccountSchema::account)
@@ -244,6 +244,16 @@ pub async fn activate_account(did: &String) -> Result<()> {
             ActorSchema::deactivatedAt.eq::<Option<String>>(None),
             ActorSchema::deleteAfter.eq::<Option<String>>(None),
         ))
+        .execute(conn)?;
+    Ok(())
+}
+
+pub async fn set_email_confirmed_at(did: &String,email_confirmed_at: String) -> Result<()> {
+    let conn = &mut establish_connection()?;
+
+    update(AccountSchema::account)
+        .filter(AccountSchema::did.eq(did))
+        .set(AccountSchema::emailConfirmedAt.eq(email_confirmed_at))
         .execute(conn)?;
     Ok(())
 }

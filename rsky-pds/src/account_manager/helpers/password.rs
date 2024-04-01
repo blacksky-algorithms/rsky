@@ -1,4 +1,4 @@
-use crate::common::get_random_str;
+use crate::common::{get_random_str, RFC3339_VARIANT};
 use crate::db::establish_connection;
 use crate::models;
 use crate::models::AppPassword;
@@ -97,7 +97,7 @@ pub async fn create_app_password(did: String, name: String) -> Result<CreateAppP
 
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
-    let created_at = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+    let created_at = format!("{}", dt.format(RFC3339_VARIANT));
 
     let got: Option<AppPassword> = insert_into(AppPasswordSchema::app_password)
         .values((

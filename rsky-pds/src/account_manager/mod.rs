@@ -4,14 +4,13 @@ use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use std::time::SystemTime;
+use futures::try_join;
+use crate::common;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -23,6 +22,11 @@ pub struct CreateAccountOpts {
     pub repo_rev: String,
     pub invite_code: Option<String>,
     pub deactivated: Option<bool>,
+}
+
+pub struct ConfirmEmailOpts<'em> {
+    pub did: &'em String,
+    pub token: &'em String
 }
 
 pub struct AccountManager {}
@@ -88,9 +92,7 @@ impl AccountManager {
             expires_in: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
-        let system_time = SystemTime::now();
-        let dt: DateTime<UtcOffset> = system_time.into();
-        let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+        let now = common::now();
 
         if let Some(invite_code) = invite_code.clone() {
             invite::ensure_invite_is_available(invite_code)?;
@@ -189,6 +191,17 @@ impl AccountManager {
 
     // Email Tokens
     // ----------
+    pub async fn confirm_email<'em>(opts: ConfirmEmailOpts<'em>) -> Result<()> {
+        let ConfirmEmailOpts { did, token } = opts;
+        email_token::assert_valid_token(did, EmailTokenPurpose::ConfirmEmail, token, None).await?;
+        let now = common::now();
+        try_join!(
+            email_token::delete_email_token(did, EmailTokenPurpose::ConfirmEmail),
+            account::set_email_confirmed_at(did, now)
+        )?;
+        Ok(())
+    }
+    
     pub async fn assert_valid_email_token(
         did: &String,
         purpose: EmailTokenPurpose,

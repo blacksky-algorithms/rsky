@@ -18,15 +18,13 @@ use crate::repo::types::{
 };
 use crate::storage::{Ipld, SqlRepoReader};
 use anyhow::{bail, Result};
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::time::SystemTime;
+use crate::common;
 
 pub struct CommitRecord {
     collection: String,
@@ -102,9 +100,7 @@ impl ActorStore {
     }
 
     pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &String) -> Result<()> {
-        let system_time = SystemTime::now();
-        let dt: DateTime<UtcOffset> = system_time.into();
-        let now: &str = &format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+        let now: &str = &common::now();
 
         let _ = stream::iter(writes).then(|write| async move {
             Ok::<(), anyhow::Error>(match write {

@@ -1,10 +1,21 @@
+use std::time::SystemTime;
 use anyhow::Result;
 use base64ct::{Base64, Encoding};
+use chrono::DateTime;
 use indexmap::IndexMap;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
 use serde_json::Value;
 use url::form_urlencoded;
+use chrono::offset::Utc as UtcOffset;
+
+pub const RFC3339_VARIANT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
+
+pub fn now() -> String {
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    format!("{}", dt.format(RFC3339_VARIANT))
+}
 
 pub fn get_random_str() -> String {
     let token: String = rand::thread_rng()

@@ -79,6 +79,25 @@ pub struct CreateSessionInput {
     pub password: String,
 }
 
+/// Delete an actor's account with a token and password. Can only be called after
+/// requesting a deletion token. Requires auth
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DeleteAccountInput {
+    pub did: String,
+    pub password: String,
+    pub token: String,
+}
+
+/// Confirm an email using a token from com.atproto.server.requestEmailConfirmation.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ConfirmEmailInput {
+    pub email: String,
+    pub token: String
+}
+
+// Outputs
+// -------
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeOutput {
     pub code: String,
@@ -92,15 +111,6 @@ pub struct CreateInviteCodesOutput {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GetAccountInviteCodesOutput {
     pub codes: Vec<InviteCode>,
-}
-
-/// Delete an actor's account with a token and password. Can only be called after
-/// requesting a deletion token. Requires auth
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DeleteAccountInput {
-    pub did: String,
-    pub password: String,
-    pub token: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -11,6 +11,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetAccountInviteCodesOutput;
 use std::time::SystemTime;
+use crate::common::RFC3339_VARIANT;
 
 struct CalculateCodesToCreateOpts {
     pub user_created_at: usize,
@@ -67,7 +68,7 @@ fn calculate_codes_to_create(opts: CalculateCodesToCreateOpts) -> Result<(usize,
         .clone()
         .into_iter()
         .filter(|code| {
-            let datetime = NaiveDateTime::parse_from_str(&code.created_at, "%Y-%m-%dT%H:%M:%S%.3fZ")
+            let datetime = NaiveDateTime::parse_from_str(&code.created_at, RFC3339_VARIANT)
                 .unwrap()
                 .and_utc()
                 .timestamp_micros() as usize;
@@ -99,7 +100,7 @@ async fn inner_get_account_invite_codes(
             && env_int("PDS_INVITE_INTERVAL").is_some()
         {
             let user_created_at =
-                NaiveDateTime::parse_from_str(&account.created_at, "%Y-%m-%dT%H:%M:%S%.3fZ")?
+                NaiveDateTime::parse_from_str(&account.created_at, RFC3339_VARIANT)?
                     .and_utc()
                     .timestamp_micros() as usize;
             let (to_create, total) = calculate_codes_to_create(CalculateCodesToCreateOpts {
