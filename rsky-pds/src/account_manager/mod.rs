@@ -182,6 +182,10 @@ impl AccountManager {
         password::create_app_password(did, name).await
     }
 
+    pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
+        password::list_app_passwords(did).await
+    }
+
     pub async fn verify_account_password(did: &String, password_str: &String) -> Result<bool> {
         password::verify_account_password(did, password_str).await
     }

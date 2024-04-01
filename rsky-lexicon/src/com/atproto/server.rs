@@ -1,27 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct InviteCode {
-    pub code: String,
-    pub available: i32,
-    pub disabled: bool,
-    #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
-    pub for_account: String,
-    #[serde(rename(deserialize = "createdBy", serialize = "createdBy"))]
-    pub created_by: String,
-    #[serde(rename(deserialize = "createdAt", serialize = "createdAt"))]
-    pub created_at: String,
-    pub uses: Vec<InviteCodeUse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct InviteCodeUse {
-    #[serde(rename(deserialize = "usedBy", serialize = "usedBy"))]
-    pub used_by: String,
-    #[serde(rename(deserialize = "usedAt", serialize = "usedAt"))]
-    pub used_at: String,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeInput {
     #[serde(rename(deserialize = "useCount", serialize = "useCount"))]
@@ -223,6 +201,37 @@ pub struct CheckAccountStatusOutput {
     pub imported_blobs: i64,
 }
 
+/// List all App Passwords.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ListAppPasswordsOutput {
+    pub passwords: Vec<AppPassword>,
+}
+
+// Refs
+// ----
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InviteCode {
+    pub code: String,
+    pub available: i32,
+    pub disabled: bool,
+    #[serde(rename(deserialize = "forAccount", serialize = "forAccount"))]
+    pub for_account: String,
+    #[serde(rename(deserialize = "createdBy", serialize = "createdBy"))]
+    pub created_by: String,
+    #[serde(rename(deserialize = "createdAt", serialize = "createdAt"))]
+    pub created_at: String,
+    pub uses: Vec<InviteCodeUse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InviteCodeUse {
+    #[serde(rename(deserialize = "usedBy", serialize = "usedBy"))]
+    pub used_by: String,
+    #[serde(rename(deserialize = "usedAt", serialize = "usedAt"))]
+    pub used_at: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DescribeServerRefLinks {
     #[serde(rename = "privacyPolicy", skip_serializing_if = "Option::is_none")]
@@ -235,4 +244,11 @@ pub struct DescribeServerRefLinks {
 pub struct DescribeServerRefContact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AppPassword {
+    pub name: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }

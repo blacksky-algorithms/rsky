@@ -1,4 +1,4 @@
-use crate::common::{get_random_str, RFC3339_VARIANT};
+use crate::common::{get_random_str, now};
 use crate::db::establish_connection;
 use crate::models;
 use crate::models::AppPassword;
@@ -8,12 +8,9 @@ use argon2::{
     Argon2,
 };
 use base64ct::{Base64, Encoding};
-use chrono::offset::Utc as UtcOffset;
-use chrono::DateTime;
 use diesel::*;
 use rsky_lexicon::com::atproto::server::CreateAppPasswordOutput;
 use sha2::{Digest, Sha256};
-use std::time::SystemTime;
 
 pub async fn verify_account_password(did: &String, password: &String) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
@@ -95,9 +92,7 @@ pub async fn create_app_password(did: String, name: String) -> Result<CreateAppP
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
     let conn = &mut establish_connection()?;
 
-    let system_time = SystemTime::now();
-    let dt: DateTime<UtcOffset> = system_time.into();
-    let created_at = format!("{}", dt.format(RFC3339_VARIANT));
+    let created_at = now();
 
     let got: Option<AppPassword> = insert_into(AppPasswordSchema::app_password)
         .values((
@@ -118,4 +113,14 @@ pub async fn create_app_password(did: String, name: String) -> Result<CreateAppP
     } else {
         bail!("could not create app-specific password")
     }
+}
+
+pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
+    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
+    let conn = &mut establish_connection()?;
+
+    Ok(AppPasswordSchema::app_password
+        .filter(AppPasswordSchema::did.eq(did))
+        .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
+        .get_results(conn)?)
 }
