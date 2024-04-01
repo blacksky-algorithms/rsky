@@ -250,6 +250,21 @@ pub async fn revoke_refresh_tokens_by_did(did: &String) -> Result<bool> {
     Ok(deleted_rows.len() > 0)
 }
 
+pub async fn revoke_app_password_refresh_token(
+    did: &String,
+    app_pass_name: &String,
+) -> Result<bool> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    let deleted_rows = delete(RefreshTokenSchema::refresh_token)
+        .filter(RefreshTokenSchema::did.eq(did))
+        .filter(RefreshTokenSchema::appPasswordName.eq(app_pass_name))
+        .get_results::<models::RefreshToken>(conn)?;
+
+    Ok(deleted_rows.len() > 0)
+}
+
 pub async fn get_refresh_token(id: &String) -> Result<Option<models::RefreshToken>> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
     let conn = &mut establish_connection()?;

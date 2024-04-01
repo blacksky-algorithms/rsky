@@ -317,6 +317,15 @@ impl AccountManager {
         )?;
         Ok(())
     }
+
+    pub async fn revoke_app_password(did: String, name: String) -> Result<()> {
+        try_join!(
+            password::delete_app_password(&did, &name),
+            auth::revoke_app_password_refresh_token(&did, &name)
+        )?;
+        Ok(())
+    }
+
     // Email Tokens
     // ----------
     pub async fn confirm_email<'em>(opts: ConfirmEmailOpts<'em>) -> Result<()> {

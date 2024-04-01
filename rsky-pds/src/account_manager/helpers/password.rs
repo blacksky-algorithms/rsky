@@ -140,3 +140,14 @@ pub async fn update_user_password(opts: UpdateUserPasswordOpts) -> Result<()> {
         .execute(conn)?;
     Ok(())
 }
+
+pub async fn delete_app_password(did: &String, name: &String) -> Result<()> {
+    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
+    let conn = &mut establish_connection()?;
+
+    delete(AppPasswordSchema::app_password)
+        .filter(AppPasswordSchema::did.eq(did))
+        .filter(AppPasswordSchema::name.eq(name))
+        .execute(conn)?;
+    Ok(())
+}

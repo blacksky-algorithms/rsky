@@ -97,6 +97,12 @@ pub struct ResetPasswordInput {
     pub password: String,
 }
 
+/// Reset a user account password using a token.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RevokeAppPasswordInput {
+    pub name: String,
+}
+
 // Outputs
 // -------
 
