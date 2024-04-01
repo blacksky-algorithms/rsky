@@ -84,6 +84,12 @@ pub struct DeactivateAccountInput {
     pub delete_after: Option<String>,
 }
 
+/// Initiate a user account password reset via email.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RequestPasswordResetInput {
+    pub email: String,
+}
+
 // Outputs
 // -------
 
