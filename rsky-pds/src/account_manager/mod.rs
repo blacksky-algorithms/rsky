@@ -2,15 +2,15 @@ use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
+use crate::common;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
+use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use futures::try_join;
-use crate::common;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -26,7 +26,7 @@ pub struct CreateAccountOpts {
 
 pub struct ConfirmEmailOpts<'em> {
     pub did: &'em String,
-    pub token: &'em String
+    pub token: &'em String,
 }
 
 pub struct AccountManager {}
@@ -115,6 +115,10 @@ impl AccountManager {
         account::delete_account(did).await
     }
 
+    pub async fn deactivate_account(did: &String, delete_after: Option<String>) -> Result<()> {
+        account::deactivate_account(did, delete_after).await
+    }
+
     pub async fn activate_account(did: &String) -> Result<()> {
         account::activate_account(did).await
     }
@@ -201,7 +205,7 @@ impl AccountManager {
         )?;
         Ok(())
     }
-    
+
     pub async fn assert_valid_email_token(
         did: &String,
         purpose: EmailTokenPurpose,

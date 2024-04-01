@@ -1,4 +1,6 @@
+use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::helpers::auth::CustomClaimObj;
+use crate::account_manager::AccountManager;
 use anyhow::{bail, Result};
 use jwt_simple::claims::Audiences;
 use jwt_simple::prelude::*;
@@ -7,8 +9,6 @@ use rocket::request::{FromRequest, Outcome, Request};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use thiserror::Error;
-use crate::account_manager::AccountManager;
-use crate::account_manager::helpers::account::AvailabilityFlags;
 
 const INFINITY: u64 = u64::MAX;
 
@@ -179,24 +179,39 @@ impl<'r> FromRequest<'r> for AccessCheckTakedown {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let result = match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
-            Ok(access) => AccessCheckTakedown { access },
-            Err(error) => {
-                return Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())));
-            }
-        };
+        let result =
+            match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
+                Ok(access) => AccessCheckTakedown { access },
+                Err(error) => {
+                    return Outcome::Failure((
+                        Status::BadRequest,
+                        AuthError::BadJwt(error.to_string()),
+                    ));
+                }
+            };
         let requester = result.clone().access.credentials.unwrap().did.unwrap();
-        let found = match AccountManager::get_account(&requester, Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None
-        })).await {
+        let found = match AccountManager::get_account(
+            &requester,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await
+        {
             Ok(Some(found)) => found,
             _ => {
-                return Outcome::Failure((Status::Forbidden, AuthError::AccountNotFound("Account not found".to_string())));
+                return Outcome::Failure((
+                    Status::Forbidden,
+                    AuthError::AccountNotFound("Account not found".to_string()),
+                ));
             }
         };
         if found.takedown_ref.is_some() {
-            return Outcome::Failure((Status::Unauthorized, AuthError::AccountTakedown("Account has been taken down".to_string())));
+            return Outcome::Failure((
+                Status::Unauthorized,
+                AuthError::AccountTakedown("Account has been taken down".to_string()),
+            ));
         }
         Outcome::Success(result)
     }

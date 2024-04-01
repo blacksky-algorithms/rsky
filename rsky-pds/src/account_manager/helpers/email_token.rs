@@ -33,13 +33,10 @@ pub async fn assert_valid_token(
     }
 }
 
-pub async fn delete_email_token(
-    did: &String,
-    purpose: EmailTokenPurpose
-) -> Result<()> {
+pub async fn delete_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<()> {
     use crate::schema::pds::email_token::dsl as EmailTokenSchema;
     let conn = &mut establish_connection()?;
-    
+
     delete(EmailTokenSchema::email_token)
         .filter(EmailTokenSchema::did.eq(did))
         .filter(EmailTokenSchema::purpose.eq(purpose))

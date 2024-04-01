@@ -1,13 +1,13 @@
-use std::time::SystemTime;
 use anyhow::Result;
 use base64ct::{Base64, Encoding};
+use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use indexmap::IndexMap;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
 use serde_json::Value;
+use std::time::SystemTime;
 use url::form_urlencoded;
-use chrono::offset::Utc as UtcOffset;
 
 pub const RFC3339_VARIANT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 

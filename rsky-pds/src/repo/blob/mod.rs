@@ -24,23 +24,25 @@ impl BlobReader {
 
     pub async fn process_writes_blob(&self, writes: Vec<PreparedWrite>) -> Result<()> {
         self.delete_dereferenced_blobs(writes.clone()).await?;
-        let _ = stream::iter(writes).then(|write| async move {
-            Ok::<(), anyhow::Error>(match write {
-                PreparedWrite::Create(w) => {
-                    for blob in w.blobs {
-                        self.verify_blob_and_make_permanent(blob.clone()).await?;
-                        self.associate_blob(blob, w.uri.clone()).await?;
+        let _ = stream::iter(writes)
+            .then(|write| async move {
+                Ok::<(), anyhow::Error>(match write {
+                    PreparedWrite::Create(w) => {
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone()).await?;
+                            self.associate_blob(blob, w.uri.clone()).await?;
+                        }
                     }
-                }
-                PreparedWrite::Update(w) => {
-                    for blob in w.blobs {
-                        self.verify_blob_and_make_permanent(blob.clone()).await?;
-                        self.associate_blob(blob, w.uri.clone()).await?;
+                    PreparedWrite::Update(w) => {
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone()).await?;
+                            self.associate_blob(blob, w.uri.clone()).await?;
+                        }
                     }
-                }
-                _ => (),
+                    _ => (),
+                })
             })
-        }).collect::<Vec<_>>()
+            .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

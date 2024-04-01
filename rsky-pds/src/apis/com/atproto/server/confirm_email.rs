@@ -1,33 +1,38 @@
-use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
-use rocket::serde::json::Json;
-use anyhow::{Result, bail};
-use rocket::http::Status;
-use rocket::response::status;
-use crate::account_manager::{AccountManager, ConfirmEmailOpts};
 use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::{AccountManager, ConfirmEmailOpts};
 use crate::auth_verifier::AccessCheckTakedown;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use anyhow::{bail, Result};
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::serde::json::Json;
+use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
 
 async fn inner_confirm_email(
     body: Json<ConfirmEmailInput>,
     auth: AccessCheckTakedown,
 ) -> Result<()> {
     let did = auth.access.credentials.unwrap().did.unwrap();
-    
-    let user = AccountManager::get_account(&did, Some(AvailabilityFlags {
-        include_deactivated: Some(true),
-        include_taken_down: None
-    })).await?;
+
+    let user = AccountManager::get_account(
+        &did,
+        Some(AvailabilityFlags {
+            include_deactivated: Some(true),
+            include_taken_down: None,
+        }),
+    )
+    .await?;
     if let Some(user) = user {
         if let Some(user_email) = user.email {
-            let ConfirmEmailInput {token, email} = body.into_inner();
+            let ConfirmEmailInput { token, email } = body.into_inner();
             if user_email != email.to_lowercase() {
                 bail!("Invalid Email")
             }
             AccountManager::confirm_email(ConfirmEmailOpts {
                 did: &did,
-                token: &token
-            }).await?;
+                token: &token,
+            })
+            .await?;
             Ok(())
         } else {
             bail!("Missing Email")

@@ -1,6 +1,7 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/repo/src/repo.ts
 // also adds components from https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/repo/transactor.ts
 
+use crate::common;
 use crate::common::tid::{Ticker, TID};
 use crate::db::establish_connection;
 use crate::repo::aws::s3::S3BlobStore;
@@ -24,7 +25,6 @@ use libipld::Cid;
 use secp256k1::Keypair;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use crate::common;
 
 pub struct CommitRecord {
     collection: String,
@@ -102,35 +102,37 @@ impl ActorStore {
     pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &String) -> Result<()> {
         let now: &str = &common::now();
 
-        let _ = stream::iter(writes).then(|write| async move {
-            Ok::<(), anyhow::Error>(match write {
-                PreparedWrite::Create(write) => {
-                    self.record
-                        .index_record(
-                            write.uri,
-                            write.cid,
-                            Some(write.record),
-                            Some(write.action),
-                            rev.clone(),
-                            now,
-                        )
-                        .await?
-                }
-                PreparedWrite::Update(write) => {
-                    self.record
-                        .index_record(
-                            write.uri,
-                            write.cid,
-                            Some(write.record),
-                            Some(write.action),
-                            rev.clone(),
-                            now,
-                        )
-                        .await?
-                }
-                PreparedWrite::Delete(write) => self.record.delete_record(write.uri).await?,
+        let _ = stream::iter(writes)
+            .then(|write| async move {
+                Ok::<(), anyhow::Error>(match write {
+                    PreparedWrite::Create(write) => {
+                        self.record
+                            .index_record(
+                                write.uri,
+                                write.cid,
+                                Some(write.record),
+                                Some(write.action),
+                                rev.clone(),
+                                now,
+                            )
+                            .await?
+                    }
+                    PreparedWrite::Update(write) => {
+                        self.record
+                            .index_record(
+                                write.uri,
+                                write.cid,
+                                Some(write.record),
+                                Some(write.action),
+                                rev.clone(),
+                                now,
+                            )
+                            .await?
+                    }
+                    PreparedWrite::Delete(write) => self.record.delete_record(write.uri).await?,
+                })
             })
-        }).collect::<Vec<_>>()
+            .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -149,9 +151,11 @@ impl ActorStore {
             .into_iter()
             .map(|row| Ok(Cid::from_str(&row)?))
             .collect::<Result<Vec<Cid>>>()?;
-        let _ = stream::iter(cids.chunks(500)).then(|chunk| async {
-            Ok::<(), anyhow::Error>(self.blob.blobstore.delete_many(chunk.to_vec()).await?)
-        }).collect::<Vec<_>>()
+        let _ = stream::iter(cids.chunks(500))
+            .then(|chunk| async {
+                Ok::<(), anyhow::Error>(self.blob.blobstore.delete_many(chunk.to_vec()).await?)
+            })
+            .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

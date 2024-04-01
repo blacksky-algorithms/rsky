@@ -1,7 +1,6 @@
 // based on atproto/packages/pds/src/actor-store/repo/sql-repo-reader.ts
 
 use crate::db::establish_connection;
-use crate::{common, models};
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::cid_set::CidSet;
@@ -10,6 +9,7 @@ use crate::repo::mst::NodeData;
 use crate::repo::parse;
 use crate::repo::types::{CommitData, RepoRecord, VersionedCommit};
 use crate::repo::util::cbor_to_lex_record;
+use crate::{common, models};
 use anyhow::Result;
 use diesel::prelude::*;
 use diesel::*;
@@ -88,7 +88,7 @@ pub struct SqlRepoReader {
 // Basically handles getting ipld blocks from db
 impl SqlRepoReader {
     pub fn new(blocks: Option<BlockMap>, did: String, now: Option<String>) -> Self {
-        let now = now.unwrap_or_else(|| { common::now() });
+        let now = now.unwrap_or_else(|| common::now());
         let mut this = SqlRepoReader {
             cache: BlockMap::new(),
             blocks: BlockMap::new(),

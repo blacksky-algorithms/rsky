@@ -326,6 +326,7 @@ pub mod create_app_password;
 pub mod create_invite_code;
 pub mod create_invite_codes;
 pub mod create_session;
+pub mod deactivate_account;
 pub mod delete_account;
 pub mod delete_session;
 pub mod describe_server;

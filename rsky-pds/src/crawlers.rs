@@ -34,21 +34,23 @@ impl Crawlers {
         if now - &self.last_notified < NOTIFY_THRESHOLD as usize {
             return Ok(());
         }
-        let _ = stream::iter(self.crawlers.clone()).then(|service: String| async move {
-            let client = reqwest::Client::new();
-            let record = CrawlerRequest {
-                hostname: service.clone(),
-            };
-            Ok::<reqwest::Response, anyhow::Error>(
-                client
-                    .post(format!("{}/xrpc/com.atproto.sync.requestCrawl", service))
-                    .json(&record)
-                    .header("Connection", "Keep-Alive")
-                    .header("Keep-Alive", "timeout=5, max=1000")
-                    .send()
-                    .await?,
-            )
-        }).collect::<Vec<_>>()
+        let _ = stream::iter(self.crawlers.clone())
+            .then(|service: String| async move {
+                let client = reqwest::Client::new();
+                let record = CrawlerRequest {
+                    hostname: service.clone(),
+                };
+                Ok::<reqwest::Response, anyhow::Error>(
+                    client
+                        .post(format!("{}/xrpc/com.atproto.sync.requestCrawl", service))
+                        .json(&record)
+                        .header("Connection", "Keep-Alive")
+                        .header("Keep-Alive", "timeout=5, max=1000")
+                        .send()
+                        .await?,
+                )
+            })
+            .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

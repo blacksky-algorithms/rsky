@@ -5,10 +5,10 @@ use crate::repo::util::cbor_to_lex_record;
 use crate::storage::Ipld;
 use anyhow::Result;
 use diesel::*;
+use futures::stream::{self, StreamExt};
 use libipld::Cid;
 use std::env;
 use std::str::FromStr;
-use futures::stream::{self, StreamExt};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetRecord {
@@ -298,14 +298,18 @@ impl RecordReader {
             .into_iter()
             .nth(0)
             .unwrap_or("");
-        let conflicts: Vec<Vec<models::Record>>= stream::iter(record_backlinks)
+        let conflicts: Vec<Vec<models::Record>> = stream::iter(record_backlinks)
             .then(|backlink| async move {
-                Ok::<Vec<models::Record>, anyhow::Error>(self.get_record_backlinks(
-                    collection.to_owned(),
-                    backlink.path,
-                    backlink.link_to,
-                ).await?)
-            }).collect::<Vec<_>>()
+                Ok::<Vec<models::Record>, anyhow::Error>(
+                    self.get_record_backlinks(
+                        collection.to_owned(),
+                        backlink.path,
+                        backlink.link_to,
+                    )
+                    .await?,
+                )
+            })
+            .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;

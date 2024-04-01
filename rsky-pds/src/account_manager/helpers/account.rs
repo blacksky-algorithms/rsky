@@ -1,3 +1,5 @@
+use crate::common;
+use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
 use crate::schema::pds::account::dsl as AccountSchema;
 use crate::schema::pds::account::table as AccountTable;
@@ -12,8 +14,6 @@ use diesel::pg::Pg;
 use diesel::*;
 use std::ops::Add;
 use std::time::SystemTime;
-use crate::common;
-use crate::common::RFC3339_VARIANT;
 
 pub struct AvailabilityFlags {
     pub include_taken_down: Option<bool>,
@@ -194,7 +194,7 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
 
 pub fn register_account(did: String, email: String, password: String) -> Result<()> {
     let conn = &mut establish_connection()?;
-    
+
     let created_at = common::now();
 
     // @TODO record recovery key for bring your own recovery key
@@ -235,6 +235,19 @@ pub async fn delete_account(did: &String) -> Result<()> {
     Ok(())
 }
 
+pub async fn deactivate_account(did: &String, delete_after: Option<String>) -> Result<()> {
+    let conn = &mut establish_connection()?;
+
+    update(ActorSchema::actor)
+        .filter(ActorSchema::did.eq(did))
+        .set((
+            ActorSchema::deactivatedAt.eq(common::now()),
+            ActorSchema::deleteAfter.eq(delete_after),
+        ))
+        .execute(conn)?;
+    Ok(())
+}
+
 pub async fn activate_account(did: &String) -> Result<()> {
     let conn = &mut establish_connection()?;
 
@@ -248,7 +261,7 @@ pub async fn activate_account(did: &String) -> Result<()> {
     Ok(())
 }
 
-pub async fn set_email_confirmed_at(did: &String,email_confirmed_at: String) -> Result<()> {
+pub async fn set_email_confirmed_at(did: &String, email_confirmed_at: String) -> Result<()> {
     let conn = &mut establish_connection()?;
 
     update(AccountSchema::account)

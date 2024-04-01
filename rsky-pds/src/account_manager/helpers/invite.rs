@@ -1,3 +1,4 @@
+use crate::common;
 use crate::db::establish_connection;
 use crate::models::models;
 use anyhow::{bail, Result};
@@ -8,7 +9,6 @@ use rsky_lexicon::com::atproto::server::{
 };
 use std::collections::BTreeMap;
 use std::mem;
-use crate::common;
 
 pub type CodeUse = LexiconInviteCodeUse;
 pub type CodeDetail = LexiconInviteCode;
@@ -65,7 +65,7 @@ pub fn record_invite_use(did: String, invite_code: Option<String>, now: String) 
 pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
-    
+
     let created_at = common::now();
 
     let rows: Vec<models::InviteCode> = to_create
@@ -100,7 +100,7 @@ pub async fn create_account_invite_codes(
 ) -> Result<Vec<CodeDetail>> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
-    
+
     let now = common::now();
 
     let rows: Vec<models::InviteCode> = codes

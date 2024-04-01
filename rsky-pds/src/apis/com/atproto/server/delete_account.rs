@@ -44,10 +44,7 @@ async fn inner_delete_account(
         .await?;
         let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
-        let mut actor_store = ActorStore::new(
-            did.clone(),
-            S3BlobStore::new(did.clone(), &config),
-        );
+        let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
         actor_store.destroy().await?;
         AccountManager::delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;

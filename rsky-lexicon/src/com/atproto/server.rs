@@ -92,7 +92,18 @@ pub struct DeleteAccountInput {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConfirmEmailInput {
     pub email: String,
-    pub token: String
+    pub token: String,
+}
+
+/// Deactivates a currently active account. Stops serving of repo, and future writes to repo
+/// until reactivated. Used to finalize account migration with the old host
+/// after the account has been activated on the new host.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DeactivateAccountInput {
+    /// A recommendation to server as to how long they should hold onto the deactivated account
+    /// before deleting.
+    #[serde(rename = "deleteAfter")]
+    pub delete_after: Option<String>,
 }
 
 // Outputs
