@@ -172,6 +172,36 @@ pub struct DescribeServerOutput {
     pub did: String,
 }
 
+/// Get a signed token on behalf of the requesting DID for the requested service.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GetServiceAuthOutput {
+    pub token: String,
+}
+
+/// Returns the status of an account, especially as pertaining to import or recovery.
+/// Can be called many times over the course of an account migration. Requires auth and
+/// can only be called pertaining to oneself.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CheckAccountStatusOutput {
+    pub activated: bool,
+    #[serde(rename = "validDid")]
+    pub valid_did: bool,
+    #[serde(rename = "repoCommit")]
+    pub repo_commit: String,
+    #[serde(rename = "repoRev")]
+    pub repo_rev: String,
+    #[serde(rename = "repoBlocks")]
+    pub repo_blocks: i64,
+    #[serde(rename = "indexedRecords")]
+    pub indexed_records: i64,
+    #[serde(rename = "privateStateValues")]
+    pub private_state_values: i64,
+    #[serde(rename = "expectedBlobs")]
+    pub expected_blobs: i64,
+    #[serde(rename = "importedBlobs")]
+    pub imported_blobs: i64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DescribeServerRefLinks {
     #[serde(rename = "privacyPolicy", skip_serializing_if = "Option::is_none")]
@@ -184,10 +214,4 @@ pub struct DescribeServerRefLinks {
 pub struct DescribeServerRefContact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-}
-
-/// Get a signed token on behalf of the requesting DID for the requested service.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct GetServiceAuthOutput {
-    pub token: String,
 }

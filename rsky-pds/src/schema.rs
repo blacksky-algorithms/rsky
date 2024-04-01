@@ -16,6 +16,7 @@ pub mod pds {
     diesel::table! {
         pds.account_pref (id) {
             id -> Int4,
+            did -> Varchar,
             name -> Varchar,
             valueJson -> Nullable<Text>,
         }
@@ -103,6 +104,7 @@ pub mod pds {
         pds.record (uri) {
             uri -> Varchar,
             cid -> Varchar,
+            did -> Varchar,
             collection -> Varchar,
             rkey -> Varchar,
             repoRev -> Nullable<Varchar>,
@@ -115,6 +117,7 @@ pub mod pds {
         pds.record_blob (blobCid, recordUri) {
             blobCid -> Varchar,
             recordUri -> Varchar,
+            did -> Varchar,
         }
     }
 
@@ -131,6 +134,7 @@ pub mod pds {
     diesel::table! {
         pds.repo_block (cid) {
             cid -> Varchar,
+            did -> Varchar,
             repoRev -> Varchar,
             size -> Int4,
             content -> Bytea,

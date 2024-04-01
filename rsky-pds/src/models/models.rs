@@ -299,6 +299,7 @@ pub struct RecordBlob {
     #[diesel(column_name = recordUri)]
     #[serde(rename = "recordUri")]
     pub record_uri: String,
+    pub did: String,
 }
 
 #[derive(

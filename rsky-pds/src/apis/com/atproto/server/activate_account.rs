@@ -7,7 +7,6 @@ use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
-use crate::storage::SqlRepoReader;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use aws_config::BehaviorVersion;

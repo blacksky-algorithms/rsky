@@ -156,7 +156,7 @@ pub fn encode_did_key(pubkey: &PublicKey) -> String {
     let pk_compact = pubkey.serialize();
     let pk_wrapped = multicodec_wrap(pk_compact.to_vec());
     let pk_multibase = multibase::encode(Base58Btc, pk_wrapped.as_slice());
-    format!("did:key:{pk_multibase}")
+    format!("{DID_KEY_PREFIX}{pk_multibase}")
 }
 
 pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {
@@ -238,6 +238,13 @@ pub async fn create_did_and_plc_op(
     }
 }
 
+pub async fn is_valid_did_doc_for_service(did: String) -> Result<bool> {
+    match assert_valid_did_documents_for_service(did).await {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
     if did.starts_with("did:plc") {
         let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
@@ -312,6 +319,7 @@ pub fn validate_existing_did(
 }*/
 
 pub mod activate_account;
+pub mod check_account_status;
 pub mod confirm_email;
 pub mod create_account;
 pub mod create_app_password;

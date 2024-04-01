@@ -3,18 +3,23 @@ use crate::models::models;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use anyhow::{bail, Result};
+use diesel::dsl::count_distinct;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use rocket::form::validate::Contains;
 
 pub struct BlobReader {
     pub blobstore: S3BlobStore,
+    pub did: String,
 }
 
 // Basically handles getting lexicon records from db
 impl BlobReader {
     pub fn new(blobstore: S3BlobStore) -> Self {
-        BlobReader { blobstore }
+        BlobReader {
+            did: blobstore.bucket.clone(),
+            blobstore,
+        }
     }
 
     pub async fn process_writes_blob(&self, writes: Vec<PreparedWrite>) -> Result<()> {
@@ -35,7 +40,10 @@ impl BlobReader {
                 }
                 _ => (),
             })
-        });
+        }).collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 
@@ -109,7 +117,11 @@ impl BlobReader {
 
         // Original code queues a background job to delete by CID from S3 compatible blobstore
         let _ = stream::iter(cids_to_delete)
-            .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) });
+            .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 
@@ -155,6 +167,29 @@ impl BlobReader {
             .on_conflict_do_nothing()
             .execute(conn)?;
         Ok(())
+    }
+
+    pub async fn blob_count(&self) -> Result<i64> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let res = BlobSchema::blob
+            .filter(BlobSchema::did.eq(&self.did))
+            .count()
+            .get_result(conn)?;
+        Ok(res)
+    }
+
+    pub async fn record_blob_count(&self) -> Result<i64> {
+        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let res: i64 = RecordBlobSchema::record_blob
+            .filter(RecordBlobSchema::did.eq(&self.did))
+            .select(count_distinct(RecordBlobSchema::blobCid))
+            .get_result(conn)?;
+
+        Ok(res)
     }
 }
 

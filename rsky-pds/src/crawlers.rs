@@ -48,7 +48,10 @@ impl Crawlers {
                     .send()
                     .await?,
             )
-        });
+        }).collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
 
         self.last_notified = now;
         Ok(())

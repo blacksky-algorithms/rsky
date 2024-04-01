@@ -5,7 +5,6 @@ use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::sequencer;
-use crate::storage::SqlRepoReader;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use aws_config::BehaviorVersion;
@@ -47,7 +46,6 @@ async fn inner_delete_account(
 
         let mut actor_store = ActorStore::new(
             did.clone(),
-            SqlRepoReader::new(None),
             S3BlobStore::new(did.clone(), &config),
         );
         actor_store.destroy().await?;

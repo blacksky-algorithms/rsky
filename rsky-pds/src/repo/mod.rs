@@ -43,10 +43,10 @@ pub struct Repo {
 }
 
 pub struct ActorStore {
-    did: String,
+    pub did: String,
     pub storage: SqlRepoReader, // get ipld blocks from db
-    record: RecordReader,       // get lexicon records from db
-    blob: BlobReader,           // get blobs
+    pub record: RecordReader,   // get lexicon records from db
+    pub blob: BlobReader,       // get blobs
 }
 
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
@@ -55,8 +55,8 @@ impl ActorStore {
     pub fn new(did: String, blobstore: S3BlobStore) -> Self {
         ActorStore {
             storage: SqlRepoReader::new(None, did.clone(), None),
+            record: RecordReader::new(did.clone()),
             did,
-            record: RecordReader::new(),
             blob: BlobReader::new(blobstore), // Unlike TS impl, just use blob reader vs generator
         }
     }
@@ -101,32 +101,44 @@ impl ActorStore {
         Ok(commit)
     }
 
-    pub async fn index_writes(&mut self, writes: Vec<PreparedWrite>, rev: String) -> Result<()> {
+    pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &String) -> Result<()> {
         let system_time = SystemTime::now();
         let dt: DateTime<UtcOffset> = system_time.into();
-        let now = format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
-        writes
-            .into_iter()
-            .map(|write| match write {
-                PreparedWrite::Create(write) => Ok(self.record.index_record(
-                    write.uri,
-                    write.cid,
-                    Some(write.record),
-                    Some(write.action),
-                    rev.clone(),
-                    now.clone(),
-                )?),
-                PreparedWrite::Update(write) => Ok(self.record.index_record(
-                    write.uri,
-                    write.cid,
-                    Some(write.record),
-                    Some(write.action),
-                    rev.clone(),
-                    now.clone(),
-                )?),
-                PreparedWrite::Delete(write) => Ok(self.record.delete_record(write.uri)?),
+        let now: &str = &format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.3fZ"));
+
+        let _ = stream::iter(writes).then(|write| async move {
+            Ok::<(), anyhow::Error>(match write {
+                PreparedWrite::Create(write) => {
+                    self.record
+                        .index_record(
+                            write.uri,
+                            write.cid,
+                            Some(write.record),
+                            Some(write.action),
+                            rev.clone(),
+                            now,
+                        )
+                        .await?
+                }
+                PreparedWrite::Update(write) => {
+                    self.record
+                        .index_record(
+                            write.uri,
+                            write.cid,
+                            Some(write.record),
+                            Some(write.action),
+                            rev.clone(),
+                            now,
+                        )
+                        .await?
+                }
+                PreparedWrite::Delete(write) => self.record.delete_record(write.uri).await?,
             })
-            .collect::<Result<()>>()
+        }).collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(())
     }
 
     pub async fn destroy(&mut self) -> Result<()> {
@@ -143,7 +155,10 @@ impl ActorStore {
             .collect::<Result<Vec<Cid>>>()?;
         let _ = stream::iter(cids.chunks(500)).then(|chunk| async {
             Ok::<(), anyhow::Error>(self.blob.blobstore.delete_many(chunk.to_vec()).await?)
-        });
+        }).collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 }

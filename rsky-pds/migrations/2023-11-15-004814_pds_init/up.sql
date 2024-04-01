@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS pds.repo_root (
 -- Create Repo Block Table
 CREATE TABLE IF NOT EXISTS pds.repo_block (
     cid character varying PRIMARY KEY,
+    did character varying NOT NULL,
     "repoRev" character varying NOT NULL,
     size integer NOT NULL,
     content bytea NOT NULL
@@ -118,6 +119,7 @@ CREATE INDEX repo_block_repo_rev_idx
 CREATE TABLE IF NOT EXISTS pds.record (
     uri character varying PRIMARY KEY,
     cid character varying NOT NULL,
+    did character varying NOT NULL,
     collection character varying NOT NULL,
     "rkey" character varying NOT NULL,
     "repoRev" character varying,
@@ -149,7 +151,8 @@ CREATE INDEX blob_tempkey_idx
 -- Create Record Blob Table
 CREATE TABLE IF NOT EXISTS pds.record_blob (
     "blobCid" character varying NOT NULL,
-    "recordUri" character varying NOT NULL
+    "recordUri" character varying NOT NULL,
+    did character varying NOT NULL
 );
 ALTER TABLE ONLY pds.record_blob
     DROP CONSTRAINT IF EXISTS record_blob_pkey;
@@ -172,6 +175,7 @@ CREATE INDEX backlink_link_to_idx
 -- Create Account Preferences Table
 CREATE TABLE IF NOT EXISTS pds.account_pref (
 	id SERIAL PRIMARY KEY,
+    did character varying NOT NULL,
     name character varying NOT NULL,
     "valueJson" text
 );

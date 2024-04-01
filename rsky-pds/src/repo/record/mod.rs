@@ -1,3 +1,4 @@
+use crate::db::establish_connection;
 use crate::models::models;
 use crate::repo::types::{Ids, Lex, RepoRecord, StatusAttr, WriteOpAction};
 use crate::repo::util::cbor_to_lex_record;
@@ -7,6 +8,7 @@ use diesel::*;
 use libipld::Cid;
 use std::env;
 use std::str::FromStr;
+use futures::stream::{self, StreamExt};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetRecord {
@@ -59,23 +61,30 @@ pub fn get_backlinks(uri: String, record: RepoRecord) -> Result<Vec<models::Back
     Ok(Vec::new())
 }
 
-pub struct RecordReader {}
+pub struct RecordReader {
+    pub did: String,
+}
 
 // Basically handles getting lexicon records from db
 impl RecordReader {
-    pub fn new() -> Self {
-        RecordReader {}
+    pub fn new(did: String) -> Self {
+        RecordReader { did }
     }
 
-    pub fn record_count(&mut self, conn: &mut PgConnection) -> Result<i64> {
+    pub async fn record_count(&mut self) -> Result<i64> {
         use crate::schema::pds::record::dsl::*;
-        let res: i64 = record.count().get_result(conn)?;
+        let conn = &mut establish_connection()?;
+
+        let res: i64 = record.filter(did.eq(&self.did)).count().get_result(conn)?;
         Ok(res)
     }
 
-    pub fn list_collection(&mut self, conn: &mut PgConnection) -> Result<Vec<String>> {
+    pub async fn list_collection(&mut self) -> Result<Vec<String>> {
         use crate::schema::pds::record::dsl::*;
+        let conn = &mut establish_connection()?;
+
         let collections = record
+            .filter(did.eq(&self.did))
             .select(collection)
             .group_by(collection)
             .load::<String>(conn)?
@@ -84,9 +93,8 @@ impl RecordReader {
         Ok(collections)
     }
 
-    pub fn list_records_for_collection(
+    pub async fn list_records_for_collection(
         &mut self,
-        conn: &mut PgConnection,
         collection: String,
         limit: i64,
         reverse: bool,
@@ -97,6 +105,8 @@ impl RecordReader {
     ) -> Result<Vec<RecordsForCollection>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
         } else {
@@ -106,6 +116,7 @@ impl RecordReader {
             .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
             .limit(limit)
             .select((models::Record::as_select(), models::RepoBlock::as_select()))
+            .filter(RecordSchema::did.eq(&self.did))
             .filter(RecordSchema::collection.eq(collection))
             .into_boxed();
         if !include_soft_deleted {
@@ -144,15 +155,16 @@ impl RecordReader {
             .collect::<Result<Vec<RecordsForCollection>>>()?)
     }
 
-    pub fn get_record(
+    pub async fn get_record(
         &mut self,
-        conn: &mut PgConnection,
         uri: String,
         cid: Option<String>,
         include_soft_deleted: Option<bool>,
     ) -> Result<Option<GetRecord>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
         } else {
@@ -183,14 +195,15 @@ impl RecordReader {
         }
     }
 
-    pub fn has_record(
+    pub async fn has_record(
         &mut self,
-        conn: &mut PgConnection,
         uri: String,
         cid: Option<String>,
         include_soft_deleted: Option<bool>,
     ) -> Result<bool> {
         use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
         } else {
@@ -210,12 +223,10 @@ impl RecordReader {
         Ok(!!record_uri.is_some())
     }
 
-    pub fn get_record_takedown_status(
-        &mut self,
-        conn: &mut PgConnection,
-        uri: String,
-    ) -> Result<Option<StatusAttr>> {
+    pub async fn get_record_takedown_status(&mut self, uri: String) -> Result<Option<StatusAttr>> {
         use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
         let res = RecordSchema::record
             .select(RecordSchema::takedownRef)
             .filter(RecordSchema::uri.eq(uri))
@@ -238,12 +249,10 @@ impl RecordReader {
         }
     }
 
-    pub fn get_current_record_cid(
-        &mut self,
-        conn: &mut PgConnection,
-        uri: String,
-    ) -> Result<Option<Cid>> {
+    pub async fn get_current_record_cid(&mut self, uri: String) -> Result<Option<Cid>> {
         use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
         let res = RecordSchema::record
             .select(RecordSchema::cid)
             .filter(RecordSchema::uri.eq(uri))
@@ -256,15 +265,16 @@ impl RecordReader {
         }
     }
 
-    pub fn get_record_backlinks(
-        &mut self,
-        conn: &mut PgConnection,
+    pub async fn get_record_backlinks(
+        &self,
         collection: String,
         path: String,
         link_to: String,
     ) -> Result<Vec<models::Record>> {
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
         let res = RecordSchema::record
             .inner_join(BacklinkSchema::backlink.on(BacklinkSchema::uri.eq(RecordSchema::uri)))
             .select(models::Record::as_select())
@@ -275,10 +285,9 @@ impl RecordReader {
         Ok(res)
     }
 
-    // TO DO: Update to use AtUri
-    pub fn get_backlink_conflicts(
-        &mut self,
-        conn: &mut PgConnection,
+    // @TODO: Update to use AtUri
+    pub async fn get_backlink_conflicts(
+        &self,
         uri: String,
         record: RepoRecord,
     ) -> Result<Vec<String>> {
@@ -289,17 +298,17 @@ impl RecordReader {
             .into_iter()
             .nth(0)
             .unwrap_or("");
-        let conflicts: Vec<Vec<models::Record>> = record_backlinks
-            .into_iter()
-            .map(|backlink| {
-                Ok(self.get_record_backlinks(
-                    conn,
+        let conflicts: Vec<Vec<models::Record>>= stream::iter(record_backlinks)
+            .then(|backlink| async move {
+                Ok::<Vec<models::Record>, anyhow::Error>(self.get_record_backlinks(
                     collection.to_owned(),
                     backlink.path,
                     backlink.link_to,
-                )?)
-            })
-            .collect::<Result<Vec<Vec<models::Record>>>>()?;
+                ).await?)
+            }).collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(conflicts
             .into_iter()
             .flatten()
@@ -317,20 +326,20 @@ impl RecordReader {
     // Transactors
     // -------------------
 
-    pub fn index_record(
-        &mut self,
+    pub async fn index_record(
+        &self,
         _uri: String, // TO DO: Use AtUri
         _cid: Cid,
         _record: Option<RepoRecord>,
         _action: Option<WriteOpAction>, // Create or update with a default of create
         _repo_rev: String,
-        _timestamp: String,
+        _timestamp: &str,
     ) -> Result<()> {
         todo!()
     }
 
-    pub fn delete_record(
-        &mut self,
+    pub async fn delete_record(
+        &self,
         _uri: String, // TO DO: Use AtUri
     ) -> Result<()> {
         todo!()

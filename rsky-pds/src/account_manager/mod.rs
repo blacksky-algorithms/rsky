@@ -42,6 +42,22 @@ impl AccountManager {
         account::get_account_by_email(email, flags).await
     }
 
+    pub async fn is_account_activated(did: &String) -> Result<bool> {
+        let account = Self::get_account(
+            did,
+            Some(AvailabilityFlags {
+                include_taken_down: None,
+                include_deactivated: Some(true),
+            }),
+        )
+        .await?;
+        if let Some(account) = account {
+            Ok(account.deactivated_at.is_none())
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
         let CreateAccountOpts {
             did,

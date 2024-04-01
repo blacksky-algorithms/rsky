@@ -154,11 +154,23 @@ impl SqlRepoReader {
 
         let result: Vec<u8> = RepoBlockSchema::repo_block
             .filter(RepoBlockSchema::cid.eq(cid.to_string()))
+            .filter(RepoBlockSchema::did.eq(&self.did))
             .select(RepoBlockSchema::content)
             .first(conn)
             .map_err(|_| anyhow::Error::new(DataStoreError::MissingBlock(cid.to_string())))?;
         self.cache.set(*cid, result.clone());
         Ok(result)
+    }
+
+    pub async fn count_blocks(&self) -> Result<i64> {
+        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
+        let res = RepoBlockSchema::repo_block
+            .filter(RepoBlockSchema::did.eq(&self.did))
+            .count()
+            .get_result(conn)?;
+        Ok(res)
     }
 
     pub fn has(&mut self, cid: Cid) -> Result<bool> {
@@ -197,20 +209,6 @@ impl SqlRepoReader {
     // Transactors
     // -------------------
 
-    /* @Todo: Remove this old apply_commit code from memory-blockstore
-    pub fn apply_commit(&mut self, commit: CommitData) -> Result<()> {
-        self.root = Some(commit.cid);
-        let rm_cids = commit.removed_cids.to_list();
-        for cid in rm_cids {
-            self.blocks.delete(cid)?;
-        }
-
-        for (cid, bytes) in commit.new_blocks.map.iter() {
-            self.blocks.set(Cid::from_str(cid)?, bytes.clone());
-        }
-        Ok(())
-    }*/
-
     pub async fn apply_commit(
         &mut self,
         commit: CommitData,
@@ -220,7 +218,7 @@ impl SqlRepoReader {
             self.update_root(commit.cid, commit.rev.clone(), is_create),
             self.put_many(commit.new_blocks, commit.rev),
             self.delete_many(commit.removed_cids.to_list())
-        );
+        )?;
         Ok(())
     }
 

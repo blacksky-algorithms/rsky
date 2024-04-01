@@ -3,7 +3,6 @@ use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use crate::storage::SqlRepoReader;
 use crate::DbConn;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
