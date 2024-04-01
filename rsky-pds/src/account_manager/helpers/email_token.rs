@@ -59,6 +59,33 @@ pub async fn assert_valid_token(
     }
 }
 
+pub async fn assert_valid_token_and_find_did(
+    purpose: EmailTokenPurpose,
+    token: &String,
+    expiration_len: Option<i32>,
+) -> Result<String> {
+    let expiration_len = expiration_len.unwrap_or(MINUTE * 15);
+    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+    let conn = &mut establish_connection()?;
+
+    let res = EmailTokenSchema::email_token
+        .filter(EmailTokenSchema::purpose.eq(purpose))
+        .filter(EmailTokenSchema::token.eq(token.to_uppercase()))
+        .select(EmailToken::as_select())
+        .first(conn)
+        .optional()?;
+    if let Some(res) = res {
+        let requested_at = from_str_to_utc(&res.requested_at);
+        let expired = !less_than_ago_ms(requested_at, expiration_len);
+        if expired {
+            bail!("Token is expired")
+        }
+        Ok(res.did)
+    } else {
+        bail!("Token is invalid")
+    }
+}
+
 pub async fn delete_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<()> {
     use crate::schema::pds::email_token::dsl as EmailTokenSchema;
     let conn = &mut establish_connection()?;

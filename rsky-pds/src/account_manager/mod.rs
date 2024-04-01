@@ -3,6 +3,7 @@ use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
 };
 use crate::account_manager::helpers::invite::CodeDetail;
+use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
 use crate::common;
@@ -35,6 +36,16 @@ pub struct CreateAccountOpts {
 pub struct ConfirmEmailOpts<'em> {
     pub did: &'em String,
     pub token: &'em String,
+}
+
+pub struct ResetPasswordOpts {
+    pub password: String,
+    pub token: String,
+}
+
+pub struct UpdateAccountPasswordOpts {
+    pub did: String,
+    pub password: String,
 }
 
 pub struct AccountManager {}
@@ -279,6 +290,33 @@ impl AccountManager {
         password::verify_app_password(did, password_str).await
     }
 
+    pub async fn reset_password(opts: ResetPasswordOpts) -> Result<()> {
+        let did = email_token::assert_valid_token_and_find_did(
+            EmailTokenPurpose::ResetPassword,
+            &opts.token,
+            None,
+        )
+        .await?;
+        Self::update_account_password(UpdateAccountPasswordOpts {
+            did,
+            password: opts.password,
+        })
+        .await
+    }
+
+    pub async fn update_account_password(opts: UpdateAccountPasswordOpts) -> Result<()> {
+        let UpdateAccountPasswordOpts { did, .. } = opts;
+        let password_encrypted = password::gen_salt_and_hash(opts.password)?;
+        try_join!(
+            password::update_user_password(UpdateUserPasswordOpts {
+                did: did.clone(),
+                password_encrypted
+            }),
+            email_token::delete_email_token(&did, EmailTokenPurpose::ResetPassword),
+            auth::revoke_refresh_tokens_by_did(&did)
+        )?;
+        Ok(())
+    }
     // Email Tokens
     // ----------
     pub async fn confirm_email<'em>(opts: ConfirmEmailOpts<'em>) -> Result<()> {

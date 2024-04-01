@@ -90,6 +90,13 @@ pub struct RequestPasswordResetInput {
     pub email: String,
 }
 
+/// Reset a user account password using a token.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ResetPasswordInput {
+    pub token: String,
+    pub password: String,
+}
+
 // Outputs
 // -------
 

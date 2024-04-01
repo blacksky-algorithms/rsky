@@ -12,6 +12,11 @@ use diesel::*;
 use rsky_lexicon::com::atproto::server::CreateAppPasswordOutput;
 use sha2::{Digest, Sha256};
 
+pub struct UpdateUserPasswordOpts {
+    pub did: String,
+    pub password_encrypted: String,
+}
+
 pub async fn verify_account_password(did: &String, password: &String) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
     let conn = &mut establish_connection()?;
@@ -123,4 +128,15 @@ pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
         .filter(AppPasswordSchema::did.eq(did))
         .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
         .get_results(conn)?)
+}
+
+pub async fn update_user_password(opts: UpdateUserPasswordOpts) -> Result<()> {
+    use crate::schema::pds::account::dsl as AccountSchema;
+    let conn = &mut establish_connection()?;
+
+    update(AccountSchema::account)
+        .filter(AccountSchema::did.eq(opts.did))
+        .set(AccountSchema::password.eq(opts.password_encrypted))
+        .execute(conn)?;
+    Ok(())
 }
