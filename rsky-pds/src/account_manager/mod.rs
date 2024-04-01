@@ -299,6 +299,10 @@ impl AccountManager {
     ) -> Result<()> {
         email_token::assert_valid_token(did, purpose, token, None).await
     }
+
+    pub async fn create_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<String> {
+        email_token::create_email_token(did, purpose).await
+    }
 }
 
 pub mod helpers;

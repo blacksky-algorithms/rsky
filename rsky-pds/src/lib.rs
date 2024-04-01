@@ -24,6 +24,7 @@ pub mod car;
 pub mod common;
 pub mod crawlers;
 pub mod db;
+pub mod mailer;
 pub mod models;
 pub mod plc;
 pub mod repo;

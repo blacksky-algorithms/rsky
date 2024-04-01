@@ -1,9 +1,34 @@
-use crate::common::time::{less_than_ago_ms, MINUTE};
+use crate::apis::com::atproto::server::get_random_token;
+use crate::common;
+use crate::common::time::{from_str_to_utc, less_than_ago_ms, MINUTE};
 use crate::db::establish_connection;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::EmailToken;
 use anyhow::{bail, Result};
 use diesel::*;
+
+pub async fn create_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<String> {
+    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+    let conn = &mut establish_connection()?;
+    let token = get_random_token().to_uppercase();
+    let now = common::now();
+
+    insert_into(EmailTokenSchema::email_token)
+        .values((
+            EmailTokenSchema::purpose.eq(purpose),
+            EmailTokenSchema::did.eq(did),
+            EmailTokenSchema::token.eq(&token),
+            EmailTokenSchema::requestedAt.eq(&now),
+        ))
+        .on_conflict((EmailTokenSchema::purpose, EmailTokenSchema::did))
+        .do_update()
+        .set((
+            EmailTokenSchema::token.eq(&token),
+            EmailTokenSchema::requestedAt.eq(&now),
+        ))
+        .execute(conn)?;
+    Ok(token)
+}
 
 pub async fn assert_valid_token(
     did: &String,
@@ -23,7 +48,8 @@ pub async fn assert_valid_token(
         .first(conn)
         .optional()?;
     if let Some(res) = res {
-        let expired = !less_than_ago_ms(res.requested_at, expiration_len);
+        let requested_at = from_str_to_utc(&res.requested_at);
+        let expired = !less_than_ago_ms(requested_at, expiration_len);
         if expired {
             bail!("Token is expired")
         }

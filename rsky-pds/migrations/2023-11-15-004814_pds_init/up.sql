@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS pds.email_token (
     purpose character varying NOT NULL,
     did character varying NOT NULL,
     token character varying NOT NULL,
-    "requestedAt" timestamptz NOT NULL
+    "requestedAt" character varying NOT NULL
 );
 ALTER TABLE ONLY pds.email_token
     DROP CONSTRAINT IF EXISTS email_token_pkey;

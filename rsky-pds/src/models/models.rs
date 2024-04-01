@@ -213,7 +213,7 @@ pub struct EmailToken {
     pub token: String,
     #[diesel(column_name = requestedAt)]
     #[serde(rename = "requestedAt")]
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: String,
 }
 
 #[derive(

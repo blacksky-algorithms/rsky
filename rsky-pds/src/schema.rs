@@ -77,7 +77,7 @@ pub mod pds {
             purpose -> Varchar,
             did -> Varchar,
             token -> Varchar,
-            requestedAt -> Timestamptz,
+            requestedAt -> Varchar,
         }
     }
 

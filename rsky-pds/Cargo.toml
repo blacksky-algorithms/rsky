@@ -52,6 +52,7 @@ jwt-simple = "0.12.9"
 argon2 = "0.5.3"
 base64ct = "1.6.0"
 url = "2.4.0"
+mailgun-rs = "0.1.10"
 
 
 [dependencies.rocket_sync_db_pools]

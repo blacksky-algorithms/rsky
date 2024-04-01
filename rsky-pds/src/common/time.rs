@@ -22,6 +22,12 @@ pub fn from_str_to_micros(str: &String) -> i64 {
         .timestamp_micros()
 }
 
+pub fn from_str_to_utc(str: &String) -> DateTime<UtcOffset> {
+    NaiveDateTime::parse_from_str(str, RFC3339_VARIANT)
+        .unwrap()
+        .and_utc()
+}
+
 #[allow(deprecated)]
 pub fn from_micros_to_utc(micros: i64) -> DateTime<UtcOffset> {
     let nanoseconds = 230 * 1000000;

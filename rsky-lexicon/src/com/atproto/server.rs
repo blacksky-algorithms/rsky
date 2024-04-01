@@ -207,6 +207,19 @@ pub struct ListAppPasswordsOutput {
     pub passwords: Vec<AppPassword>,
 }
 
+/// Refresh an authentication session. Requires auth using the 'refreshJwt' (not the 'accessJwt').
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RefreshSessionOutput {
+    pub handle: String,
+    pub did: String,
+    #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
+    pub did_doc: Option<String>,
+    #[serde(rename = "accessJwt")]
+    pub access_jwt: String,
+    #[serde(rename = "refreshJwt")]
+    pub refresh_jwt: String,
+}
+
 // Refs
 // ----
 
