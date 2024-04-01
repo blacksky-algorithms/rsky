@@ -19,7 +19,7 @@ async fn inner_request_email_confirmation(auth: AccessCheckTakedown) -> Result<(
             include_taken_down: Some(true),
         }),
     )
-        .await?;
+    .await?;
     if let Some(account) = account {
         if let Some(email) = account.email {
             let token =

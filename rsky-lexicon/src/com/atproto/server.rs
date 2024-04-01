@@ -220,6 +220,13 @@ pub struct RefreshSessionOutput {
     pub refresh_jwt: String,
 }
 
+/// Request a token in order to update email.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RequestEmailUpdateOutput {
+    #[serde(rename = "tokenRequired")]
+    pub token_required: bool,
+}
+
 // Refs
 // ----
 
