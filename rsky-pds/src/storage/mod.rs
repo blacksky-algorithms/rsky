@@ -119,6 +119,7 @@ impl SqlRepoReader {
         let _ = missing_strings.chunks(500).map(|batch| {
             let _ = RepoBlockSchema::repo_block
                 .filter(RepoBlockSchema::cid.eq_any(batch))
+                .filter(RepoBlockSchema::did.eq(&self.did))
                 .select((RepoBlockSchema::cid, RepoBlockSchema::content))
                 .load::<(String, Vec<u8>)>(conn)?
                 .into_iter()
@@ -223,6 +224,7 @@ impl SqlRepoReader {
         for (cid, bytes) in to_put.map.iter() {
             blocks.push(RepoBlock {
                 cid: cid.to_string(),
+                did: self.did.clone(),
                 repo_rev: rev.clone(),
                 size: bytes.len() as i32,
                 content: bytes.clone(),

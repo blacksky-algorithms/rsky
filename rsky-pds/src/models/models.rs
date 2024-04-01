@@ -339,6 +339,7 @@ pub struct RefreshToken {
 pub struct RepoBlock {
     #[diesel(sql_type = Text)]
     pub cid: String,
+    pub did: String,
     #[diesel(column_name = repoRev)]
     #[serde(rename = "repoRev")]
     pub repo_rev: String,

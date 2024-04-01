@@ -42,7 +42,7 @@ pub async fn send_template(opts: MailOpts) -> Result<()> {
 
     let client = Mailgun {
         api_key: env::var("PDS_MAILGUN_API_KEY").unwrap(),
-        domain: env::var("PDS_HOSTNAME").unwrap(),
+        domain: env::var("PDS_MAILGUN_DOMAIN").unwrap(),
         message,
     };
     let sender = EmailAddress::name_address(
