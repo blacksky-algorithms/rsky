@@ -5,9 +5,10 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
 use crate::repo::parse;
 use crate::repo::types::{BlockWriter, CidAndBytes};
-use crate::storage::{Ipld, ObjAndBytes, SqlRepoReader};
+use crate::storage::{ObjAndBytes, SqlRepoReader};
 use anyhow::{anyhow, bail, Result};
 use libipld::Cid;
+use serde_cbor::Value as CborValue;
 use std::mem;
 
 pub struct NodeIter {
@@ -329,10 +330,13 @@ impl MST {
         };
         // otherwise this is a virtual/pointer struct, and we need to hydrate from
         // block store before returning entries
-        let data: NodeData = self
-            .storage
-            .read_obj(&self.pointer, |obj| matches!(obj, Ipld::Node(_)))?
-            .node();
+        let data: CborValue = self.storage.read_obj(&self.pointer, |obj: &CborValue| {
+            match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        })?;
+        let data: NodeData = serde_cbor::value::from_value(data)?;
 
         // can compute the layer on the first KeySuffix, because
         // for the first entry that field is a complete key
@@ -1029,14 +1033,17 @@ impl MST {
             }
             for cid in to_fetch.to_list() {
                 let found: ObjAndBytes =
-                    parse::get_and_parse_by_kind(&fetched.blocks, cid, |obj| {
-                        matches!(obj, Ipld::Node(_))
+                    parse::get_and_parse_by_kind(&fetched.blocks, cid, |obj: &CborValue| {
+                        match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        }
                     })?;
                 car.push(CidAndBytes {
                     cid,
                     bytes: found.bytes,
                 });
-                let node_data: NodeData = found.obj.node();
+                let node_data: NodeData = serde_cbor::value::from_value(found.obj)?;
                 let entries = util::deserialize_node_data(&self.storage, node_data.clone(), None)?;
 
                 for entry in entries {

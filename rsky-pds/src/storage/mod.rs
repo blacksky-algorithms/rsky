@@ -1,71 +1,69 @@
-// based on atproto/packages/pds/src/actor-store/repo/sql-repo-reader.ts
-
 use crate::db::establish_connection;
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
 use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
-use crate::repo::mst::NodeData;
 use crate::repo::parse;
-use crate::repo::types::{CommitData, RepoRecord, VersionedCommit};
+use crate::repo::types::{CommitData, RepoRecord};
 use crate::repo::util::cbor_to_lex_record;
 use crate::{common, models};
 use anyhow::Result;
 use diesel::prelude::*;
 use diesel::*;
 use futures::try_join;
+use libipld::cbor::encode::write_null;
+use libipld::cbor::DagCborCodec;
+use libipld::codec::Encode;
 use libipld::Cid;
+use serde_cbor::Value as CborValue;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::str::FromStr;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum Ipld {
-    /// Represents the absence of a value or the value undefined.
-    Null,
-    /// Represents a boolean value.
-    Bool(bool),
-    /// Represents an integer.
-    Integer(i128),
-    /// Represents a floating point value.
-    Float(f64),
-    /// Represents a UTF-8 string.
-    String(String),
+    /// Represents a Json Value
+    Json(JsonValue),
     /// Represents a sequence of bytes.
     Bytes(Vec<u8>),
     /// Represents a list.
     List(Vec<Ipld>),
-    /// Represents a map of strings.
+    /// Represents a map of strings to objects.
     Map(BTreeMap<String, Ipld>),
-    /// Represents a map of integers.
+    /// Represents a Cid.
     Link(Cid),
-    /// Represents MST Node.
-    Node(NodeData),
-    /// Represents a commit,
-    VersionedCommit(VersionedCommit),
 }
 
-impl Ipld {
-    pub fn node(self) -> NodeData {
-        if let Ipld::Node(s) = self {
-            s
-        } else {
-            panic!("Not a NodeData")
-        }
-    }
-
-    pub fn commit(self) -> VersionedCommit {
-        if let Ipld::VersionedCommit(s) = self {
-            s
-        } else {
-            panic!("Not a VersionedCommit")
+impl Encode<DagCborCodec> for Ipld {
+    fn encode<W: Write>(&self, c: DagCborCodec, w: &mut W) -> Result<()> {
+        match self {
+            Self::Json(JsonValue::Null) => write_null(w),
+            Self::Json(JsonValue::Bool(b)) => b.encode(c, w),
+            Self::Json(JsonValue::Number(n)) => {
+                if n.is_f64() {
+                    n.as_f64().unwrap().encode(c, w)
+                } else if n.is_u64() {
+                    n.as_u64().unwrap().encode(c, w)
+                } else {
+                    n.as_i64().unwrap().encode(c, w)
+                }
+            }
+            Self::Json(JsonValue::String(s)) => s.encode(c, w),
+            Self::Json(JsonValue::Object(o)) => serde_json::to_vec(o)?.encode(c, w),
+            Self::Json(JsonValue::Array(a)) => serde_json::to_vec(a)?.as_slice().encode(c, w),
+            Self::Bytes(b) => b.as_slice().encode(c, w),
+            Self::List(l) => l.encode(c, w),
+            Self::Map(m) => m.encode(c, w),
+            Self::Link(cid) => cid.encode(c, w),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ObjAndBytes {
-    pub obj: Ipld,
+    pub obj: CborValue,
     pub bytes: Vec<u8>,
 }
 
@@ -175,7 +173,7 @@ impl SqlRepoReader {
     pub fn attempt_read(
         &mut self,
         cid: &Cid,
-        check: impl Fn(&'_ Ipld) -> bool,
+        check: impl Fn(&'_ CborValue) -> bool,
     ) -> Result<ObjAndBytes> {
         let bytes = self.get_bytes(cid)?;
         Ok(parse::parse_obj_by_kind(bytes, *cid, check)?)
@@ -184,13 +182,17 @@ impl SqlRepoReader {
     pub fn read_obj_and_bytes(
         &mut self,
         cid: &Cid,
-        check: impl Fn(&'_ Ipld) -> bool,
+        check: impl Fn(&'_ CborValue) -> bool,
     ) -> Result<ObjAndBytes> {
         let read = self.attempt_read(cid, check)?;
         Ok(read)
     }
 
-    pub fn read_obj(&mut self, cid: &Cid, check: impl Fn(&'_ Ipld) -> bool) -> Result<Ipld> {
+    pub fn read_obj(
+        &mut self,
+        cid: &Cid,
+        check: impl Fn(&'_ CborValue) -> bool,
+    ) -> Result<CborValue> {
         let obj = self.read_obj_and_bytes(cid, check)?;
         Ok(obj.obj)
     }
@@ -202,6 +204,23 @@ impl SqlRepoReader {
 
     // Transactors
     // -------------------
+
+    /// Proactively cache all blocks from a particular commit (to prevent multiple roundtrips)
+    pub async fn cache_rev(&mut self, rev: String) -> Result<()> {
+        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
+        let res: Vec<(String, Vec<u8>)> = RepoBlockSchema::repo_block
+            .filter(RepoBlockSchema::did.eq(&self.did))
+            .filter(RepoBlockSchema::repoRev.eq(rev))
+            .select((RepoBlockSchema::cid, RepoBlockSchema::content))
+            .limit(15)
+            .get_results::<(String, Vec<u8>)>(conn)?;
+        for row in res {
+            self.cache.set(Cid::from_str(&row.0)?, row.1)
+        }
+        Ok(())
+    }
 
     pub async fn apply_commit(
         &mut self,

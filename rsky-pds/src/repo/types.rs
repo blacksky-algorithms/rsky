@@ -81,6 +81,61 @@ pub enum Lex {
 pub type RepoRecord = BTreeMap<String, Lex>;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct BlobConstraint {
+    pub max_size: Option<usize>,
+    pub accept: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PreparedBlobRef {
+    pub cid: Cid,
+    pub mime_type: String,
+    pub contraints: BlobConstraint,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PreparedCreateOrUpdate {
+    pub action: WriteOpAction,
+    pub uri: String,
+    pub cid: Cid,
+    pub swap_cid: Option<Cid>,
+    pub record: RepoRecord,
+    pub blobs: Vec<PreparedBlobRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PreparedDelete {
+    pub action: WriteOpAction,
+    pub uri: String,
+    pub swap_cid: Option<Cid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum PreparedWrite {
+    Create(PreparedCreateOrUpdate),
+    Update(PreparedCreateOrUpdate),
+    Delete(PreparedDelete),
+}
+
+impl PreparedWrite {
+    pub fn uri(&self) -> &String {
+        match self {
+            PreparedWrite::Create(w) => &w.uri,
+            PreparedWrite::Update(w) => &w.uri,
+            PreparedWrite::Delete(w) => &w.uri,
+        }
+    }
+
+    pub fn swap_cid(&self) -> &Option<Cid> {
+        match self {
+            PreparedWrite::Create(w) => &w.swap_cid,
+            PreparedWrite::Update(w) => &w.swap_cid,
+            PreparedWrite::Delete(w) => &w.swap_cid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum WriteOpAction {
     Create,
     Update,
@@ -107,6 +162,55 @@ pub enum RecordWriteOp {
     Create(RecordCreateOrUpdateOp),
     Update(RecordCreateOrUpdateOp),
     Delete(RecordDeleteOp),
+}
+
+// @TODO: Use AtUri
+pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
+    let uri_without_prefix = write.uri.replace("at://", "");
+    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
+    RecordWriteOp::Create {
+        0: RecordCreateOrUpdateOp {
+            action: WriteOpAction::Create,
+            collection: parts[1].to_string(),
+            rkey: parts[2].to_string(),
+            record: write.record,
+        },
+    }
+}
+
+// @TODO: Use AtUri
+pub fn update_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
+    let uri_without_prefix = write.uri.replace("at://", "");
+    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
+    RecordWriteOp::Create {
+        0: RecordCreateOrUpdateOp {
+            action: WriteOpAction::Update,
+            collection: parts[1].to_string(),
+            rkey: parts[2].to_string(),
+            record: write.record,
+        },
+    }
+}
+
+// @TODO: Use AtUri
+pub fn delete_write_to_op(write: PreparedDelete) -> RecordWriteOp {
+    let uri_without_prefix = write.uri.replace("at://", "");
+    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
+    RecordWriteOp::Delete {
+        0: RecordDeleteOp {
+            action: WriteOpAction::Delete,
+            collection: parts[1].to_string(),
+            rkey: parts[2].to_string(),
+        },
+    }
+}
+
+pub fn write_to_op(write: PreparedWrite) -> RecordWriteOp {
+    match write {
+        PreparedWrite::Create(c) => create_write_to_op(c),
+        PreparedWrite::Update(u) => update_write_to_op(u),
+        PreparedWrite::Delete(d) => delete_write_to_op(d),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -207,53 +311,6 @@ pub struct VerifiedRepo {
 }
 
 pub type CarBlock = CidAndBytes;
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct BlobConstraint {
-    pub max_size: Option<usize>,
-    pub accept: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct PreparedBlobRef {
-    pub cid: Cid,
-    pub mime_type: String,
-    pub contraints: BlobConstraint,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct PreparedCreateOrUpdate {
-    pub action: WriteOpAction,
-    pub uri: String,
-    pub cid: Cid,
-    pub swap_cid: Option<Cid>,
-    pub record: RepoRecord,
-    pub blobs: Vec<PreparedBlobRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct PreparedDelete {
-    pub action: WriteOpAction,
-    pub uri: String,
-    pub swap_cid: Option<Cid>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub enum PreparedWrite {
-    Create(PreparedCreateOrUpdate),
-    Update(PreparedCreateOrUpdate),
-    Delete(PreparedDelete),
-}
-
-impl PreparedWrite {
-    pub fn uri(&self) -> &String {
-        match self {
-            PreparedWrite::Create(w) => &w.uri,
-            PreparedWrite::Update(w) => &w.uri,
-            PreparedWrite::Delete(w) => &w.uri,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StatusAttr {

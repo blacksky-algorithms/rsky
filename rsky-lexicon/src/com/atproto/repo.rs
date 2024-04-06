@@ -1,9 +1,4 @@
-use cid::Cid;
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_cbor::tags::Tagged;
-
-const CBOR_TAG_CID: u64 = 42;
-const MULTIBASE_IDENTITY: u8 = 0;
+use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StrongRef {
@@ -12,26 +7,39 @@ pub struct StrongRef {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Record<T> {
+pub struct Record {
     pub uri: String,
     pub cid: String,
-    pub value: T,
+    pub value: Value,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ListRecordsOutput<T> {
+pub struct ListRecordsOutput {
     pub cursor: Option<String>,
-    pub records: Vec<Record<T>>,
+    pub records: Vec<Record>,
 }
 
-#[derive(Serialize)]
-pub struct CreateRecord<'a, T> {
-    pub repo: &'a str,
-    pub collection: &'a str,
-    pub record: T,
+/// Create a single new repository record. Requires auth, implemented by PDS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateRecordInput {
+    /// The handle or DID of the repo (aka, current account)
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The record itself. Must contain a $type field.
+    pub record: Value,
+    /// The Record Key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rkey: Option<String>,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<bool>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateRecordOutput {
     pub cid: String,
     pub uri: String,
@@ -55,12 +63,8 @@ pub struct Blob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default = "default_resource",
-        deserialize_with = "deserialize_cid_v1"
-    )]
-    pub r#ref: Option<Cid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
@@ -76,12 +80,8 @@ pub struct OriginalBlob {
         skip_serializing_if = "Option::is_none"
     )]
     pub rust_type: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default = "default_resource",
-        deserialize_with = "deserialize_cid_v1"
-    )]
-    pub r#ref: Option<Cid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
@@ -89,32 +89,7 @@ pub struct OriginalBlob {
     pub size: usize,
 }
 
-fn default_resource() -> Option<Cid> {
-    None
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BlobOutput {
     pub blob: Blob,
-}
-
-fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<cid::Cid>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let buf = Tagged::<serde_bytes::ByteBuf>::deserialize(deserializer)?;
-    match buf.tag {
-        Some(CBOR_TAG_CID) | None => {
-            let mut bz = buf.value.into_vec();
-
-            if bz.first() == Some(&MULTIBASE_IDENTITY) {
-                bz.remove(0);
-            }
-
-            Ok(Some(Cid::try_from(bz).map_err(|e| {
-                serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
-            })?))
-        }
-        Some(_) => Err(serde::de::Error::custom("unexpected tag")),
-    }
 }

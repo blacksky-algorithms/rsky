@@ -22,7 +22,7 @@ impl BlobReader {
         }
     }
 
-    pub async fn process_writes_blob(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+    pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
         self.delete_dereferenced_blobs(writes.clone()).await?;
         let _ = stream::iter(writes)
             .then(|write| async move {

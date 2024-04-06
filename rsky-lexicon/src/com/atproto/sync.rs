@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
-use cid::Cid;
-use serde::Deserialize;
+use libipld::Cid;
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeReposCommitOperation {

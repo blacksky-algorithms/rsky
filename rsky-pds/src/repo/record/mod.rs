@@ -7,38 +7,39 @@ use anyhow::Result;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use libipld::Cid;
+use serde_json::Value as JsonValue;
 use std::env;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetRecord {
-    uri: String,
-    cid: String,
-    value: RepoRecord,
+    pub uri: String,
+    pub cid: String,
+    pub value: RepoRecord,
     #[serde(rename = "indexedAt")]
-    indexed_at: String,
+    pub indexed_at: String,
     #[serde(rename = "takedownRef")]
-    takedown_ref: Option<String>,
+    pub takedown_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RecordsForCollection {
-    uri: String,
-    cid: String,
-    value: RepoRecord,
+    pub uri: String,
+    pub cid: String,
+    pub value: RepoRecord,
 }
 
 // @NOTE in the future this can be replaced with a more generic routine that pulls backlinks based on lex docs.
 // For now, we just want to ensure we're tracking links from follows, blocks, likes, and reposts.
-pub fn get_backlinks(uri: String, record: RepoRecord) -> Result<Vec<models::Backlink>> {
-    if let Some(Lex::Ipld(Ipld::String(record_type))) = record.get("$type") {
+pub fn get_backlinks(uri: &String, record: &RepoRecord) -> Result<Vec<models::Backlink>> {
+    if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(record_type)))) = record.get("$type") {
         if record_type == Ids::AppBskyGraphFollow.as_str()
             || record_type == Ids::AppBskyGraphBlock.as_str()
         {
-            if let Some(Lex::Ipld(Ipld::String(subject))) = record.get("subject") {
-                // TO DO: Ensure valid DID https://github.com/bluesky-social/atproto/blob/main/packages/syntax/src/did.ts
+            if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject)))) = record.get("subject") {
+                // @TODO: Ensure valid DID https://github.com/bluesky-social/atproto/blob/main/packages/syntax/src/did.ts
                 return Ok(vec![models::Backlink {
-                    uri,
+                    uri: uri.clone(),
                     path: "subject".to_owned(),
                     link_to: subject.clone(),
                 }]);
@@ -47,10 +48,12 @@ pub fn get_backlinks(uri: String, record: RepoRecord) -> Result<Vec<models::Back
             || record_type == Ids::AppBskyFeedRepost.as_str()
         {
             if let Some(Lex::Map(ref_object)) = record.get("subject") {
-                if let Some(Lex::Ipld(Ipld::String(subject_uri))) = ref_object.get("uri") {
+                if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject_uri)))) =
+                    ref_object.get("uri")
+                {
                     // TO DO: Ensure valid AT URI
                     return Ok(vec![models::Backlink {
-                        uri,
+                        uri: uri.clone(),
                         path: "subject.uri".to_owned(),
                         link_to: subject_uri.clone(),
                     }]);
@@ -288,10 +291,10 @@ impl RecordReader {
     // @TODO: Update to use AtUri
     pub async fn get_backlink_conflicts(
         &self,
-        uri: String,
-        record: RepoRecord,
+        uri: &String,
+        record: &RepoRecord,
     ) -> Result<Vec<String>> {
-        let record_backlinks = get_backlinks(uri.clone(), record)?;
+        let record_backlinks = get_backlinks(uri, record)?;
         let collection = uri
             .split("/")
             .collect::<Vec<&str>>()
