@@ -173,7 +173,7 @@ impl ActorStore {
                 }
                 let record = self
                     .record
-                    .get_record(write.uri().clone(), None, Some(true))
+                    .get_record(write.uri(), None, Some(true))
                     .await?;
                 let current_record = match record {
                     Some(record) => Some(Cid::from_str(&record.cid)?),

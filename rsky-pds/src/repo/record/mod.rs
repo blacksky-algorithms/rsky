@@ -160,7 +160,7 @@ impl RecordReader {
 
     pub async fn get_record(
         &mut self,
-        uri: String,
+        uri: &String,
         cid: Option<String>,
         include_soft_deleted: Option<bool>,
     ) -> Result<Option<GetRecord>> {

@@ -13,12 +13,6 @@ pub struct Record {
     pub value: Value,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListRecordsOutput {
-    pub cursor: Option<String>,
-    pub records: Vec<Record>,
-}
-
 /// Create a single new repository record. Requires auth, implemented by PDS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateRecordInput {
@@ -37,6 +31,22 @@ pub struct CreateRecordInput {
     /// Compare and swap with the previous commit by CID.
     #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
     pub swap_commit: Option<String>,
+}
+
+/// Get a single record from a repository. Does not require auth.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetRecordOutput {
+    pub uri: String,
+    /// The CID of the version of the record. If not specified, then return the most recent version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    pub value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRecordsOutput {
+    pub cursor: Option<String>,
+    pub records: Vec<Record>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

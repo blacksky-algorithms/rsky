@@ -86,6 +86,16 @@ impl AccountManager {
         }
     }
 
+    pub async fn get_did_for_actor(
+        handle_or_did: &String,
+        flags: Option<AvailabilityFlags>,
+    ) -> Result<Option<String>> {
+        match Self::get_account(handle_or_did, flags).await {
+            Ok(Some(got)) => Ok(Some(got.did)),
+            _ => Ok(None),
+        }
+    }
+
     pub async fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
         let CreateAccountOpts {
             did,
