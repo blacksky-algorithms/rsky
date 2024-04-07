@@ -1,4 +1,117 @@
-#[rocket::post("/xrpc/com.atproto.repo.deleteRecord")]
-pub async fn delete_record() {
-    todo!();
+use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::AccountManager;
+use crate::auth_verifier::AccessCheckTakedown;
+use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::repo::aws::s3::S3BlobStore;
+use crate::repo::types::PreparedWrite;
+use crate::repo::{prepare_delete, ActorStore, PrepareDeleteOpts};
+use crate::SharedSequencer;
+use anyhow::{bail, Result};
+use aws_config::BehaviorVersion;
+use libipld::Cid;
+use rocket::http::Status;
+use rocket::response::status;
+use rocket::serde::json::Json;
+use rocket::State;
+use rsky_lexicon::com::atproto::repo::DeleteRecordInput;
+use std::str::FromStr;
+
+async fn inner_delete_record(
+    body: Json<DeleteRecordInput>,
+    auth: AccessCheckTakedown,
+    sequencer: &State<SharedSequencer>,
+) -> Result<()> {
+    let DeleteRecordInput {
+        repo,
+        collection,
+        rkey,
+        swap_record,
+        swap_commit,
+    } = body.into_inner();
+    let account = AccountManager::get_account(
+        &repo,
+        Some(AvailabilityFlags {
+            include_deactivated: Some(true),
+            include_taken_down: None,
+        }),
+    )
+    .await?;
+    match account {
+        None => bail!("Could not find repo: `{repo}`"),
+        Some(account) if account.deactivated_at.is_some() => bail!("Account is deactivated"),
+        Some(account) => {
+            let did = account.did;
+            if did != auth.access.credentials.unwrap().did.unwrap() {
+                bail!("AuthRequiredError")
+            }
+
+            let swap_commit_cid = match swap_commit {
+                Some(swap_commit) => Some(Cid::from_str(&swap_commit)?),
+                None => None,
+            };
+            let swap_record_cid = match swap_record {
+                Some(swap_record) => Some(Cid::from_str(&swap_record)?),
+                None => None,
+            };
+
+            let write = prepare_delete(PrepareDeleteOpts {
+                did: did.clone(),
+                collection,
+                rkey,
+                swap_cid: swap_record_cid,
+            });
+            let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+            let mut actor_store =
+                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+
+            let record = actor_store
+                .record
+                .get_record(&write.uri, None, Some(true))
+                .await?;
+            let commit = match record {
+                None => return Ok(()), // No-op if record already doesn't exist
+                Some(_) => {
+                    actor_store
+                        .process_writes(vec![PreparedWrite::Delete(write.clone())], swap_commit_cid)
+                        .await?
+                }
+            };
+
+            let mut lock = sequencer.sequencer.write().await;
+            lock.sequence_commit(
+                did.clone(),
+                commit.clone(),
+                vec![PreparedWrite::Delete(write)],
+            )
+            .await?;
+            AccountManager::update_repo_root(did, commit.cid, commit.rev)?;
+
+            Ok(())
+        }
+    }
+}
+
+#[rocket::post(
+    "/xrpc/com.atproto.repo.deleteRecord",
+    format = "json",
+    data = "<body>"
+)]
+pub async fn delete_record(
+    body: Json<DeleteRecordInput>,
+    auth: AccessCheckTakedown,
+    sequencer: &State<SharedSequencer>,
+) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+    match inner_delete_record(body, auth, sequencer).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let internal_error = InternalErrorMessageResponse {
+                code: Some(InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
 }

@@ -33,6 +33,23 @@ pub struct CreateRecordInput {
     pub swap_commit: Option<String>,
 }
 
+/// Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeleteRecordInput {
+    /// The handle or DID of the repo (aka, current account).
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The Record Key.
+    pub rkey: String,
+    /// Compare and swap with the previous record by CID.
+    #[serde(rename = "swapRecord", skip_serializing_if = "Option::is_none")]
+    pub swap_record: Option<String>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
 /// Get a single record from a repository. Does not require auth.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetRecordOutput {
