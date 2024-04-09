@@ -9,7 +9,7 @@ use crate::repo::{
 };
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::BehaviorVersion;
+use aws_config::SdkConfig;
 use libipld::Cid;
 use rocket::http::Status;
 use rocket::response::status;
@@ -22,6 +22,7 @@ async fn inner_create_record(
     body: Json<CreateRecordInput>,
     auth: AccessCheckTakedown,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<CreateRecordOutput> {
     let CreateRecordInput {
         repo,
@@ -60,9 +61,9 @@ async fn inner_create_record(
             swap_cid: None,
         })
         .await?;
-        let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
-        let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+        let mut actor_store =
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
         let backlink_conflicts: Vec<String> = match validate {
             Some(true) => {
                 actor_store
@@ -123,8 +124,9 @@ pub async fn create_record(
     body: Json<CreateRecordInput>,
     auth: AccessCheckTakedown,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<Json<CreateRecordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    match inner_create_record(body, auth, sequencer).await {
+    match inner_create_record(body, auth, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             let internal_error = InternalErrorMessageResponse {

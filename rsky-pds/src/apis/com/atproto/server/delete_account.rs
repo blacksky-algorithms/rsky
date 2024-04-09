@@ -7,7 +7,7 @@ use crate::repo::ActorStore;
 use crate::sequencer;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::BehaviorVersion;
+use aws_config::SdkConfig;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -17,6 +17,7 @@ use rsky_lexicon::com::atproto::server::DeleteAccountInput;
 async fn inner_delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<()> {
     let DeleteAccountInput {
         did,
@@ -42,9 +43,9 @@ async fn inner_delete_account(
             &token,
         )
         .await?;
-        let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
-        let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+        let mut actor_store =
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
         actor_store.destroy().await?;
         AccountManager::delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;
@@ -66,8 +67,9 @@ async fn inner_delete_account(
 pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
-    match inner_delete_account(body, sequencer).await {
+    match inner_delete_account(body, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
             let internal_error = InternalErrorMessageResponse {

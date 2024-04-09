@@ -4,12 +4,47 @@ use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use indexmap::IndexMap;
 use rand::{distributions::Alphanumeric, Rng};
+use rocket::http::Status;
+use rocket::request::{FromRequest, Outcome};
+use rocket::Request;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::SystemTime;
+use thiserror::Error;
 use url::form_urlencoded;
 
 pub const RFC3339_VARIANT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
+
+#[derive(Error, Debug)]
+pub enum BadContentTypeError {
+    #[error("BadType: `{0}`")]
+    BadType(String),
+    #[error("Content-Type header is missing")]
+    MissingType,
+}
+
+#[derive(Clone)]
+pub struct ContentType {
+    pub name: String,
+}
+
+/// Used mainly as a way to parse out content-type from request
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ContentType {
+    type Error = BadContentTypeError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.content_type() {
+            None => Outcome::Error((
+                Status::UnsupportedMediaType,
+                BadContentTypeError::MissingType,
+            )),
+            Some(content_type) => Outcome::Success(ContentType {
+                name: content_type.to_string(),
+            }),
+        }
+    }
+}
 
 pub fn now() -> String {
     let system_time = SystemTime::now();

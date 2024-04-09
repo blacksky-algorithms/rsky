@@ -3,6 +3,7 @@ extern crate rocket;
 use diesel::prelude::*;
 use diesel::sql_types::Int4;
 use dotenvy::dotenv;
+use rocket::data::{Limits, ToByteUnit};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::figment::{
     util::map,
@@ -117,7 +118,10 @@ fn rocket() -> _ {
         "timeout" => 30.into(),
     };
 
-    let figment = rocket::Config::figment().merge(("databases", map!["pg_db" => db]));
+    let figment = rocket::Config::figment()
+        .merge(("databases", map!["pg_db" => db]))
+        .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
+
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::new(
             Crawlers::new(
@@ -127,6 +131,12 @@ fn rocket() -> _ {
             None,
         )),
     };
+
+    let config = futures::executor::block_on(
+        aws_config::from_env()
+            .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
+            .load(),
+    );
 
     rocket::custom(figment)
         .mount(
@@ -249,4 +259,5 @@ fn rocket() -> _ {
         .attach(CORS)
         .attach(DbConn::fairing())
         .manage(sequencer)
+        .manage(config)
 }

@@ -9,7 +9,7 @@ use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::BehaviorVersion;
+use aws_config::SdkConfig;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -18,6 +18,7 @@ use rocket::State;
 async fn inner_activate_account(
     auth: AccessNotAppPassword,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<()> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
     assert_valid_did_documents_for_service(requester.clone()).await?;
@@ -33,11 +34,10 @@ async fn inner_activate_account(
 
     if let Some(account) = account {
         AccountManager::activate_account(&requester).await?;
-        let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
         let mut actor_store = ActorStore::new(
             requester.clone(),
-            S3BlobStore::new(requester.clone(), &config),
+            S3BlobStore::new(requester.clone(), s3_config),
         );
         let root = actor_store.storage.get_root_detailed().await?;
         let blocks = actor_store.storage.get_blocks(vec![root.cid]).await?;
@@ -69,8 +69,9 @@ async fn inner_activate_account(
 pub async fn activate_account(
     auth: AccessNotAppPassword,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
-    match inner_activate_account(auth, sequencer).await {
+    match inner_activate_account(auth, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");

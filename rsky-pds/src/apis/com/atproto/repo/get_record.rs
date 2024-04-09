@@ -3,10 +3,11 @@ use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::{make_aturi, ActorStore};
 use anyhow::{bail, Result};
-use aws_config::BehaviorVersion;
+use aws_config::SdkConfig;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
 
 async fn inner_get_record(
@@ -14,6 +15,7 @@ async fn inner_get_record(
     collection: String,
     rkey: String,
     cid: Option<String>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<GetRecordOutput> {
     let did = AccountManager::get_did_for_actor(&repo, None).await?;
 
@@ -21,9 +23,9 @@ async fn inner_get_record(
     if let Some(did) = did {
         // @TODO: Use ATUri
         let uri = make_aturi(did.clone(), Some(collection), Some(rkey));
-        let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
-        let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+        let mut actor_store =
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
 
         match actor_store.record.get_record(&uri, cid, None).await {
             Ok(Some(record)) if record.takedown_ref.is_none() => Ok(GetRecordOutput {
@@ -45,8 +47,9 @@ pub async fn get_record(
     collection: String,
     rkey: String,
     cid: Option<String>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<Json<GetRecordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    match inner_get_record(repo, collection, rkey, cid).await {
+    match inner_get_record(repo, collection, rkey, cid, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             let internal_error = InternalErrorMessageResponse {

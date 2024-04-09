@@ -17,7 +17,7 @@ multihash = "0.16"
 tokio = { version = "1.28.2",features = ["full"] }
 
 # for everything else
-rocket = { version = "=0.5.0-rc.3", features = ["json"] }
+rocket = { version = "=0.5.0", features = ["json"] }
 dotenvy = "0.15"
 rsky-lexicon = { workspace = true }
 diesel = { version = "2.1.4", features = ["chrono","postgres"] }
@@ -46,7 +46,7 @@ lazy_static = "1.4.0"
 regex = "1.10.3"
 thiserror = "1.0.40"
 aws-sdk-s3 = "1.19.1"
-aws-config = "1.1.8"
+aws-config = { version = "1.1.8",features = ["behavior-version-latest"] }
 futures = "0.3.28"
 jwt-simple = "0.12.9"
 argon2 = "0.5.3"
@@ -57,5 +57,5 @@ mailchecker = "6.0.1"
 
 
 [dependencies.rocket_sync_db_pools]
-version = "=0.1.0-rc.3"
+version = "=0.1.0"
 features = ["diesel_postgres_pool"]

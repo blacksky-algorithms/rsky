@@ -5,7 +5,7 @@ use crate::repo::ActorStore;
 use crate::DbConn;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_sdk_s3::config::BehaviorVersion;
+use aws_config::SdkConfig;
 use email_address::*;
 use rocket::http::Status;
 use rocket::response::status;
@@ -20,6 +20,7 @@ async fn create(
     mut body: Json<CreateAccountInput>,
     connection: DbConn,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<CreateAccountOutput, anyhow::Error> {
     let CreateAccountInput {
         email,
@@ -61,9 +62,8 @@ async fn create(
         }
     }
     let did = did.unwrap();
-    let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
 
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -109,6 +109,7 @@ pub async fn server_create_account(
     body: Json<CreateAccountInput>,
     connection: DbConn,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     // @TODO: Throw error for any plcOp input
 
@@ -146,7 +147,7 @@ pub async fn server_create_account(
         ));
     };
 
-    match create(body, connection, sequencer).await {
+    match create(body, connection, sequencer, s3_config).await {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             eprintln!("Internal Error: {error}");

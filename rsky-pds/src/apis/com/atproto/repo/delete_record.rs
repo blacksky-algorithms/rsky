@@ -7,7 +7,7 @@ use crate::repo::types::PreparedWrite;
 use crate::repo::{prepare_delete, ActorStore, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::BehaviorVersion;
+use aws_config::SdkConfig;
 use libipld::Cid;
 use rocket::http::Status;
 use rocket::response::status;
@@ -20,6 +20,7 @@ async fn inner_delete_record(
     body: Json<DeleteRecordInput>,
     auth: AccessCheckTakedown,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<()> {
     let DeleteRecordInput {
         repo,
@@ -60,9 +61,8 @@ async fn inner_delete_record(
                 rkey,
                 swap_cid: swap_record_cid,
             });
-            let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
             let mut actor_store =
-                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), &config));
+                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
 
             let record = actor_store
                 .record
@@ -100,8 +100,9 @@ pub async fn delete_record(
     body: Json<DeleteRecordInput>,
     auth: AccessCheckTakedown,
     sequencer: &State<SharedSequencer>,
+    s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
-    match inner_delete_record(body, auth, sequencer).await {
+    match inner_delete_record(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {
             let internal_error = InternalErrorMessageResponse {

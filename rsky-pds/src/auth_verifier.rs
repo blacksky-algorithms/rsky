@@ -118,7 +118,7 @@ impl<'r> FromRequest<'r> for Access {
         match validate_access_token(req, vec![AuthScope::Access]).await {
             Ok(access) => Outcome::Success(Access { access }),
             Err(error) => {
-                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
     }
@@ -149,7 +149,7 @@ impl<'r> FromRequest<'r> for Refresh {
                 match payload.jti {
                     Some(_) => result,
                     None => {
-                        return Outcome::Failure((
+                        return Outcome::Error((
                             Status::BadRequest,
                             AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
                         ));
@@ -157,10 +157,7 @@ impl<'r> FromRequest<'r> for Refresh {
                 }
             }
             Err(error) => {
-                return Outcome::Failure((
-                    Status::BadRequest,
-                    AuthError::BadJwt(error.to_string()),
-                ));
+                return Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())));
             }
         };
         Outcome::Success(Refresh {
@@ -192,7 +189,7 @@ impl<'r> FromRequest<'r> for AccessNotAppPassword {
         match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
             Ok(access) => Outcome::Success(AccessNotAppPassword { access }),
             Err(error) => {
-                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
     }
@@ -219,7 +216,7 @@ impl<'r> FromRequest<'r> for AccessDeactivated {
         {
             Ok(access) => Outcome::Success(AccessDeactivated { access }),
             Err(error) => {
-                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
     }
@@ -235,16 +232,14 @@ impl<'r> FromRequest<'r> for AccessCheckTakedown {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let result =
-            match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
-                Ok(access) => AccessCheckTakedown { access },
-                Err(error) => {
-                    return Outcome::Failure((
-                        Status::BadRequest,
-                        AuthError::BadJwt(error.to_string()),
-                    ));
-                }
-            };
+        let result = match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass])
+            .await
+        {
+            Ok(access) => AccessCheckTakedown { access },
+            Err(error) => {
+                return Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())));
+            }
+        };
         let requester = result.clone().access.credentials.unwrap().did.unwrap();
         let found = match AccountManager::get_account(
             &requester,
@@ -257,14 +252,14 @@ impl<'r> FromRequest<'r> for AccessCheckTakedown {
         {
             Ok(Some(found)) => found,
             _ => {
-                return Outcome::Failure((
+                return Outcome::Error((
                     Status::Forbidden,
                     AuthError::AccountNotFound("Account not found".to_string()),
                 ));
             }
         };
         if found.takedown_ref.is_some() {
-            return Outcome::Failure((
+            return Outcome::Error((
                 Status::Unauthorized,
                 AuthError::AccountTakedown("Account has been taken down".to_string()),
             ));
@@ -287,13 +282,13 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
         match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
             Ok(result) => match result.payload.jti {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
-                None => Outcome::Failure((
+                None => Outcome::Error((
                     Status::BadRequest,
                     AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
                 )),
             },
             Err(error) => {
-                Outcome::Failure((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
     }
