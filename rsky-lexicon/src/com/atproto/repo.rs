@@ -89,14 +89,15 @@ pub struct Blob {
         rename(deserialize = "$type", serialize = "$type"),
         skip_serializing_if = "Option::is_none"
     )]
-    pub rust_type: Option<String>,
+    pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<String>,
+    pub r#ref: Option<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
-    pub size: Option<usize>,
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original: Option<OriginalBlob>,
 }
 
@@ -106,14 +107,14 @@ pub struct OriginalBlob {
         rename(deserialize = "$type", serialize = "$type"),
         skip_serializing_if = "Option::is_none"
     )]
-    pub rust_type: Option<String>,
+    pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<String>,
+    pub r#ref: Option<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
-    pub size: usize,
+    pub size: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -1,12 +1,30 @@
+use crate::common::ipld::sha256_raw_to_cid;
+use crate::common::now;
 use crate::db::establish_connection;
+use crate::image;
 use crate::models::models;
 use crate::repo::aws::s3::S3BlobStore;
+use crate::repo::blob_refs::BlobRef;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use anyhow::{bail, Result};
 use diesel::dsl::count_distinct;
+use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::*;
 use futures::stream::{self, StreamExt};
+use futures::try_join;
+use libipld::Cid;
+use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
+use sha2::{Digest, Sha256};
+
+pub struct BlobMetadata {
+    pub temp_key: String,
+    pub size: i64,
+    pub cid: Cid,
+    pub mime_type: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
 
 pub struct BlobReader {
     pub blobstore: S3BlobStore,
@@ -20,6 +38,106 @@ impl BlobReader {
             did: blobstore.bucket.clone(),
             blobstore,
         }
+    }
+
+    pub async fn get_records_for_blob(&self, cid: Cid) -> Result<Vec<String>> {
+        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let res = RecordBlobSchema::record_blob
+            .filter(RecordBlobSchema::blobCid.eq(cid.to_string()))
+            .filter(RecordBlobSchema::did.eq(&self.did))
+            .select(models::RecordBlob::as_select())
+            .get_results(conn)?
+            .into_iter()
+            .map(|row| row.record_uri)
+            .collect::<Vec<String>>();
+
+        Ok(res)
+    }
+
+    pub async fn upload_blob_and_get_metadata(
+        &self,
+        user_suggested_mime: String,
+        blob: Data<'_>,
+    ) -> Result<BlobMetadata> {
+        let blob_stream = blob.open(100.mebibytes());
+        let bytes = blob_stream.into_bytes().await?;
+        let size = bytes.n.written;
+        let bytes = bytes.into_inner();
+        let (temp_key, sha256, img_info, sniffed_mime) = try_join!(
+            self.blobstore.put_temp(bytes.clone()),
+            sha256_stream(bytes.clone()),
+            image::maybe_get_info(bytes.clone()),
+            image::mime_type_from_bytes(bytes.clone())
+        )?;
+
+        let cid = sha256_raw_to_cid(sha256);
+        let mime_type = sniffed_mime.unwrap_or(user_suggested_mime);
+
+        Ok(BlobMetadata {
+            temp_key,
+            size: size as i64,
+            cid,
+            mime_type,
+            width: if let Some(ref info) = img_info {
+                Some(info.width.clone() as i32)
+            } else {
+                None
+            },
+            height: if let Some(info) = img_info {
+                Some(info.height as i32)
+            } else {
+                None
+            },
+        })
+    }
+
+    pub async fn track_untethered_blob(&self, metadata: BlobMetadata) -> Result<BlobRef> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+        let BlobMetadata {
+            temp_key,
+            size,
+            cid,
+            mime_type,
+            width,
+            height,
+        } = metadata;
+        let created_at = now();
+
+        let found = BlobSchema::blob
+            .filter(BlobSchema::did.eq(&self.did))
+            .filter(BlobSchema::cid.eq(&cid.to_string()))
+            .select(models::Blob::as_select())
+            .first(conn)
+            .optional()?;
+
+        if let Some(found) = found {
+            if found.takedown_ref.is_some() {
+                bail!("Blob has been takendown, cannot re-upload")
+            }
+        }
+
+        let upsert = sql_query("INSERT INTO pds.blob (cid, did, \"mimeType\", size, \"tempKey\", width, height, \"createdAt\", \"takedownRef\") \
+        VALUES \
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+        ON CONFLICT (cid) DO UPDATE \
+        SET \"tempKey\" = EXCLUDED.\"tempKey\" \
+            WHERE pds.blob.\"tempKey\" is not null;");
+        upsert
+            .bind::<Text, _>(&cid.to_string())
+            .bind::<Text, _>(&self.did)
+            .bind::<Text, _>(&mime_type)
+            .bind::<Integer, _>(size.clone() as i32)
+            .bind::<Nullable<Text>, _>(Some(temp_key.clone()))
+            .bind::<Nullable<Integer>, _>(width)
+            .bind::<Nullable<Integer>, _>(height)
+            .bind::<Text, _>(created_at)
+            .bind::<Nullable<Text>, _>(None as Option<String>)
+            .execute(conn)?;
+
+        Ok(BlobRef::new(cid, mime_type, size, None))
     }
 
     pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
@@ -165,6 +283,7 @@ impl BlobReader {
             .values((
                 RecordBlobSchema::blobCid.eq(blob.cid.to_string()),
                 RecordBlobSchema::recordUri.eq(record_uri),
+                RecordBlobSchema::did.eq(&self.did),
             ))
             .on_conflict_do_nothing()
             .execute(conn)?;
@@ -238,4 +357,10 @@ pub async fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result
         }
     }
     Ok(())
+}
+
+pub async fn sha256_stream(to_hash: Vec<u8>) -> Result<Vec<u8>> {
+    let digest = Sha256::digest(&*to_hash);
+    let hash: &[u8] = digest.as_ref();
+    Ok(hash.to_vec())
 }

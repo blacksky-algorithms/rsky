@@ -20,7 +20,7 @@ tokio = { version = "1.28.2",features = ["full"] }
 rocket = { version = "=0.5.0", features = ["json"] }
 dotenvy = "0.15"
 rsky-lexicon = { workspace = true }
-diesel = { version = "2.1.4", features = ["chrono","postgres"] }
+diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
@@ -54,7 +54,8 @@ base64ct = "1.6.0"
 url = "2.4.0"
 mailgun-rs = "0.1.10"
 mailchecker = "6.0.1"
-
+image = "0.25.1"
+infer = "0.15.0"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"

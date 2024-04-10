@@ -9,7 +9,7 @@ pub struct TypedJsonBlobRef {
     pub r#ref: Cid,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
-    pub size: i128,
+    pub size: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -31,12 +31,7 @@ pub struct BlobRef {
 }
 
 impl BlobRef {
-    pub fn new(
-        r#ref: Cid,
-        mime_type: String,
-        size: i128,
-        original: Option<JsonBlobRef>,
-    ) -> BlobRef {
+    pub fn new(r#ref: Cid, mime_type: String, size: i64, original: Option<JsonBlobRef>) -> BlobRef {
         if let Some(o) = original {
             BlobRef { original: o }
         } else {
@@ -47,6 +42,27 @@ impl BlobRef {
                 size,
             });
             BlobRef { original: o }
+        }
+    }
+
+    pub fn get_cid(&self) -> Result<Cid> {
+        match &self.original {
+            JsonBlobRef::Typed(typed) => Ok(typed.r#ref),
+            JsonBlobRef::Untyped(untyped) => Ok(Cid::from_str(&untyped.cid)?),
+        }
+    }
+
+    pub fn get_mime_type(&self) -> &String {
+        match &self.original {
+            JsonBlobRef::Typed(typed) => &typed.mime_type,
+            JsonBlobRef::Untyped(untyped) => &untyped.mime_type,
+        }
+    }
+
+    pub fn get_size(&self) -> Option<i64> {
+        match &self.original {
+            JsonBlobRef::Typed(typed) => Some(typed.size),
+            JsonBlobRef::Untyped(_) => None,
         }
     }
 
