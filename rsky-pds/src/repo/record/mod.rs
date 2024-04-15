@@ -82,7 +82,7 @@ impl RecordReader {
         Ok(res)
     }
 
-    pub async fn list_collection(&mut self) -> Result<Vec<String>> {
+    pub async fn list_collections(&mut self) -> Result<Vec<String>> {
         use crate::schema::pds::record::dsl::*;
         let conn = &mut establish_connection()?;
 

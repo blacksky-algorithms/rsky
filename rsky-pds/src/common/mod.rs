@@ -7,11 +7,12 @@ use rand::{distributions::Alphanumeric, Rng};
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
+use rsky_identity::types::DidDocument;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::SystemTime;
 use thiserror::Error;
-use url::form_urlencoded;
+use urlencoding::encode;
 
 pub const RFC3339_VARIANT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
 
@@ -78,7 +79,21 @@ pub fn json_to_b64url<T: Serialize>(obj: &T) -> Result<String> {
 }
 
 pub fn encode_uri_component(input: &String) -> String {
-    form_urlencoded::byte_serialize(input.as_bytes()).collect()
+    encode(input).to_string()
+}
+
+pub fn get_handle(doc: &DidDocument) -> Option<String> {
+    match &doc.also_known_as {
+        None => None,
+        Some(aka) => {
+            let found = aka.into_iter().find(|name| name.starts_with("at://"));
+            match found {
+                None => None,
+                // strip off at:// prefix
+                Some(found) => Some(found[5..].to_string()),
+            }
+        }
+    }
 }
 
 pub mod env;

@@ -14,11 +14,13 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
+use rsky_identity::did::did_resolver::DidResolver;
+use rsky_identity::types::{DidCache, DidResolverOpts};
 use rsky_pds::apis::*;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::sequencer::Sequencer;
-use rsky_pds::DbConn;
 use rsky_pds::SharedSequencer;
+use rsky_pds::{DbConn, SharedDidResolver};
 use std::env;
 use tokio::sync::RwLock;
 
@@ -137,6 +139,16 @@ fn rocket() -> _ {
             .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
             .load(),
     );
+    let id_resolver = SharedDidResolver {
+        id_resolver: RwLock::new(DidResolver::new(DidResolverOpts {
+            timeout: None,
+            plc_url: Some(format!(
+                "https://{}",
+                env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned())
+            )),
+            did_cache: DidCache::new(None, None),
+        })),
+    };
 
     rocket::custom(figment)
         .mount(
@@ -260,4 +272,5 @@ fn rocket() -> _ {
         .attach(DbConn::fairing())
         .manage(sequencer)
         .manage(config)
+        .manage(id_resolver)
 }

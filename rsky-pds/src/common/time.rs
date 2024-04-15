@@ -6,6 +6,7 @@ use std::time::SystemTime;
 pub const SECOND: i32 = 1000;
 pub const MINUTE: i32 = SECOND * 60;
 pub const HOUR: i32 = MINUTE * 60;
+pub const DAY: i32 = HOUR * 24;
 
 pub fn less_than_ago_ms(time: DateTime<UtcOffset>, range: i32) -> bool {
     let now = SystemTime::now()

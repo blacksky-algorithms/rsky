@@ -13,6 +13,46 @@ pub struct Record {
     pub value: Value,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Link {
+    #[serde(rename(deserialize = "$link", serialize = "$link"))]
+    pub link: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Blob {
+    #[serde(
+    rename(deserialize = "$type", serialize = "$type"),
+    skip_serializing_if = "Option::is_none"
+    )]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Link>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
+    pub mime_type: String,
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original: Option<OriginalBlob>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OriginalBlob {
+    #[serde(
+    rename(deserialize = "$type", serialize = "$type"),
+    skip_serializing_if = "Option::is_none"
+    )]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Link>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
+    pub mime_type: String,
+    pub size: i64,
+}
+
 /// Create a single new repository record. Requires auth, implemented by PDS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateRecordInput {
@@ -73,51 +113,22 @@ pub struct CreateRecordOutput {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateUploadBlob {
-    pub blob: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Link {
-    #[serde(rename(deserialize = "$link", serialize = "$link"))]
-    pub link: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Blob {
-    #[serde(
-        rename(deserialize = "$type", serialize = "$type"),
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<Link>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cid: Option<String>,
-    #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
-    pub mime_type: String,
-    pub size: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub original: Option<OriginalBlob>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OriginalBlob {
-    #[serde(
-        rename(deserialize = "$type", serialize = "$type"),
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<Link>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cid: Option<String>,
-    #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
-    pub mime_type: String,
-    pub size: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct BlobOutput {
     pub blob: Blob,
+}
+
+/// Get information about an account and repository, including the list of collections. 
+/// Does not require auth.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DescribeRepoOutput {
+    pub handle: String,
+    pub did: String,
+    /// The complete DID document for this account.
+    #[serde(rename = "didDoc")]
+    pub did_doc: Value,
+    /// List of all the collections (NSIDs) for which this repo contains at least one record.
+    pub collections: Vec<String>,
+    /// Indicates if handle is currently valid (resolves bi-directionally)
+    #[serde(rename = "handleIsCorrect")]
+    pub handle_is_correct: bool,
 }
