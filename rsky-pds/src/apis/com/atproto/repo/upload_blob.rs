@@ -44,7 +44,7 @@ async fn inner_upload_blob(
             .verify_blob_and_make_permanent(PreparedBlobRef {
                 cid: blobref.get_cid()?,
                 mime_type: blobref.get_mime_type().to_string(),
-                contraints: BlobConstraint {
+                constraints: BlobConstraint {
                     max_size: None,
                     accept: None,
                 },

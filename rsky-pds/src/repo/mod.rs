@@ -5,8 +5,10 @@ use crate::common;
 use crate::common::ipld::data_to_cbor_block;
 use crate::common::tid::{Ticker, TID};
 use crate::db::establish_connection;
+use crate::lexicons::LEXICONS;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
+use crate::repo::blob_refs::{BlobRef, JsonBlobRef};
 use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::repo::data_diff::DataDiff;
@@ -14,9 +16,9 @@ use crate::repo::error::DataStoreError;
 use crate::repo::mst::MST;
 use crate::repo::record::RecordReader;
 use crate::repo::types::{
-    write_to_op, CollectionContents, Commit, CommitData, Lex, PreparedCreateOrUpdate,
-    PreparedDelete, PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp,
-    RepoContents, RepoRecord, UnsignedCommit, VersionedCommit, WriteOpAction,
+    write_to_op, BlobConstraint, CollectionContents, Commit, CommitData, Ids, Lex, PreparedBlobRef,
+    PreparedCreateOrUpdate, PreparedDelete, PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum,
+    RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit, VersionedCommit, WriteOpAction,
 };
 use crate::repo::util::{cbor_to_lex, lex_to_ipld};
 use crate::storage::{Ipld, SqlRepoReader};
@@ -24,18 +26,34 @@ use anyhow::{bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use futures::try_join;
+use lazy_static::lazy_static;
 use libipld::Cid;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde_cbor::Value as CborValue;
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::env;
 use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct FoundBlobRef {
+    pub r#ref: BlobRef,
+    pub path: Vec<String>,
+}
 
 pub struct PrepareCreateOpts {
     pub did: String,
     pub collection: String,
     pub rkey: Option<String>,
+    pub swap_cid: Option<Cid>,
+    pub record: RepoRecord,
+    pub validate: Option<bool>,
+}
+
+pub struct PrepareUpdateOpts {
+    pub did: String,
+    pub collection: String,
+    pub rkey: String,
     pub swap_cid: Option<Cid>,
     pub record: RepoRecord,
     pub validate: Option<bool>,
@@ -609,6 +627,71 @@ impl Repo {
     }
 }
 
+pub fn blobs_for_write(record: RepoRecord, validate: bool) -> Result<Vec<PreparedBlobRef>> {
+    let refs = find_blob_refs(Lex::Map(record.clone()), None, None);
+    let record_type = match record.get("$type") {
+        Some(Lex::Ipld(Ipld::Json(JsonValue::String(t)))) => Some(t),
+        _ => None,
+    };
+    for r#ref in refs.clone() {
+        if matches!(r#ref.r#ref.original, JsonBlobRef::Untyped(_)) {
+            bail!("Legacy blob ref at `{}`", r#ref.path.join("/"))
+        }
+    }
+    refs.into_iter()
+        .map(|FoundBlobRef { r#ref, path }| {
+            let constraints: BlobConstraint = match (validate, record_type) {
+                (true, Some(record_type)) => {
+                    let properties: crate::lexicons::lexicons::Image2 = serde_json::from_value(
+                        CONSTRAINTS[record_type.as_str()][path.join("/")].clone(),
+                    )?;
+                    BlobConstraint {
+                        max_size: Some(properties.max_size as usize),
+                        accept: Some(properties.accept),
+                    }
+                }
+                (_, _) => BlobConstraint {
+                    max_size: None,
+                    accept: None,
+                },
+            };
+
+            Ok(PreparedBlobRef {
+                cid: r#ref.get_cid()?,
+                mime_type: r#ref.get_mime_type().to_string(),
+                constraints,
+            })
+        })
+        .collect::<Result<Vec<PreparedBlobRef>>>()
+}
+
+pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) -> Vec<FoundBlobRef> {
+    let layer = layer.unwrap_or_else(|| 0);
+    let path = path.unwrap_or_else(|| vec![]);
+    if layer > 32 {
+        return vec![];
+    }
+    // walk arrays
+    match val {
+        Lex::List(list) => list
+            .into_iter()
+            .flat_map(|item| find_blob_refs(item, Some(path.clone()), Some(layer + 1)))
+            .collect::<Vec<FoundBlobRef>>(),
+        Lex::Blob(blob) => vec![FoundBlobRef { r#ref: blob, path }],
+        Lex::Ipld(_) => vec![],
+        Lex::Map(map) => map
+            .into_iter()
+            .flat_map(|(key, item)| {
+                find_blob_refs(
+                    item,
+                    Some([path.as_slice(), [key].as_slice()].concat()),
+                    Some(layer + 1),
+                )
+            })
+            .collect::<Vec<FoundBlobRef>>(),
+    }
+}
+
 pub fn assert_valid_record(record: &RepoRecord) -> Result<()> {
     match record.get("$type") {
         Some(Lex::Ipld(Ipld::Json(JsonValue::String(_)))) => Ok(()),
@@ -678,8 +761,34 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> Result<PreparedCreateOrU
         uri: make_aturi(did, Some(collection), rkey),
         cid: cid_for_safe_record(record.clone()).await?,
         swap_cid,
-        record,
-        blobs: vec![],
+        record: record.clone(),
+        blobs: blobs_for_write(record, validate)?,
+    })
+}
+
+pub async fn prepare_update(opts: PrepareUpdateOpts) -> Result<PreparedCreateOrUpdate> {
+    let PrepareUpdateOpts {
+        did,
+        collection,
+        rkey,
+        swap_cid,
+        validate,
+        ..
+    } = opts;
+    let validate = validate.unwrap_or_else(|| true);
+
+    let record = set_collection_name(&collection, opts.record, validate)?;
+    if validate {
+        assert_valid_record(&record)?;
+    }
+    // assert_no_explicit_slurs(rkey, record).await?;
+    Ok(PreparedCreateOrUpdate {
+        action: WriteOpAction::Update,
+        uri: make_aturi(did, Some(collection), Some(rkey)),
+        cid: cid_for_safe_record(record.clone()).await?,
+        swap_cid,
+        record: record.clone(),
+        blobs: blobs_for_write(record, validate)?,
     })
 }
 
@@ -695,6 +804,29 @@ pub fn prepare_delete(opts: PrepareDeleteOpts) -> PreparedDelete {
         uri: make_aturi(did, Some(collection), Some(rkey)),
         swap_cid,
     }
+}
+
+lazy_static! {
+    static ref CONSTRAINTS: JsonValue = {
+        json!({
+            Ids::AppBskyActorProfile.as_str(): {
+                "avatar": LEXICONS.app_bsky_actor_profile.defs.main.record.properties.avatar,
+                "banner": LEXICONS.app_bsky_actor_profile.defs.main.record.properties.banner
+            },
+            Ids::AppBskyFeedGenerator.as_str(): {
+                "avatar": LEXICONS.app_bsky_feed_generator.defs.main.record.properties.avatar
+            },
+            Ids::AppBskyGraphList.as_str(): {
+                "avatar": LEXICONS.app_bsky_graph_list.defs.main.record.properties.avatar
+            },
+            Ids::AppBskyFeedPost.as_str(): {
+                "embed/images/image": LEXICONS.app_bsky_embed_images.defs.image.properties.image,
+                "embed/external/thumb": LEXICONS.app_bsky_embed_external.defs.external.properties.thumb,
+                "embed/media/images/image": LEXICONS.app_bsky_embed_images.defs.image.properties.image,
+                "embed/media/external/thumb": LEXICONS.app_bsky_embed_external.defs.external.properties.thumb
+            }
+        })
+    };
 }
 
 pub mod aws;

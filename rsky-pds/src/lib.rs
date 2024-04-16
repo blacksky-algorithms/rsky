@@ -30,6 +30,7 @@ pub mod common;
 pub mod crawlers;
 pub mod db;
 pub mod image;
+pub mod lexicons;
 pub mod mailer;
 pub mod models;
 pub mod plc;

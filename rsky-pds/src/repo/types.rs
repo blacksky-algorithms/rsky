@@ -90,7 +90,7 @@ pub struct BlobConstraint {
 pub struct PreparedBlobRef {
     pub cid: Cid,
     pub mime_type: String,
-    pub contraints: BlobConstraint,
+    pub constraints: BlobConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -123,6 +123,14 @@ impl PreparedWrite {
             PreparedWrite::Create(w) => &w.uri,
             PreparedWrite::Update(w) => &w.uri,
             PreparedWrite::Delete(w) => &w.uri,
+        }
+    }
+
+    pub fn cid(&self) -> Option<Cid> {
+        match self {
+            PreparedWrite::Create(w) => Some(w.cid),
+            PreparedWrite::Update(w) => Some(w.cid),
+            PreparedWrite::Delete(_) => None,
         }
     }
 

@@ -73,6 +73,28 @@ pub struct CreateRecordInput {
     pub swap_commit: Option<String>,
 }
 
+/// Write a repository record, creating or updating it as needed. Requires auth, implemented by PDS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PutRecordInput {
+    /// The handle or DID of the repo (aka, current account)
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The Record Key.
+    pub rkey: String,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<bool>, // Default 'true'
+    /// The record itself. Must contain a $type field.
+    pub record: Value,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapRecord")]
+    pub swap_record: Option<String>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
 /// Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeleteRecordInput {
@@ -108,6 +130,12 @@ pub struct ListRecordsOutput {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateRecordOutput {
+    pub cid: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PutRecordOutput {
     pub cid: String,
     pub uri: String,
 }
