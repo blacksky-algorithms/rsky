@@ -227,7 +227,6 @@ fn rocket() -> _ {
                 com::atproto::sync::get_head::get_head,
                 com::atproto::sync::notify_of_update::notify_of_update,
                 com::atproto::sync::request_crawl::request_crawl,
-                com::atproto::temp::fetch_labels::fetch_labels,
                 app::bsky::actor::get_preferences::get_preferences,
                 app::bsky::actor::get_profile::get_profile,
                 app::bsky::actor::get_profiles::get_profiles,

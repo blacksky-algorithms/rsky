@@ -112,6 +112,21 @@ pub struct DeleteRecordInput {
     pub swap_commit: Option<String>,
 }
 
+/// Apply a batch transaction of repository creates, updates, and deletes.
+/// Requires auth, implemented by PDS.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApplyWritesInput {
+    /// The handle or DID of the repo (aka, current account).
+    pub repo: String,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data, for all operations.
+    pub validate: Option<bool>,
+    /// The Record Key.
+    pub writes: Vec<ApplyWritesInputRefWrite>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
 /// Get a single record from a repository. Does not require auth.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetRecordOutput {
@@ -145,7 +160,7 @@ pub struct BlobOutput {
     pub blob: Blob,
 }
 
-/// Get information about an account and repository, including the list of collections. 
+/// Get information about an account and repository, including the list of collections.
 /// Does not require auth.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DescribeRepoOutput {
@@ -159,4 +174,34 @@ pub struct DescribeRepoOutput {
     /// Indicates if handle is currently valid (resolves bi-directionally)
     #[serde(rename = "handleIsCorrect")]
     pub handle_is_correct: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ApplyWritesInputRefWrite {
+    Create(RefWriteCreate),
+    Update(RefWriteUpdate),
+    Delete(RefWriteDelete)
+}
+
+/// Operation which creates a new record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefWriteCreate {
+    pub collection: String,
+    pub rkey: Option<String>,
+    pub value: Value
+}
+
+/// Operation which updates an existing record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefWriteUpdate {
+    pub collection: String,
+    pub rkey: String,
+    pub value: Value
+}
+
+/// Operation which deletes an existing record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefWriteDelete {
+    pub collection: String,
+    pub rkey: String
 }
