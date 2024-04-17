@@ -6,7 +6,7 @@ pub struct StrongRef {
     pub cid: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub uri: String,
     pub cid: String,
@@ -122,7 +122,7 @@ pub struct GetRecordOutput {
     pub value: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ListRecordsOutput {
     pub cursor: Option<String>,
     pub records: Vec<Record>,
