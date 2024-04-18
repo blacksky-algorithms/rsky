@@ -7,7 +7,7 @@ use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob_refs::BlobRef;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use anyhow::{bail, Result};
-use diesel::dsl::count_distinct;
+use diesel::dsl::{count_distinct, exists, not};
 use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::*;
 use futures::stream::{self, StreamExt};
@@ -15,6 +15,7 @@ use futures::try_join;
 use libipld::Cid;
 use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
+use rsky_lexicon::com::atproto::repo::ListMissingBlobsRefRecordBlob;
 use sha2::{Digest, Sha256};
 
 pub struct BlobMetadata {
@@ -31,7 +32,12 @@ pub struct BlobReader {
     pub did: String,
 }
 
-// Basically handles getting lexicon records from db
+pub struct ListMissingBlobsOpts {
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+// Basically handles getting blob records from db
 impl BlobReader {
     pub fn new(blobstore: S3BlobStore) -> Self {
         BlobReader {
@@ -311,6 +317,59 @@ impl BlobReader {
             .get_result(conn)?;
 
         Ok(res)
+    }
+
+    pub async fn list_missing_blobs(
+        &self,
+        opts: ListMissingBlobsOpts,
+    ) -> Result<Vec<ListMissingBlobsRefRecordBlob>> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
+        let ListMissingBlobsOpts { cursor, limit } = opts;
+
+        if limit > 1000 {
+            bail!("Limit too high. Max: 1000.");
+        }
+
+        let res: Vec<models::RecordBlob> = if let Some(cursor) = cursor {
+            RecordBlobSchema::record_blob
+                .limit(limit as i64)
+                .filter(not(exists(
+                    BlobSchema::blob
+                        .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
+                        .filter(BlobSchema::did.eq(&self.did))
+                        .select(models::Blob::as_select()),
+                )))
+                .filter(RecordBlobSchema::blobCid.gt(cursor))
+                .filter(RecordBlobSchema::did.eq(&self.did))
+                .select(models::RecordBlob::as_select())
+                .order(RecordBlobSchema::blobCid.asc())
+                .distinct_on(RecordBlobSchema::blobCid)
+                .get_results(conn)?
+        } else {
+            RecordBlobSchema::record_blob
+                .limit(limit as i64)
+                .filter(not(exists(
+                    BlobSchema::blob
+                        .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
+                        .filter(BlobSchema::did.eq(&self.did))
+                        .select(models::Blob::as_select()),
+                )))
+                .filter(RecordBlobSchema::did.eq(&self.did))
+                .select(models::RecordBlob::as_select())
+                .order(RecordBlobSchema::blobCid.asc())
+                .distinct_on(RecordBlobSchema::blobCid)
+                .get_results(conn)?
+        };
+
+        Ok(res
+            .into_iter()
+            .map(|row| ListMissingBlobsRefRecordBlob {
+                cid: row.blob_cid,
+                record_uri: row.record_uri,
+            })
+            .collect())
     }
 }
 

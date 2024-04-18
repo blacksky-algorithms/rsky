@@ -188,6 +188,7 @@ fn rocket() -> _ {
                 com::atproto::repo::describe_repo::describe_repo,
                 com::atproto::repo::get_record::get_record,
                 com::atproto::repo::list_records::list_records,
+                com::atproto::repo::list_missing_blobs::list_missing_blobs,
                 com::atproto::repo::put_record::put_record,
                 com::atproto::repo::upload_blob::upload_blob,
                 com::atproto::server::confirm_email::confirm_email,

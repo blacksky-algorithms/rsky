@@ -22,8 +22,8 @@ pub struct Link {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Blob {
     #[serde(
-    rename(deserialize = "$type", serialize = "$type"),
-    skip_serializing_if = "Option::is_none"
+        rename(deserialize = "$type", serialize = "$type"),
+        skip_serializing_if = "Option::is_none"
     )]
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,8 +40,8 @@ pub struct Blob {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OriginalBlob {
     #[serde(
-    rename(deserialize = "$type", serialize = "$type"),
-    skip_serializing_if = "Option::is_none"
+        rename(deserialize = "$type", serialize = "$type"),
+        skip_serializing_if = "Option::is_none"
     )]
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +160,15 @@ pub struct BlobOutput {
     pub blob: Blob,
 }
 
+/// Returns a list of missing blobs for the requesting account.
+/// Intended to be used in the account migration flow.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListMissingBlobsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub blobs: Vec<ListMissingBlobsRefRecordBlob>,
+}
+
 /// Get information about an account and repository, including the list of collections.
 /// Does not require auth.
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,7 +189,13 @@ pub struct DescribeRepoOutput {
 pub enum ApplyWritesInputRefWrite {
     Create(RefWriteCreate),
     Update(RefWriteUpdate),
-    Delete(RefWriteDelete)
+    Delete(RefWriteDelete),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListMissingBlobsRefRecordBlob {
+    pub cid: String,
+    pub record_uri: String,
 }
 
 /// Operation which creates a new record.
@@ -188,7 +203,7 @@ pub enum ApplyWritesInputRefWrite {
 pub struct RefWriteCreate {
     pub collection: String,
     pub rkey: Option<String>,
-    pub value: Value
+    pub value: Value,
 }
 
 /// Operation which updates an existing record.
@@ -196,12 +211,12 @@ pub struct RefWriteCreate {
 pub struct RefWriteUpdate {
     pub collection: String,
     pub rkey: String,
-    pub value: Value
+    pub value: Value,
 }
 
 /// Operation which deletes an existing record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefWriteDelete {
     pub collection: String,
-    pub rkey: String
+    pub rkey: String,
 }

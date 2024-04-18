@@ -287,18 +287,28 @@ pub struct Record {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    QueryableByName,
+    Queryable,
+    Identifiable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(blobCid, recordUri))]
 #[diesel(table_name = crate::schema::pds::record_blob)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RecordBlob {
-    #[diesel(column_name = blobCid)]
+    #[diesel(column_name = blobCid, sql_type = Text)]
     #[serde(rename = "blobCid")]
     pub blob_cid: String,
-    #[diesel(column_name = recordUri)]
+    #[diesel(column_name = recordUri, sql_type = Text)]
     #[serde(rename = "recordUri")]
     pub record_uri: String,
+    #[diesel(sql_type = Text)]
     pub did: String,
 }
 
