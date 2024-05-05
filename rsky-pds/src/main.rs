@@ -187,6 +187,7 @@ fn rocket() -> _ {
                 com::atproto::repo::delete_record::delete_record,
                 com::atproto::repo::describe_repo::describe_repo,
                 com::atproto::repo::get_record::get_record,
+                com::atproto::repo::import_repo::import_repo,
                 com::atproto::repo::list_records::list_records,
                 com::atproto::repo::list_missing_blobs::list_missing_blobs,
                 com::atproto::repo::put_record::put_record,

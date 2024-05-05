@@ -3,6 +3,7 @@ pub mod create_record;
 pub mod delete_record;
 pub mod describe_repo;
 pub mod get_record;
+pub mod import_repo;
 pub mod list_missing_blobs;
 pub mod list_records;
 pub mod put_record;

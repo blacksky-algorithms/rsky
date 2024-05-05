@@ -7,7 +7,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
-use rsky_identity::types::DidDocument;
+use rsky_identity::types::{DidDocument, VerificationMethod};
 use serde::Serialize;
 use serde_json::Value;
 use std::time::SystemTime;
@@ -27,6 +27,12 @@ pub enum BadContentTypeError {
 #[derive(Clone)]
 pub struct ContentType {
     pub name: String,
+}
+
+#[derive(Clone)]
+pub struct VerificationMaterial {
+    pub r#type: String,
+    pub public_key_multibase: String,
 }
 
 /// Used mainly as a way to parse out content-type from request
@@ -82,6 +88,11 @@ pub fn encode_uri_component(input: &String) -> String {
     encode(input).to_string()
 }
 
+// based on did-doc.ts
+pub fn get_did(doc: &DidDocument) -> String {
+    doc.id.clone()
+}
+
 pub fn get_handle(doc: &DidDocument) -> Option<String> {
     match &doc.also_known_as {
         None => None,
@@ -93,6 +104,31 @@ pub fn get_handle(doc: &DidDocument) -> Option<String> {
                 Some(found) => Some(found[5..].to_string()),
             }
         }
+    }
+}
+
+pub fn get_verification_material(
+    doc: &DidDocument,
+    key_id: &String,
+) -> Option<VerificationMaterial> {
+    let did = get_did(doc);
+    let keys = &doc.verification_method;
+    if let Some(keys) = keys {
+        let found = keys
+            .into_iter()
+            .find(|key| key.id == format!("#{key_id}") || key.id == format!("{did}#{key_id}"));
+        match found {
+            Some(found) if found.public_key_multibase.is_some() => {
+                let found = found.clone();
+                Some(VerificationMaterial {
+                    r#type: found.r#type,
+                    public_key_multibase: found.public_key_multibase.unwrap(),
+                })
+            }
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 

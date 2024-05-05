@@ -1,11 +1,15 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
+use crate::common::get_verification_material;
+use crate::SharedDidResolver;
 use anyhow::{bail, Result};
 use jwt_simple::claims::Audiences;
 use jwt_simple::prelude::*;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
+use rocket::State;
+use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use thiserror::Error;
@@ -78,10 +82,9 @@ pub struct AuthVerifierDids {
     pub mod_service: Option<String>,
 }
 
-pub struct AuthVerifierOpts {
-    jwt_key: Keypair,
-    admin_pass: String,
-    dids: AuthVerifierDids,
+pub struct ServiceJwt {
+    pub aud: Option<String>,
+    pub iss: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -368,6 +371,48 @@ pub async fn validate_access_token<'r>(
         }),
         artifacts: Some(token),
     })
+}
+
+async fn get_signing_key(
+    iss: String,
+    force_refresh: bool,
+    id_resolver: &State<SharedDidResolver>,
+    opts: &ServiceJwt,
+) -> Result<String> {
+    match &opts.iss {
+        Some(opts_iss) if opts_iss.contains(&iss) => bail!("UntrustedIss: Untrusted issuer"),
+        _ => (),
+    }
+    let parts = iss.split("#").collect::<Vec<&str>>();
+    if let (Some(did), Some(service_id)) = (parts.get(0), parts.get(1)) {
+        let (did, service_id) = (did.to_string(), *service_id);
+        let key_id = if service_id == "atproto_labeler" {
+            "atproto_label"
+        } else {
+            "atproto"
+        };
+        let mut lock = id_resolver.id_resolver.write().await;
+        let did_doc: DidDocument = match lock.ensure_resolve(&did, Some(force_refresh)).await {
+            Err(err) => bail!("could not resolve iss did: `{err}`"),
+            Ok(res) => res,
+        };
+        match get_verification_material(&did_doc, &key_id.to_string()) {
+            None => bail!("missing or bad key in did doc"),
+            Some(parsed_key) => {
+                todo!()
+            }
+        }
+    } else {
+        bail!("could not resolve iss did")
+    }
+}
+
+pub async fn verify_service_jwt<'r>(
+    request: &'r Request<'_>,
+    id_resolver: &State<SharedDidResolver>,
+    opts: ServiceJwt,
+) -> Result<ServiceJwt> {
+    todo!()
 }
 
 pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
