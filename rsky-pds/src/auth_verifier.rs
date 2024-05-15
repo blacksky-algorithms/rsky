@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
 use crate::common::get_verification_material;
+use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedDidResolver;
 use anyhow::{bail, Result};
 use jwt_simple::claims::Audiences;
@@ -9,6 +10,7 @@ use jwt_simple::prelude::*;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
+use rsky_identity::did::atproto_data::get_did_key_from_multibase;
 use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
@@ -82,9 +84,14 @@ pub struct AuthVerifierDids {
     pub mod_service: Option<String>,
 }
 
-pub struct ServiceJwt {
+pub struct ServiceJwtOpts {
     pub aud: Option<String>,
     pub iss: Option<Vec<String>>,
+}
+
+pub struct VerifiedServiceJwt {
+    pub aud: String,
+    pub iss: String,
 }
 
 #[derive(Clone)]
@@ -297,6 +304,47 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
     }
 }
 
+pub struct UserDidAuth {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for UserDidAuth {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let id_resolver = req.guard::<&State<SharedDidResolver>>().await.unwrap();
+        match verify_service_jwt(
+            req,
+            id_resolver,
+            ServiceJwtOpts {
+                aud: Some(env::var("PDS_SERVICE_DID").unwrap()),
+                iss: None,
+            },
+        )
+        .await
+        {
+            Ok(payload) => Outcome::Success(UserDidAuth {
+                access: AccessOutput {
+                    credentials: Some(Credentials {
+                        r#type: "user_did".to_string(),
+                        did: None,
+                        scope: None,
+                        audience: None,
+                        token_id: None,
+                        aud: Some(payload.aud),
+                        iss: Some(payload.iss),
+                    }),
+                    artifacts: None,
+                },
+            }),
+            Err(error) => {
+                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+            }
+        }
+    }
+}
+
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
@@ -373,46 +421,54 @@ pub async fn validate_access_token<'r>(
     })
 }
 
-async fn get_signing_key(
-    iss: String,
-    force_refresh: bool,
-    id_resolver: &State<SharedDidResolver>,
-    opts: &ServiceJwt,
-) -> Result<String> {
-    match &opts.iss {
-        Some(opts_iss) if opts_iss.contains(&iss) => bail!("UntrustedIss: Untrusted issuer"),
-        _ => (),
-    }
-    let parts = iss.split("#").collect::<Vec<&str>>();
-    if let (Some(did), Some(service_id)) = (parts.get(0), parts.get(1)) {
-        let (did, service_id) = (did.to_string(), *service_id);
-        let key_id = if service_id == "atproto_labeler" {
-            "atproto_label"
-        } else {
-            "atproto"
-        };
-        let mut lock = id_resolver.id_resolver.write().await;
-        let did_doc: DidDocument = match lock.ensure_resolve(&did, Some(force_refresh)).await {
-            Err(err) => bail!("could not resolve iss did: `{err}`"),
-            Ok(res) => res,
-        };
-        match get_verification_material(&did_doc, &key_id.to_string()) {
-            None => bail!("missing or bad key in did doc"),
-            Some(parsed_key) => {
-                todo!()
-            }
-        }
-    } else {
-        bail!("could not resolve iss did")
-    }
-}
-
 pub async fn verify_service_jwt<'r>(
     request: &'r Request<'_>,
     id_resolver: &State<SharedDidResolver>,
-    opts: ServiceJwt,
-) -> Result<ServiceJwt> {
-    todo!()
+    opts: ServiceJwtOpts,
+) -> Result<VerifiedServiceJwt> {
+    let get_signing_key = |iss: String, force_refresh: bool| -> Result<String> {
+        match &opts.iss {
+            Some(opts_iss) if opts_iss.contains(&iss) => bail!("UntrustedIss: Untrusted issuer"),
+            _ => (),
+        }
+        let parts = iss.split("#").collect::<Vec<&str>>();
+        if let (Some(did), Some(service_id)) = (parts.get(0), parts.get(1)) {
+            let (did, service_id) = (did.to_string(), *service_id);
+            let key_id = if service_id == "atproto_labeler" {
+                "atproto_label"
+            } else {
+                "atproto"
+            };
+            let mut lock = futures::executor::block_on(id_resolver.id_resolver.write());
+            let did_doc: Result<DidDocument> =
+                futures::executor::block_on(lock.ensure_resolve(&did, Some(force_refresh)));
+            let did_doc: DidDocument = match did_doc {
+                Err(err) => bail!("could not resolve iss did: `{err}`"),
+                Ok(res) => res,
+            };
+            match get_verification_material(&did_doc, &key_id.to_string()) {
+                None => bail!("missing or bad key in did doc"),
+                Some(parsed_key) => match get_did_key_from_multibase(parsed_key)? {
+                    None => bail!("missing or bad key in did doc"),
+                    Some(did_key) => Ok(did_key),
+                },
+            }
+        } else {
+            bail!("could not resolve iss did")
+        }
+    };
+
+    match bearer_token_from_req(request)? {
+        None => bail!("MissingJwt: missing jwt"),
+        Some(jwt_str) => {
+            let payload: ServiceJwtPayload =
+                verify_service_jwt_server(jwt_str, opts.aud, get_signing_key).await?;
+            Ok(VerifiedServiceJwt {
+                iss: payload.iss,
+                aud: payload.aud,
+            })
+        }
+    }
 }
 
 pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {

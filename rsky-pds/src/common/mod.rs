@@ -7,6 +7,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
+use rsky_identity::did::atproto_data::VerificationMaterial;
 use rsky_identity::types::{DidDocument, VerificationMethod};
 use serde::Serialize;
 use serde_json::Value;
@@ -27,12 +28,6 @@ pub enum BadContentTypeError {
 #[derive(Clone)]
 pub struct ContentType {
     pub name: String,
-}
-
-#[derive(Clone)]
-pub struct VerificationMaterial {
-    pub r#type: String,
-    pub public_key_multibase: String,
 }
 
 /// Used mainly as a way to parse out content-type from request

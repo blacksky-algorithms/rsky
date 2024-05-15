@@ -1,3 +1,4 @@
+#![feature(async_closure)]
 #[macro_use]
 extern crate serde_derive;
 extern crate core;
@@ -39,3 +40,4 @@ pub mod schema;
 pub mod sequencer;
 pub mod storage;
 mod vendored;
+pub mod xrpc_server;

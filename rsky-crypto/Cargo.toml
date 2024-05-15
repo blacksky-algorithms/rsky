@@ -14,3 +14,4 @@ documentation = "https://docs.rs/rsky-crypto"
 multibase = "0.9.1"
 secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes"] }
 anyhow = "1.0.79"
+p256 = { version = "0.13.2", features = ["ecdsa","arithmetic","alloc"] }
