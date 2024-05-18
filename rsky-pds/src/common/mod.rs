@@ -8,7 +8,7 @@ use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
 use rsky_identity::did::atproto_data::VerificationMaterial;
-use rsky_identity::types::{DidDocument, VerificationMethod};
+use rsky_identity::types::DidDocument;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::SystemTime;

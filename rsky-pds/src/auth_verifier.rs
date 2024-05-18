@@ -345,6 +345,29 @@ impl<'r> FromRequest<'r> for UserDidAuth {
     }
 }
 
+pub struct UserDidAuthOptional {
+    pub access: Option<AccessOutput>,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for UserDidAuthOptional {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if is_bearer_token(req) {
+            match UserDidAuth::from_request(req).await {
+                Outcome::Success(output) => Outcome::Success(UserDidAuthOptional {
+                    access: Some(output.access),
+                }),
+                Outcome::Error(err) => Outcome::Error(err),
+                _ => panic!("Unexpected outcome during UserDidAuthOptional"),
+            }
+        } else {
+            Outcome::Success(UserDidAuthOptional { access: None })
+        }
+    }
+}
+
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
@@ -468,6 +491,26 @@ pub async fn verify_service_jwt<'r>(
                 aud: payload.aud,
             })
         }
+    }
+}
+
+// HELPERS
+// ---------
+
+const BEARER: &str = "Bearer ";
+const BASIC: &str = "Basic ";
+
+pub fn is_bearer_token(request: &Request) -> bool {
+    match request.headers().get_one("Authorization") {
+        None => false,
+        Some(auth_header) => auth_header.starts_with(BEARER),
+    }
+}
+
+pub fn is_basic_token(request: &Request) -> bool {
+    match request.headers().get_one("Authorization") {
+        None => false,
+        Some(auth_header) => auth_header.starts_with(BASIC),
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::constants::{BASE58_MULTIBASE_PREFIX, DID_KEY_PREFIX, PLUGINS};
-use crate::utils::{extract_prefixed_bytes, has_prefix};
+use crate::utils::{extract_multikey, extract_prefixed_bytes, has_prefix};
 use anyhow::{bail, Result};
 use multibase::{encode, Base};
 
@@ -41,6 +41,11 @@ pub fn format_multikey(jwt_alg: String, key_bytes: Vec<u8>) -> Result<String> {
     } else {
         bail!("Unsupported key type")
     }
+}
+
+pub fn parse_did_key(did: &String) -> Result<ParsedMultikey> {
+    let multikey = extract_multikey(did)?;
+    parse_multikey(multikey)
 }
 
 pub fn format_did_key(jwt_alg: String, key_bytes: Vec<u8>) -> Result<String> {

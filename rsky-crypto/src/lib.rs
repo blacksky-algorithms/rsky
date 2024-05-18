@@ -5,3 +5,4 @@ pub mod p256;
 pub mod secp256k1;
 pub mod types;
 pub mod utils;
+pub mod verify;

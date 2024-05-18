@@ -1,4 +1,5 @@
 use crate::account_manager::{AccountManager, CreateAccountOpts};
+use crate::auth_verifier::UserDidAuthOptional;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
@@ -110,9 +111,16 @@ pub async fn server_create_account(
     connection: DbConn,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    auth: UserDidAuthOptional,
 ) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     // @TODO: Throw error for any plcOp input
 
+    let _requester = match auth.access {
+        Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
+        _ => None,
+    };
+
+    // @TODO: Move to validate_inputs_for_local_pds()
     let mut error_msg: Option<String> = None;
     if body.email.is_none() {
         error_msg = Some("Email is required".to_owned());
