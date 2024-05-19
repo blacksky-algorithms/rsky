@@ -109,7 +109,7 @@ impl Fairing for CORS {
 }
 
 #[launch]
-fn rocket() -> _ {
+async fn rocket() -> _ {
     dotenv().ok();
 
     let db_url = env::var("DATABASE_URL").unwrap_or("".into());
@@ -134,11 +134,11 @@ fn rocket() -> _ {
         )),
     };
 
-    let config = futures::executor::block_on(
-        aws_config::from_env()
-            .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
-            .load(),
-    );
+    let config = aws_config::from_env()
+        .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
+        .load()
+        .await;
+
     let id_resolver = SharedDidResolver {
         id_resolver: RwLock::new(DidResolver::new(DidResolverOpts {
             timeout: None,

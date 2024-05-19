@@ -1,5 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::auth_verifier::AdminToken;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
@@ -68,6 +69,7 @@ pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    _auth: AdminToken,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_delete_account(body, sequencer, s3_config).await {
         Ok(_) => Ok(()),

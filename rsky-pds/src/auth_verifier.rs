@@ -5,6 +5,7 @@ use crate::common::get_verification_material;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedDidResolver;
 use anyhow::{bail, Result};
+use base64::{engine::general_purpose::STANDARD as base64pad, Engine as _};
 use jwt_simple::claims::Audiences;
 use jwt_simple::prelude::*;
 use rocket::http::Status;
@@ -14,6 +15,7 @@ use rsky_identity::did::atproto_data::get_did_key_from_multibase;
 use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
+use std::str;
 use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
@@ -94,6 +96,11 @@ pub struct VerifiedServiceJwt {
     pub iss: String,
 }
 
+pub struct BasicAuth {
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Clone)]
 pub struct JwtPayload {
     pub scope: AuthScope,
@@ -108,6 +115,8 @@ pub struct JwtPayload {
 pub enum AuthError {
     #[error("BadJwt: `{0}`")]
     BadJwt(String),
+    #[error("AuthRequired: `{0}`")]
+    AuthRequired(String),
     #[error("AccountNotFound: `{0}`")]
     AccountNotFound(String),
     #[error("AccountTakedown: `{0}`")]
@@ -368,6 +377,80 @@ impl<'r> FromRequest<'r> for UserDidAuthOptional {
     }
 }
 
+pub struct AdminToken {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AdminToken {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let auth_header: &str = req.headers().get_one("Authorization").unwrap_or("");
+        match parse_basic_auth(auth_header) {
+            None => Outcome::Error((
+                Status::BadRequest,
+                AuthError::AuthRequired("AuthMissing".to_string()),
+            )),
+            Some(parsed) => {
+                let BasicAuth { username, password } = parsed;
+                if username != "admin" || password != env::var("PDS_ADMIN_PASS").unwrap() {
+                    Outcome::Error((
+                        Status::BadRequest,
+                        AuthError::AuthRequired("BadAuth".to_string()),
+                    ))
+                } else {
+                    Outcome::Success(AdminToken {
+                        access: AccessOutput {
+                            credentials: Some(Credentials {
+                                r#type: "admin_token".to_string(),
+                                did: None,
+                                scope: None,
+                                audience: None,
+                                token_id: None,
+                                aud: None,
+                                iss: None,
+                            }),
+                            artifacts: None,
+                        },
+                    })
+                }
+            }
+        }
+    }
+}
+
+pub struct OptionalAccessOrAdminToken {
+    pub access: Option<AccessOutput>,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if is_bearer_token(req) {
+            match Access::from_request(req).await {
+                Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
+                    access: Some(output.access),
+                }),
+                Outcome::Error(err) => Outcome::Error(err),
+                _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
+            }
+        } else if is_basic_token(req) {
+            match AdminToken::from_request(req).await {
+                Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
+                    access: Some(output.access),
+                }),
+                Outcome::Error(err) => Outcome::Error(err),
+                _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
+            }
+        } else {
+            Outcome::Success(OptionalAccessOrAdminToken { access: None })
+        }
+    }
+}
+
 pub async fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
@@ -542,4 +625,29 @@ pub async fn verify_jwt(
         iat: claims.issued_at,
         jti: claims.jwt_id,
     })
+}
+
+pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
+    if !token.starts_with(BASIC) {
+        return None;
+    }
+
+    let b64 = &token[BASIC.len()..];
+    let decoded: Vec<u8> = match base64pad.decode(b64) {
+        Err(_) => return None,
+        Ok(decoded) => decoded,
+    };
+    let parsed_str: &str = match str::from_utf8(&decoded) {
+        Err(_) => return None,
+        Ok(res) => res,
+    };
+    let parsed_parts = parsed_str.split(":").collect::<Vec<&str>>();
+
+    match (parsed_parts.get(0), parsed_parts.get(1)) {
+        (Some(username), Some(password)) => Some(BasicAuth {
+            username: username.to_string(),
+            password: password.to_string(),
+        }),
+        _ => None,
+    }
 }

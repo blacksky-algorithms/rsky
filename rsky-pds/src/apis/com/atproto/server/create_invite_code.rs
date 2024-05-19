@@ -1,4 +1,5 @@
 use crate::account_manager;
+use crate::auth_verifier::AdminToken;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use account_manager::AccountManager;
 use rocket::http::Status;
@@ -15,6 +16,7 @@ use rsky_lexicon::com::atproto::server::{
 )]
 pub async fn create_invite_code(
     body: Json<CreateInviteCodeInput>,
+    _auth: AdminToken,
 ) -> Result<Json<CreateInviteCodeOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     // @TODO: verify admin auth token
     let CreateInviteCodeInput {
