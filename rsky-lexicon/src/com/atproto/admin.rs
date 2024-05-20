@@ -20,3 +20,11 @@ pub struct DisableInviteCodesInput {
     pub codes: Option<Vec<String>>,
     pub accounts: Option<Vec<String>>,
 }
+
+/// Re-enable an account's ability to receive invite codes.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EnableAccountInvitesInput {
+    pub account: String,
+    /// Optional reason for enabled invites.
+    pub note: Option<String>,
+}
