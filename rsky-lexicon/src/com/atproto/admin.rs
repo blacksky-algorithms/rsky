@@ -8,8 +8,15 @@ pub struct DeleteAccountInput {
 
 /// Disable an account from receiving new invite codes, but does not invalidate existing codes.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DisableAccountInvites {
+pub struct DisableAccountInvitesInput {
     pub account: String,
     /// Optional reason for disabled invites.
     pub note: Option<String>,
+}
+
+/// Disable some set of codes and/or all codes associated with a set of users.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DisableInviteCodesInput {
+    pub codes: Option<Vec<String>>,
+    pub accounts: Option<Vec<String>>,
 }

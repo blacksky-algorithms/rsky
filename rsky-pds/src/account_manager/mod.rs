@@ -53,6 +53,11 @@ pub struct UpdateEmailOpts {
     pub email: String,
 }
 
+pub struct DisableInviteCodesOpts {
+    pub codes: Vec<String>,
+    pub accounts: Vec<String>,
+}
+
 pub struct AccountManager {}
 
 impl AccountManager {
@@ -285,6 +290,10 @@ impl AccountManager {
 
     pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {
         invite::set_account_invites_disabled(did, disabled).await
+    }
+
+    pub async fn disable_invite_codes(opts: DisableInviteCodesOpts) -> Result<()> {
+        invite::disable_invite_codes(opts).await
     }
 
     // Passwords

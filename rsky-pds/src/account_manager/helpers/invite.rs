@@ -1,3 +1,4 @@
+use crate::account_manager::DisableInviteCodesOpts;
 use crate::common;
 use crate::db::establish_connection;
 use crate::models::models;
@@ -203,5 +204,25 @@ pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Resul
         .filter(AccountSchema::did.eq(did))
         .set((AccountSchema::invitesDisabled.eq(disabled),))
         .execute(conn)?;
+    Ok(())
+}
+
+pub async fn disable_invite_codes(opts: DisableInviteCodesOpts) -> Result<()> {
+    use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
+    let conn = &mut establish_connection()?;
+
+    let DisableInviteCodesOpts { codes, accounts } = opts;
+    if codes.len() > 0 {
+        update(InviteCodeSchema::invite_code)
+            .filter(InviteCodeSchema::code.eq_any(&codes))
+            .set((InviteCodeSchema::disabled.eq(1),))
+            .execute(conn)?;
+    }
+    if accounts.len() > 0 {
+        update(InviteCodeSchema::invite_code)
+            .filter(InviteCodeSchema::forAccount.eq_any(&accounts))
+            .set((InviteCodeSchema::disabled.eq(1),))
+            .execute(conn)?;
+    }
     Ok(())
 }

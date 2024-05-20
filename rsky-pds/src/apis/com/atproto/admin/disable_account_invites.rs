@@ -5,7 +5,7 @@ use anyhow::Result;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
-use rsky_lexicon::com::atproto::admin::DisableAccountInvites;
+use rsky_lexicon::com::atproto::admin::DisableAccountInvitesInput;
 
 #[rocket::post(
     "/xrpc/com.atproto.admin.disableAccountInvites",
@@ -13,10 +13,10 @@ use rsky_lexicon::com::atproto::admin::DisableAccountInvites;
     data = "<body>"
 )]
 pub async fn disable_account_invites(
-    body: Json<DisableAccountInvites>,
+    body: Json<DisableAccountInvitesInput>,
     _auth: Moderator,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
-    let DisableAccountInvites { account, .. } = body.into_inner();
+    let DisableAccountInvitesInput { account, .. } = body.into_inner();
     match AccountManager::set_account_invites_disabled(&account, true).await {
         Ok(_) => Ok(()),
         Err(error) => {
