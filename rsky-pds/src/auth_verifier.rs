@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
+use crate::common::env::env_str;
 use crate::common::get_verification_material;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedDidResolver;
@@ -115,6 +116,10 @@ pub struct JwtPayload {
 pub enum AuthError {
     #[error("BadJwt: `{0}`")]
     BadJwt(String),
+    #[error("BadJwtAudience: `{0}`")]
+    BadJwtAudience(String),
+    #[error("UntrustedIss: `{0}`")]
+    UntrustedIss(String),
     #[error("AuthRequired: `{0}`")]
     AuthRequired(String),
     #[error("AccountNotFound: `{0}`")]
@@ -373,6 +378,98 @@ impl<'r> FromRequest<'r> for UserDidAuthOptional {
             }
         } else {
             Outcome::Success(UserDidAuthOptional { access: None })
+        }
+    }
+}
+
+pub struct ModService {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ModService {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if let Some(mod_service_did) = env_str("PDS_MOD_SERVICE_DID") {
+            let id_resolver = req.guard::<&State<SharedDidResolver>>().await.unwrap();
+            match verify_service_jwt(
+                req,
+                id_resolver,
+                ServiceJwtOpts {
+                    aud: None,
+                    iss: Some(vec![
+                        mod_service_did.clone(),
+                        format!("{mod_service_did}#atproto_labeler"),
+                    ]),
+                },
+            )
+            .await
+            {
+                Ok(payload)
+                    if Some(payload.aud.clone()) != env_str("PDS_SERVICE_DID")
+                        && (env_str("PDS_ENTRYWAY_DID").is_none()
+                            || Some(payload.aud.clone()) != env_str("PDS_ENTRYWAY_DID")) =>
+                {
+                    Outcome::Error((
+                        Status::BadRequest,
+                        AuthError::BadJwtAudience(
+                            "jwt audience does not match service did".to_string(),
+                        ),
+                    ))
+                }
+                Ok(payload) => Outcome::Success(ModService {
+                    access: AccessOutput {
+                        credentials: Some(Credentials {
+                            r#type: "mod_service".to_string(),
+                            did: None,
+                            scope: None,
+                            audience: None,
+                            token_id: None,
+                            aud: Some(payload.aud),
+                            iss: Some(payload.iss),
+                        }),
+                        artifacts: None,
+                    },
+                }),
+                Err(error) => {
+                    Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                }
+            }
+        } else {
+            Outcome::Error((
+                Status::BadRequest,
+                AuthError::UntrustedIss("Untrusted issuer".to_string()),
+            ))
+        }
+    }
+}
+
+pub struct Moderator {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Moderator {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if is_bearer_token(req) {
+            match ModService::from_request(req).await {
+                Outcome::Success(output) => Outcome::Success(Moderator {
+                    access: output.access,
+                }),
+                Outcome::Error(err) => Outcome::Error(err),
+                _ => panic!("Unexpected outcome during Moderator"),
+            }
+        } else {
+            match AdminToken::from_request(req).await {
+                Outcome::Success(output) => Outcome::Success(Moderator {
+                    access: output.access,
+                }),
+                Outcome::Error(err) => Outcome::Error(err),
+                _ => panic!("Unexpected outcome during Moderator"),
+            }
         }
     }
 }

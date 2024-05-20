@@ -5,3 +5,11 @@ use serde::{Deserialize, Serialize};
 pub struct DeleteAccountInput {
     pub did: String,
 }
+
+/// Disable an account from receiving new invite codes, but does not invalidate existing codes.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DisableAccountInvites {
+    pub account: String,
+    /// Optional reason for disabled invites.
+    pub note: Option<String>,
+}

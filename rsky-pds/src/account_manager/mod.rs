@@ -283,6 +283,10 @@ impl AccountManager {
         invite::get_account_invite_codes(did).await
     }
 
+    pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {
+        invite::set_account_invites_disabled(did, disabled).await
+    }
+
     // Passwords
     // ----------
 

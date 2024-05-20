@@ -87,7 +87,7 @@ pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -
         })
         .collect();
     insert_into(InviteCodeSchema::invite_code)
-        .values(rows)
+        .values(&rows)
         .execute(conn)?;
     Ok(())
 }
@@ -192,4 +192,16 @@ pub async fn get_invite_codes_uses(codes: Vec<String>) -> Result<BTreeMap<String
         }
     }
     Ok(uses)
+}
+
+pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {
+    use crate::schema::pds::account::dsl as AccountSchema;
+    let conn = &mut establish_connection()?;
+
+    let disabled: i16 = if disabled { 1 } else { 0 };
+    update(AccountSchema::account)
+        .filter(AccountSchema::did.eq(did))
+        .set((AccountSchema::invitesDisabled.eq(disabled),))
+        .execute(conn)?;
+    Ok(())
 }
