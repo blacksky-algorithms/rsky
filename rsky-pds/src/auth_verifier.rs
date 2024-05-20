@@ -577,6 +577,14 @@ pub async fn verify_service_jwt<'r>(
     }
 }
 
+pub fn is_user_or_admin(auth: AccessOutput, did: &String) -> bool {
+    match auth.credentials {
+        Some(credentials) if credentials.did == Some("admin_token".to_string()) => true,
+        Some(credentials) => credentials.did == Some(did.to_string()),
+        None => false,
+    }
+}
+
 // HELPERS
 // ---------
 

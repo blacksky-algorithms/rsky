@@ -157,6 +157,7 @@ async fn rocket() -> _ {
                 index,
                 robots,
                 health,
+                com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
                 com::atproto::admin::enable_account_invites::enable_account_invites,

@@ -1,3 +1,4 @@
+pub mod delete_account;
 pub mod disable_account_invites;
 pub mod disable_invite_codes;
 pub mod enable_account_invites;
