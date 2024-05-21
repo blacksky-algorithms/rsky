@@ -195,6 +195,54 @@ pub async fn get_invite_codes_uses(codes: Vec<String>) -> Result<BTreeMap<String
     Ok(uses)
 }
 
+pub async fn get_invited_by_for_accounts(
+    dids: Vec<&String>,
+) -> Result<BTreeMap<String, CodeDetail>> {
+    if dids.len() < 1 {
+        return Ok(BTreeMap::new());
+    }
+    use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
+    use crate::schema::pds::invite_code_use::dsl as InviteCodeUseSchema;
+    let conn = &mut establish_connection()?;
+
+    let res: Vec<models::InviteCode> = InviteCodeSchema::invite_code
+        .filter(
+            InviteCodeSchema::forAccount.eq_any(
+                InviteCodeUseSchema::invite_code_use
+                    .filter(InviteCodeUseSchema::usedBy.eq_any(dids))
+                    .select(InviteCodeUseSchema::code)
+                    .distinct(),
+            ),
+        )
+        .select(models::InviteCode::as_select())
+        .get_results(conn)?;
+    let codes: Vec<String> = res.iter().map(|row| row.code.clone()).collect();
+    let mut uses = get_invite_codes_uses(codes).await?;
+
+    let code_details = res
+        .into_iter()
+        .map(|row| CodeDetail {
+            code: row.code.clone(),
+            available: row.available_uses,
+            disabled: row.disabled == 1,
+            for_account: row.for_account,
+            created_by: row.created_by,
+            created_at: row.created_at,
+            uses: mem::take(uses.get_mut(&row.code).unwrap_or(&mut Vec::new())),
+        })
+        .collect::<Vec<CodeDetail>>();
+
+    Ok(code_details.iter().fold(
+        BTreeMap::new(),
+        |mut acc: BTreeMap<String, CodeDetail>, cur| {
+            for code_use in &cur.uses {
+                acc.insert(code_use.used_by.clone(), cur.clone());
+            }
+            acc
+        },
+    ))
+}
+
 pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {
     use crate::schema::pds::account::dsl as AccountSchema;
     let conn = &mut establish_connection()?;

@@ -18,6 +18,7 @@ use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
+use std::collections::BTreeMap;
 use std::env;
 use std::time::SystemTime;
 
@@ -286,6 +287,12 @@ impl AccountManager {
 
     pub async fn get_account_invite_codes(did: &String) -> Result<Vec<CodeDetail>> {
         invite::get_account_invite_codes(did).await
+    }
+
+    pub async fn get_invited_by_for_accounts(
+        dids: Vec<&String>,
+    ) -> Result<BTreeMap<String, CodeDetail>> {
+        invite::get_invited_by_for_accounts(dids).await
     }
 
     pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {

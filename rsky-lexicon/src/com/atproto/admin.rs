@@ -1,4 +1,6 @@
+use crate::com::atproto::server::InviteCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Delete a user account as an administrator.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -27,4 +29,24 @@ pub struct EnableAccountInvitesInput {
     pub account: String,
     /// Optional reason for enabled invites.
     pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AccountView {
+    pub did: String,
+    pub handle: String,
+    pub email: Option<String>,
+    #[serde(rename = "relatedRecords")]
+    pub related_records: Option<Vec<Value>>,
+    #[serde(rename = "indexedAt")]
+    pub indexed_at: String,
+    #[serde(rename = "invitedBy")]
+    pub invited_by: Option<InviteCode>,
+    pub invites: Option<Vec<InviteCode>>,
+    #[serde(rename = "invitesDisabled")]
+    pub invites_disabled: Option<bool>,
+    #[serde(rename = "emailConfirmedAt")]
+    pub email_confirmed_at: Option<String>,
+    #[serde(rename = "inviteNote")]
+    pub invite_note: Option<String>,
 }
