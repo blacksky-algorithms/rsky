@@ -31,6 +31,14 @@ pub struct EnableAccountInvitesInput {
     pub note: Option<String>,
 }
 
+/// Administrative action to update an account's email.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpdateAccountEmailInput {
+    /// The handle or DID of the repo.
+    pub account: String,
+    pub email: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GetInviteCodesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
