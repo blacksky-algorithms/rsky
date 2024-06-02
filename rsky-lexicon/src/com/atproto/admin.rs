@@ -32,6 +32,13 @@ pub struct EnableAccountInvitesInput {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GetInviteCodesOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub codes: Vec<InviteCode>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AccountView {
     pub did: String,
     pub handle: String,

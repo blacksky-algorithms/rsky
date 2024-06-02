@@ -1,4 +1,5 @@
 use crate::common::RFC3339_VARIANT;
+use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use std::time::SystemTime;
@@ -21,6 +22,12 @@ pub fn from_str_to_micros(str: &String) -> i64 {
         .unwrap()
         .and_utc()
         .timestamp_micros()
+}
+
+pub fn from_str_to_millis(str: &String) -> Result<i64> {
+    Ok(NaiveDateTime::parse_from_str(str, RFC3339_VARIANT)?
+        .and_utc()
+        .timestamp_millis())
 }
 
 pub fn from_str_to_utc(str: &String) -> DateTime<UtcOffset> {

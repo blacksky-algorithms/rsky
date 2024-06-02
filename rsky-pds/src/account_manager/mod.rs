@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
 };
-use crate::account_manager::helpers::invite::CodeDetail;
+use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
@@ -293,6 +293,12 @@ impl AccountManager {
         dids: Vec<&String>,
     ) -> Result<BTreeMap<String, CodeDetail>> {
         invite::get_invited_by_for_accounts(dids).await
+    }
+
+    pub async fn get_invite_codes_uses(
+        codes: Vec<String>,
+    ) -> Result<BTreeMap<String, Vec<CodeUse>>> {
+        invite::get_invite_codes_uses(codes).await
     }
 
     pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {

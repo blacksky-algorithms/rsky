@@ -17,7 +17,7 @@ async fn inner_list_records(
     // The NSID of the record type.
     collection: String,
     // The number of records to return.
-    limit: u8,
+    limit: u16,
     cursor: Option<String>,
     // DEPRECATED: The lowest sort-ordered rkey to start from (exclusive)
     rkeyStart: Option<String>,
@@ -86,7 +86,7 @@ pub async fn list_records(
     // The NSID of the record type.
     collection: String,
     // The number of records to return.
-    limit: Option<u8>,
+    limit: Option<u16>,
     cursor: Option<String>,
     // DEPRECATED: The lowest sort-ordered rkey to start from (exclusive)
     rkeyStart: Option<String>,
