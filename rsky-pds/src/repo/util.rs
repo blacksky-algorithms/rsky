@@ -1,24 +1,16 @@
+use crate::common::sign::atproto_sign;
 use crate::common::tid::Ticker;
 use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
-use indexmap::IndexMap;
-use secp256k1::{Keypair, Message};
+use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::str::FromStr;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
-    let json = serde_json::to_string(&unsigned).unwrap();
-    let map_unsigned: IndexMap<String, JsonValue> = serde_json::from_str(&json).unwrap();
-    let unsigned_bytes = serde_ipld_dagcbor::to_vec(&map_unsigned).unwrap();
-    let hash = Sha256::digest(&*unsigned_bytes);
-    let message = Message::from_digest_slice(hash.as_ref()).unwrap();
-    let mut sig = keypair.secret_key().sign_ecdsa(message);
-    sig.normalize_s();
-    let commit_sig = sig.serialize_compact();
+    let commit_sig = atproto_sign(&unsigned, &keypair.secret_key())?;
     Ok(Commit {
         did: unsigned.did,
         version: unsigned.version,

@@ -39,6 +39,13 @@ pub struct UpdateAccountEmailInput {
     pub email: String,
 }
 
+/// Administrative action to update an account's handle.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpdateAccountHandleInput {
+    pub did: String,
+    pub handle: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GetInviteCodesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]

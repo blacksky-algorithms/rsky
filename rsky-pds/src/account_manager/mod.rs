@@ -155,6 +155,11 @@ impl AccountManager {
         account::delete_account(did).await
     }
 
+    // @NOTE should always be paired with a sequenceHandle().
+    pub async fn update_handle(did: &String, handle: &String) -> Result<()> {
+        account::update_handle(did, handle).await
+    }
+
     pub async fn deactivate_account(did: &String, delete_after: Option<String>) -> Result<()> {
         account::deactivate_account(did, delete_after).await
     }

@@ -129,5 +129,6 @@ pub fn get_verification_material(
 
 pub mod env;
 pub mod ipld;
+pub mod sign;
 pub mod tid;
 pub mod time;

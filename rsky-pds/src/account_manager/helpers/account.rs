@@ -8,7 +8,7 @@ use crate::schema::pds::actor::table as ActorTable;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use diesel::dsl::LeftJoinOn;
+use diesel::dsl::{exists, not, LeftJoinOn};
 use diesel::helper_types::{Eq, IntoBoxed};
 use diesel::pg::Pg;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
@@ -294,6 +294,26 @@ pub async fn update_email(did: &String, email: &String) -> Result<()> {
         },
         Err(e) => Err(anyhow::Error::new(e)),
     }
+}
+
+pub async fn update_handle(did: &String, handle: &String) -> Result<()> {
+    let conn = &mut establish_connection()?;
+    use crate::schema::pds::actor;
+
+    let actor2 = diesel::alias!(actor as actor2);
+
+    let res = update(ActorSchema::actor)
+        .filter(ActorSchema::did.eq(did))
+        .filter(not(exists(actor2.filter(ActorSchema::handle.eq(handle)))))
+        .set((ActorSchema::handle.eq(handle),))
+        .execute(conn)?;
+
+    if res < 1 {
+        return Err(anyhow::Error::new(
+            AccountHelperError::UserAlreadyExistsError,
+        ));
+    }
+    Ok(())
 }
 
 pub async fn set_email_confirmed_at(did: &String, email_confirmed_at: String) -> Result<()> {

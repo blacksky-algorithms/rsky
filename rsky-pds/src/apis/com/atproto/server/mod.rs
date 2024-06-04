@@ -1,5 +1,6 @@
 extern crate unsigned_varint;
 use crate::common::env::{env_int, env_str};
+use crate::common::sign::atproto_sign;
 use crate::models::*;
 use crate::plc;
 use anyhow::{bail, Result};
@@ -12,7 +13,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use reqwest;
 use rocket::form::validate::Contains;
 use rsky_lexicon::com::atproto::server::CreateAccountInput;
-use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -73,7 +74,7 @@ pub fn get_random_token() -> String {
 }
 
 /// generate an invite code preceded by the hostname
-/// with '.'s replaced by '-'s so it is not mistakable for a link
+/// with '.'s replaced by '-'s, so it is not mistakable for a link
 /// ex: blacksky-app-abc234-567xy
 /// regex: blacksky-app-[a-z2-7]{5}-[a-z2-7]{5}
 pub fn gen_invite_code() -> String {
@@ -114,23 +115,7 @@ pub fn lookup_user_by_handle(handle: &str, conn: &mut PgConnection) -> Result<Ac
 }
 
 pub fn sign(mut genesis: PlcGenesisOperation, private_key: &SecretKey) -> PlcGenesisOperation {
-    // Encode object to json before dag-cbor because serde_ipld_dagcbor doesn't properly
-    // sort by keys
-    let json = serde_json::to_string(&genesis).unwrap();
-    // Deserialize to IndexMap with preserve key order enabled. serde_ipld_dagcbor does not sort nested
-    // objects properly by keys
-    let map_genesis: IndexMap<String, Value> = serde_json::from_str(&json).unwrap();
-
-    let genesis_bytes = serde_ipld_dagcbor::to_vec(&map_genesis).unwrap();
-    // Hash dag_cbor to sha256
-    let hash = Sha256::digest(&*genesis_bytes);
-    // Sign sha256 hash using private key
-    let message = Message::from_digest_slice(hash.as_ref()).unwrap();
-    let mut sig = private_key.sign_ecdsa(message);
-    // Convert to low-s
-    sig.normalize_s();
-    // ASN.1 encoded per decode_dss_signature
-    let genesis_sig = sig.serialize_compact();
+    let genesis_sig = atproto_sign(&genesis, private_key).unwrap();
     // Base 64 encode signature bytes
     genesis.sig = Some(base64_url::encode(&genesis_sig).replace("=", ""));
     genesis

@@ -70,7 +70,7 @@ impl TimeCodeKeySet {
             cursor
                 .primary
                 .parse::<i64>()
-                .map_err(|error| anyhow!("Malformed cursor"))?,
+                .map_err(|_| anyhow!("Malformed cursor"))?,
         );
         Ok(Cursor {
             primary: format!("{}", primary_date.format(RFC3339_VARIANT)),
@@ -236,7 +236,7 @@ impl UseCodeKeyset {
             cursor
                 .primary
                 .parse::<i64>()
-                .map_err(|error| anyhow!("Malformed cursor"))?,
+                .map_err(|_| anyhow!("Malformed cursor"))?,
         );
         Ok(Cursor {
             primary: format!("{}", primary_date.format(RFC3339_VARIANT)),

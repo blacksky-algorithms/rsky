@@ -1,3 +1,3 @@
 pub mod encoding;
-mod operations;
+pub mod operations;
 pub mod plugin;
