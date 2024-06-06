@@ -46,6 +46,13 @@ pub struct UpdateAccountHandleInput {
     pub handle: String,
 }
 
+/// Update the password for a user account as an administrator.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpdateAccountPasswordInput {
+    pub did: String,
+    pub password: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GetInviteCodesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
