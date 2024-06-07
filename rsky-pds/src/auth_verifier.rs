@@ -491,6 +491,7 @@ impl<'r> FromRequest<'r> for AdminToken {
             )),
             Some(parsed) => {
                 let BasicAuth { username, password } = parsed;
+
                 if username != "admin" || password != env::var("PDS_ADMIN_PASS").unwrap() {
                     Outcome::Error((
                         Status::BadRequest,

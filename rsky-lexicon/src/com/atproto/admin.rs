@@ -95,28 +95,28 @@ pub struct AccountView {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StatusAttr {
     pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub r#ref: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "$type")]
 pub enum Subject {
+    #[serde(rename = "com.atproto.admin.defs#repoRef")]
     RepoRef(RepoRef),
+    #[serde(rename = "com.atproto.repo.strongRef")]
     StrongRef(StrongRef),
+    #[serde(rename = "com.atproto.admin.defs#repoBlobRef")]
     RepoBlobRef(RepoBlobRef),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoRef {
-    #[serde(rename = "$type")]
-    pub r#type: String,
     pub did: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoBlobRef {
-    #[serde(rename = "$type")]
-    pub r#type: String,
     pub did: String,
     pub cid: String,
     #[serde(rename = "recordUri")]

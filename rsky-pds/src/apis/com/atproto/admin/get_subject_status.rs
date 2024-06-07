@@ -38,7 +38,6 @@ async fn inner_get_subject_status(
                 if let Some(takedown) = takedown {
                     body = Some(GetSubjectStatusOutput {
                         subject: Subject::RepoBlobRef(RepoBlobRef {
-                            r#type: "com.atproto.admin.defs#repoBlobRef".to_string(),
                             did,
                             cid: blob,
                             record_uri: None,
@@ -66,7 +65,6 @@ async fn inner_get_subject_status(
             if let (Some(cid), Some(takedown)) = (cid, takedown) {
                 body = Some(GetSubjectStatusOutput {
                     subject: Subject::StrongRef(StrongRef {
-                        r#type: "com.atproto.repo.strongRef".to_string(),
                         uri,
                         cid: cid.to_string(),
                     }),
@@ -80,7 +78,6 @@ async fn inner_get_subject_status(
         if let Some(status) = status {
             body = Some(GetSubjectStatusOutput {
                 subject: Subject::RepoRef(RepoRef {
-                    r#type: "com.atproto.admin.defs#repoRef".to_string(),
                     did,
                 }),
                 takedown: Some(status.takedown),
@@ -103,9 +100,9 @@ pub async fn get_subject_status(
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
     _auth: Moderator,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetSubjectStatusOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_get_subject_status(did, uri, blob, s3_config).await {
-        Ok(_) => Ok(()),
+        Ok(res) => Ok(Json(res)),
         Err(error) => {
             let internal_error = InternalErrorMessageResponse {
                 code: Some(InternalErrorCode::InternalError),

@@ -31,6 +31,7 @@ pub struct AvailabilityFlags {
     pub include_deactivated: Option<bool>,
 }
 
+#[derive(Debug)]
 pub struct GetAccountAdminStatusOutput {
     pub takedown: StatusAttr,
     pub deactivated: StatusAttr,
