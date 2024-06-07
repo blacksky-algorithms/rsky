@@ -1,4 +1,6 @@
-use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::helpers::account::{
+    ActorAccount, AvailabilityFlags, GetAccountAdminStatusOutput,
+};
 use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
 };
@@ -145,6 +147,12 @@ impl AccountManager {
         auth::store_refresh_token(refresh_payload, None).await?;
         repo::update_root(did, repo_cid, repo_rev)?;
         Ok((access_jwt, refresh_jwt))
+    }
+
+    pub async fn get_account_admin_status(
+        did: &String,
+    ) -> Result<Option<GetAccountAdminStatusOutput>> {
+        account::get_account_admin_status(did).await
     }
 
     pub fn update_repo_root(did: String, cid: Cid, rev: String) -> Result<()> {

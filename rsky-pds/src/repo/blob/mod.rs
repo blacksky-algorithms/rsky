@@ -15,6 +15,7 @@ use futures::try_join;
 use libipld::Cid;
 use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
+use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::repo::ListMissingBlobsRefRecordBlob;
 use sha2::{Digest, Sha256};
 
@@ -370,6 +371,30 @@ impl BlobReader {
                 record_uri: row.record_uri,
             })
             .collect())
+    }
+
+    pub async fn get_blob_takedown_status(&self, cid: Cid) -> Result<Option<StatusAttr>> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let res = BlobSchema::blob
+            .filter(BlobSchema::cid.eq(cid.to_string()))
+            .select(models::Blob::as_select())
+            .first(conn)
+            .optional()?;
+        match res {
+            None => Ok(None),
+            Some(res) => match res.takedown_ref {
+                None => Ok(Some(StatusAttr {
+                    applied: false,
+                    r#ref: None,
+                })),
+                Some(takedown_ref) => Ok(Some(StatusAttr {
+                    applied: true,
+                    r#ref: Some(takedown_ref),
+                })),
+            },
+        }
     }
 }
 

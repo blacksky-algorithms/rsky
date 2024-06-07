@@ -320,12 +320,6 @@ pub struct VerifiedRepo {
 
 pub type CarBlock = CidAndBytes;
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct StatusAttr {
-    pub applied: bool,
-    pub r#ref: Option<String>,
-}
-
 pub struct CidAndBytes {
     pub cid: Cid,
     pub bytes: Vec<u8>,

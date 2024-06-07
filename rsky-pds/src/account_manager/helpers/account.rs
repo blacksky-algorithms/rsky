@@ -13,6 +13,7 @@ use diesel::helper_types::{Eq, IntoBoxed};
 use diesel::pg::Pg;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::*;
+use rsky_lexicon::com::atproto::admin::StatusAttr;
 use std::ops::Add;
 use std::time::SystemTime;
 use thiserror::Error;
@@ -28,6 +29,11 @@ pub enum AccountHelperError {
 pub struct AvailabilityFlags {
     pub include_taken_down: Option<bool>,
     pub include_deactivated: Option<bool>,
+}
+
+pub struct GetAccountAdminStatusOutput {
+    pub takedown: StatusAttr,
+    pub deactivated: StatusAttr,
 }
 
 pub type ActorJoinAccount =
@@ -324,4 +330,43 @@ pub async fn set_email_confirmed_at(did: &String, email_confirmed_at: String) ->
         .set(AccountSchema::emailConfirmedAt.eq(email_confirmed_at))
         .execute(conn)?;
     Ok(())
+}
+
+pub async fn get_account_admin_status(did: &String) -> Result<Option<GetAccountAdminStatusOutput>> {
+    let conn = &mut establish_connection()?;
+
+    let res: Option<(Option<String>, Option<String>)> = ActorSchema::actor
+        .filter(ActorSchema::did.eq(did))
+        .select((ActorSchema::takedownRef, ActorSchema::deactivatedAt))
+        .first(conn)
+        .optional()?;
+    match res {
+        None => Ok(None),
+        Some(res) => {
+            let takedown = match res.0 {
+                Some(takedown_ref) => StatusAttr {
+                    applied: true,
+                    r#ref: Some(takedown_ref),
+                },
+                None => StatusAttr {
+                    applied: false,
+                    r#ref: None,
+                },
+            };
+            let deactivated = match res.1 {
+                Some(_) => StatusAttr {
+                    applied: true,
+                    r#ref: None,
+                },
+                None => StatusAttr {
+                    applied: false,
+                    r#ref: None,
+                },
+            };
+            Ok(Some(GetAccountAdminStatusOutput {
+                takedown,
+                deactivated,
+            }))
+        }
+    }
 }

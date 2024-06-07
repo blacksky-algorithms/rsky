@@ -1,3 +1,4 @@
+use crate::com::atproto::repo::StrongRef;
 use crate::com::atproto::server::InviteCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,12 +54,23 @@ pub struct UpdateAccountPasswordInput {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GetInviteCodesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub codes: Vec<InviteCode>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct GetSubjectStatusOutput {
+    pub subject: Subject,
+    pub takedown: Option<StatusAttr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deactivated: Option<StatusAttr>,
+}
+
+// Defs
+// ----
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AccountView {
@@ -78,4 +90,35 @@ pub struct AccountView {
     pub email_confirmed_at: Option<String>,
     #[serde(rename = "inviteNote")]
     pub invite_note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StatusAttr {
+    pub applied: bool,
+    pub r#ref: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum Subject {
+    RepoRef(RepoRef),
+    StrongRef(StrongRef),
+    RepoBlobRef(RepoBlobRef),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RepoRef {
+    #[serde(rename = "$type")]
+    pub r#type: String,
+    pub did: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RepoBlobRef {
+    #[serde(rename = "$type")]
+    pub r#type: String,
+    pub did: String,
+    pub cid: String,
+    #[serde(rename = "recordUri")]
+    pub record_uri: Option<String>,
 }

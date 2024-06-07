@@ -1,12 +1,13 @@
 use crate::db::establish_connection;
 use crate::models::models;
-use crate::repo::types::{Ids, Lex, RepoRecord, StatusAttr, WriteOpAction};
+use crate::repo::types::{Ids, Lex, RepoRecord, WriteOpAction};
 use crate::repo::util::cbor_to_lex_record;
 use crate::storage::Ipld;
 use anyhow::Result;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use libipld::Cid;
+use rsky_lexicon::com::atproto::admin::StatusAttr;
 use serde_json::Value as JsonValue;
 use std::env;
 use std::str::FromStr;
@@ -226,7 +227,7 @@ impl RecordReader {
         Ok(!!record_uri.is_some())
     }
 
-    pub async fn get_record_takedown_status(&mut self, uri: String) -> Result<Option<StatusAttr>> {
+    pub async fn get_record_takedown_status(&self, uri: String) -> Result<Option<StatusAttr>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         let conn = &mut establish_connection()?;
 
@@ -252,7 +253,7 @@ impl RecordReader {
         }
     }
 
-    pub async fn get_current_record_cid(&mut self, uri: String) -> Result<Option<Cid>> {
+    pub async fn get_current_record_cid(&self, uri: String) -> Result<Option<Cid>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         let conn = &mut establish_connection()?;
 

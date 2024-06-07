@@ -255,7 +255,7 @@ pub struct RequestEmailUpdateOutput {
     pub token_required: bool,
 }
 
-// Refs
+// Defs
 // ----
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -2,6 +2,8 @@ use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StrongRef {
+    #[serde(rename = "$type")]
+    pub r#type: String,
     pub uri: String,
     pub cid: String,
 }
