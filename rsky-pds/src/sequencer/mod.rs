@@ -1,9 +1,11 @@
+use crate::account_manager::helpers::account::AccountStatus;
 use crate::crawlers::Crawlers;
 use crate::db::establish_connection;
 use crate::models;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::sequencer::events::{
-    format_seq_commit, format_seq_handle_update, format_seq_identity_evt, format_seq_tombstone,
+    format_seq_account_evt, format_seq_commit, format_seq_handle_update, format_seq_identity_evt,
+    format_seq_tombstone,
 };
 use anyhow::Result;
 use diesel::*;
@@ -58,6 +60,11 @@ impl Sequencer {
 
     pub async fn sequence_identity_evt(&mut self, did: String) -> Result<()> {
         let evt = format_seq_identity_evt(did).await?;
+        self.sequence_evt(evt).await
+    }
+
+    pub async fn sequence_account_evt(&mut self, did: String, status: AccountStatus) -> Result<()> {
+        let evt = format_seq_account_evt(did, status).await?;
         self.sequence_evt(evt).await
     }
 

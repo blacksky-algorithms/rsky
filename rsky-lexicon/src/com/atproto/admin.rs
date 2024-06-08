@@ -61,12 +61,18 @@ pub struct GetInviteCodesOutput {
     pub codes: Vec<InviteCode>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct GetSubjectStatusOutput {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SubjectStatus {
     pub subject: Subject,
     pub takedown: Option<StatusAttr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deactivated: Option<StatusAttr>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateSubjectStatusOutput {
+    pub subject: Subject,
+    pub takedown: Option<StatusAttr>,
 }
 
 // Defs

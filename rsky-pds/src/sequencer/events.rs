@@ -1,3 +1,4 @@
+use crate::account_manager::helpers::account::AccountStatus;
 use crate::car::read_car_bytes;
 use crate::common;
 use crate::common::struct_to_cbor;
@@ -46,6 +47,14 @@ pub struct HandleEvt {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IdentityEvt {
     pub did: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AccountEvt {
+    pub did: String,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<AccountStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -140,6 +149,24 @@ pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
     Ok(models::RepoSeq::new(
         did,
         "identity".to_string(),
+        struct_to_cbor(evt)?,
+        common::now(),
+    ))
+}
+
+pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Result<models::RepoSeq> {
+    let mut evt = AccountEvt {
+        did: did.clone(),
+        active: matches!(status, AccountStatus::Active),
+        status: None,
+    };
+    if !matches!(status, AccountStatus::Active) {
+        evt.status = Some(status);
+    }
+
+    Ok(models::RepoSeq::new(
+        did,
+        "account".to_string(),
         struct_to_cbor(evt)?,
         common::now(),
     ))

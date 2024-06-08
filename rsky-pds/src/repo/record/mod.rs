@@ -1,3 +1,4 @@
+use crate::common;
 use crate::db::establish_connection;
 use crate::models::models;
 use crate::repo::types::{Ids, Lex, RepoRecord, WriteOpAction};
@@ -336,7 +337,7 @@ impl RecordReader {
 
     pub async fn index_record(
         &self,
-        _uri: String, // TO DO: Use AtUri
+        _uri: String, // @TODO: Use AtUri
         _cid: Cid,
         _record: Option<RepoRecord>,
         _action: Option<WriteOpAction>, // Create or update with a default of create
@@ -348,8 +349,32 @@ impl RecordReader {
 
     pub async fn delete_record(
         &self,
-        _uri: String, // TO DO: Use AtUri
+        _uri: String, // @TODO: Use AtUri
     ) -> Result<()> {
         todo!()
+    }
+
+    pub async fn update_record_takedown_status(
+        &self,
+        uri: &String, // @TODO: Use AtUri
+        takedown: StatusAttr,
+    ) -> Result<()> {
+        use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
+        let takedown_ref: Option<String> = match takedown.applied {
+            true => match takedown.r#ref {
+                Some(takedown_ref) => Some(takedown_ref),
+                None => Some(common::now()),
+            },
+            false => None,
+        };
+
+        update(RecordSchema::record)
+            .filter(RecordSchema::uri.eq(uri))
+            .set(RecordSchema::takedownRef.eq(takedown_ref))
+            .execute(conn)?;
+
+        Ok(())
     }
 }

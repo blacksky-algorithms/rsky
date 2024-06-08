@@ -6,37 +6,35 @@ use crate::repo::ActorStore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use futures::try_join;
+use libipld::Cid;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::admin::{GetSubjectStatusOutput, RepoBlobRef, RepoRef, Subject};
+use rsky_lexicon::com::atproto::admin::{RepoBlobRef, RepoRef, Subject, SubjectStatus};
 use rsky_lexicon::com::atproto::repo::StrongRef;
 use std::str::FromStr;
-use libipld::Cid;
 
 async fn inner_get_subject_status(
     did: Option<String>,
     uri: Option<String>,
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
-) -> Result<GetSubjectStatusOutput> {
-    let mut body: Option<GetSubjectStatusOutput> = None;
+) -> Result<SubjectStatus> {
+    let mut body: Option<SubjectStatus> = None;
     if let Some(blob) = blob {
         match did {
             None => bail!("Must provide a did to request blob state"),
             Some(did) => {
-                let actor_store = ActorStore::new(
-                    did.clone(),
-                    S3BlobStore::new(did.clone(), s3_config),
-                );
-                
+                let actor_store =
+                    ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+
                 let takedown = actor_store
                     .blob
                     .get_blob_takedown_status(Cid::from_str(&blob)?)
                     .await?;
                 if let Some(takedown) = takedown {
-                    body = Some(GetSubjectStatusOutput {
+                    body = Some(SubjectStatus {
                         subject: Subject::RepoBlobRef(RepoBlobRef {
                             did,
                             cid: blob,
@@ -51,9 +49,7 @@ async fn inner_get_subject_status(
     } else if let Some(uri) = uri {
         let uri_without_prefix = uri.replace("at://", "");
         let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-        if let (Some(uri_hostname), Some(_), Some(_)) =
-            (parts.get(0), parts.get(1), parts.get(2))
-        {
+        if let (Some(uri_hostname), Some(_), Some(_)) = (parts.get(0), parts.get(1), parts.get(2)) {
             let actor_store = ActorStore::new(
                 uri_hostname.to_string(),
                 S3BlobStore::new(uri_hostname.to_string(), s3_config),
@@ -63,7 +59,7 @@ async fn inner_get_subject_status(
                 actor_store.record.get_current_record_cid(uri.clone()),
             )?;
             if let (Some(cid), Some(takedown)) = (cid, takedown) {
-                body = Some(GetSubjectStatusOutput {
+                body = Some(SubjectStatus {
                     subject: Subject::StrongRef(StrongRef {
                         uri,
                         cid: cid.to_string(),
@@ -76,10 +72,8 @@ async fn inner_get_subject_status(
     } else if let Some(did) = did {
         let status = AccountManager::get_account_admin_status(&did).await?;
         if let Some(status) = status {
-            body = Some(GetSubjectStatusOutput {
-                subject: Subject::RepoRef(RepoRef {
-                    did,
-                }),
+            body = Some(SubjectStatus {
+                subject: Subject::RepoRef(RepoRef { did }),
                 takedown: Some(status.takedown),
                 deactivated: Some(status.deactivated),
             });
@@ -100,7 +94,7 @@ pub async fn get_subject_status(
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
     _auth: Moderator,
-) -> Result<Json<GetSubjectStatusOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<SubjectStatus>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_get_subject_status(did, uri, blob, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

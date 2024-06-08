@@ -1,5 +1,5 @@
 use crate::account_manager::helpers::account::{
-    ActorAccount, AvailabilityFlags, GetAccountAdminStatusOutput,
+    AccountStatus, ActorAccount, AvailabilityFlags, GetAccountAdminStatusOutput,
 };
 use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
@@ -18,6 +18,7 @@ use chrono::DateTime;
 use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
+use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
@@ -163,6 +164,14 @@ impl AccountManager {
         account::delete_account(did).await
     }
 
+    pub async fn takedown_account(did: &String, takedown: StatusAttr) -> Result<()> {
+        (_, _) = try_join!(
+            account::update_account_takedown_status(did, takedown),
+            auth::revoke_refresh_tokens_by_did(did)
+        )?;
+        Ok(())
+    }
+
     // @NOTE should always be paired with a sequenceHandle().
     pub async fn update_handle(did: &String, handle: &String) -> Result<()> {
         account::update_handle(did, handle).await
@@ -174,6 +183,23 @@ impl AccountManager {
 
     pub async fn activate_account(did: &String) -> Result<()> {
         account::activate_account(did).await
+    }
+
+    pub async fn get_account_status(handle_or_did: &String) -> Result<AccountStatus> {
+        let got = account::get_account(
+            handle_or_did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
+        match got {
+            None => Ok(AccountStatus::Deleted),
+            Some(got) if got.takedown_ref.is_some() => Ok(AccountStatus::Takendown),
+            Some(got) if got.deactivated_at.is_some() => Ok(AccountStatus::Deactivated),
+            _ => Ok(AccountStatus::Active),
+        }
     }
 
     // Auth

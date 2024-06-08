@@ -31,6 +31,15 @@ pub struct AvailabilityFlags {
     pub include_deactivated: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum AccountStatus {
+    Active,
+    Takendown,
+    Suspended,
+    Deleted,
+    Deactivated,
+}
+
 #[derive(Debug)]
 pub struct GetAccountAdminStatusOutput {
     pub takedown: StatusAttr,
@@ -248,6 +257,22 @@ pub async fn delete_account(did: &String) -> Result<()> {
         .execute(conn)?;
     delete(ActorSchema::actor)
         .filter(ActorSchema::did.eq(did))
+        .execute(conn)?;
+    Ok(())
+}
+
+pub async fn update_account_takedown_status(did: &String, takedown: StatusAttr) -> Result<()> {
+    let conn = &mut establish_connection()?;
+    let takedown_ref: Option<String> = match takedown.applied {
+        true => match takedown.r#ref {
+            Some(takedown_ref) => Some(takedown_ref),
+            None => Some(common::now()),
+        },
+        false => None,
+    };
+    update(ActorSchema::actor)
+        .filter(ActorSchema::did.eq(did))
+        .set((ActorSchema::takedownRef.eq(takedown_ref),))
         .execute(conn)?;
     Ok(())
 }

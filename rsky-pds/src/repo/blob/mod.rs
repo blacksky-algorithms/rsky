@@ -1,11 +1,12 @@
 use crate::common::ipld::sha256_raw_to_cid;
 use crate::common::now;
 use crate::db::establish_connection;
-use crate::image;
 use crate::models::models;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob_refs::BlobRef;
+use crate::repo::error::BlobError;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
+use crate::{common, image};
 use anyhow::{bail, Result};
 use diesel::dsl::{count_distinct, exists, not};
 use diesel::sql_types::{Integer, Nullable, Text};
@@ -393,6 +394,39 @@ impl BlobReader {
                     applied: true,
                     r#ref: Some(takedown_ref),
                 })),
+            },
+        }
+    }
+
+    // Transactors
+    // -------------------
+
+    pub async fn update_blob_takedown_status(&self, blob: Cid, takedown: StatusAttr) -> Result<()> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let takedown_ref: Option<String> = match takedown.applied {
+            true => match takedown.r#ref {
+                Some(takedown_ref) => Some(takedown_ref),
+                None => Some(common::now()),
+            },
+            false => None,
+        };
+
+        update(BlobSchema::blob)
+            .filter(BlobSchema::cid.eq(blob.to_string()))
+            .set(BlobSchema::takedownRef.eq(takedown_ref))
+            .execute(conn)?;
+
+        let res = match takedown.applied {
+            true => self.blobstore.quarantine(blob).await,
+            false => self.blobstore.unquarantine(blob).await,
+        };
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => match e.downcast_ref() {
+                Some(BlobError::BlobNotFoundError) => Ok(()),
+                None => Err(e),
             },
         }
     }
