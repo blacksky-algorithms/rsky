@@ -1,3 +1,5 @@
+pub mod moderation;
+
 extern crate mailgun_rs;
 
 use anyhow::Result;

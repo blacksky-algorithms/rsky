@@ -54,6 +54,25 @@ pub struct UpdateAccountPasswordInput {
     pub password: String,
 }
 
+/// Send email to a user's account email address.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SendMailInput {
+    #[serde(rename = "recipientDid")]
+    pub recipient_did: String,
+    pub content: String,
+    pub subject: Option<String>,
+    #[serde(rename = "senderDid")]
+    pub sender_did: String,
+    /// Additional comment by the sender that won't be used in the email itself but helpful to
+    /// provide more context for moderators/reviewers
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SendMailOutput {
+    pub sent: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct GetInviteCodesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
