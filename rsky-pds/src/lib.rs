@@ -9,7 +9,7 @@ extern crate serde;
 use crate::sequencer::Sequencer;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
-use rsky_identity::did::did_resolver::DidResolver;
+use rsky_identity::IdResolver;
 use tokio::sync::RwLock;
 
 #[database("pg_db")]
@@ -19,8 +19,8 @@ pub struct SharedSequencer {
     pub sequencer: RwLock<Sequencer>,
 }
 
-pub struct SharedDidResolver {
-    pub id_resolver: RwLock<DidResolver>,
+pub struct SharedIdResolver {
+    pub id_resolver: RwLock<IdResolver>,
 }
 
 pub mod account_manager;

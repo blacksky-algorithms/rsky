@@ -19,3 +19,4 @@ thiserror = "1.0.58"
 url = "2.5.0"
 serde = { version = "1.0.197", features = ["derive"] }
 rsky-crypto = { workspace = true }
+hickory-resolver = "0.24.1"

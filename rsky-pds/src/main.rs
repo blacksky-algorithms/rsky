@@ -15,12 +15,14 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
 use rsky_identity::did::did_resolver::DidResolver;
-use rsky_identity::types::{DidCache, DidResolverOpts};
+use rsky_identity::types::{DidCache, DidResolverOpts, IdentityResolverOpts};
+use rsky_identity::IdResolver;
 use rsky_pds::apis::*;
+use rsky_pds::common::env::env_list;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::sequencer::Sequencer;
 use rsky_pds::SharedSequencer;
-use rsky_pds::{DbConn, SharedDidResolver};
+use rsky_pds::{DbConn, SharedIdResolver};
 use std::env;
 use tokio::sync::RwLock;
 
@@ -139,14 +141,15 @@ async fn rocket() -> _ {
         .load()
         .await;
 
-    let id_resolver = SharedDidResolver {
-        id_resolver: RwLock::new(DidResolver::new(DidResolverOpts {
+    let id_resolver = SharedIdResolver {
+        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
             timeout: None,
             plc_url: Some(format!(
                 "https://{}",
                 env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned())
             )),
-            did_cache: DidCache::new(None, None),
+            did_cache: Some(DidCache::new(None, None)),
+            backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
         })),
     };
 

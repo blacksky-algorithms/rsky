@@ -4,7 +4,7 @@ use crate::account_manager::AccountManager;
 use crate::common::env::env_str;
 use crate::common::get_verification_material;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
-use crate::SharedDidResolver;
+use crate::SharedIdResolver;
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose::STANDARD as base64pad, Engine as _};
 use jwt_simple::claims::Audiences;
@@ -327,7 +327,7 @@ impl<'r> FromRequest<'r> for UserDidAuth {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let id_resolver = req.guard::<&State<SharedDidResolver>>().await.unwrap();
+        let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
         match verify_service_jwt(
             req,
             id_resolver,
@@ -392,7 +392,7 @@ impl<'r> FromRequest<'r> for ModService {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         if let Some(mod_service_did) = env_str("PDS_MOD_SERVICE_DID") {
-            let id_resolver = req.guard::<&State<SharedDidResolver>>().await.unwrap();
+            let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
             match verify_service_jwt(
                 req,
                 id_resolver,
@@ -627,7 +627,7 @@ pub async fn validate_access_token<'r>(
 
 pub async fn verify_service_jwt<'r>(
     request: &'r Request<'_>,
-    id_resolver: &State<SharedDidResolver>,
+    id_resolver: &State<SharedIdResolver>,
     opts: ServiceJwtOpts,
 ) -> Result<VerifiedServiceJwt> {
     let get_signing_key = |iss: String, force_refresh: bool| -> Result<String> {
@@ -645,7 +645,7 @@ pub async fn verify_service_jwt<'r>(
             };
             let mut lock = futures::executor::block_on(id_resolver.id_resolver.write());
             let did_doc: Result<DidDocument> =
-                futures::executor::block_on(lock.ensure_resolve(&did, Some(force_refresh)));
+                futures::executor::block_on(lock.did.ensure_resolve(&did, Some(force_refresh)));
             let did_doc: DidDocument = match did_doc {
                 Err(err) => bail!("could not resolve iss did: `{err}`"),
                 Ok(res) => res,

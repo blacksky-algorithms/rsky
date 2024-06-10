@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use crate::{common, SharedDidResolver};
+use crate::{common, SharedIdResolver};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use rocket::http::Status;
@@ -14,7 +14,7 @@ use rsky_lexicon::com::atproto::repo::DescribeRepoOutput;
 
 async fn inner_describe_repo(
     repo: String,
-    id_resolver: &State<SharedDidResolver>,
+    id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
 ) -> Result<DescribeRepoOutput> {
     let account = AccountManager::get_account(&repo, None).await?;
@@ -23,7 +23,7 @@ async fn inner_describe_repo(
         Some(account) => {
             let did_doc: DidDocument;
             let mut lock = id_resolver.id_resolver.write().await;
-            did_doc = match lock.ensure_resolve(&account.did, None).await {
+            did_doc = match lock.did.ensure_resolve(&account.did, None).await {
                 Err(err) => bail!("Could not resolve DID: `{err}`"),
                 Ok(res) => res,
             };
@@ -50,7 +50,7 @@ async fn inner_describe_repo(
 #[rocket::get("/xrpc/com.atproto.repo.describeRepo?<repo>")]
 pub async fn describe_repo(
     repo: String,
-    id_resolver: &State<SharedDidResolver>,
+    id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<DescribeRepoOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_describe_repo(repo, id_resolver, s3_config).await {
