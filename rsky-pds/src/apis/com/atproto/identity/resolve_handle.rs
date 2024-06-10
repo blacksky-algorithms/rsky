@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::ActorAccount;
 use crate::account_manager::AccountManager;
-use crate::common::env::env_list;
+use crate::common::env::{env_list, env_str};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -9,6 +9,32 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::identity::ResolveHandleOutput;
+
+async fn try_resolve_from_app_view(handle: &String) -> Result<Option<String>> {
+    match env_str("PDS_BSKY_APP_VIEW_URL") {
+        None => Ok(None),
+        Some(bsky_app_view_url) => {
+            let client = reqwest::Client::new();
+            let params = Some(vec![("handle", handle)]);
+            let res = client
+                .get(format!(
+                    "{bsky_app_view_url}/xrpc/com.atproto.identity.resolveHandle"
+                ))
+                .header("Connection", "Keep-Alive")
+                .header("Keep-Alive", "timeout=5, max=1000")
+                .query(&params)
+                .send()
+                .await;
+            match res {
+                Err(_) => Ok(None),
+                Ok(res) => match res.json::<ResolveHandleOutput>().await {
+                    Err(_) => Ok(None),
+                    Ok(data) => Ok(Some(data.did)),
+                },
+            }
+        }
+    }
+}
 
 async fn inner_resolve_handle(
     handle: String,
@@ -33,9 +59,9 @@ async fn inner_resolve_handle(
     }
 
     // this is not someone on our server, but we help with resolving anyway
-    /* if (!did && ctx.appViewAgent) {
-      did = await tryResolveFromAppView(ctx.appViewAgent, handle)
-    } */
+    if did.is_none() && env_str("PDS_BSKY_APP_VIEW_URL").is_some() {
+        did = try_resolve_from_app_view(&handle).await?;
+    }
 
     if did.is_none() {
         let mut lock = id_resolver.id_resolver.write().await;
