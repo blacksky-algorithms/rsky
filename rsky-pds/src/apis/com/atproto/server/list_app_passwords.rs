@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::Access;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
@@ -8,7 +8,7 @@ use rsky_lexicon::com::atproto::server::{AppPassword, ListAppPasswordsOutput};
 
 #[rocket::get("/xrpc/com.atproto.server.listAppPasswords")]
 pub async fn list_app_passwords(
-    auth: Access,
+    auth: AccessFull,
 ) -> Result<Json<ListAppPasswordsOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     match AccountManager::list_app_passwords(&did).await {

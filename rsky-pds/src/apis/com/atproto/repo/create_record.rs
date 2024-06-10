@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{PreparedDelete, PreparedWrite};
@@ -20,7 +20,7 @@ use std::str::FromStr;
 
 async fn inner_create_record(
     body: Json<CreateRecordInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<CreateRecordOutput> {
@@ -122,7 +122,7 @@ async fn inner_create_record(
 )]
 pub async fn create_record(
     body: Json<CreateRecordInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<CreateRecordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {

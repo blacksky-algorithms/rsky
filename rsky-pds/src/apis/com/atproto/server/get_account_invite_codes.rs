@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::gen_invite_codes;
-use crate::auth_verifier::AccessNotAppPassword;
+use crate::auth_verifier::AccessFull;
 use crate::common::env::{env_bool, env_int};
 use crate::common::RFC3339_VARIANT;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
@@ -87,7 +87,7 @@ fn calculate_codes_to_create(opts: CalculateCodesToCreateOpts) -> Result<(usize,
 async fn inner_get_account_invite_codes(
     include_used: bool,
     create_available: bool,
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
 ) -> Result<GetAccountInviteCodesOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
     let account = AccountManager::get_account(&requester, None).await?;
@@ -147,7 +147,7 @@ async fn inner_get_account_invite_codes(
 pub async fn get_account_invite_codes(
     includeUsed: bool,
     createAvailable: bool,
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
 ) -> Result<Json<GetAccountInviteCodesOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_get_account_invite_codes(includeUsed, createAvailable, auth).await {
         Ok(res) => Ok(Json(res)),

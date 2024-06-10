@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
@@ -11,7 +11,9 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
-async fn inner_request_email_update(auth: AccessCheckTakedown) -> Result<RequestEmailUpdateOutput> {
+async fn inner_request_email_update(
+    auth: AccessStandardIncludeChecks,
+) -> Result<RequestEmailUpdateOutput> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let account = AccountManager::get_account(
         &did,
@@ -42,7 +44,7 @@ async fn inner_request_email_update(auth: AccessCheckTakedown) -> Result<Request
 
 #[rocket::post("/xrpc/com.atproto.server.requestEmailUpdate")]
 pub async fn request_email_update(
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
 ) -> Result<Json<RequestEmailUpdateOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_request_email_update(auth).await {
         Ok(res) => Ok(Json(res)),

@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessNotAppPassword;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
@@ -13,7 +13,7 @@ use rsky_lexicon::com::atproto::server::{CreateAppPasswordInput, CreateAppPasswo
 )]
 pub async fn create_app_password(
     body: Json<CreateAppPasswordInput>,
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
 ) -> Result<Json<CreateAppPasswordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     let CreateAppPasswordInput { name } = body.into_inner();
     match AccountManager::create_app_password(auth.access.credentials.unwrap().did.unwrap(), name)

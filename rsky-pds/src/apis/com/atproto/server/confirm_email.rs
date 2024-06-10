@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, ConfirmEmailOpts};
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
@@ -10,7 +10,7 @@ use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
 
 async fn inner_confirm_email(
     body: Json<ConfirmEmailInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
 ) -> Result<()> {
     let did = auth.access.credentials.unwrap().did.unwrap();
 
@@ -49,7 +49,7 @@ async fn inner_confirm_email(
 )]
 pub async fn confirm_email(
     body: Json<ConfirmEmailInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_confirm_email(body, auth).await {
         Ok(()) => Ok(()),

@@ -1,6 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::is_valid_did_doc_for_service;
-use crate::auth_verifier::Access;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
@@ -14,7 +14,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::CheckAccountStatusOutput;
 
 async fn inner_check_account_status(
-    auth: Access,
+    auth: AccessFull,
     s3_config: &State<SdkConfig>,
 ) -> Result<CheckAccountStatusOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
@@ -51,7 +51,7 @@ async fn inner_check_account_status(
 
 #[rocket::get("/xrpc/com.atproto.server.checkAccountStatus")]
 pub async fn check_account_status(
-    auth: Access,
+    auth: AccessFull,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<CheckAccountStatusOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_check_account_status(auth, s3_config).await {

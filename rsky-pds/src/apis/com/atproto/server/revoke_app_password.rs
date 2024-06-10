@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::Access;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
@@ -13,7 +13,7 @@ use rsky_lexicon::com::atproto::server::RevokeAppPasswordInput;
 )]
 pub async fn revoke_app_password(
     body: Json<RevokeAppPasswordInput>,
-    auth: Access,
+    auth: AccessFull,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     let RevokeAppPasswordInput { name } = body.into_inner();
     let requester = auth.access.credentials.unwrap().did.unwrap();

@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::PreparedWrite;
@@ -18,7 +18,7 @@ use std::str::FromStr;
 
 async fn inner_delete_record(
     body: Json<DeleteRecordInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<()> {
@@ -98,7 +98,7 @@ async fn inner_delete_record(
 )]
 pub async fn delete_record(
     body: Json<DeleteRecordInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {

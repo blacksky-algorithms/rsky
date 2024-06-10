@@ -1,5 +1,5 @@
 use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
-use crate::auth_verifier::Access;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
@@ -11,7 +11,7 @@ use std::env;
 #[rocket::get("/xrpc/com.atproto.server.getServiceAuth?<aud>")]
 pub async fn get_service_auth(
     aud: String,
-    auth: Access,
+    auth: AccessFull,
 ) -> Result<Json<GetServiceAuthOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     // We just use the repo signing key

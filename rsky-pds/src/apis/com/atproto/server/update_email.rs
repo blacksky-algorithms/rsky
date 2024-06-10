@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityFlags};
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
-use crate::auth_verifier::AccessNotAppPassword;
+use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use anyhow::{bail, Result};
@@ -9,10 +9,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
-async fn inner_update_email(
-    body: Json<UpdateEmailInput>,
-    auth: AccessNotAppPassword,
-) -> Result<()> {
+async fn inner_update_email(body: Json<UpdateEmailInput>, auth: AccessFull) -> Result<()> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
@@ -62,7 +59,7 @@ async fn inner_update_email(
 )]
 pub async fn update_email(
     body: Json<UpdateEmailInput>,
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_update_email(body, auth).await {
         Ok(_) => Ok(()),

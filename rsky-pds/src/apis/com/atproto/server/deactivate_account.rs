@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessNotAppPassword;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use anyhow::Result;
 use rocket::http::Status;
@@ -14,7 +14,7 @@ use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 )]
 pub async fn deactivate_account(
     body: Json<DeactivateAccountInput>,
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let DeactivateAccountInput { delete_after } = body.into_inner();

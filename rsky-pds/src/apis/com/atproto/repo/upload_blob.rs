@@ -1,4 +1,4 @@
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::common::ContentType;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
@@ -14,7 +14,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::repo::{Blob, BlobOutput, Link};
 
 async fn inner_upload_blob(
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,
@@ -68,7 +68,7 @@ async fn inner_upload_blob(
 
 #[rocket::post("/xrpc/com.atproto.repo.uploadBlob", data = "<blob>")]
 pub async fn upload_blob(
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,

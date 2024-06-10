@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::PreparedWrite;
@@ -22,7 +22,7 @@ use std::str::FromStr;
 
 async fn inner_apply_writes(
     body: Json<ApplyWritesInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<()> {
@@ -120,7 +120,7 @@ async fn inner_apply_writes(
 #[rocket::post("/xrpc/com.atproto.repo.applyWrites", format = "json", data = "<body>")]
 pub async fn apply_writes(
     body: Json<ApplyWritesInput>,
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {

@@ -1,4 +1,4 @@
-use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
 use crate::common::env::env_str;
@@ -26,7 +26,8 @@ pub enum AuthScope {
     Access,
     Refresh,
     AppPass,
-    Deactivated,
+    AppPassPrivileged,
+    SignupQueued,
 }
 
 impl AuthScope {
@@ -35,7 +36,8 @@ impl AuthScope {
             AuthScope::Access => "com.atproto.access",
             AuthScope::Refresh => "com.atproto.refresh",
             AuthScope::AppPass => "com.atproto.appPass",
-            AuthScope::Deactivated => "com.atproto.deactivated",
+            AuthScope::AppPassPrivileged => "com.atproto.appPassPrivileged",
+            AuthScope::SignupQueued => "com.atproto.signupQueued",
         }
     }
 
@@ -44,7 +46,8 @@ impl AuthScope {
             "com.atproto.access" => Ok(AuthScope::Access),
             "com.atproto.refresh" => Ok(AuthScope::Refresh),
             "com.atproto.appPass" => Ok(AuthScope::AppPass),
-            "com.atproto.deactivated" => Ok(AuthScope::Deactivated),
+            "com.atproto.appPassPrivileged" => Ok(AuthScope::AppPassPrivileged),
+            "com.atproto.signupQueued" => Ok(AuthScope::SignupQueued),
             _ => bail!("Invalid AuthScope: `{scope:?}` is not a valid auth scope"),
         }
     }
@@ -92,6 +95,11 @@ pub struct ServiceJwtOpts {
     pub iss: Option<Vec<String>>,
 }
 
+pub struct ValidateAccessTokenOpts {
+    pub check_takedown: Option<bool>,
+    pub check_deactivated: Option<bool>,
+}
+
 pub struct VerifiedServiceJwt {
     pub aud: String,
     pub iss: String,
@@ -126,27 +134,11 @@ pub enum AuthError {
     AccountNotFound(String),
     #[error("AccountTakedown: `{0}`")]
     AccountTakedown(String),
+    #[error("AccountDeactivated: `{0}`")]
+    AccountDeactivated(String),
 }
 
 // verifier guards
-
-pub struct Access {
-    pub access: AccessOutput,
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for Access {
-    type Error = AuthError;
-
-    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match validate_access_token(req, vec![AuthScope::Access]).await {
-            Ok(access) => Outcome::Success(Access { access }),
-            Err(error) => {
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
-            }
-        }
-    }
-}
 
 pub struct Refresh {
     pub access: AccessOutput,
@@ -201,94 +193,111 @@ impl<'r> FromRequest<'r> for Refresh {
     }
 }
 
-pub struct AccessNotAppPassword {
+pub async fn access_check<'r>(
+    req: &'r Request<'_>,
+    scopes: Vec<AuthScope>,
+    opts: Option<ValidateAccessTokenOpts>,
+) -> Outcome<AccessOutput, AuthError> {
+    match validate_access_token(req, scopes, opts).await {
+        Ok(access) => Outcome::Success(access),
+        Err(error) => match error.downcast_ref() {
+            Some(AuthError::AccountDeactivated(error)) => Outcome::Error((
+                Status::BadRequest,
+                AuthError::AccountDeactivated(error.to_string()),
+            )),
+            Some(AuthError::AccountNotFound(error)) => Outcome::Error((
+                Status::BadRequest,
+                AuthError::AccountNotFound(error.to_string()),
+            )),
+            Some(AuthError::AccountTakedown(error)) => Outcome::Error((
+                Status::BadRequest,
+                AuthError::AccountTakedown(error.to_string()),
+            )),
+            _ => Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string()))),
+        },
+    }
+}
+
+pub struct AccessFull {
     pub access: AccessOutput,
 }
 
 #[rocket::async_trait]
-impl<'r> FromRequest<'r> for AccessNotAppPassword {
+impl<'r> FromRequest<'r> for AccessFull {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass]).await {
-            Ok(access) => Outcome::Success(AccessNotAppPassword { access }),
-            Err(error) => {
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
-            }
+        match access_check(
+            req,
+            vec![
+                AuthScope::Access,
+            ],
+            None,
+        )
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(AccessFull { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
 }
 
-pub struct AccessDeactivated {
+pub struct AccessStandard {
     pub access: AccessOutput,
 }
 
 #[rocket::async_trait]
-impl<'r> FromRequest<'r> for AccessDeactivated {
+impl<'r> FromRequest<'r> for AccessStandard {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match validate_access_token(
+        match access_check(
             req,
             vec![
                 AuthScope::Access,
                 AuthScope::AppPass,
-                AuthScope::Deactivated,
+                AuthScope::AppPassPrivileged,
             ],
+            None,
         )
         .await
         {
-            Ok(access) => Outcome::Success(AccessDeactivated { access }),
-            Err(error) => {
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
-            }
+            Outcome::Success(access) => Outcome::Success(AccessStandard { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
 }
 
 #[derive(Clone)]
-pub struct AccessCheckTakedown {
+pub struct AccessStandardIncludeChecks {
     pub access: AccessOutput,
 }
 
 #[rocket::async_trait]
-impl<'r> FromRequest<'r> for AccessCheckTakedown {
+impl<'r> FromRequest<'r> for AccessStandardIncludeChecks {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let result = match validate_access_token(req, vec![AuthScope::Access, AuthScope::AppPass])
-            .await
-        {
-            Ok(access) => AccessCheckTakedown { access },
-            Err(error) => {
-                return Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())));
-            }
-        };
-        let requester = result.clone().access.credentials.unwrap().did.unwrap();
-        let found = match AccountManager::get_account(
-            &requester,
-            Some(AvailabilityFlags {
-                include_deactivated: Some(true),
-                include_taken_down: None,
+        match access_check(
+            req,
+            vec![
+                AuthScope::Access,
+                AuthScope::AppPass,
+                AuthScope::AppPassPrivileged,
+            ],
+            Some(ValidateAccessTokenOpts {
+                check_deactivated: Some(true),
+                check_takedown: Some(true),
             }),
         )
         .await
         {
-            Ok(Some(found)) => found,
-            _ => {
-                return Outcome::Error((
-                    Status::Forbidden,
-                    AuthError::AccountNotFound("Account not found".to_string()),
-                ));
-            }
-        };
-        if found.takedown_ref.is_some() {
-            return Outcome::Error((
-                Status::Unauthorized,
-                AuthError::AccountTakedown("Account has been taken down".to_string()),
-            ));
+            Outcome::Success(access) => Outcome::Success(AccessStandardIncludeChecks { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
-        Outcome::Success(result)
     }
 }
 
@@ -528,7 +537,7 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         if is_bearer_token(req) {
-            match Access::from_request(req).await {
+            match AccessFull::from_request(req).await {
                 Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
@@ -599,6 +608,7 @@ pub async fn validate_bearer_token<'r>(
 pub async fn validate_access_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
+    opts: Option<ValidateAccessTokenOpts>,
 ) -> Result<AccessOutput> {
     let mut options = VerificationOptions::default();
     options.allowed_audiences = Some(HashSet::from_strings(&[
@@ -611,6 +621,43 @@ pub async fn validate_access_token<'r>(
         audience,
         ..
     } = validate_bearer_token(request, scopes, Some(options)).await?;
+    let ValidateAccessTokenOpts {
+        check_takedown,
+        check_deactivated,
+    } = opts.unwrap_or_else(|| ValidateAccessTokenOpts {
+        check_takedown: Some(false),
+        check_deactivated: Some(false),
+    });
+    let check_takedown = check_takedown.unwrap_or(false);
+    let check_deactivated = check_deactivated.unwrap_or(false);
+    if check_takedown || check_deactivated {
+        let found: ActorAccount = match AccountManager::get_account(
+            &did,
+            Some(AvailabilityFlags {
+                include_deactivated: None,
+                include_taken_down: Some(true),
+            }),
+        )
+        .await
+        {
+            Ok(Some(found)) => found,
+            _ => {
+                return Err(anyhow::Error::new(AuthError::AccountNotFound(
+                    "Account not found".to_string(),
+                )))
+            }
+        };
+        if check_takedown && found.takedown_ref.is_some() {
+            return Err(anyhow::Error::new(AuthError::AccountTakedown(
+                "Account has been taken down".to_string(),
+            )));
+        }
+        if check_deactivated && found.deactivated_at.is_some() {
+            return Err(anyhow::Error::new(AuthError::AccountDeactivated(
+                "Account is deactivated".to_string(),
+            )));
+        }
+    }
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),

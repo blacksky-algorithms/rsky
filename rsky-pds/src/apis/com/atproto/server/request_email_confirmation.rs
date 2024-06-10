@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::auth_verifier::AccessCheckTakedown;
+use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
@@ -10,7 +10,7 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 
-async fn inner_request_email_confirmation(auth: AccessCheckTakedown) -> Result<()> {
+async fn inner_request_email_confirmation(auth: AccessStandardIncludeChecks) -> Result<()> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let account = AccountManager::get_account(
         &did,
@@ -36,7 +36,7 @@ async fn inner_request_email_confirmation(auth: AccessCheckTakedown) -> Result<(
 
 #[rocket::post("/xrpc/com.atproto.server.requestEmailConfirmation")]
 pub async fn request_email_confirmation(
-    auth: AccessCheckTakedown,
+    auth: AccessStandardIncludeChecks,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_request_email_confirmation(auth).await {
         Ok(_) => Ok(()),

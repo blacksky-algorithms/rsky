@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
-use crate::auth_verifier::AccessNotAppPassword;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
@@ -16,7 +16,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 
 async fn inner_activate_account(
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<()> {
@@ -67,7 +67,7 @@ async fn inner_activate_account(
 
 #[rocket::post("/xrpc/com.atproto.server.activateAccount")]
 pub async fn activate_account(
-    auth: AccessNotAppPassword,
+    auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {

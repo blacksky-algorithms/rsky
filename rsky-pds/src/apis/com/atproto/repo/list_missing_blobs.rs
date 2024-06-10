@@ -1,4 +1,4 @@
-use crate::auth_verifier::Access;
+use crate::auth_verifier::AccessFull;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListMissingBlobsOpts;
@@ -15,7 +15,7 @@ use rsky_lexicon::com::atproto::repo::ListMissingBlobsOutput;
 pub async fn list_missing_blobs(
     limit: Option<u16>,
     cursor: Option<String>,
-    auth: Access,
+    auth: AccessFull,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<ListMissingBlobsOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
     let did = auth.access.credentials.unwrap().did.unwrap();
