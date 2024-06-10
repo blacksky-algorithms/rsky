@@ -227,15 +227,7 @@ impl<'r> FromRequest<'r> for AccessFull {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match access_check(
-            req,
-            vec![
-                AuthScope::Access,
-            ],
-            None,
-        )
-        .await
-        {
+        match access_check(req, vec![AuthScope::Access], None).await {
             Outcome::Success(access) => Outcome::Success(AccessFull { access }),
             Outcome::Error(error) => Outcome::Error(error),
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -295,6 +287,37 @@ impl<'r> FromRequest<'r> for AccessStandardIncludeChecks {
         .await
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardIncludeChecks { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AccessStandardCheckTakedown {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessStandardCheckTakedown {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match access_check(
+            req,
+            vec![
+                AuthScope::Access,
+                AuthScope::AppPass,
+                AuthScope::AppPassPrivileged,
+            ],
+            Some(ValidateAccessTokenOpts {
+                check_deactivated: None,
+                check_takedown: Some(true),
+            }),
+        )
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(AccessStandardCheckTakedown { access }),
             Outcome::Error(error) => Outcome::Error(error),
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
