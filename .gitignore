@@ -18,5 +18,6 @@ NOTE.md
 .env.production.local
 .env.local
 .env.prod
-
+.env*.bak
 /venv/
+/botenv/
