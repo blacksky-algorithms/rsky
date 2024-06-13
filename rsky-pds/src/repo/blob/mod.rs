@@ -8,6 +8,7 @@ use crate::repo::error::BlobError;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use crate::{common, image};
 use anyhow::{bail, Result};
+use aws_sdk_s3::primitives::ByteStream;
 use diesel::dsl::{count_distinct, exists, not};
 use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::*;
@@ -39,6 +40,17 @@ pub struct ListMissingBlobsOpts {
     pub limit: u16,
 }
 
+pub struct GetBlobOutput {
+    pub size: i32,
+    pub mime_type: Option<String>,
+    pub stream: ByteStream
+}
+
+pub struct GetBlobMetadataOutput {
+    pub size: i32,
+    pub mime_type: Option<String>
+}
+
 // Basically handles getting blob records from db
 impl BlobReader {
     pub fn new(blobstore: S3BlobStore) -> Self {
@@ -46,6 +58,37 @@ impl BlobReader {
             did: blobstore.bucket.clone(),
             blobstore,
         }
+    }
+    
+    pub async fn get_blob_metadata(&self, cid: Cid) -> Result<GetBlobMetadataOutput> {
+        use crate::schema::pds::blob::dsl as BlobSchema;
+        let conn = &mut establish_connection()?;
+
+        let found = BlobSchema::blob
+            .filter(BlobSchema::did.eq(&self.did))
+            .filter(BlobSchema::cid.eq(&cid.to_string()))
+            .filter(BlobSchema::takedownRef.is_null())
+            .select(models::Blob::as_select())
+            .first(conn)
+            .optional()?;
+
+        match found { 
+            None => bail!("Blob not found"),
+            Some(found) => Ok(GetBlobMetadataOutput {
+                size: found.size,
+                mime_type: Some(found.mime_type)
+            })
+        }
+    }
+    
+    pub async fn get_blob(&self, cid: Cid) -> Result<GetBlobOutput> {
+        let metadata = self.get_blob_metadata(cid).await?;
+        let blob_stream = self.blobstore.get_stream(cid).await?;
+        Ok(GetBlobOutput {
+            size: metadata.size,
+            mime_type: metadata.mime_type,
+            stream: blob_stream,
+        })
     }
 
     pub async fn get_records_for_blob(&self, cid: Cid) -> Result<Vec<String>> {
