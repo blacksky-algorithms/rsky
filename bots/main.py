@@ -83,9 +83,9 @@ def get_images(urls):
 
 def parse_images(t):
     if t.get('includes'):
-        parsed_urls = [m.get('url') for m in t['includes'].get('media') if
+        parsed_urls = [m.get('url') for m in t['includes'].get('media',[]) if
                        m.get('type') == 'photo']
-        video_thumbnails = [m.get('preview_image_url') for m in t['includes'].get('media') if
+        video_thumbnails = [m.get('preview_image_url') for m in t['includes'].get('media',[]) if
                             m.get('type') == 'video']
         parsed_urls.extend(video_thumbnails)
         return parsed_urls
