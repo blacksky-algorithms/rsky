@@ -73,6 +73,7 @@ pub struct CommitRecord {
     record: RepoRecord,
 }
 
+#[derive(Debug)]
 pub struct Repo {
     storage: SqlRepoReader, // get ipld blocks from db
     data: MST,
@@ -272,7 +273,7 @@ impl ActorStore {
                                 Some(write.record),
                                 Some(write.action),
                                 rev.clone(),
-                                now,
+                                Some(now.to_string()),
                             )
                             .await?
                     }
@@ -284,7 +285,7 @@ impl ActorStore {
                                 Some(write.record),
                                 Some(write.action),
                                 rev.clone(),
-                                now,
+                                Some(now.to_string()),
                             )
                             .await?
                     }
@@ -376,7 +377,6 @@ impl Repo {
                 })?;
                 let commit: VersionedCommit = serde_cbor::value::from_value(commit)?;
                 let data = MST::load(storage.clone(), commit.data(), None)?;
-                println!("Loaded repo for did: `{:?}`", commit.did());
                 Ok(Repo::new(
                     storage.clone(),
                     data,
@@ -544,6 +544,7 @@ impl Repo {
 
         let data_cid = data.get_pointer()?;
         let diff = DataDiff::of(&mut data, Some(&mut self.data.clone()))?;
+
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
 
@@ -755,10 +756,13 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> Result<PreparedCreateOrU
     if validate {
         assert_valid_record(&record)?;
     }
+
     // assert_no_explicit_slurs(rkey, record).await?;
+    let next_rkey = Ticker::new().next(None);
+    let rkey = rkey.unwrap_or(next_rkey.to_string());
     Ok(PreparedCreateOrUpdate {
         action: WriteOpAction::Create,
-        uri: make_aturi(did, Some(collection), rkey),
+        uri: make_aturi(did, Some(collection), Some(rkey)),
         cid: cid_for_safe_record(record.clone()).await?,
         swap_cid,
         record: record.clone(),

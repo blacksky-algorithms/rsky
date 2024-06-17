@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use std::fmt::Debug;
+use std::fmt::Display;
 use std::str::FromStr;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
@@ -21,8 +21,8 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
     })
 }
 
-pub fn format_data_key<T: FromStr + Debug>(collection: T, rkey: T) -> String {
-    format!("{collection:?}/{rkey:?}")
+pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
+    format!("{collection}/{rkey}")
 }
 
 pub fn lex_to_ipld(val: Lex) -> Ipld {

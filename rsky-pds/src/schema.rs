@@ -51,7 +51,7 @@ pub mod pds {
     }
 
     diesel::table! {
-        pds.blob (cid) {
+        pds.blob (cid, did) {
             cid -> Varchar,
             did -> Varchar,
             mimeType -> Varchar,
@@ -132,7 +132,7 @@ pub mod pds {
     }
 
     diesel::table! {
-        pds.repo_block (cid) {
+        pds.repo_block (cid, did) {
             cid -> Varchar,
             did -> Varchar,
             repoRev -> Varchar,

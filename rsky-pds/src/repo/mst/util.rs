@@ -8,11 +8,12 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::str;
 
-fn is_valid_chars(input: String) -> bool {
+// @TODO fix regex
+fn is_valid_chars(input: &str) -> bool {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"^[a-zA-Z0-9_\-:.]*$").unwrap();
     }
-    RE.is_match(&input)
+    RE.is_match(input)
 }
 
 // * Restricted to a subset of ASCII characters — the allowed characters are
@@ -21,12 +22,13 @@ fn is_valid_chars(input: String) -> bool {
 // * The specific record key values . and .. are not allowed
 pub fn is_valid_repo_mst_path(key: &String) -> Result<bool> {
     let split: Vec<&str> = key.split("/").collect();
+
     return if key.len() <= 256
         && split.len() == 2
         && split[0].len() > 0
         && split[1].len() > 0
-        && is_valid_chars(split[0].to_owned())
-        && is_valid_chars(split[1].to_owned())
+        && is_valid_chars(split[0])
+        && is_valid_chars(split[1])
     {
         Ok(true)
     } else {
@@ -50,10 +52,10 @@ pub fn cid_for_entries(entries: Vec<NodeEntry>) -> Result<Cid> {
 pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
     let mut x = 0;
     for i in 0..a.len() {
-        if a.chars().nth(i).unwrap() != b.chars().nth(i).unwrap() {
-            break;
+        match (a.chars().nth(i), b.chars().nth(i)) {
+            (Some(a), Some(b)) if a == b => x += 1,
+            _ => break,
         }
-        x += 1;
     }
     Ok(x)
 }
@@ -71,14 +73,14 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
     let mut last_key = "";
     while i < entries.len() {
         let leaf = &entries[i];
-        let next = &entries[i + 1];
+        let next = entries.get(i + 1);
         if !leaf.is_leaf() {
             return Err(anyhow!("Not a valid node: two subtrees next to each other"));
         };
         i += 1;
         let mut subtree: Option<Cid> = None;
         match next {
-            NodeEntry::MST(tree) => {
+            Some(NodeEntry::MST(tree)) => {
                 subtree = Some(tree.pointer);
                 i += 1;
             }
@@ -89,7 +91,7 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
             let prefix_len = count_prefix_len(last_key.to_owned(), l.key.to_owned())?;
             data.e.push(TreeEntry {
                 p: u8::try_from(prefix_len)?,
-                k: l.key[0..prefix_len].to_owned().into_bytes(),
+                k: l.key[prefix_len..].to_owned().into_bytes(),
                 v: l.value,
                 t: subtree,
             });

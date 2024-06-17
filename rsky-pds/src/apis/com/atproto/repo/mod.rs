@@ -1,18 +1,19 @@
-use anyhow::{Result, bail};
-use crate::account_manager::AccountManager;
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::AccountManager;
+use anyhow::{bail, Result};
 
 pub async fn assert_repo_availability(
     did: &String,
-    is_admin_of_self: bool
+    is_admin_of_self: bool,
 ) -> Result<ActorAccount> {
     let account = AccountManager::get_account(
         did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
-            include_taken_down: Some(true)
-        })
-    ).await?;
+            include_taken_down: Some(true),
+        }),
+    )
+    .await?;
     match account {
         None => bail!("RepoNotFound: Could not find repo for DID: {did}"),
         Some(account) => {

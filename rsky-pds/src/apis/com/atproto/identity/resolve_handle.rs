@@ -59,6 +59,7 @@ async fn inner_resolve_handle(
     }
 
     // this is not someone on our server, but we help with resolving anyway
+    // @TODO: Weird error about Tokio received when this fails that leads to panic
     if did.is_none() && env_str("PDS_BSKY_APP_VIEW_URL").is_some() {
         did = try_resolve_from_app_view(&handle).await?;
     }

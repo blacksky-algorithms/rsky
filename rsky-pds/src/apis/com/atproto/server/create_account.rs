@@ -48,6 +48,7 @@ async fn create(
         body.recovery_key = Some(input_recovery_key.to_owned());
     }
     //@TODO: Lookup user by email as well
+    //@TODO: Validate and require invite code
 
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();

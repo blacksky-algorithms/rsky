@@ -73,6 +73,10 @@ impl TID {
     pub fn older_than(&self, other: &TID) -> bool {
         self.compare_to(other) < 0
     }
+
+    pub fn to_string(self) -> String {
+        self.0
+    }
 }
 
 /// Based on adenosine/adenosine/src/identifiers.rs

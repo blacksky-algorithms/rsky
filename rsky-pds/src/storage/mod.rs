@@ -23,6 +23,7 @@ use std::str::FromStr;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
 pub enum Ipld {
     /// Represents a Json Value
     Json(JsonValue),
@@ -34,6 +35,8 @@ pub enum Ipld {
     Map(BTreeMap<String, Ipld>),
     /// Represents a Cid.
     Link(Cid),
+    /// String
+    String(String),
 }
 
 impl Encode<DagCborCodec> for Ipld {
@@ -57,6 +60,7 @@ impl Encode<DagCborCodec> for Ipld {
             Self::List(l) => l.encode(c, w),
             Self::Map(m) => m.encode(c, w),
             Self::Link(cid) => cid.encode(c, w),
+            Self::String(s) => s.encode(c, w),
         }
     }
 }
@@ -73,7 +77,7 @@ pub struct CidAndRev {
     pub rev: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SqlRepoReader {
     pub cache: BlockMap,
     pub blocks: BlockMap,

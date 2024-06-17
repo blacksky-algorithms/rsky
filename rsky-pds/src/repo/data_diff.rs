@@ -6,22 +6,26 @@ use anyhow::Result;
 use libipld::Cid;
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub struct DataAdd {
     key: String,
     cid: Cid,
 }
 
+#[derive(Debug)]
 pub struct DataUpdate {
     key: String,
     prev: Cid,
     cid: Cid,
 }
 
+#[derive(Debug)]
 pub struct DataDelete {
     key: String,
     cid: Cid,
 }
 
+#[derive(Debug)]
 pub struct DataDiff {
     pub adds: BTreeMap<String, DataAdd>,
     pub updates: BTreeMap<String, DataUpdate>,

@@ -123,6 +123,7 @@ impl BlockMap {
     }
 }
 
+#[derive(Debug)]
 pub struct BlocksAndMissing {
     pub blocks: BlockMap,
     pub missing: Vec<Cid>,

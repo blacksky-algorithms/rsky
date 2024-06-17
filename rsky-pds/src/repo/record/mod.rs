@@ -1,10 +1,10 @@
 use crate::common;
 use crate::db::establish_connection;
-use crate::models::models;
+use crate::models::{models, Backlink, Record};
 use crate::repo::types::{Ids, Lex, RepoRecord, WriteOpAction};
 use crate::repo::util::cbor_to_lex_record;
 use crate::storage::Ipld;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use libipld::Cid;
@@ -282,11 +282,11 @@ impl RecordReader {
 
         let res = RecordSchema::record
             .inner_join(BacklinkSchema::backlink.on(BacklinkSchema::uri.eq(RecordSchema::uri)))
-            .select(models::Record::as_select())
+            .select(Record::as_select())
             .filter(BacklinkSchema::path.eq(path))
             .filter(BacklinkSchema::linkTo.eq(link_to))
             .filter(RecordSchema::collection.eq(collection))
-            .load::<models::Record>(conn)?;
+            .load::<Record>(conn)?;
         Ok(res)
     }
 
@@ -303,9 +303,9 @@ impl RecordReader {
             .into_iter()
             .nth(0)
             .unwrap_or("");
-        let conflicts: Vec<Vec<models::Record>> = stream::iter(record_backlinks)
+        let conflicts: Vec<Vec<Record>> = stream::iter(record_backlinks)
             .then(|backlink| async move {
-                Ok::<Vec<models::Record>, anyhow::Error>(
+                Ok::<Vec<Record>, anyhow::Error>(
                     self.get_record_backlinks(
                         collection.to_owned(),
                         backlink.path,
@@ -337,21 +337,110 @@ impl RecordReader {
 
     pub async fn index_record(
         &self,
-        _uri: String, // @TODO: Use AtUri
-        _cid: Cid,
-        _record: Option<RepoRecord>,
-        _action: Option<WriteOpAction>, // Create or update with a default of create
-        _repo_rev: String,
-        _timestamp: &str,
+        uri: String, // @TODO: Use AtUri
+        cid: Cid,
+        record: Option<RepoRecord>,
+        action: Option<WriteOpAction>, // Create or update with a default of create
+        repo_rev: String,
+        timestamp: Option<String>,
     ) -> Result<()> {
-        todo!()
+        println!("@LOG DEBUG RecordReader::index_record, indexing record {uri}");
+        let action = action.unwrap_or(WriteOpAction::Create);
+        let uri_without_prefix = uri.replace("at://", "");
+        let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
+        match (parts.get(0), parts.get(1), parts.get(2)) {
+            (Some(hostname), Some(collection), Some(rkey)) => {
+                let indexed_at = timestamp.unwrap_or_else(|| common::now());
+                let row = Record {
+                    did: self.did.clone(),
+                    uri: uri.clone(),
+                    cid: cid.to_string(),
+                    collection: collection.to_string(),
+                    rkey: rkey.to_string(),
+                    repo_rev: Some(repo_rev.clone()),
+                    indexed_at: indexed_at.clone(),
+                    takedown_ref: None,
+                };
+
+                if !hostname.starts_with("did:") {
+                    bail!("Expected indexed URI to contain DID")
+                } else if collection.len() < 1 {
+                    bail!("Expected indexed URI to contain a collection")
+                } else if rkey.len() < 1 {
+                    bail!("Expected indexed URI to contain a record key")
+                }
+
+                use crate::schema::pds::record::dsl as RecordSchema;
+                let conn = &mut establish_connection()?;
+
+                // Track current version of record
+                insert_into(RecordSchema::record)
+                    .values(row)
+                    .on_conflict(RecordSchema::uri)
+                    .do_update()
+                    .set((
+                        RecordSchema::cid.eq(cid.to_string()),
+                        RecordSchema::repoRev.eq(&repo_rev),
+                        RecordSchema::indexedAt.eq(&indexed_at),
+                    ))
+                    .execute(conn)?;
+
+                if let Some(record) = record {
+                    // Maintain backlinks
+                    let backlinks = get_backlinks(&uri, &record)?;
+                    if let WriteOpAction::Update = action {
+                        // On update just recreate backlinks from scratch for the record, so we can clear out
+                        // the old ones. E.g. for weird cases like updating a follow to be for a different did.
+                        self.remove_backlinks_by_uri(&uri).await?;
+                    }
+                    self.add_backlinks(backlinks).await?;
+                }
+                println!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
+                Ok(())
+            }
+            _ => bail!("Issue parsing uri: {uri}"),
+        }
     }
 
     pub async fn delete_record(
         &self,
-        _uri: String, // @TODO: Use AtUri
+        uri: String, // @TODO: Use AtUri
     ) -> Result<()> {
-        todo!()
+        println!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
+        use crate::schema::pds::backlink::dsl as BacklinkSchema;
+        use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+        delete(RecordSchema::record)
+            .filter(RecordSchema::uri.eq(&uri))
+            .execute(conn)?;
+        delete(BacklinkSchema::backlink)
+            .filter(BacklinkSchema::uri.eq(&uri))
+            .execute(conn)?;
+        println!("@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}");
+        Ok(())
+    }
+
+    pub async fn remove_backlinks_by_uri(&self, uri: &String) -> Result<()> {
+        use crate::schema::pds::backlink::dsl as BacklinkSchema;
+        let conn = &mut establish_connection()?;
+        delete(BacklinkSchema::backlink)
+            .filter(BacklinkSchema::uri.eq(uri))
+            .execute(conn)?;
+        Ok(())
+    }
+
+    pub async fn add_backlinks(&self, backlinks: Vec<Backlink>) -> Result<()> {
+        if backlinks.len() == 0 {
+            Ok(())
+        } else {
+            use crate::schema::pds::backlink::dsl as BacklinkSchema;
+            let conn = &mut establish_connection()?;
+            insert_into(BacklinkSchema::backlink)
+                .values(&backlinks)
+                .on_conflict_do_nothing()
+                .execute(conn)?;
+            Ok(())
+        }
     }
 
     pub async fn update_record_takedown_status(

@@ -106,12 +106,14 @@ CREATE TABLE IF NOT EXISTS pds.repo_root (
 
 -- Create Repo Block Table
 CREATE TABLE IF NOT EXISTS pds.repo_block (
-    cid character varying PRIMARY KEY,
+    cid character varying NOT NULL,
     did character varying NOT NULL,
     "repoRev" character varying NOT NULL,
     size integer NOT NULL,
     content bytea NOT NULL
 );
+ALTER TABLE ONLY pds.repo_block
+    ADD CONSTRAINT repo_block_pkey PRIMARY KEY (cid, did);
 CREATE INDEX repo_block_repo_rev_idx
 	ON pds.repo_block("repoRev", cid);
 
@@ -135,7 +137,7 @@ CREATE INDEX record_repo_rev_idx
 
 -- Create Blob Table
 CREATE TABLE IF NOT EXISTS pds.blob (
-    cid character varying PRIMARY KEY,
+    cid character varying NOT NULL,
     did character varying NOT NULL,
     "mimeType" character varying NOT NULL,
     size integer NOT NULL,
@@ -145,6 +147,8 @@ CREATE TABLE IF NOT EXISTS pds.blob (
     "createdAt" character varying NOT NULL,
     "takedownRef" character varying
 );
+ALTER TABLE ONLY pds.blob
+    ADD CONSTRAINT blob_pkey PRIMARY KEY (cid, did);
 CREATE INDEX blob_tempkey_idx
 	ON pds.blob("tempKey");
 

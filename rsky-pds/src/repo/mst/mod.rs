@@ -11,6 +11,7 @@ use libipld::Cid;
 use serde_cbor::Value as CborValue;
 use std::mem;
 
+#[derive(Debug)]
 pub struct NodeIter {
     entries: Vec<NodeEntry>, // Contains the remaining children of a node,
     // The iterator of the parent node, if present
@@ -86,6 +87,7 @@ impl Iterator for NodeIter {
 }
 
 /// Alternative implementation of iterator
+#[derive(Debug)]
 pub struct NodeIterReachable {
     entries: Vec<NodeEntry>,
     parent: Option<Box<NodeIterReachable>>,
@@ -185,7 +187,7 @@ pub struct Leaf {
 /// Following the Typescript implementation, this is basically a flexible
 /// "TreeEntry" (aka "leaf") which might also be the "Left" pointer on a
 /// NodeData (aka "tree").
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum NodeEntry {
     MST(MST),
     Leaf(Leaf),
@@ -258,7 +260,7 @@ pub struct UnstoredBlocks {
 /// (pointer is defined, no entries have been pulled from block store)
 ///
 /// MerkleSearchTree values are immutable. Methods return copies with changes.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MST {
     pub entries: Option<Vec<NodeEntry>>,
     pub layer: Option<u32>,
@@ -340,8 +342,11 @@ impl MST {
 
         // can compute the layer on the first KeySuffix, because
         // for the first entry that field is a complete key
-        let leaf = &data.e[0];
-        let layer = Some(util::leading_zeros_on_hash(&leaf.k)?);
+        let first_leaf = data.e.get(0);
+        let layer: Option<u32> = match first_leaf {
+            Some(first_leaf) => Some(util::leading_zeros_on_hash(&first_leaf.k)?),
+            None => None,
+        };
 
         self.entries = Some(util::deserialize_node_data(
             &self.storage,
@@ -464,13 +469,16 @@ impl MST {
             key_zeros = util::leading_zeros_on_hash(&key.clone().into_bytes())?;
         }
         let layer = self.get_layer()?;
+
         let new_leaf = Leaf {
             key: key.clone(),
             value,
         };
+
         return if key_zeros == layer {
             // it belongs in this layer
             let index = self.find_gt_or_equal_leaf_index(&key)?;
+
             let found = self.at_index(index)?;
             if let Some(NodeEntry::Leaf(l)) = found {
                 if l.key == *key {
@@ -634,7 +642,7 @@ impl MST {
     // -------------------
 
     /// update entry in place
-    pub fn update_entry(&mut self, index: usize, entry: NodeEntry) -> Result<MST> {
+    pub fn update_entry(&mut self, index: isize, entry: NodeEntry) -> Result<MST> {
         let mut update = Vec::new();
         for e in self.slice(Some(0), Some(index))? {
             update.push(e);
@@ -648,7 +656,7 @@ impl MST {
     }
 
     /// remove entry at index
-    pub fn remove_entry(&mut self, index: usize) -> Result<MST> {
+    pub fn remove_entry(&mut self, index: isize) -> Result<MST> {
         let mut updated = Vec::new();
         updated.append(&mut self.slice(Some(0), Some(index))?);
         updated.append(&mut self.slice(Some(index + 1), None)?);
@@ -671,27 +679,79 @@ impl MST {
     }
 
     /// returns entry at index
-    pub fn at_index(&mut self, index: usize) -> Result<Option<NodeEntry>> {
+    pub fn at_index(&mut self, index: isize) -> Result<Option<NodeEntry>> {
         let entries = self.get_entries()?;
-        Ok(entries.into_iter().nth(index))
+        if index >= 0 {
+            Ok(entries.into_iter().nth(index as usize))
+        } else {
+            Ok(None)
+        }
     }
 
     /// returns a slice of the node
-    pub fn slice(&mut self, start: Option<usize>, end: Option<usize>) -> Result<Vec<NodeEntry>> {
+    pub fn slice(&mut self, start: Option<isize>, end: Option<isize>) -> Result<Vec<NodeEntry>> {
         let entries = self.get_entries()?;
-        if start.is_some() && end.is_some() {
-            Ok(entries[start.unwrap()..end.unwrap()].to_vec())
-        } else if start.is_some() && end.is_none() {
-            Ok(entries[start.unwrap()..].to_vec())
-        } else if start.is_none() && end.is_some() {
-            Ok(entries[..end.unwrap()].to_vec())
-        } else {
-            Ok(entries)
+        let entry_len = entries.len() as isize;
+        match (start, end) {
+            (Some(start), Some(end)) => {
+                // Adapted from Javascript Array.prototype.slice()
+                // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/slice
+                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                    (start + entry_len) as usize
+                } else if start < (-1 * entry_len) {
+                    0
+                } else if start >= entry_len {
+                    return Ok(vec![]);
+                } else {
+                    start as usize
+                };
+
+                let end: usize = if end < 0 && end >= (-1 * entry_len) {
+                    (end + entry_len) as usize
+                } else if end < (-1 * entry_len) {
+                    0
+                } else if end >= entry_len {
+                    entries.len()
+                } else if end <= start as isize {
+                    return Ok(vec![]);
+                } else {
+                    end as usize
+                };
+
+                Ok(entries[start..end].to_vec())
+            }
+            (Some(start), None) => {
+                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                    (start + entry_len) as usize
+                } else if start < (-1 * entry_len) {
+                    0
+                } else if start >= entry_len {
+                    return Ok(vec![]);
+                } else {
+                    start as usize
+                };
+                Ok(entries[start..].to_vec())
+            }
+            (None, Some(end)) => {
+                let end: usize = if end < 0 && end >= (-1 * entry_len) {
+                    (end + entry_len) as usize
+                } else if end < (-1 * entry_len) {
+                    0
+                } else if end >= entry_len {
+                    entries.len()
+                } else if end <= 0 {
+                    return Ok(vec![]);
+                } else {
+                    end as usize
+                };
+                Ok(entries[..end].to_vec())
+            }
+            (None, None) => Ok(entries),
         }
     }
 
     /// inserts entry at index
-    pub fn splice_in(&mut self, entry: NodeEntry, index: usize) -> Result<MST> {
+    pub fn splice_in(&mut self, entry: NodeEntry, index: isize) -> Result<MST> {
         let mut update = Vec::new();
         for e in self.slice(Some(0), Some(index))? {
             update.push(e.clone());
@@ -707,7 +767,7 @@ impl MST {
     /// replaces an entry with [ Some(tree), Leaf, Some(tree) ]
     pub fn replace_with_split(
         &mut self,
-        index: usize,
+        index: isize,
         left: Option<MST>,
         leaf: Leaf,
         right: Option<MST>,
@@ -755,9 +815,13 @@ impl MST {
         // if the far right of the left side is a subtree,
         // we need to split it on the key as well
         let left_len = left_data.len();
-        let last_in_left = left_data.into_iter().nth(left_len - 1);
+        let last_in_left: Option<NodeEntry> = if let [.., last] = left_data.as_slice() {
+            Some(last.clone())
+        } else {
+            None
+        };
         if let Some(NodeEntry::MST(mut last)) = last_in_left {
-            left = left.remove_entry(left_len - 1)?;
+            left = left.remove_entry(left_len as isize - 1)?;
             let split = last.split_around(key)?;
             if let Some(s0) = split.0 {
                 left = left.append(NodeEntry::MST(s0.clone()))?;
@@ -837,7 +901,7 @@ impl MST {
     // -------------------
 
     /// finds index of first leaf node that is greater than or equal to the value
-    pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<usize> {
+    pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<isize> {
         let entries = self.get_entries()?;
         let maybe_index = entries
             .clone()
@@ -852,9 +916,9 @@ impl MST {
             .position(|entry| entry.key >= *key);
         // if we can't find, we're on the end
         if let Some(i) = maybe_index {
-            Ok(i)
+            Ok(i as isize)
         } else {
-            Ok(entries.len())
+            Ok(entries.len() as isize)
         }
     }
 
@@ -866,7 +930,7 @@ impl MST {
     /// controls might stop earlier.
     pub fn walk_leaves_from(&mut self, key: &String) -> impl Iterator<Item = Leaf> {
         let mut iter: Vec<Leaf> = Vec::new();
-        let index = self.find_gt_or_equal_leaf_index(key).unwrap();
+        let index = self.find_gt_or_equal_leaf_index(key).unwrap() as usize;
         let entries = self.get_entries().unwrap();
         let prev = entries.get(index - 1).unwrap().clone();
         if let NodeEntry::MST(mut p) = prev {

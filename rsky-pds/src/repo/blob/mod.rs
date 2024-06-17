@@ -43,12 +43,12 @@ pub struct ListMissingBlobsOpts {
 pub struct GetBlobOutput {
     pub size: i32,
     pub mime_type: Option<String>,
-    pub stream: ByteStream
+    pub stream: ByteStream,
 }
 
 pub struct GetBlobMetadataOutput {
     pub size: i32,
-    pub mime_type: Option<String>
+    pub mime_type: Option<String>,
 }
 
 // Basically handles getting blob records from db
@@ -59,7 +59,7 @@ impl BlobReader {
             blobstore,
         }
     }
-    
+
     pub async fn get_blob_metadata(&self, cid: Cid) -> Result<GetBlobMetadataOutput> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         let conn = &mut establish_connection()?;
@@ -72,15 +72,15 @@ impl BlobReader {
             .first(conn)
             .optional()?;
 
-        match found { 
+        match found {
             None => bail!("Blob not found"),
             Some(found) => Ok(GetBlobMetadataOutput {
                 size: found.size,
-                mime_type: Some(found.mime_type)
-            })
+                mime_type: Some(found.mime_type),
+            }),
         }
     }
-    
+
     pub async fn get_blob(&self, cid: Cid) -> Result<GetBlobOutput> {
         let metadata = self.get_blob_metadata(cid).await?;
         let blob_stream = self.blobstore.get_stream(cid).await?;
@@ -173,7 +173,7 @@ impl BlobReader {
         let upsert = sql_query("INSERT INTO pds.blob (cid, did, \"mimeType\", size, \"tempKey\", width, height, \"createdAt\", \"takedownRef\") \
         VALUES \
             ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-        ON CONFLICT (cid) DO UPDATE \
+        ON CONFLICT (cid, did) DO UPDATE \
         SET \"tempKey\" = EXCLUDED.\"tempKey\" \
             WHERE pds.blob.\"tempKey\" is not null;");
         upsert

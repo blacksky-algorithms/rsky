@@ -89,7 +89,16 @@ pub struct AppPassword {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(uri, path))]
 #[diesel(table_name = crate::schema::pds::backlink)]
@@ -265,7 +274,16 @@ pub struct InviteCodeUse {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(primary_key(uri))]
 #[diesel(table_name = crate::schema::pds::record)]
@@ -273,6 +291,7 @@ pub struct InviteCodeUse {
 pub struct Record {
     pub uri: String,
     pub cid: String,
+    pub did: String,
     pub collection: String,
     pub rkey: String,
     #[diesel(column_name = repoRev)]
