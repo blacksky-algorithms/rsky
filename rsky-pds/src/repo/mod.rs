@@ -29,6 +29,7 @@ use futures::try_join;
 use lazy_static::lazy_static;
 use libipld::Cid;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
+use serde::Serialize;
 use serde_cbor::Value as CborValue;
 use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
@@ -631,7 +632,7 @@ impl Repo {
 pub fn blobs_for_write(record: RepoRecord, validate: bool) -> Result<Vec<PreparedBlobRef>> {
     let refs = find_blob_refs(Lex::Map(record.clone()), None, None);
     let record_type = match record.get("$type") {
-        Some(Lex::Ipld(Ipld::Json(JsonValue::String(t)))) => Some(t),
+        Some(Lex::Ipld(Ipld::String(t))) => Some(t),
         _ => None,
     };
     for r#ref in refs.clone() {
@@ -679,6 +680,32 @@ pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) ->
             .flat_map(|item| find_blob_refs(item, Some(path.clone()), Some(layer + 1)))
             .collect::<Vec<FoundBlobRef>>(),
         Lex::Blob(blob) => vec![FoundBlobRef { r#ref: blob, path }],
+        Lex::Ipld(Ipld::Json(JsonValue::Array(list))) => list
+            .into_iter()
+            .flat_map(|item| match serde_json::from_value::<RepoRecord>(item) {
+                Ok(item) => find_blob_refs(Lex::Map(item), Some(path.clone()), Some(layer + 1)),
+                Err(_) => vec![],
+            })
+            .collect::<Vec<FoundBlobRef>>(),
+        Lex::Ipld(Ipld::Json(json)) => match serde_json::from_value::<JsonBlobRef>(json.clone()) {
+            Ok(blob) => vec![FoundBlobRef {
+                r#ref: BlobRef { original: blob },
+                path,
+            }],
+            Err(blob_err) => match serde_json::from_value::<RepoRecord>(json) {
+                Ok(record) => record
+                    .into_iter()
+                    .flat_map(|(key, item)| {
+                        find_blob_refs(
+                            item,
+                            Some([path.as_slice(), [key].as_slice()].concat()),
+                            Some(layer + 1),
+                        )
+                    })
+                    .collect::<Vec<FoundBlobRef>>(),
+                Err(_) => vec![],
+            },
+        },
         Lex::Ipld(_) => vec![],
         Lex::Map(map) => map
             .into_iter()

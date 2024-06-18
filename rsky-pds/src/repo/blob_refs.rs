@@ -3,10 +3,16 @@ use libipld::Cid;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CidLinkRef {
+    #[serde(rename = "$link")]
+    pub link: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TypedJsonBlobRef {
     #[serde(rename = "$type")]
     pub r#type: String, // `blob`
-    pub r#ref: Cid,
+    pub r#ref: CidLinkRef,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
     pub size: i64,
@@ -20,6 +26,7 @@ pub struct UntypedJsonBlobRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
 pub enum JsonBlobRef {
     Typed(TypedJsonBlobRef),
     Untyped(UntypedJsonBlobRef),
@@ -37,7 +44,9 @@ impl BlobRef {
         } else {
             let o = JsonBlobRef::Typed(TypedJsonBlobRef {
                 r#type: "blob".to_owned(),
-                r#ref,
+                r#ref: CidLinkRef {
+                    link: r#ref.to_string(),
+                },
                 mime_type,
                 size,
             });
@@ -47,7 +56,7 @@ impl BlobRef {
 
     pub fn get_cid(&self) -> Result<Cid> {
         match &self.original {
-            JsonBlobRef::Typed(typed) => Ok(typed.r#ref),
+            JsonBlobRef::Typed(typed) => Ok(Cid::from_str(&typed.r#ref.link)?),
             JsonBlobRef::Untyped(untyped) => Ok(Cid::from_str(&untyped.cid)?),
         }
     }
@@ -68,7 +77,12 @@ impl BlobRef {
 
     pub fn from_json_ref(json: JsonBlobRef) -> Result<BlobRef> {
         match json {
-            JsonBlobRef::Typed(j) => Ok(BlobRef::new(j.r#ref, j.mime_type, j.size, None)),
+            JsonBlobRef::Typed(j) => Ok(BlobRef::new(
+                Cid::from_str(&j.r#ref.link)?,
+                j.mime_type,
+                j.size,
+                None,
+            )),
             JsonBlobRef::Untyped(ref j) => Ok(BlobRef::new(
                 Cid::from_str(&j.cid)?,
                 j.mime_type.clone(),
@@ -82,7 +96,7 @@ impl BlobRef {
         if let JsonBlobRef::Typed(j) = &self.original {
             TypedJsonBlobRef {
                 r#type: "blob".to_owned(),
-                r#ref: j.r#ref,
+                r#ref: j.r#ref.clone(),
                 mime_type: j.mime_type.clone(),
                 size: j.size,
             }

@@ -8,6 +8,7 @@ use crate::repo::error::BlobError;
 use crate::repo::types::{PreparedBlobRef, PreparedWrite};
 use crate::{common, image};
 use anyhow::{bail, Result};
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use diesel::dsl::{count_distinct, exists, not};
 use diesel::sql_types::{Integer, Nullable, Text};
@@ -83,7 +84,17 @@ impl BlobReader {
 
     pub async fn get_blob(&self, cid: Cid) -> Result<GetBlobOutput> {
         let metadata = self.get_blob_metadata(cid).await?;
-        let blob_stream = self.blobstore.get_stream(cid).await?;
+        let blob_stream = match self.blobstore.get_stream(cid).await {
+            Ok(res) => res,
+            Err(e) => {
+                return match e.downcast_ref() {
+                    Some(GetObjectError::NoSuchKey(key)) => {
+                        Err(anyhow::Error::new(GetObjectError::NoSuchKey(key.clone())))
+                    }
+                    _ => bail!(e.to_string()),
+                }
+            }
+        };
         Ok(GetBlobOutput {
             size: metadata.size,
             mime_type: metadata.mime_type,

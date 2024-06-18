@@ -1,9 +1,11 @@
 use std::str::FromStr;
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
+use crate::common::env::env_str;
 use crate::common::get_random_str;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use aws_sdk_s3 as s3;
+use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectCannedAcl, ObjectIdentifier};
 use libipld::Cid;
@@ -119,8 +121,12 @@ impl S3BlobStore {
             .bucket(&self.bucket)
             .key(self.get_stored_path(cid))
             .send()
-            .await?;
-        Ok(res.body)
+            .await;
+        match res {
+            Ok(res) => Ok(res.body),
+            Err(SdkError::ServiceError(s)) => Err(anyhow::Error::new(s.into_err())),
+            Err(e) => Err(anyhow::Error::new(e.into_service_error())),
+        }
     }
 
     pub async fn get_bytes(&self, cid: Cid) -> Result<Vec<u8>> {
@@ -198,7 +204,12 @@ impl S3BlobStore {
         self.client
             .copy_object()
             .bucket(&self.bucket)
-            .copy_source(format!("{0}/{1}", self.bucket, keys.from))
+            .copy_source(format!(
+                "{0}/{1}/{2}",
+                env_str("AWS_ENDPOINT_BUCKET").unwrap(),
+                self.bucket,
+                keys.from
+            ))
             .key(keys.to)
             .acl(ObjectCannedAcl::PublicRead)
             .send()

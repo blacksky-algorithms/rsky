@@ -22,6 +22,8 @@ pub enum InternalErrorCode {
     Unavailable,
     #[serde(rename = "data_loss")]
     DataLoss,
+    #[serde(rename = "not_found")]
+    NotFound,
 }
 
 impl ToString for InternalErrorCode {
@@ -38,6 +40,7 @@ impl ToString for InternalErrorCode {
             Self::OutOfRange => String::from("out_of_range"),
             Self::Unavailable => String::from("unavailable"),
             Self::DataLoss => String::from("data_loss"),
+            Self::NotFound => String::from("not_found"),
         }
     }
 }

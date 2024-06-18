@@ -550,6 +550,7 @@ impl<'r> FromRequest<'r> for AdminToken {
     }
 }
 
+#[derive(Clone)]
 pub struct OptionalAccessOrAdminToken {
     pub access: Option<AccessOutput>,
 }
