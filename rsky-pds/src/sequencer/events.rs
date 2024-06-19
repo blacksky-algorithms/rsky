@@ -76,7 +76,7 @@ pub async fn format_seq_commit(
         too_big = true;
         let mut just_root = BlockMap::new();
         just_root.add(commit_data.new_blocks.get(commit_data.cid))?;
-        car_slice = read_car_bytes(&commit_data.cid, just_root).await?;
+        car_slice = read_car_bytes(Some(&commit_data.cid), just_root).await?;
     } else {
         too_big = false;
         for w in writes {
@@ -108,7 +108,7 @@ pub async fn format_seq_commit(
             }
             ops.push(CommitEvtOp { action, path, cid });
         }
-        car_slice = read_car_bytes(&commit_data.cid, commit_data.new_blocks).await?;
+        car_slice = read_car_bytes(Some(&commit_data.cid), commit_data.new_blocks).await?;
     }
 
     let evt = CommitEvt {

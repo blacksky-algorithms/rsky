@@ -4,8 +4,12 @@ use crate::vendored::iroh_car::{CarHeader, CarWriter};
 use anyhow::Result;
 use libipld::Cid;
 
-pub async fn read_car_bytes(root: &Cid, blocks: BlockMap) -> Result<Vec<u8>> {
-    let car_header = CarHeader::new_v1(vec![*root]);
+pub async fn read_car_bytes(root: Option<&Cid>, blocks: BlockMap) -> Result<Vec<u8>> {
+    let roots = match root {
+        Some(root) => vec![*root],
+        None => vec![],
+    };
+    let car_header = CarHeader::new_v1(roots);
     let buf: Vec<u8> = Default::default();
     let mut car_writer = CarWriter::new(car_header, buf);
 

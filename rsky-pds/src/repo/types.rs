@@ -216,7 +216,6 @@ pub fn delete_write_to_op(write: PreparedDelete) -> RecordWriteOp {
 }
 
 pub fn write_to_op(write: PreparedWrite) -> RecordWriteOp {
-    println!("Write: {write:?}");
     match write {
         PreparedWrite::Create(c) => create_write_to_op(c),
         PreparedWrite::Update(u) => update_write_to_op(u),

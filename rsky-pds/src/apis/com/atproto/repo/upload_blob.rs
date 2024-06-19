@@ -50,7 +50,6 @@ async fn inner_upload_blob(
                 },
             })
             .await?;
-        println!("Debugging make permanent: {:?}", res);
     }
 
     Ok(BlobOutput {

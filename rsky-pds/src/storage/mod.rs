@@ -110,27 +110,35 @@ impl SqlRepoReader {
         let conn = &mut establish_connection()?;
 
         let cached = self.cache.get_many(cids)?;
+
         if cached.missing.len() < 1 {
             return Ok(cached);
         }
-        let missing = CidSet::new(Some(cached.missing.clone()));
+        let mut missing = CidSet::new(Some(cached.missing.clone()));
         let missing_strings: Vec<String> =
             cached.missing.into_iter().map(|c| c.to_string()).collect();
+
         let mut blocks = BlockMap::new();
 
-        let _ = missing_strings.chunks(500).map(|batch| {
-            let _ = RepoBlockSchema::repo_block
-                .filter(RepoBlockSchema::cid.eq_any(batch))
-                .filter(RepoBlockSchema::did.eq(&self.did))
-                .select((RepoBlockSchema::cid, RepoBlockSchema::content))
-                .load::<(String, Vec<u8>)>(conn)?
-                .into_iter()
-                .map(|row: (String, Vec<u8>)| {
-                    let cid = Cid::from_str(&row.0).unwrap();
-                    blocks.set(cid, row.1);
-                });
-            Ok::<(), anyhow::Error>(())
-        });
+        let _: Vec<_> = missing_strings
+            .chunks(500)
+            .into_iter()
+            .map(|batch| {
+                let _: Vec<_> = RepoBlockSchema::repo_block
+                    .filter(RepoBlockSchema::cid.eq_any(batch))
+                    .filter(RepoBlockSchema::did.eq(&self.did))
+                    .select((RepoBlockSchema::cid, RepoBlockSchema::content))
+                    .load::<(String, Vec<u8>)>(conn)?
+                    .into_iter()
+                    .map(|row: (String, Vec<u8>)| {
+                        let cid = Cid::from_str(&row.0).unwrap();
+                        blocks.set(cid, row.1);
+                        missing.delete(cid);
+                    })
+                    .collect();
+                Ok::<(), anyhow::Error>(())
+            })
+            .collect();
         self.cache.add_map(blocks.clone())?;
         blocks.add_map(cached.blocks)?;
         Ok(BlocksAndMissing {
