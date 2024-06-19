@@ -13,6 +13,7 @@ use rocket::http::Header;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
+use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
@@ -152,6 +153,8 @@ async fn rocket() -> _ {
         })),
     };
 
+    let shield = Shield::default().enable(NoSniff::Enable);
+
     rocket::custom(figment)
         .mount(
             "/",
@@ -263,6 +266,7 @@ async fn rocket() -> _ {
         .register("/", catchers![default_catcher])
         .attach(CORS)
         .attach(DbConn::fairing())
+        .attach(shield)
         .manage(sequencer)
         .manage(config)
         .manage(id_resolver)

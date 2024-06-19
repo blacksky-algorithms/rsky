@@ -9,22 +9,22 @@ use aws_config::SdkConfig;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::AggregatedBytes;
 use libipld::Cid;
-use rocket::http::Status;
+use rocket::http::{Header, Status};
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Responder, State};
 use std::str::FromStr;
 
 #[derive(Responder)]
-#[response(status = 200, content_type = "binary")]
-pub struct BlobResponder(Vec<u8>);
+#[response(status = 200)]
+pub struct BlobResponder(Vec<u8>, Header<'static>, Header<'static>, Header<'static>);
 
 async fn inner_get_blob(
     did: String,
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Option<String>)> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
@@ -37,7 +37,7 @@ async fn inner_get_blob(
 
     let found = actor_store.blob.get_blob(cid).await?;
     let buf: AggregatedBytes = found.stream.collect().await?;
-    Ok(buf.to_vec())
+    Ok((buf.to_vec(), found.mime_type))
 }
 
 /// Get a blob associated with a given account. Returns the full blob as originally uploaded.
@@ -50,7 +50,18 @@ pub async fn get_blob(
     auth: OptionalAccessOrAdminToken,
 ) -> Result<BlobResponder, status::Custom<Json<InternalErrorMessageResponse>>> {
     match inner_get_blob(did, cid, s3_config, auth).await {
-        Ok(res) => Ok(BlobResponder(res)),
+        Ok(res) => {
+            let (bytes, mime_type) = res;
+            Ok(BlobResponder(
+                bytes.clone(),
+                Header::new("Content-Length", bytes.len().to_string()),
+                Header::new(
+                    "Content-Type",
+                    mime_type.unwrap_or("application/octet-stream".to_string()),
+                ),
+                Header::new("Content-Security-Policy", "default-src 'none'; sandbox"),
+            ))
+        }
         Err(error) => {
             return match error.downcast_ref() {
                 Some(GetObjectError::NoSuchKey(_)) => {
