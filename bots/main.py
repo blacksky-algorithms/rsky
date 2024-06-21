@@ -1,7 +1,7 @@
 import json, requests, re, html, os, datetime, time
 from PIL import Image as PILImage
 from io import BytesIO
-from atproto import Client
+from atproto import Client, models
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,7 +43,7 @@ def get_tweet(tweet_id):
     params = {
         'tweet.fields': ','.join(
             ['attachments', 'author_id', 'created_at', 'id', 'in_reply_to_user_id', 'possibly_sensitive',
-             'public_metrics', 'referenced_tweets', 'source', 'text', 'withheld']),
+             'public_metrics', 'referenced_tweets', 'source', 'text', 'withheld', 'entities']),
         'expansions': ','.join(['author_id', 'attachments.media_keys']),
         'media.fields': ','.join(['duration_ms', 'height', 'media_key', 'preview_image_url', 'type', 'url', 'width'])
     }
@@ -80,18 +80,57 @@ def get_images(urls):
             images.append((buf, len(r.content)))
     return images
 
+def get_image(url):
+    image_tuple = None
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        image = PILImage.open(BytesIO(r.content)).convert('RGB')
+        image.thumbnail(size, PILImage.Resampling.LANCZOS)
+        buf = BytesIO()
+        image.save(buf, format='PNG')
+        image_tuple = (buf, len(r.content))
+    return image_tuple
 
 def parse_images(t):
-    if t.get('includes'):
-        parsed_urls = [m.get('url') for m in t['includes'].get('media',[]) if
+    includes = t.get('includes')
+    if includes:
+        parsed_urls = [m.get('url') for m in includes.get('media',[]) if
                        m.get('type') == 'photo']
-        video_thumbnails = [m.get('preview_image_url') for m in t['includes'].get('media',[]) if
+        video_thumbnails = [m.get('preview_image_url') for m in includes.get('media',[]) if
                             m.get('type') == 'video']
         parsed_urls.extend(video_thumbnails)
         return parsed_urls
     else:
         return []
 
+def get_first(iterable, default=None):
+    if iterable:
+        for item in iterable:
+            return item
+    return default
+
+def parse_embed_url(t, client):
+    entities = t['data'].get('entities')
+    embed = None
+    if entities:
+        parsed_urls = [e for e in entities.get('urls',[])]
+        first_url = get_first(parsed_urls)
+        if first_url and first_url.get('unwound_url') and first_url.get('media_key') is None:
+            first_image = get_first(first_url.get('images'))
+            blob = None
+            if first_image:
+                image_bytes = get_image(first_image['url'])[0].getvalue()
+                blob = client.upload_blob(image_bytes).blob
+
+            external = models.AppBskyEmbedExternal.External(
+                description=first_url['description'],
+                title=first_url['title'],
+                uri=first_url['unwound_url'],
+                thumb=blob
+            )
+            embed = models.AppBskyEmbedExternal.Main(external=external)
+
+    return embed
 
 def remove_twitter_link(txt):
     return re.sub(r'https?://t\.co\S+', '', txt)
@@ -112,6 +151,7 @@ if __name__ == '__main__':
                         tweet = get_tweet(tweet_id)
                         image_urls = parse_images(tweet)
                         list_of_images = get_images(image_urls)
+                        external_url = parse_embed_url(tweet, client)
 
                         if list_of_images:
                             image_bytes = [i[0].getvalue() for i in list_of_images]
@@ -119,6 +159,11 @@ if __name__ == '__main__':
                                 text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
                                 images=image_bytes,
                                 image_alts=[]
+                            )
+                        elif external_url:
+                            client.send_post(
+                                text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
+                                embed=external_url
                             )
                         else:
                             client.send_post(text=html.unescape(remove_twitter_link(tweet['data'].get('text'))))
