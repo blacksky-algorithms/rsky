@@ -160,13 +160,16 @@ if __name__ == '__main__':
                                 images=image_bytes,
                                 image_alts=[]
                             )
+                            print('Made image post for {}'.format(tweet_id))
                         elif external_url:
                             client.send_post(
                                 text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
                                 embed=external_url
                             )
+                            print('Made external url post for {}'.format(tweet_id))
                         else:
                             client.send_post(text=html.unescape(remove_twitter_link(tweet['data'].get('text'))))
+                            print('Made plain text post for {}'.format(tweet_id))
 
                         cached_ids.add(tweet_id)
                         for edit in edit_history:
