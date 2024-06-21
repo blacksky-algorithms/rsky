@@ -1,21 +1,20 @@
 use chrono::{DateTime, Utc};
-use libipld::Cid;
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeReposCommitOperation {
     pub path: String,
     pub action: String,
-    pub cid: Option<Cid>,
+    pub cid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeReposCommit {
     #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
-    pub commit: Cid,
+    pub commit: String,
     #[serde(rename(deserialize = "ops"))]
     pub operations: Vec<SubscribeReposCommitOperation>,
-    pub prev: Option<Cid>,
+    pub prev: Option<String>,
     pub rebase: bool,
     pub repo: String,
     #[serde(rename(deserialize = "seq"))]
@@ -23,6 +22,13 @@ pub struct SubscribeReposCommit {
     pub time: DateTime<Utc>,
     #[serde(rename(deserialize = "tooBig"))]
     pub too_big: bool,
+}
+
+/// Get the current commit CID & revision of the specified repo. Does not require auth.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetLatestCommitOutput {
+    pub cid: String,
+    pub rev: String,
 }
 
 #[derive(Debug, Deserialize)]

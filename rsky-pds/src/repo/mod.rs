@@ -692,7 +692,7 @@ pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) ->
                 r#ref: BlobRef { original: blob },
                 path,
             }],
-            Err(blob_err) => match serde_json::from_value::<RepoRecord>(json) {
+            Err(_) => match serde_json::from_value::<RepoRecord>(json) {
                 Ok(record) => record
                     .into_iter()
                     .flat_map(|(key, item)| {

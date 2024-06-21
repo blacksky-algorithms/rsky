@@ -39,7 +39,7 @@ async fn inner_upload_blob(
         .await?;
 
     if records_for_blob.len() > 0 {
-        let res = actor_store
+        let _ = actor_store
             .blob
             .verify_blob_and_make_permanent(PreparedBlobRef {
                 cid: blobref.get_cid()?,

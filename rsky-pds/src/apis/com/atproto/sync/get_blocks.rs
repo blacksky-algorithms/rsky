@@ -8,7 +8,7 @@ use crate::repo::ActorStore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use libipld::Cid;
-use rocket::http::{Header, Status};
+use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Responder, State};
