@@ -1,3 +1,4 @@
+use crate::car::read_car_bytes;
 use crate::db::establish_connection;
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
@@ -6,9 +7,12 @@ use crate::repo::error::DataStoreError;
 use crate::repo::parse;
 use crate::repo::types::{CommitData, RepoRecord};
 use crate::repo::util::cbor_to_lex_record;
+use crate::storage::RepoRootError::RepoRootNotFoundError;
 use crate::{common, models};
 use anyhow::Result;
+use diesel::dsl::sql;
 use diesel::prelude::*;
+use diesel::sql_types::{Bool, Text};
 use diesel::*;
 use futures::try_join;
 use libipld::cbor::encode::write_null;
@@ -20,6 +24,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use thiserror::Error;
 
 /// Ipld
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -87,6 +92,12 @@ pub struct SqlRepoReader {
     pub did: String, // @TODO: Refactor so SQL Repo Reader reads from one repo
 }
 
+#[derive(Error, Debug)]
+pub enum RepoRootError {
+    #[error("Repo root not found")]
+    RepoRootNotFoundError,
+}
+
 // Basically handles getting ipld blocks from db
 impl SqlRepoReader {
     pub fn new(blocks: Option<BlockMap>, did: String, now: Option<String>) -> Self {
@@ -145,6 +156,69 @@ impl SqlRepoReader {
             blocks,
             missing: missing.to_list(),
         })
+    }
+
+    pub async fn get_car_stream(&self, since: Option<String>) -> Result<Vec<u8>> {
+        match self.get_root().await {
+            None => return Err(anyhow::Error::new(RepoRootNotFoundError)),
+            Some(root) => {
+                let mut car = BlockMap::new();
+                let mut cursor: Option<CidAndRev> = None;
+                let mut write_rows = |rows: Vec<RepoBlock>| -> Result<()> {
+                    for row in rows {
+                        car.set(Cid::from_str(&row.cid)?, row.content);
+                    }
+                    Ok(())
+                };
+                loop {
+                    let res = self.get_block_range(&since, &cursor).await?;
+                    write_rows(res.clone())?;
+                    if let Some(last_row) = res.last() {
+                        cursor = Some(CidAndRev {
+                            cid: Cid::from_str(&last_row.cid)?,
+                            rev: last_row.repo_rev.clone(),
+                        });
+                    } else {
+                        break;
+                    }
+                }
+                read_car_bytes(Some(&root), car).await
+            }
+        }
+    }
+
+    pub async fn get_block_range(
+        &self,
+        since: &Option<String>,
+        cursor: &Option<CidAndRev>,
+    ) -> Result<Vec<RepoBlock>> {
+        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+        let conn = &mut establish_connection()?;
+
+        let mut builder = RepoBlockSchema::repo_block
+            .select(RepoBlock::as_select())
+            .order((RepoBlockSchema::repoRev.desc(), RepoBlockSchema::cid.desc()))
+            .limit(500)
+            .into_boxed();
+
+        if let Some(cursor) = cursor {
+            // use this syntax to ensure we hit the index
+            builder = builder.filter(
+                sql::<Bool>("((")
+                    .bind(RepoBlockSchema::repoRev)
+                    .sql(", ")
+                    .bind(RepoBlockSchema::cid)
+                    .sql(") < (")
+                    .bind::<Text, _>(cursor.rev.clone())
+                    .sql(", ")
+                    .bind::<Text, _>(cursor.cid.to_string())
+                    .sql("))"),
+            );
+        }
+        if let Some(since) = since {
+            builder = builder.filter(RepoBlockSchema::repoRev.gt(since));
+        }
+        Ok(builder.load(conn)?)
     }
 
     pub fn get_bytes(&mut self, cid: &Cid) -> Result<Vec<u8>> {
