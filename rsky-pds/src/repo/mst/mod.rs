@@ -1132,9 +1132,9 @@ impl MST {
         Ok(())
     }
 
-    pub fn cids_for_path(&mut self, key: &String) -> Result<Vec<Cid>> {
+    pub fn cids_for_path(&mut self, key: String) -> Result<Vec<Cid>> {
         let mut cids: Vec<Cid> = vec![self.get_pointer()?];
-        let index = self.find_gt_or_equal_leaf_index(key)?;
+        let index = self.find_gt_or_equal_leaf_index(&key)?;
         let found = self.at_index(index)?;
         if let Some(NodeEntry::Leaf(l)) = found {
             if l.key == *key {

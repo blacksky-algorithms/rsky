@@ -870,5 +870,6 @@ pub mod error;
 pub mod mst;
 pub mod parse;
 pub mod record;
+pub mod sync;
 pub mod types;
 pub mod util;
