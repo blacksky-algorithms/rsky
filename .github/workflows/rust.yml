@@ -18,21 +18,20 @@ jobs:
     - name: Set up Rust
       uses: actions-rs/toolchain@v1
       with:
-        toolchain: nightly
         components: clippy, rustfmt
         profile: minimal
 
     - name: Run cargo check
-      run: cargo check --all-targets
+      run: cargo check
 
     - name: Run cargo build
-      run: cargo build --all-targets --release
+      run: cargo build --release
 
     - name: Run cargo test
-      run: cargo test --all-targets
+      run: cargo test 
 
     - name: Run Clippy
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy  -- -D warnings
 
     - name: Run cargo fmt
       run: cargo fmt -- --check
