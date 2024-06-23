@@ -133,7 +133,6 @@ impl SqlRepoReader {
 
         let _: Vec<_> = missing_strings
             .chunks(500)
-            .into_iter()
             .map(|batch| {
                 let _: Vec<_> = RepoBlockSchema::repo_block
                     .filter(RepoBlockSchema::cid.eq_any(batch))
@@ -160,7 +159,7 @@ impl SqlRepoReader {
 
     pub async fn get_car_stream(&self, since: Option<String>) -> Result<Vec<u8>> {
         match self.get_root().await {
-            None => return Err(anyhow::Error::new(RepoRootNotFoundError)),
+            None => Err(anyhow::Error::new(RepoRootNotFoundError)),
             Some(root) => {
                 let mut car = BlockMap::new();
                 let mut cursor: Option<CidAndRev> = None;
@@ -262,7 +261,7 @@ impl SqlRepoReader {
         check: impl Fn(&'_ CborValue) -> bool,
     ) -> Result<ObjAndBytes> {
         let bytes = self.get_bytes(cid)?;
-        Ok(parse::parse_obj_by_kind(bytes, *cid, check)?)
+        parse::parse_obj_by_kind(bytes, *cid, check)
     }
 
     pub fn read_obj_and_bytes(
@@ -285,7 +284,7 @@ impl SqlRepoReader {
 
     pub fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
         let bytes = self.get_bytes(cid)?;
-        Ok(cbor_to_lex_record(bytes)?)
+        cbor_to_lex_record(bytes)
     }
 
     // Transactors
@@ -348,7 +347,7 @@ impl SqlRepoReader {
     }
 
     pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
-        if cids.len() < 1 {
+        if cids.is_empty() {
             return Ok(());
         }
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;

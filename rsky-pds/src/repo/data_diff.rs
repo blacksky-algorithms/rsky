@@ -117,7 +117,7 @@ impl DataDiff {
         self.new_leaf_cids.add(cid);
     }
 
-    pub fn leaf_delete(&mut self, key: &String, cid: Cid) -> () {
+    pub fn leaf_delete(&mut self, key: &String, cid: Cid) {
         self.deletes.insert(
             key.clone(),
             DataDelete {
@@ -132,13 +132,12 @@ impl DataDiff {
         }
     }
 
-    pub fn tree_add(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
+    pub fn tree_add(&mut self, cid: Cid, bytes: Vec<u8>) {
         if self.removed_cids.has(cid) {
             self.removed_cids.delete(cid);
         } else {
             self.new_mst_blocks.set(cid, bytes);
         }
-        ()
     }
 
     pub fn tree_delete(&mut self, cid: Cid) -> Result<()> {

@@ -90,7 +90,7 @@ pub async fn hash_app_password(did: &String, password: &String) -> Result<String
 /// 1234-abcd-5678-efgh
 pub async fn create_app_password(did: String, name: String) -> Result<CreateAppPasswordOutput> {
     let str = &get_random_str()[0..16].to_lowercase();
-    let chunks = vec![&str[0..4], &str[4..8], &str[8..12], &str[12..16]];
+    let chunks = [&str[0..4], &str[4..8], &str[8..12], &str[12..16]];
     let password = chunks.join("-");
     let password_encrypted = hash_app_password(&did, &password).await?;
 

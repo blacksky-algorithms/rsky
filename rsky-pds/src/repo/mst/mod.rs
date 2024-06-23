@@ -696,9 +696,9 @@ impl MST {
             (Some(start), Some(end)) => {
                 // Adapted from Javascript Array.prototype.slice()
                 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/slice
-                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                let start: usize = if start < 0 && start >= (-entry_len) {
                     (start + entry_len) as usize
-                } else if start < (-1 * entry_len) {
+                } else if start < (-entry_len) {
                     0
                 } else if start >= entry_len {
                     return Ok(vec![]);
@@ -708,7 +708,7 @@ impl MST {
 
                 let end: usize = if end < 0 && end >= (-1 * entry_len) {
                     (end + entry_len) as usize
-                } else if end < (-1 * entry_len) {
+                } else if end < (-entry_len) {
                     0
                 } else if end >= entry_len {
                     entries.len()
@@ -721,9 +721,9 @@ impl MST {
                 Ok(entries[start..end].to_vec())
             }
             (Some(start), None) => {
-                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                let start: usize = if start < 0 && start >= (-entry_len) {
                     (start + entry_len) as usize
-                } else if start < (-1 * entry_len) {
+                } else if start < (-entry_len) {
                     0
                 } else if start >= entry_len {
                     return Ok(vec![]);
@@ -733,9 +733,9 @@ impl MST {
                 Ok(entries[start..].to_vec())
             }
             (None, Some(end)) => {
-                let end: usize = if end < 0 && end >= (-1 * entry_len) {
+                let end: usize = if end < 0 && end >= (-entry_len) {
                     (end + entry_len) as usize
-                } else if end < (-1 * entry_len) {
+                } else if end < (-entry_len) {
                     0
                 } else if end >= entry_len {
                     entries.len()
