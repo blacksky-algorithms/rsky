@@ -8,9 +8,7 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -24,9 +22,17 @@ jobs:
     - name: Run cargo build
       run: cargo build --release
 
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
     - name: Run cargo test
       run: cargo test 
 
+  clippy:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
     - name: Run Clippy
       run: cargo clippy  -- -D warnings
 
