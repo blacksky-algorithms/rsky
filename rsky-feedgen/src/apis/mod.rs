@@ -878,7 +878,7 @@ pub async fn get_cursor(
 ) -> Result<SubState, PathUnknownErrorMessageResponse> {
     use crate::schema::sub_state::dsl::*;
 
-    connection
+    let result = connection
         .run(move |conn| {
             let mut result = sub_state
                 .filter(service.eq(service_))
@@ -898,5 +898,7 @@ pub async fn get_cursor(
                 Err(not_found_error)
             }
         })
-        .await
+        .await;
+
+    result
 }

@@ -2,7 +2,7 @@ use crate::models::JwtParts;
 use base64::{engine::general_purpose, Engine as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn verify_jwt(jwtstr: &str, service_did: &str) -> Result<String, String> {
+pub fn verify_jwt(jwtstr: &String, service_did: &String) -> Result<String, String> {
     let parts = jwtstr.split(".").map(String::from).collect::<Vec<_>>();
 
     if parts.len() != 3 {

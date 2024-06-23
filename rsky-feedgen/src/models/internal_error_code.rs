@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum InternalErrorCode {
     #[serde(rename = "no_internal_error")]
@@ -26,21 +24,21 @@ pub enum InternalErrorCode {
     DataLoss,
 }
 
-impl Display for InternalErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NoInternalError => "no_internal_error",
-            Self::InternalError => "internal_error",
-            Self::Cancelled => "cancelled",
-            Self::DeadlineExceeded => "deadline_exceeded",
-            Self::AlreadyExists => "already_exists",
-            Self::ResourceExhausted => "resource_exhausted",
-            Self::FailedPrecondition => "failed_precondition",
-            Self::Aborted => "aborted",
-            Self::OutOfRange => "out_of_range",
-            Self::Unavailable => "unavailable",
-            Self::DataLoss => "data_loss",
-        })
+impl ToString for InternalErrorCode {
+    fn to_string(&self) -> String {
+        match self {
+            Self::NoInternalError => String::from("no_internal_error"),
+            Self::InternalError => String::from("internal_error"),
+            Self::Cancelled => String::from("cancelled"),
+            Self::DeadlineExceeded => String::from("deadline_exceeded"),
+            Self::AlreadyExists => String::from("already_exists"),
+            Self::ResourceExhausted => String::from("resource_exhausted"),
+            Self::FailedPrecondition => String::from("failed_precondition"),
+            Self::Aborted => String::from("aborted"),
+            Self::OutOfRange => String::from("out_of_range"),
+            Self::Unavailable => String::from("unavailable"),
+            Self::DataLoss => String::from("data_loss"),
+        }
     }
 }
 

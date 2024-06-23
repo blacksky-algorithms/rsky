@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum NotFoundErrorCode {
     #[serde(rename = "not_found_error")]
@@ -10,13 +8,13 @@ pub enum NotFoundErrorCode {
     Unimplemented,
 }
 
-impl Display for NotFoundErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NotFoundError => "not_found_error",
-            Self::UndefinedEndpoint => "undefined_endpoint",
-            Self::Unimplemented => "unimplemented",
-        })
+impl ToString for NotFoundErrorCode {
+    fn to_string(&self) -> String {
+        match self {
+            Self::NotFoundError => String::from("not_found_error"),
+            Self::UndefinedEndpoint => String::from("undefined_endpoint"),
+            Self::Unimplemented => String::from("unimplemented"),
+        }
     }
 }
 

@@ -10,7 +10,7 @@ pub fn verify_did_sig(
     sig: &[u8],
     opts: Option<VerifyOptions>,
 ) -> Result<bool> {
-    let prefixed_bytes = extract_prefixed_bytes(extract_multikey(did)?)?;
+    let prefixed_bytes = extract_prefixed_bytes(extract_multikey(&did)?)?;
     if !has_prefix(&prefixed_bytes, &SECP256K1_DID_PREFIX.to_vec()) {
         bail!("Not a secp256k1 did:key: {did}");
     }

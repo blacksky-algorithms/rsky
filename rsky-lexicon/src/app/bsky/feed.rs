@@ -35,7 +35,7 @@ pub enum Media {
         deserialize = "app.bsky.embed.external",
         serialize = "app.bsky.embed.external"
     ))]
-    External(Box<External>),
+    External(External),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -61,7 +61,7 @@ pub enum Embeds {
         alias = "app.bsky.embed.external",
         alias = "app.bsky.embed.external#main"
     )]
-    External(Box<External>),
+    External(External),
 
     #[serde(rename(
         deserialize = "app.bsky.embed.record",
@@ -193,7 +193,7 @@ pub struct NotFoundPost {
 #[serde(tag = "$type")]
 pub enum ThreadViewPostEnum {
     #[serde(rename(deserialize = "app.bsky.feed.defs#threadViewPost"))]
-    ThreadViewPost(Box<ThreadViewPost>),
+    ThreadViewPost(ThreadViewPost),
     #[serde(rename(deserialize = "app.bsky.feed.defs#notFoundPost"))]
     NotFoundPost(NotFoundPost),
 }

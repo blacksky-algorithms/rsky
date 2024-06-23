@@ -145,7 +145,6 @@ impl DidCache {
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        self.cache.clear();
-        Ok(())
+        Ok(self.cache.clear())
     }
 }

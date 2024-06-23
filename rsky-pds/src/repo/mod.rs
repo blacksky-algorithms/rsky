@@ -67,7 +67,6 @@ pub struct PrepareDeleteOpts {
     pub swap_cid: Option<Cid>,
 }
 
-#[allow(dead_code)]
 pub struct CommitRecord {
     collection: String,
     rkey: String,
