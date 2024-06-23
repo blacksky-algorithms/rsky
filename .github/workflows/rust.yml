@@ -13,13 +13,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        components: clippy, rustfmt
-        profile: minimal
+      uses: actions/checkout@v4
 
     - name: Run cargo check
       run: cargo check
