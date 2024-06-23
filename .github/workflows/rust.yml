@@ -15,6 +15,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
     - name: Run cargo check
       run: cargo check
 
