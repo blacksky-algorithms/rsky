@@ -26,6 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
     - name: Run cargo test
       run: cargo test 
 
@@ -33,6 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
     - name: Run Clippy
       run: cargo clippy  -- -D warnings
 
