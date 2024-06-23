@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use libipld::Cid;
 
 #[derive(Debug, Deserialize)]
 pub struct SubscribeReposCommitOperation {
     pub path: String,
     pub action: String,
-    pub cid: Option<String>,
+    pub cid: Option<Cid>,
 }
 
 #[derive(Debug, Deserialize)]

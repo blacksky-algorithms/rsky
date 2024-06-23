@@ -49,13 +49,13 @@ impl<'r> FromRequest<'r> for ApiKey<'r> {
         if let Ok(token_result) = env::var("RSKY_API_KEY") {
             token = token_result;
         } else {
-            return Outcome::Failure((Status::BadRequest, ApiKeyError::Invalid));
+            return Outcome::Error((Status::BadRequest, ApiKeyError::Invalid));
         }
 
         match req.headers().get_one("X-RSKY-KEY") {
-            None => Outcome::Failure((Status::Unauthorized, ApiKeyError::Missing)),
+            None => Outcome::Error((Status::Unauthorized, ApiKeyError::Missing)),
             Some(key) if key == token => Outcome::Success(ApiKey(key)),
-            Some(_) => Outcome::Failure((Status::Unauthorized, ApiKeyError::Invalid)),
+            Some(_) => Outcome::Error((Status::Unauthorized, ApiKeyError::Invalid)),
         }
     }
 }
@@ -67,9 +67,9 @@ impl<'r> FromRequest<'r> for AccessToken {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         match req.headers().get_one("Authorization") {
-            None => Outcome::Failure((Status::Unauthorized, AccessTokenError::Missing)),
+            None => Outcome::Error((Status::Unauthorized, AccessTokenError::Missing)),
             Some(token) if !token.starts_with("Bearer ") => {
-                Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
             }
             Some(token) => {
                 println!("Visited by {token:?}");
@@ -80,11 +80,11 @@ impl<'r> FromRequest<'r> for AccessToken {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
                         Err(error) => {
                             eprintln!("Error decoding jwt. {error:?}");
-                            Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                            Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
                         }
                     }
                 } else {
-                    Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                    Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
                 }
             }
         }

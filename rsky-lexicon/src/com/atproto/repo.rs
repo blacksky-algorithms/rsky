@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -17,6 +19,12 @@ pub struct Record {
 pub struct Link {
     #[serde(rename(deserialize = "$link", serialize = "$link"))]
     pub link: String,
+}
+
+impl Display for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.link.as_str())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

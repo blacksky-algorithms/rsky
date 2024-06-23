@@ -13,7 +13,7 @@ documentation = "https://docs.rs/rsky-pds"
 [dependencies]
 # for vendored iroh-car
 integer-encoding = { version = "3", features = ["tokio_async"] }
-multihash = "0.16"
+multihash = "0.18"
 tokio = { version = "1.28.2",features = ["full"] }
 
 # for everything else
