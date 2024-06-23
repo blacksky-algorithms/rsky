@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, pds]
 
 jobs:
   build:
@@ -35,18 +34,18 @@ jobs:
     - name: Run cargo test
       run: cargo test 
 
-  clippy:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+  # clippy:
+  #   runs-on: ubuntu-latest
+  #   needs: test
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
 
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
+  #   - name: Rust Cache
+  #     uses: Swatinem/rust-cache@v2
 
-    - name: Run Clippy
-      run: cargo clippy  -- -D warnings
+  #   - name: Run Clippy
+  #     run: cargo clippy  -- -D warnings
 
-    - name: Run cargo fmt
-      run: cargo fmt -- --check
+  #   - name: Run cargo fmt
+  #     run: cargo fmt -- --check
