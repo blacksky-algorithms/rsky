@@ -144,8 +144,7 @@ impl HandleResolver {
                             None => vec![],
                             Some(backup_nameserver_ips) => backup_nameserver_ips.clone(),
                         };
-                        backup_nameserver_ips
-                            .append(&mut response.iter().map(|ip| ip).collect::<Vec<IpAddr>>());
+                        backup_nameserver_ips.append(&mut response.iter().collect::<Vec<IpAddr>>());
                         self.backup_nameserver_ips = Some(backup_nameserver_ips);
                     }
                 }

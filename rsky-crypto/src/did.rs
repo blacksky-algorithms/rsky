@@ -26,9 +26,7 @@ pub fn parse_multikey(multikey: String) -> Result<ParsedMultikey> {
 }
 
 pub fn format_multikey(jwt_alg: String, key_bytes: Vec<u8>) -> Result<String> {
-    let plugin = PLUGINS
-        .into_iter()
-        .find(|p| p.jwt_alg.to_string() == jwt_alg);
+    let plugin = PLUGINS.into_iter().find(|p| *p.jwt_alg == jwt_alg);
     if let Some(plugin) = plugin {
         let prefixed_bytes: Vec<u8> =
             [plugin.prefix.to_vec(), (plugin.compress_pubkey)(key_bytes)?].concat();

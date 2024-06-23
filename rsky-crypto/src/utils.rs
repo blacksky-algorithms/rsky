@@ -16,6 +16,6 @@ pub fn extract_prefixed_bytes(multikey: String) -> Result<Vec<u8>> {
     Ok(encode(Base::Base58Btc, &multikey[BASE58_MULTIBASE_PREFIX.len()..]).into_bytes())
 }
 
-pub fn has_prefix(bytes: &Vec<u8>, prefix: &Vec<u8>) -> bool {
+pub fn has_prefix(bytes: &[u8], prefix: &Vec<u8>) -> bool {
     *prefix == bytes[0..prefix.len()]
 }
