@@ -1,6 +1,7 @@
 use crate::common::encode_uri_component;
 use crate::plc::operations::update_handle_op;
 use crate::plc::types::{CompatibleOp, OpOrTombstone};
+use crate::APP_USER_AGENT;
 use anyhow::{bail, Result};
 use secp256k1::SecretKey;
 use serde::de::DeserializeOwned;
@@ -24,7 +25,9 @@ impl Client {
         url: String,
         params: Option<Vec<(&str, String)>>,
     ) -> Result<T> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent(APP_USER_AGENT)
+            .build()?;
         let mut builder = client
             .get(url)
             .header("Connection", "Keep-Alive")
@@ -37,7 +40,9 @@ impl Client {
     }
 
     async fn send_operation(&self, did: &String, op: &OpOrTombstone) -> Result<()> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent(APP_USER_AGENT)
+            .build()?;
         let response = client
             .post(self.post_op_url(did))
             .json(op)

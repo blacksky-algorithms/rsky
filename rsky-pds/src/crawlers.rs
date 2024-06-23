@@ -1,4 +1,5 @@
 use crate::common::time::MINUTE;
+use crate::APP_USER_AGENT;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use std::time::SystemTime;
@@ -36,7 +37,9 @@ impl Crawlers {
         }
         let _ = stream::iter(self.crawlers.clone())
             .then(|service: String| async move {
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder()
+                    .user_agent(APP_USER_AGENT)
+                    .build()?;
                 let record = CrawlerRequest {
                     hostname: service.clone(),
                 };

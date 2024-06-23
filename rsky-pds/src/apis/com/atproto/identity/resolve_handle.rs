@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::ActorAccount;
 use crate::account_manager::AccountManager;
 use crate::common::env::{env_list, env_str};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
-use crate::SharedIdResolver;
+use crate::{SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -14,7 +14,9 @@ async fn try_resolve_from_app_view(handle: &String) -> Result<Option<String>> {
     match env_str("PDS_BSKY_APP_VIEW_URL") {
         None => Ok(None),
         Some(bsky_app_view_url) => {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .build()?;
             let params = Some(vec![("handle", handle)]);
             let res = client
                 .get(format!(

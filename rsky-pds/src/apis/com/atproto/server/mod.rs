@@ -2,7 +2,7 @@ extern crate unsigned_varint;
 use crate::common::env::{env_int, env_str};
 use crate::common::sign::atproto_sign;
 use crate::models::*;
-use crate::plc;
+use crate::{plc, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use data_encoding::BASE32;
 use diesel::prelude::*;
@@ -208,7 +208,9 @@ pub async fn create_did_and_plc_op(
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
         did_plc
     );
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent(APP_USER_AGENT)
+        .build()?;
     let response = client
         .post(plc_url)
         .json(&create_op)
