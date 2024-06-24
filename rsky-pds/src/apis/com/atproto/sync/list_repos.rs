@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, ActorAccount, FormattedAccountStatus,
 };
-use crate::common::time::{from_micros_to_utc, from_str_to_millis};
+use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
-use diesel::QueryDsl;
+use diesel::{debug_query, pg, QueryDsl};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -66,7 +66,7 @@ impl TimeDidKeySet {
     }
 
     pub fn cursor_to_labeled_result(&self, cursor: Cursor) -> Result<Cursor> {
-        let primary_date = from_micros_to_utc(
+        let primary_date = from_millis_to_utc(
             cursor
                 .primary
                 .parse::<i64>()
@@ -264,7 +264,7 @@ async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<
         repos,
     })
 }
-// @TODO: FIX CURSOR - SHOULD RETURN NOTHING
+
 #[rocket::get("/xrpc/com.atproto.sync.listRepos?<limit>&<cursor>")]
 pub async fn list_repos(
     limit: Option<i64>,

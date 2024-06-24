@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::invite::{get_invite_codes_uses, CodeDetail};
 use crate::auth_verifier::Moderator;
-use crate::common::time::{from_micros_to_utc, from_str_to_millis};
+use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
 use crate::models::{models, InternalErrorCode, InternalErrorMessageResponse};
@@ -66,7 +66,7 @@ impl TimeCodeKeySet {
     }
 
     pub fn cursor_to_labeled_result(&self, cursor: Cursor) -> Result<Cursor> {
-        let primary_date = from_micros_to_utc(
+        let primary_date = from_millis_to_utc(
             cursor
                 .primary
                 .parse::<i64>()
@@ -232,7 +232,7 @@ impl UseCodeKeyset {
     }
 
     pub fn cursor_to_labeled_result(&self, cursor: Cursor) -> Result<Cursor> {
-        let primary_date = from_micros_to_utc(
+        let primary_date = from_millis_to_utc(
             cursor
                 .primary
                 .parse::<i64>()

@@ -45,3 +45,11 @@ pub fn from_micros_to_utc(micros: i64) -> DateTime<UtcOffset> {
 pub fn from_micros_to_str(micros: i64) -> String {
     format!("{}", from_micros_to_utc(micros).format(RFC3339_VARIANT))
 }
+
+pub fn from_millis_to_utc(millis: i64) -> DateTime<UtcOffset> {
+    DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_millis(millis).unwrap(), Utc)
+}
+
+pub fn from_millis_to_str(millis: i64) -> String {
+    format!("{}", from_millis_to_utc(millis).format(RFC3339_VARIANT))
+}
