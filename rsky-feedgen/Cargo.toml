@@ -16,13 +16,13 @@ rocket = { version = "=0.5.0", features = ["json"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_bytes = "0.11.9"
-serde_ipld_dagcbor = "0.3.0"
+serde_ipld_dagcbor = "0.6.1"
 serde_json = "1.0.96"
 serde_cbor = "0.11.2"
 diesel = { version = "2.1.0", features = ["postgres"] }
 dotenvy = "0.15"
 chrono = "0.4.26"
-cid = { version = "0.10.1", features = ["serde-codec"] }
+cid = { version = "0.11.1", features = ["serde-codec"] }
 regex = "1.8.4"
 lazy_static = "1.4.0"
 base64 = "0.21.2"
