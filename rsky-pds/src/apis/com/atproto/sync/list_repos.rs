@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
-use diesel::{debug_query, pg, QueryDsl};
+use diesel::{pg, QueryDsl};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
