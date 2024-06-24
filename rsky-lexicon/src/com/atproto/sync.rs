@@ -57,6 +57,13 @@ pub struct ListBlobsOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListReposOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub repos: Vec<RefRepo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoStatus {
     Takedown,
@@ -85,4 +92,19 @@ pub enum SubscribeRepos {
     Commit(SubscribeReposCommit),
     Handle(SubscribeReposHandle),
     Tombstone(SubscribeReposTombstone),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefRepo {
+    pub did: String,
+    // Current repo commit CID
+    pub head: String,
+    pub rev: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    // If active=false, this optional field indicates a possible reason for why the account
+    // is not active. If active=false and no status is supplied, then the host makes no claim for
+    // why the repository is no longer being hosted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RepoStatus>,
 }
