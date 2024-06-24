@@ -47,6 +47,15 @@ pub struct GetRepoStatusOutput {
     pub rev: Option<String>,
 }
 
+/// List blob CIDs for an account, since some repo revision. Does not require auth;
+/// implemented by PDS
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListBlobsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub cids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoStatus {

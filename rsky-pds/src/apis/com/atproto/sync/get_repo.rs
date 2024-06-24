@@ -6,7 +6,6 @@ use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
-use libipld::Cid;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -21,7 +20,7 @@ async fn get_car_stream(
     did: String,
     since: Option<String>,
 ) -> Result<Vec<u8>> {
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
     match actor_store.storage.get_car_stream(since).await {
         Err(_) => bail!("Could not find repo for DID: {did}"),
         Ok(carstream) => Ok(carstream),

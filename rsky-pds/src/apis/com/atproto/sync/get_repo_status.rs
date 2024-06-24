@@ -19,8 +19,7 @@ async fn inner_get_repo(did: String, s3_config: &State<SdkConfig>) -> Result<Get
 
     let mut rev: Option<String> = None;
     if active {
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+        let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
         let root = actor_store.storage.get_root_detailed().await?;
         rev = Some(root.rev);
     }

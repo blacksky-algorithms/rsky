@@ -41,6 +41,12 @@ pub struct ListMissingBlobsOpts {
     pub limit: u16,
 }
 
+pub struct ListBlobsOpts {
+    pub since: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
 pub struct GetBlobOutput {
     pub size: i32,
     pub mime_type: Option<String>,
@@ -426,6 +432,48 @@ impl BlobReader {
                 record_uri: row.record_uri,
             })
             .collect())
+    }
+
+    pub async fn list_blobs(&self, opts: ListBlobsOpts) -> Result<Vec<String>> {
+        use crate::schema::pds::record::dsl as RecordSchema;
+        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
+        let conn = &mut establish_connection()?;
+        let ListBlobsOpts {
+            since,
+            cursor,
+            limit,
+        } = opts;
+
+        let res: Vec<String> = if let Some(since) = since {
+            let mut builder = RecordBlobSchema::record_blob
+                .inner_join(
+                    RecordSchema::record.on(RecordSchema::uri.eq(RecordBlobSchema::recordUri)),
+                )
+                .filter(RecordSchema::repoRev.gt(&since))
+                .select(RecordBlobSchema::blobCid)
+                .distinct()
+                .order(RecordBlobSchema::blobCid.asc())
+                .limit(limit as i64)
+                .into_boxed();
+
+            if let Some(cursor) = cursor {
+                builder = builder.filter(RecordBlobSchema::blobCid.gt(cursor));
+            }
+            builder.load(conn)?
+        } else {
+            let mut builder = RecordBlobSchema::record_blob
+                .select(RecordBlobSchema::blobCid)
+                .distinct()
+                .order(RecordBlobSchema::blobCid.asc())
+                .limit(limit as i64)
+                .into_boxed();
+
+            if let Some(cursor) = cursor {
+                builder = builder.filter(RecordBlobSchema::blobCid.gt(cursor));
+            }
+            builder.load(conn)?
+        };
+        Ok(res)
     }
 
     pub async fn get_blob_takedown_status(&self, cid: Cid) -> Result<Option<StatusAttr>> {
