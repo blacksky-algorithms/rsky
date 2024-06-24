@@ -40,6 +40,12 @@ pub enum AccountStatus {
     Deactivated,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct FormattedAccountStatus {
+    pub active: bool,
+    pub status: Option<AccountStatus>,
+}
+
 #[derive(Debug)]
 pub struct GetAccountAdminStatusOutput {
     pub takedown: StatusAttr,
@@ -394,5 +400,26 @@ pub async fn get_account_admin_status(did: &String) -> Result<Option<GetAccountA
                 deactivated,
             }))
         }
+    }
+}
+
+pub fn format_account_status(account: Option<ActorAccount>) -> FormattedAccountStatus {
+    match account {
+        None => FormattedAccountStatus {
+            active: false,
+            status: Some(AccountStatus::Deleted),
+        },
+        Some(got) if got.takedown_ref.is_some() => FormattedAccountStatus {
+            active: false,
+            status: Some(AccountStatus::Takendown),
+        },
+        Some(got) if got.deactivated_at.is_some() => FormattedAccountStatus {
+            active: false,
+            status: Some(AccountStatus::Deactivated),
+        },
+        _ => FormattedAccountStatus {
+            active: true,
+            status: None,
+        },
     }
 }

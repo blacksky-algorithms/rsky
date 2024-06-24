@@ -194,11 +194,10 @@ impl AccountManager {
             }),
         )
         .await?;
-        match got {
-            None => Ok(AccountStatus::Deleted),
-            Some(got) if got.takedown_ref.is_some() => Ok(AccountStatus::Takendown),
-            Some(got) if got.deactivated_at.is_some() => Ok(AccountStatus::Deactivated),
-            _ => Ok(AccountStatus::Active),
+        let res = account::format_account_status(got);
+        match res.active {
+            true => Ok(AccountStatus::Active),
+            false => Ok(res.status.expect("Account status not properly formatted.")),
         }
     }
 

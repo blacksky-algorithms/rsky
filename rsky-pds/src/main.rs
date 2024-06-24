@@ -219,6 +219,7 @@ async fn rocket() -> _ {
                 com::atproto::sync::get_latest_commit::get_latest_commit,
                 com::atproto::sync::get_record::get_record,
                 com::atproto::sync::get_repo::get_repo,
+                com::atproto::sync::get_repo_status::get_repo_status,
                 com::atproto::sync::list_blobs::list_blobs,
                 com::atproto::sync::list_repos::list_repos,
                 com::atproto::sync::subscribe_repos::subscribe_repos,
