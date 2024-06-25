@@ -12,8 +12,13 @@ use rocket_sync_db_pools::database;
 use rsky_identity::IdResolver;
 use tokio::sync::RwLock;
 
-const URL: &'static str = &*env!("CARGO_PKG_HOMEPAGE").replace("https://", "");
-static APP_USER_AGENT: &str = concat!(URL, "@", env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
+static APP_USER_AGENT: &str = format!(
+    "{}@{}/{}",
+    env!("CARGO_PKG_HOMEPAGE").replace("https://", ""),
+    env!("CARGO_PKG_NAME"),
+    env!("CARGO_PKG_VERSION")
+)
+.as_str();
 
 #[database("pg_db")]
 pub struct DbConn(PgConnection);
