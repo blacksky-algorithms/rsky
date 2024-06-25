@@ -1,12 +1,12 @@
 [package]
 name = "rsky-identity"
 version = "0.1.0"
-authors = ["him@rudyfraser.com"]
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust library for decentralized identities in atproto using DIDs and handles."
 license = "Apache-2.0"
 edition = "2021"
 publish = false
-homepage = "https://github.com/blacksky-algorithms/rsky"
+homepage = "https://blackskyweb.xyz"
 repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-identity"
 documentation = "https://docs.rs/rsky-identity"
 
