@@ -85,3 +85,4 @@ pub async fn delete_all_for_user(did: &String) -> Result<()> {
 }
 
 pub mod events;
+pub mod outbox;

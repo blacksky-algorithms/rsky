@@ -14,6 +14,7 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::data_diff::DataDiff;
 use crate::repo::error::DataStoreError;
 use crate::repo::mst::MST;
+use crate::repo::preference::PreferenceReader;
 use crate::repo::record::RecordReader;
 use crate::repo::types::{
     write_to_op, BlobConstraint, CollectionContents, Commit, CommitData, Ids, Lex, PreparedBlobRef,
@@ -87,6 +88,7 @@ pub struct ActorStore {
     pub storage: SqlRepoReader, // get ipld blocks from db
     pub record: RecordReader,   // get lexicon records from db
     pub blob: BlobReader,       // get blobs
+    pub pref: PreferenceReader, // get preferences
 }
 
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
@@ -96,6 +98,7 @@ impl ActorStore {
         ActorStore {
             storage: SqlRepoReader::new(None, did.clone(), None),
             record: RecordReader::new(did.clone()),
+            pref: PreferenceReader::new(did.clone()),
             did,
             blob: BlobReader::new(blobstore), // Unlike TS impl, just use blob reader vs generator
         }
@@ -869,6 +872,7 @@ pub mod data_diff;
 pub mod error;
 pub mod mst;
 pub mod parse;
+pub mod preference;
 pub mod record;
 pub mod sync;
 pub mod types;

@@ -62,6 +62,85 @@ pub struct TombstoneEvt {
     pub did: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedCommitEvt {
+    pub r#type: String, // 'commit'
+    pub seq: i64,
+    pub time: String,
+    pub evt: CommitEvt,
+}
+
+impl Default for TypedCommitEvt {
+    fn default() -> Self {
+        Self {
+            r#type: "commit".to_string(),
+            seq: 0,
+            time: common::now(),
+            evt: CommitEvt {
+                rebase: false,
+                too_big: false,
+                repo: "".to_string(),
+                commit: Default::default(),
+                prev: None,
+                rev: "".to_string(),
+                since: None,
+                blocks: vec![],
+                ops: vec![],
+                blobs: vec![],
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedHandleEvt {
+    pub r#type: String, // 'handle'
+    pub seq: i64,
+    pub time: String,
+    pub evt: HandleEvt,
+}
+
+impl Default for TypedHandleEvt {
+    fn default() -> Self {
+        Self {
+            r#type: "handle".to_string(),
+            seq: 0,
+            time: common::now(),
+            evt: HandleEvt {
+                did: "".to_string(),
+                handle: "".to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedIdentityEvt {
+    pub r#type: String, // 'identity'
+    pub seq: i64,
+    pub time: String,
+    pub evt: IdentityEvt,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedAccountEvt {
+    pub r#type: String, // 'account'
+    pub seq: i64,
+    pub time: String,
+    pub evt: AccountEvt,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedTombstoneEvt {
+    pub r#type: String, // 'tombstone'
+    pub seq: i64,
+    pub time: String,
+    pub evt: TombstoneEvt,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum SeqEvt {}
+
 pub async fn format_seq_commit(
     did: String,
     commit_data: CommitData,
