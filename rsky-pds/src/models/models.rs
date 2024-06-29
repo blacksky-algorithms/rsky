@@ -38,7 +38,16 @@ pub struct Account {
 }
 
 #[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(table_name = crate::schema::pds::account_pref)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
