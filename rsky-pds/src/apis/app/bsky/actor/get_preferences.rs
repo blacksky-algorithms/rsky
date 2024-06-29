@@ -22,7 +22,8 @@ async fn inner_get_preferences(
     );
     let preferences: Vec<RefPreferences> = actor_store
         .pref
-        .get_preferences(Some("app.bsky".to_string()), auth.scope.unwrap()).await?;
+        .get_preferences(Some("app.bsky".to_string()), auth.scope.unwrap())
+        .await?;
 
     Ok(GetPreferencesOutput { preferences })
 }

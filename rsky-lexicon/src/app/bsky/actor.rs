@@ -5,6 +5,11 @@ pub struct GetPreferencesOutput {
     pub preferences: Vec<RefPreferences>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PutPreferencesInput {
+    pub preferences: Vec<RefPreferences>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Label {
     pub src: String,
@@ -79,6 +84,24 @@ pub enum RefPreferences {
     MutedWordsPref(MutedWordsPref),
     #[serde(rename = "app.bsky.actor.defs#hiddenPostsPref")]
     HiddenPostsPref(HiddenPostsPref),
+}
+
+impl RefPreferences {
+    pub fn get_type(&self) -> String {
+        let r#type = match self {
+            RefPreferences::AdultContentPref(_) => "app.bsky.actor.defs#adultContentPref",
+            RefPreferences::ContentLabelPref(_) => "app.bsky.actor.defs#contentLabelPref",
+            RefPreferences::SavedFeedsPref(_) => "app.bsky.actor.defs#savedFeedsPref",
+            RefPreferences::SavedFeedsPrefV2(_) => "app.bsky.actor.defs#savedFeedsPrefV2",
+            RefPreferences::PersonalDetailsPref(_) => "app.bsky.actor.defs#personalDetailsPref",
+            RefPreferences::FeedViewPref(_) => "app.bsky.actor.defs#feedViewPref",
+            RefPreferences::ThreadViewPref(_) => "app.bsky.actor.defs#threadViewPref",
+            RefPreferences::InterestsPref(_) => "app.bsky.actor.defs#interestsPref",
+            RefPreferences::MutedWordsPref(_) => "app.bsky.actor.defs#mutedWordsPref",
+            RefPreferences::HiddenPostsPref(_) => "app.bsky.actor.defs#hiddenPostsPref",
+        };
+        r#type.to_string()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
