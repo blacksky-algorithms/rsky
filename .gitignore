@@ -20,3 +20,4 @@ NOTE.md
 .env.prod
 .env*.bak
 /venv/
+rustc-*.txt

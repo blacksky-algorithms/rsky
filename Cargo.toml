@@ -1,8 +1,9 @@
 [workspace]
-members = [ "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-lexicon", "rsky-pds"]
+members = [ "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-lexicon", "rsky-pds", "rsky-syntax"]
 resolver = "2"
 
 [workspace.dependencies]
-rsky-lexicon = {path = "rsky-lexicon", version = "0.1.0"}
+rsky-lexicon = {path = "rsky-lexicon", version = "0.2.0"}
 rsky-identity = {path = "rsky-identity", version = "0.1.0"}
 rsky-crypto = {path = "rsky-crypto", version = "0.1.0"}
+rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
