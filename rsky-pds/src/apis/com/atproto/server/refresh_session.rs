@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::{Credentials, Refresh};
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -28,7 +29,7 @@ async fn inner_refresh_session(auth: Refresh) -> Result<RefreshSessionOutput> {
         let rotated = AccountManager::rotate_refresh_token(&token_id).await?;
         if let Some(rotated) = rotated {
             Ok(RefreshSessionOutput {
-                handle: user.handle.unwrap_or("handle.invalid".to_string()),
+                handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
                 did,
                 did_doc: None,
                 access_jwt: rotated.0,

@@ -3,6 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::auth_verifier::Moderator;
 use crate::common::env::env_str;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use futures::try_join;
 use rocket::http::Status;
@@ -26,7 +27,7 @@ async fn inner_get_account_info(did: String) -> Result<AccountView> {
         let manages_own_invites = env_str("PDS_ENTRYWAY_URL").is_none();
         Ok(AccountView {
             did: account.did,
-            handle: account.handle.unwrap_or("handle.invalid".to_owned()),
+            handle: account.handle.unwrap_or(INVALID_HANDLE.to_string()),
             email: account.email,
             indexed_at: account.created_at,
             email_confirmed_at: account.email_confirmed_at,

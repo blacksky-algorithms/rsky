@@ -62,6 +62,7 @@ pub struct DisableInviteCodesOpts {
     pub accounts: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct AccountManager {}
 
 impl AccountManager {

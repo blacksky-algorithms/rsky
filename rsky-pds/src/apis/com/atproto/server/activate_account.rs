@@ -8,6 +8,7 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
 use crate::SharedSequencer;
+use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use rocket::http::Status;
@@ -55,7 +56,7 @@ async fn inner_activate_account(
         lock.sequence_identity_evt(requester.clone()).await?;
         lock.sequence_handle_update(
             requester.clone(),
-            account.handle.unwrap_or("handle.invalid".to_owned()),
+            account.handle.unwrap_or(INVALID_HANDLE.to_string()),
         )
         .await?;
         lock.sequence_commit(requester, commit_data, vec![]).await?;

@@ -54,6 +54,12 @@ pub fn now() -> String {
     format!("{}", dt.format(RFC3339_VARIANT))
 }
 
+pub fn beginning_of_time() -> String {
+    let beginning_of_time = SystemTime::UNIX_EPOCH;
+    let dt: DateTime<UtcOffset> = beginning_of_time.into();
+    format!("{}", dt.format(RFC3339_VARIANT))
+}
+
 pub fn get_random_str() -> String {
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)

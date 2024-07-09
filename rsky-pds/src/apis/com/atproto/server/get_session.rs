@@ -1,6 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AccessStandard;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::INVALID_HANDLE;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -13,7 +14,7 @@ pub async fn get_session(
     let did = auth.access.credentials.unwrap().did.unwrap();
     match AccountManager::get_account(&did, None).await {
         Ok(Some(user)) => Ok(Json(GetSessionOutput {
-            handle: user.handle.unwrap_or("handle.invalid".to_string()),
+            handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
             did: user.did,
             email: user.email,
             did_doc: None,

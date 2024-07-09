@@ -20,6 +20,8 @@ static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
 );
 
+const INVALID_HANDLE: &'static str = "handle.invalid";
+
 #[database("pg_db")]
 pub struct DbConn(PgConnection);
 
@@ -42,7 +44,9 @@ pub mod image;
 pub mod lexicons;
 pub mod mailer;
 pub mod models;
+pub mod pipethrough;
 pub mod plc;
+pub mod read_after_write;
 pub mod repo;
 pub mod schema;
 pub mod sequencer;

@@ -8,7 +8,6 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::str;
 
-// @TODO fix regex
 fn is_valid_chars(input: &str) -> bool {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"^[a-zA-Z0-9_\-:.]*$").unwrap();

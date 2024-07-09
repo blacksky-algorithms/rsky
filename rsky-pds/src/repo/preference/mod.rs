@@ -101,13 +101,18 @@ impl PreferenceReader {
                 }
                 if put_prefs.len() > 0 {
                     insert_into(AccountPrefSchema::account_pref)
-                        .values(put_prefs.into_iter().map(|pref| {
-                            (
-                                AccountPrefSchema::did.eq(&self.did),
-                                AccountPrefSchema::name.eq(pref.name),
-                                AccountPrefSchema::valueJson.eq(pref.value_json),
-                            )
-                        }).collect::<Vec<_>>())
+                        .values(
+                            put_prefs
+                                .into_iter()
+                                .map(|pref| {
+                                    (
+                                        AccountPrefSchema::did.eq(&self.did),
+                                        AccountPrefSchema::name.eq(pref.name),
+                                        AccountPrefSchema::valueJson.eq(pref.value_json),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
                         .execute(conn)?;
                 }
                 Ok(())

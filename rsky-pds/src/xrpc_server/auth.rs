@@ -1,5 +1,7 @@
+use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
 use anyhow::{anyhow, bail, Result};
 use base64ct::{Base64, Encoding};
+use rocket::http::hyper::header::AUTHORIZATION;
 use rsky_crypto::types::VerifyOptions;
 use rsky_crypto::verify::verify_signature;
 use std::time::{Duration, SystemTime};
@@ -15,6 +17,11 @@ pub struct JwtPayload {
     pub iss: String,
     pub aud: String,
     pub exp: u64,
+}
+
+pub async fn create_service_auth_headers(params: ServiceJwtParams) -> Result<(String, String)> {
+    let jwt = create_service_jwt(params).await?;
+    Ok((AUTHORIZATION.as_str().to_string(), format!("Bearer {jwt}")))
 }
 
 pub fn parse_b64_url_to_json(b64: &str) -> Result<JwtPayload> {

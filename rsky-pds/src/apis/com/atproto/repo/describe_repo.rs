@@ -2,6 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
+use crate::INVALID_HANDLE;
 use crate::{common, SharedIdResolver};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -37,7 +38,7 @@ async fn inner_describe_repo(
             let collections = actor_store.record.list_collections().await?;
 
             Ok(DescribeRepoOutput {
-                handle: account.handle.unwrap_or("handle.invalid".to_string()),
+                handle: account.handle.unwrap_or(INVALID_HANDLE.to_string()),
                 did: account.did,
                 did_doc: serde_json::to_value(did_doc)?,
                 collections,

@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::INVALID_HANDLE;
 use anyhow::bail;
 use rocket::http::Status;
 use rocket::response::status;
@@ -56,7 +57,7 @@ async fn inner_create_session(
         Ok(CreateSessionOutput {
             did: user.did,
             did_doc: None,
-            handle: user.handle.unwrap_or("handle.invalid".to_string()),
+            handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
             email: user.email,
             email_confirmed: Some(user.email_confirmed_at.is_some()),
             access_jwt,
