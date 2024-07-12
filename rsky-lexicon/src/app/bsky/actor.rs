@@ -1,40 +1,59 @@
+use crate::app::bsky::graph::ListViewBasic;
+use crate::com::atproto::label::{Label, SelfLabels};
+use crate::com::atproto::repo::{Blob, StrongRef};
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetPreferencesOutput {
     pub preferences: Vec<RefPreferences>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PutPreferencesInput {
     pub preferences: Vec<RefPreferences>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Label {
-    pub src: String,
-    pub uri: String,
-    pub val: String,
-    pub neg: bool,
-    pub cts: DateTime<Utc>,
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "app.bsky.actor.profile")]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    /// Small image to be displayed next to posts from account. AKA, 'profile picture'
+    pub avatar: Option<Blob>,
+    /// Larger horizontal image to display behind profile view.
+    pub banner: Option<Blob>,
+    pub labels: Option<ProfileLabels>,
+    pub joined_via_starter_pack: Option<StrongRef>,
+    pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+pub enum ProfileLabels {
+    #[serde(rename = "com.atproto.label.defs#selfLabels")]
+    SelfLabels(SelfLabels),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileViewBasic {
     pub did: String,
     pub handle: String,
-    #[serde(rename(deserialize = "displayName"))]
     pub display_name: Option<String>,
     pub avatar: Option<String>,
-    pub labels: Vec<Label>,
-    pub indexed_at: Option<String>,
+    pub associated: Option<RefProfileAssociated>,
+    pub viewer: Option<ViewerState>,
+    pub labels: Option<Vec<Label>>,
+    pub created_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileView {
     pub did: String,
     pub handle: String,
-    #[serde(rename(deserialize = "displayName"))]
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub avatar: Option<String>,
@@ -42,26 +61,68 @@ pub struct ProfileView {
     pub indexed_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileViewDetailed {
     pub did: String,
     pub handle: String,
-    #[serde(rename(deserialize = "displayName"))]
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub avatar: Option<String>,
     pub banner: Option<String>,
-    #[serde(rename(deserialize = "followersCount"))]
     pub followers_count: Option<usize>,
-    #[serde(rename(deserialize = "followsCount"))]
     pub follows_count: Option<usize>,
-    #[serde(rename(deserialize = "postsCount"))]
     pub posts_count: Option<usize>,
     pub labels: Vec<Label>,
     pub indexed_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefProfileAssociated {
+    pub lists: Option<u64>,
+    pub feedgens: Option<u64>,
+    pub starter_packs: Option<u64>,
+    pub labeler: Option<bool>,
+    pub chat: Option<RefProfileAssociatedChat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefProfileAssociatedChat {
+    pub allow_incoming: Option<AssociatedChatAllowIncoming>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssociatedChatAllowIncoming {
+    All,
+    None,
+    Following,
+}
+
+/// Metadata about the requesting account's relationship with the subject account.
+/// Only has meaningful content for authed requests.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerState {
+    pub muted: Option<bool>,
+    pub muted_by_list: Option<ListViewBasic>,
+    pub blocked_by: Option<bool>,
+    pub blocking_by_list: Option<ListViewBasic>,
+    pub following: Option<String>,
+    pub followed_by: Option<String>,
+    pub known_followers: Option<KnownFollowers>,
+}
+
+/// The subject's followers whom you also follow
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct KnownFollowers {
+    pub count: usize,
+    pub followers: Vec<ProfileViewBasic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "$type")]
 pub enum RefPreferences {
     #[serde(rename = "app.bsky.actor.defs#adultContentPref")]
@@ -104,16 +165,16 @@ impl RefPreferences {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContentLabelPref {
     // Which labeler does this preference apply to? If undefined, applies globally.
-    #[serde(rename = "labelerDid")]
     pub labeler_did: Option<String>,
     pub label: String,
     pub visibility: ContentLabelVisibility,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentLabelVisibility {
     Ignore,
@@ -122,7 +183,7 @@ pub enum ContentLabelVisibility {
     Hide,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SavedFeed {
     pub id: String,
     #[serde(rename = "type")]
@@ -131,7 +192,7 @@ pub struct SavedFeed {
     pub pinned: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SavedFeedType {
     Feed,
@@ -139,56 +200,52 @@ pub enum SavedFeedType {
     Timeline,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SavedFeedsPrefV2 {
     pub items: Vec<SavedFeed>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SavedFeedsPref {
     pub pinned: Vec<String>,
     pub saved: Vec<String>,
-    #[serde(rename = "timelineIndex")]
     pub timeline_index: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersonalDetailsPref {
-    #[serde(rename = "birthDate")]
     pub birth_date: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FeedViewPref {
     // The URI of the feed, or an identifier which describes the feed.
     pub feed: String,
     // Hide replies in the feed.
-    #[serde(rename = "hideReplies")]
     pub hide_replies: Option<bool>,
     // Hide replies in the feed if they are not by followed users.
-    #[serde(rename = "hideRepliesByUnfollowed")]
     pub hide_replies_by_unfollowed: Option<bool>,
     // Hide replies in the feed if they do not have this number of likes.
-    #[serde(rename = "hideRepliesByLikeCount")]
     pub hide_replies_by_like_count: Option<i64>,
     // Hide reposts in the feed.
-    #[serde(rename = "hideReposts")]
     pub hide_reposts: Option<bool>,
     // Hide quote posts in the feed.
-    #[serde(rename = "hideQuotePosts")]
     pub hide_quote_posts: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadViewPref {
     // Sorting mode for threads.
     pub sort: Option<ThreadViewSort>,
     // Show followed users at the top of all replies.
-    #[serde(rename = "prioritizeFollowedUsers")]
     pub prioritize_followed_users: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreadViewSort {
     Oldest,
@@ -198,13 +255,13 @@ pub enum ThreadViewSort {
     Random,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct InterestsPref {
     // A list of tags which describe the account owner's interests gathered during onboarding.
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MutedWordTarget {
     Content,
@@ -212,7 +269,7 @@ pub enum MutedWordTarget {
 }
 
 /// A word that the account owner has muted.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct MutedWord {
     // The muted word itself.
     pub value: String,
@@ -220,19 +277,19 @@ pub struct MutedWord {
     pub targets: Vec<MutedWordTarget>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct MutedWordsPref {
     // A list of words the account owner has muted.
     pub items: Vec<MutedWord>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct HiddenPostsPref {
     // A list of URIs of posts the account owner has hidden.
     pub items: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct AdultContentPref {
     pub enabled: bool,
 }

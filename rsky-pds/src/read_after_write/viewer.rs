@@ -10,9 +10,17 @@ use crate::repo::ActorStore;
 use crate::xrpc_server::auth::create_service_auth_headers;
 use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
+use atrium_api::app::bsky::feed::get_feed_generator::{
+    Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
+    ParametersData as AppBskyFeedGetFeedGeneratorData,
+};
 use atrium_api::app::bsky::feed::get_posts::{
     Output as AppBskyFeedGetPostsOutput, Parameters as AppBskyFeedGetPostsParams,
     ParametersData as AppBskyFeedGetPostsData,
+};
+use atrium_api::app::bsky::graph::get_list::{
+    Output as AppBskyGraphGetListOutput, Parameters as AppBskyGraphGetListParams,
+    ParametersData as AppBskyGraphGetListData,
 };
 use atrium_api::client::AtpServiceClient;
 use atrium_ipld::ipld::Ipld as AtriumIpld;
@@ -20,16 +28,20 @@ use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use diesel::*;
 use libipld::Cid;
 use reqwest::header;
-use rsky_lexicon::app::bsky::actor::Profile;
+use rocket::form::validate::Len;
+use rsky_lexicon::app::bsky::actor::{Profile, ProfileView, ProfileViewBasic};
 use rsky_lexicon::app::bsky::embed::external::{
-    ExternalObject, View as EmbedExternalView, ViewExternal,
+    ExternalObject, View as ExternalView, ViewExternal,
 };
-use rsky_lexicon::app::bsky::embed::images::{View as ViewImages, ViewImage};
-use rsky_lexicon::app::bsky::embed::record::{Record, View as EmbedRecordView, ViewRecord};
-use rsky_lexicon::app::bsky::embed::{MediaUnion, MediaViewUnion};
-use rsky_lexicon::app::bsky::feed::{
-    FeedViewPost, GeneratorView, Post, PostView, ProfileViewBasic,
+use rsky_lexicon::app::bsky::embed::images::{View as ImagesView, ViewImage};
+use rsky_lexicon::app::bsky::embed::record::{
+    Record, View as RecordView, ViewNotFound as RecordViewNotFound, ViewRecord,
 };
+use rsky_lexicon::app::bsky::embed::record_with_media::{
+    RecordWithMedia, View as RecordWithMediaView,
+};
+use rsky_lexicon::app::bsky::embed::{record, EmbedViews, Embeds, MediaUnion, MediaViewUnion};
+use rsky_lexicon::app::bsky::feed::{FeedViewPost, GeneratorView, Post, PostView};
 use rsky_lexicon::app::bsky::graph::ListView;
 use rsky_syntax::aturi::AtUri;
 use secp256k1::SecretKey;
@@ -53,12 +65,6 @@ pub struct LocalViewer {
     pub appview_agent: Option<String>,
     pub appview_did: Option<String>,
     pub appview_cdn_url_pattern: Option<String>,
-}
-
-pub enum FormatRecordEmbedInternalOutput {
-    ViewRecord(ViewRecord),
-    GeneratorView(GeneratorView),
-    ListView(ListView),
 }
 
 impl LocalViewer {
@@ -130,7 +136,7 @@ impl LocalViewer {
                 let mut headers = header::HeaderMap::new();
                 let service_auth = &self.service_auth_headers(appview_did).await?;
                 headers.insert(
-                    &service_auth.0,
+                    &*service_auth.0,
                     header::HeaderValue::from_str(&service_auth.1)?,
                 );
 
@@ -216,7 +222,7 @@ impl LocalViewer {
 
     pub async fn format_and_insert_posts_in_feed(
         &self,
-        feed: Vec<FeedViewPost>,
+        mut feed: Vec<FeedViewPost>,
         posts: Vec<RecordDescript<Post>>,
     ) -> Result<Vec<FeedViewPost>> {
         if posts.len() == 0 {
@@ -232,9 +238,27 @@ impl LocalViewer {
             .collect::<Vec<RecordDescript<Post>>>();
         in_feed.reverse();
 
-        let maybe_formatted = in_feed.into_iter().map(|p| self.get_post(p)).collect();
-
-        todo!()
+        let maybe_formatted: Vec<Option<PostView>> = in_feed
+            .into_iter()
+            .map(async move |p| self.get_post(p).await)
+            .collect::<Result<Vec<Option<PostView>>>>()?;
+        let formatted: Vec<PostView> = maybe_formatted.into_iter().flatten().collect();
+        for post in formatted {
+            let idx = feed
+                .iter()
+                .position(|fi| fi.post.indexed_at < post.indexed_at);
+            let feed_view_post = FeedViewPost {
+                post,
+                reply: None,
+                reason: None,
+                feed_context: None,
+            };
+            match idx {
+                None => feed.push(feed_view_post),
+                Some(idx) => feed.insert(idx, feed_view_post),
+            }
+        }
+        Ok(feed)
     }
 
     pub async fn get_post(&self, descript: RecordDescript<Post>) -> Result<Option<PostView>> {
@@ -248,16 +272,47 @@ impl LocalViewer {
         match author {
             None => Ok(None),
             Some(author) => {
-                todo!()
+                let embed = match record.embed {
+                    None => None,
+                    Some(_) => self.format_post_embed(record.clone()).await?,
+                };
+                Ok(Some(PostView {
+                    uri: uri.to_string(),
+                    cid: cid.to_string(),
+                    author,
+                    record: serde_json::to_value(record)?,
+                    embed,
+                    reply_count: Some(0), // counts presumed to be 0 directly after post creation
+                    repost_count: Some(0),
+                    like_count: Some(0),
+                    indexed_at,
+                    viewer: None,
+                    labels: None,
+                }))
             }
         }
     }
 
-    pub async fn format_post_embed(&self, did: String, post: Post) -> Result<Option<String>> {
-        todo!()
+    pub async fn format_post_embed(&self, post: Post) -> Result<Option<EmbedViews>> {
+        let embed = post.embed;
+        match embed {
+            None => Ok(None),
+            Some(embed) => Ok(Some(match embed {
+                Embeds::Images(embed) => self.format_simple_embed(MediaUnion::Images(embed)).await,
+                Embeds::External(embed) => {
+                    self.format_simple_embed(MediaUnion::External(embed)).await
+                }
+                Embeds::Record(embed) => {
+                    EmbedViews::RecordView(self.format_record_embed(embed).await?)
+                }
+                Embeds::RecordWithMedia(embed) => EmbedViews::RecordWithMediaView(
+                    self.format_record_with_media_embed(embed).await?,
+                ),
+            })),
+        }
     }
 
-    pub async fn format_simple_embed(&self, embed: MediaUnion) -> MediaViewUnion {
+    pub async fn format_simple_embed(&self, embed: MediaUnion) -> EmbedViews {
         match embed {
             MediaUnion::Images(embed) => {
                 let images = embed
@@ -276,7 +331,7 @@ impl LocalViewer {
                         aspect_ratio: img.aspect_ratio,
                     })
                     .collect::<Vec<ViewImage>>();
-                MediaViewUnion::ImagesView(ViewImages { images })
+                EmbedViews::ImagesView(ImagesView { images })
             }
             MediaUnion::External(embed) => {
                 let ExternalObject {
@@ -285,7 +340,7 @@ impl LocalViewer {
                     description,
                     thumb,
                 } = embed.external;
-                MediaViewUnion::ExternalView(EmbedExternalView {
+                EmbedViews::ExternalView(ExternalView {
                     external: ViewExternal {
                         uri,
                         title,
@@ -303,13 +358,26 @@ impl LocalViewer {
         }
     }
 
+    pub async fn format_record_embed(&self, embed: Record) -> Result<RecordView> {
+        let view = self.format_record_embed_internal(embed.clone()).await?;
+        match view {
+            None => Ok(RecordView {
+                record: record::ViewUnion::ViewNotFound(RecordViewNotFound {
+                    uri: embed.record.uri,
+                    not_found: true,
+                }),
+            }),
+            Some(view) => Ok(RecordView { record: view }),
+        }
+    }
+
     pub async fn format_record_embed_internal(
         &self,
         embed: Record,
-    ) -> Result<Option<FormatRecordEmbedInternalOutput>> {
+    ) -> Result<Option<record::ViewUnion>> {
         match (&self.get_atp_agent().await, &self.appview_did) {
-            (Ok(Some(appview_agent)), Some(appview_did)) => {
-                let collection = AtUri::new(embed.record.uri, None)?.get_collection();
+            (Ok(Some(appview_agent)), Some(_)) => {
+                let collection = AtUri::new(embed.record.uri.clone(), None)?.get_collection();
                 if collection == Ids::AppBskyFeedPost.as_str() {
                     let res: AppBskyFeedGetPostsOutput = appview_agent
                         .service
@@ -328,34 +396,151 @@ impl LocalViewer {
                         Some(post) => {
                             let post: PostView =
                                 serde_json::from_value(serde_json::to_value(&post)?)?;
-                            Ok(Some(FormatRecordEmbedInternalOutput::ViewRecord(
-                                ViewRecord {
-                                    uri: post.uri,
-                                    cid: post.cid,
-                                    author: post.author,
-                                    value: post.record,
-                                    labels: post.labels,
-                                    reply_count: None,
-                                    repost_count: None,
-                                    like_count: None,
-                                    embeds: match post.embed {
-                                        Some(post_embed) => Some(vec![post_embed]),
-                                        None => None,
-                                    },
-                                    indexed_at: post.indexed_at,
+                            Ok(Some(record::ViewUnion::ViewRecord(ViewRecord {
+                                uri: post.uri,
+                                cid: post.cid,
+                                author: post.author,
+                                value: post.record,
+                                labels: post.labels,
+                                reply_count: None,
+                                repost_count: None,
+                                like_count: None,
+                                embeds: match post.embed {
+                                    Some(post_embed) => Some(vec![post_embed]),
+                                    None => None,
                                 },
-                            )))
+                                indexed_at: post.indexed_at,
+                            })))
                         }
                     }
                 } else if collection == Ids::AppBskyFeedGenerator.as_str() {
-                    todo!()
+                    let res: AppBskyFeedGetFeedGeneratorOutput = appview_agent
+                        .service
+                        .app
+                        .bsky
+                        .feed
+                        .get_feed_generator(AppBskyFeedGetFeedGeneratorParams {
+                            data: AppBskyFeedGetFeedGeneratorData {
+                                feed: embed.record.uri,
+                            },
+                            extra_data: AtriumIpld::Null,
+                        })
+                        .await?;
+                    let generator_view: GeneratorView =
+                        serde_json::from_value(serde_json::to_value(&res.view)?)?;
+                    Ok(Some(record::ViewUnion::GeneratorView(generator_view)))
                 } else if collection == Ids::AppBskyGraphList.as_str() {
-                    todo!()
+                    let res: AppBskyGraphGetListOutput = appview_agent
+                        .service
+                        .app
+                        .bsky
+                        .graph
+                        .get_list(AppBskyGraphGetListParams {
+                            data: AppBskyGraphGetListData {
+                                cursor: None,
+                                limit: None,
+                                list: embed.record.uri,
+                            },
+                            extra_data: AtriumIpld::Null,
+                        })
+                        .await?;
+                    let list_view: ListView =
+                        serde_json::from_value(serde_json::to_value(&res.list)?)?;
+                    Ok(Some(record::ViewUnion::ListView(list_view)))
                 } else {
                     Ok(None)
                 }
             }
             _ => Ok(None),
+        }
+    }
+
+    pub async fn format_record_with_media_embed(
+        &self,
+        embed: RecordWithMedia,
+    ) -> Result<RecordWithMediaView> {
+        let media = match self.format_simple_embed(embed.media).await {
+            EmbedViews::ImagesView(media) => MediaViewUnion::ImagesView(media),
+            EmbedViews::ExternalView(media) => MediaViewUnion::ExternalView(media),
+            _ => bail!("Unexpected enum for media."),
+        };
+        let record = self.format_record_embed(embed.record).await?;
+        Ok(RecordWithMediaView { record, media })
+    }
+
+    pub fn update_profile_view_basic(
+        &self,
+        view: ProfileViewBasic,
+        record: Profile,
+    ) -> ProfileViewBasic {
+        let ProfileViewBasic {
+            did,
+            handle,
+            display_name,
+            avatar,
+            associated,
+            viewer,
+            labels,
+            created_at,
+        } = view;
+        ProfileViewBasic {
+            did,
+            handle,
+            display_name: record.display_name,
+            avatar: match record.avatar {
+                None => None,
+                Some(avatar) => match avatar.r#ref {
+                    Some(r#ref) => Some(self.get_image_url("avatar".to_string(), r#ref.link)),
+                    None => None,
+                },
+            },
+            associated,
+            viewer,
+            labels,
+            created_at,
+        }
+    }
+
+    pub fn update_profile_view(&self, view: ProfileView, record: Profile) -> ProfileView {
+        let ProfileView {
+            did,
+            handle,
+            display_name,
+            description,
+            avatar,
+            labels,
+            indexed_at,
+        } = view;
+        let ProfileViewBasic {
+            did,
+            handle,
+            display_name,
+            avatar,
+            associated,
+            viewer,
+            labels,
+            created_at,
+        } = self.update_profile_view_basic(
+            ProfileViewBasic {
+                did,
+                handle,
+                display_name,
+                avatar,
+                associated: None,
+                viewer: None,
+                labels: Some(labels),
+                created_at: None,
+            },
+            record,
+        );
+        ProfileView {
+            did,
+            handle,
+            display_name,
+            description,
+            avatar,
+            labels: vec![],
+            indexed_at,
         }
     }
 }

@@ -1,13 +1,13 @@
-use super::{
-    actor::ProfileView,
-};
+mod like;
+
+use super::actor::ProfileView;
 use crate::app::bsky::actor::{ProfileViewBasic, ViewerState};
+use crate::app::bsky::embed::{EmbedViews, Embeds};
 use crate::app::bsky::richtext::Facet;
 use crate::com::atproto::label::{Label, SelfLabels};
 use crate::com::atproto::repo::StrongRef;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use crate::app::bsky::embed::Embeds;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "$type")]
@@ -45,12 +45,15 @@ pub enum PostLabels {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "app.bsky.feed.defs#postView")]
 #[serde(rename_all = "camelCase")]
 pub struct PostView {
     pub uri: String,
     pub cid: String,
     pub author: ProfileViewBasic,
     pub record: Value,
+    pub embed: Option<EmbedViews>,
     pub reply_count: Option<usize>,
     pub repost_count: Option<usize>,
     pub like_count: Option<usize>,
@@ -73,22 +76,13 @@ pub struct FeedViewPost {
     pub reply: Option<ReplyRef>,
     pub reason: Option<ReasonRepost>,
     /// Context provided by feed generator that may be passed back alongside interactions.
-    pub feed_context: Option<String>
+    pub feed_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct AuthorFeed {
     pub cursor: Option<String>,
     pub feed: Vec<FeedViewPost>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Like {
-    #[serde(rename = "$type")]
-    pub r#type: Option<String>,
-    pub created_at: String,
-    pub subject: StrongRef,
 }
 
 ///like from app.bsky.feed.getLikes
@@ -113,7 +107,7 @@ pub struct ReplyRef {
     pub root: ReplyRefUnion,
     pub parent: ReplyRefUnion,
     /// When parent is a reply to another post, this is the author of that post.
-    pub grandparent_author: Option<ProfileViewBasic>
+    pub grandparent_author: Option<ProfileViewBasic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -123,7 +117,7 @@ pub enum ReplyRefUnion {
     #[serde(rename = "#notFoundPost")]
     NotFoundPost(NotFoundPost),
     #[serde(rename = "#blockedPost")]
-    BlockedPost(BlockedPost)
+    BlockedPost(BlockedPost),
 }
 
 /// Deprecated: use facets instead.
@@ -175,7 +169,7 @@ pub struct NotFoundPost {
 pub struct BlockedPost {
     pub uri: String,
     pub blocked: bool,
-    pub author: BlockedAuthor
+    pub author: BlockedAuthor,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -185,6 +179,8 @@ pub struct BlockedAuthor {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "app.bsky.feed.defs#generatorView")]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratorView {
     pub uri: String,
@@ -193,18 +189,18 @@ pub struct GeneratorView {
     pub creator: ProfileView,
     pub display_name: String,
     pub description: Option<String>,
-    pub description_facets: Option<Facet>,
+    pub description_facets: Option<Vec<Facet>>,
     pub avatar: Option<String>,
     pub like_count: Option<usize>,
     pub accepts_interactions: Option<bool>,
     pub labels: Option<Vec<Label>>,
     pub viewer: Option<GeneratorViewState>,
-    pub indexed_at: String
+    pub indexed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GeneratorViewState {
-    pub like: String
+    pub like: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

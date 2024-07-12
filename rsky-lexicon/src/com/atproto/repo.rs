@@ -1,25 +1,25 @@
 use serde_json::Value;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StrongRef {
     pub uri: String,
     pub cid: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Record {
     pub uri: String,
     pub cid: String,
     pub value: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Link {
     #[serde(rename(deserialize = "$link", serialize = "$link"))]
     pub link: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Blob {
     #[serde(
         rename(deserialize = "$type", serialize = "$type"),
@@ -37,7 +37,7 @@ pub struct Blob {
     pub original: Option<OriginalBlob>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OriginalBlob {
     #[serde(
         rename(deserialize = "$type", serialize = "$type"),
@@ -54,7 +54,7 @@ pub struct OriginalBlob {
 }
 
 /// Create a single new repository record. Requires auth, implemented by PDS.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CreateRecordInput {
     /// The handle or DID of the repo (aka, current account)
     pub repo: String,
@@ -74,7 +74,7 @@ pub struct CreateRecordInput {
 }
 
 /// Write a repository record, creating or updating it as needed. Requires auth, implemented by PDS.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PutRecordInput {
     /// The handle or DID of the repo (aka, current account)
     pub repo: String,
@@ -96,7 +96,7 @@ pub struct PutRecordInput {
 }
 
 /// Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct DeleteRecordInput {
     /// The handle or DID of the repo (aka, current account).
     pub repo: String,
@@ -114,7 +114,7 @@ pub struct DeleteRecordInput {
 
 /// Apply a batch transaction of repository creates, updates, and deletes.
 /// Requires auth, implemented by PDS.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ApplyWritesInput {
     /// The handle or DID of the repo (aka, current account).
     pub repo: String,
@@ -128,7 +128,7 @@ pub struct ApplyWritesInput {
 }
 
 /// Get a single record from a repository. Does not require auth.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetRecordOutput {
     pub uri: String,
     /// The CID of the version of the record. If not specified, then return the most recent version.
@@ -137,32 +137,32 @@ pub struct GetRecordOutput {
     pub value: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ListRecordsOutput {
     pub cursor: Option<String>,
     pub records: Vec<Record>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CreateRecordOutput {
     pub cid: String,
     pub uri: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct PutRecordOutput {
     pub cid: String,
     pub uri: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BlobOutput {
     pub blob: Blob,
 }
 
 /// Returns a list of missing blobs for the requesting account.
 /// Intended to be used in the account migration flow.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ListMissingBlobsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -171,7 +171,7 @@ pub struct ListMissingBlobsOutput {
 
 /// Get information about an account and repository, including the list of collections.
 /// Does not require auth.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct DescribeRepoOutput {
     pub handle: String,
     pub did: String,
@@ -185,21 +185,21 @@ pub struct DescribeRepoOutput {
     pub handle_is_correct: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum ApplyWritesInputRefWrite {
     Create(RefWriteCreate),
     Update(RefWriteUpdate),
     Delete(RefWriteDelete),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ListMissingBlobsRefRecordBlob {
     pub cid: String,
     pub record_uri: String,
 }
 
 /// Operation which creates a new record.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RefWriteCreate {
     pub collection: String,
     pub rkey: Option<String>,
@@ -207,7 +207,7 @@ pub struct RefWriteCreate {
 }
 
 /// Operation which updates an existing record.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RefWriteUpdate {
     pub collection: String,
     pub rkey: String,
@@ -215,7 +215,7 @@ pub struct RefWriteUpdate {
 }
 
 /// Operation which deletes an existing record.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RefWriteDelete {
     pub collection: String,
     pub rkey: String,
