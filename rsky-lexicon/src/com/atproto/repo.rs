@@ -1,4 +1,4 @@
-use cid::Cid;
+use libipld::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_cbor::tags::Tagged;
 
@@ -98,7 +98,7 @@ pub struct BlobOutput {
     pub blob: Blob,
 }
 
-fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<cid::Cid>, D::Error>
+fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<Cid>, D::Error>
 where
     D: Deserializer<'de>,
 {

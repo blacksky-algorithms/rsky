@@ -1,4 +1,4 @@
-use cid::Cid;
+use libipld::cid::Cid;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};

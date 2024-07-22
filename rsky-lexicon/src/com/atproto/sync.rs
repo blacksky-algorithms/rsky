@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use cid::Cid;
+use libipld::cid::Cid;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
