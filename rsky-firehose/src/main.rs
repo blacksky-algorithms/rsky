@@ -8,11 +8,11 @@ use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::env;
 use std::io::Cursor;
+use std::{thread, time::Duration};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
-use std::{thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "$type")]
@@ -111,7 +111,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                         &commit.sequence,
                         client,
                     )
-                        .await;
+                    .await;
                     match resp {
                         Ok(()) => (),
                         Err(error) => eprintln!("Failed to update cursor: {error:?}"),
@@ -281,11 +281,12 @@ async fn main() {
                     "{}/xrpc/com.atproto.sync.subscribeRepos",
                     default_subscriber_path
                 )
-                    .as_str(),
+                .as_str(),
             )
-                .unwrap(),
+            .unwrap(),
         )
-            .await {
+        .await
+        {
             Ok((mut socket, _response)) => {
                 println!("Connected to {default_subscriber_path:?}.");
                 while let Some(Ok(Message::Binary(message))) = socket.next().await {
@@ -294,7 +295,7 @@ async fn main() {
                         process(message, &client).await;
                     });
                 }
-            },
+            }
             Err(error) => {
                 eprintln!("Error connecting to {default_subscriber_path:?}. Waiting to reconnect: {error:?}");
                 thread::sleep(Duration::from_millis(500));
