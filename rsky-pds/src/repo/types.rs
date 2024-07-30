@@ -2,6 +2,7 @@ use crate::repo::blob_refs::BlobRef;
 use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::storage::Ipld;
+use anyhow::{bail, Result};
 use libipld::Cid;
 use std::collections::BTreeMap;
 
@@ -489,6 +490,12 @@ pub enum Ids {
     ToolsOzoneModerationQueryEvents,
     ToolsOzoneModerationQueryStatuses,
     ToolsOzoneModerationSearchRepos,
+    ToolsOzoneServerGetConfig,
+    ToolsOzoneTeamAddMember,
+    ToolsOzoneTeamDefs,
+    ToolsOzoneTeamDeleteMember,
+    ToolsOzoneTeamListMembers,
+    ToolsOzoneTeamUpdateMember,
 }
 
 impl Ids {
@@ -672,6 +679,224 @@ impl Ids {
             Ids::ToolsOzoneModerationQueryEvents => "tools.ozone.moderation.queryEvents",
             Ids::ToolsOzoneModerationQueryStatuses => "tools.ozone.moderation.queryStatuses",
             Ids::ToolsOzoneModerationSearchRepos => "tools.ozone.moderation.searchRepos",
+            Ids::ToolsOzoneServerGetConfig => "tools.ozone.server.getConfig",
+            Ids::ToolsOzoneTeamAddMember => "tools.ozone.team.addMember",
+            Ids::ToolsOzoneTeamDefs => "tools.ozone.team.defs",
+            Ids::ToolsOzoneTeamDeleteMember => "tools.ozone.team.deleteMember",
+            Ids::ToolsOzoneTeamListMembers => "tools.ozone.team.listMembers",
+            Ids::ToolsOzoneTeamUpdateMember => "tools.ozone.team.updateMember",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "com.atproto.admin.defs" => Ok(Ids::ComAtprotoAdminDefs),
+            "com.atproto.admin.deleteAccount" => Ok(Ids::ComAtprotoAdminDeleteAccount),
+            "com.atproto.admin.disableAccountInvites" => {
+                Ok(Ids::ComAtprotoAdminDisableAccountInvites)
+            }
+            "com.atproto.admin.disableInviteCodes" => Ok(Ids::ComAtprotoAdminDisableInviteCodes),
+            "com.atproto.admin.enableAccountInvites" => {
+                Ok(Ids::ComAtprotoAdminEnableAccountInvites)
+            }
+            "com.atproto.admin.getAccountInfo" => Ok(Ids::ComAtprotoAdminGetAccountInfo),
+            "com.atproto.admin.getAccountInfos" => Ok(Ids::ComAtprotoAdminGetAccountInfos),
+            "com.atproto.admin.getInviteCodes" => Ok(Ids::ComAtprotoAdminGetInviteCodes),
+            "com.atproto.admin.getSubjectStatus" => Ok(Ids::ComAtprotoAdminGetSubjectStatus),
+            "com.atproto.admin.sendEmail" => Ok(Ids::ComAtprotoAdminSendEmail),
+            "com.atproto.admin.updateAccountEmail" => Ok(Ids::ComAtprotoAdminUpdateAccountEmail),
+            "com.atproto.admin.updateAccountHandle" => Ok(Ids::ComAtprotoAdminUpdateAccountHandle),
+            "com.atproto.admin.updateAccountPassword" => {
+                Ok(Ids::ComAtprotoAdminUpdateAccountPassword)
+            }
+            "com.atproto.admin.updateSubjectStatus" => Ok(Ids::ComAtprotoAdminUpdateSubjectStatus),
+            "com.atproto.identity.getRecommendedDidCredentials" => {
+                Ok(Ids::ComAtprotoIdentityGetRecommendedDidCredentials)
+            }
+            "com.atproto.identity.requestPlcOperationSignature" => {
+                Ok(Ids::ComAtprotoIdentityRequestPlcOperationSignature)
+            }
+            "com.atproto.identity.resolveHandle" => Ok(Ids::ComAtprotoIdentityResolveHandle),
+            "com.atproto.identity.signPlcOperation" => Ok(Ids::ComAtprotoIdentitySignPlcOperation),
+            "com.atproto.identity.submitPlcOperation" => {
+                Ok(Ids::ComAtprotoIdentitySubmitPlcOperation)
+            }
+            "com.atproto.identity.updateHandle" => Ok(Ids::ComAtprotoIdentityUpdateHandle),
+            "com.atproto.label.defs" => Ok(Ids::ComAtprotoLabelDefs),
+            "com.atproto.label.queryLabels" => Ok(Ids::ComAtprotoLabelQueryLabels),
+            "com.atproto.label.subscribeLabels" => Ok(Ids::ComAtprotoLabelSubscribeLabels),
+            "com.atproto.moderation.createReport" => Ok(Ids::ComAtprotoModerationCreateReport),
+            "com.atproto.moderation.defs" => Ok(Ids::ComAtprotoModerationDefs),
+            "com.atproto.repo.applyWrites" => Ok(Ids::ComAtprotoRepoApplyWrites),
+            "com.atproto.repo.createRecord" => Ok(Ids::ComAtprotoRepoCreateRecord),
+            "com.atproto.repo.deleteRecord" => Ok(Ids::ComAtprotoRepoDeleteRecord),
+            "com.atproto.repo.describeRepo" => Ok(Ids::ComAtprotoRepoDescribeRepo),
+            "com.atproto.repo.getRecord" => Ok(Ids::ComAtprotoRepoGetRecord),
+            "com.atproto.repo.importRepo" => Ok(Ids::ComAtprotoRepoImportRepo),
+            "com.atproto.repo.listMissingBlobs" => Ok(Ids::ComAtprotoRepoListMissingBlobs),
+            "com.atproto.repo.listRecords" => Ok(Ids::ComAtprotoRepoListRecords),
+            "com.atproto.repo.putRecord" => Ok(Ids::ComAtprotoRepoPutRecord),
+            "com.atproto.repo.strongRef" => Ok(Ids::ComAtprotoRepoStrongRef),
+            "com.atproto.repo.uploadBlob" => Ok(Ids::ComAtprotoRepoUploadBlob),
+            "com.atproto.server.activateAccount" => Ok(Ids::ComAtprotoServerActivateAccount),
+            "com.atproto.server.checkAccountStatus" => Ok(Ids::ComAtprotoServerCheckAccountStatus),
+            "com.atproto.server.confirmEmail" => Ok(Ids::ComAtprotoServerConfirmEmail),
+            "com.atproto.server.createAccount" => Ok(Ids::ComAtprotoServerCreateAccount),
+            "com.atproto.server.createAppPassword" => Ok(Ids::ComAtprotoServerCreateAppPassword),
+            "com.atproto.server.createInviteCode" => Ok(Ids::ComAtprotoServerCreateInviteCode),
+            "com.atproto.server.createInviteCodes" => Ok(Ids::ComAtprotoServerCreateInviteCodes),
+            "com.atproto.server.createSession" => Ok(Ids::ComAtprotoServerCreateSession),
+            "com.atproto.server.deactivateAccount" => Ok(Ids::ComAtprotoServerDeactivateAccount),
+            "com.atproto.server.defs" => Ok(Ids::ComAtprotoServerDefs),
+            "com.atproto.server.deleteAccount" => Ok(Ids::ComAtprotoServerDeleteAccount),
+            "com.atproto.server.deleteSession" => Ok(Ids::ComAtprotoServerDeleteSession),
+            "com.atproto.server.describeServer" => Ok(Ids::ComAtprotoServerDescribeServer),
+            "com.atproto.server.getAccountInviteCodes" => {
+                Ok(Ids::ComAtprotoServerGetAccountInviteCodes)
+            }
+            "com.atproto.server.getServiceAuth" => Ok(Ids::ComAtprotoServerGetServiceAuth),
+            "com.atproto.server.getSession" => Ok(Ids::ComAtprotoServerGetSession),
+            "com.atproto.server.listAppPasswords" => Ok(Ids::ComAtprotoServerListAppPasswords),
+            "com.atproto.server.refreshSession" => Ok(Ids::ComAtprotoServerRefreshSession),
+            "com.atproto.server.requestAccountDelete" => {
+                Ok(Ids::ComAtprotoServerRequestAccountDelete)
+            }
+            "com.atproto.server.requestEmailConfirmation" => {
+                Ok(Ids::ComAtprotoServerRequestEmailConfirmation)
+            }
+            "com.atproto.server.requestEmailUpdate" => Ok(Ids::ComAtprotoServerRequestEmailUpdate),
+            "com.atproto.server.requestPasswordReset" => {
+                Ok(Ids::ComAtprotoServerRequestPasswordReset)
+            }
+            "com.atproto.server.reserveSigningKey" => Ok(Ids::ComAtprotoServerReserveSigningKey),
+            "com.atproto.server.resetPassword" => Ok(Ids::ComAtprotoServerResetPassword),
+            "com.atproto.server.revokeAppPassword" => Ok(Ids::ComAtprotoServerRevokeAppPassword),
+            "com.atproto.server.updateEmail" => Ok(Ids::ComAtprotoServerUpdateEmail),
+            "com.atproto.sync.getBlob" => Ok(Ids::ComAtprotoSyncGetBlob),
+            "com.atproto.sync.getBlocks" => Ok(Ids::ComAtprotoSyncGetBlocks),
+            "com.atproto.sync.getCheckout" => Ok(Ids::ComAtprotoSyncGetCheckout),
+            "com.atproto.sync.getHead" => Ok(Ids::ComAtprotoSyncGetHead),
+            "com.atproto.sync.getLatestCommit" => Ok(Ids::ComAtprotoSyncGetLatestCommit),
+            "com.atproto.sync.getRecord" => Ok(Ids::ComAtprotoSyncGetRecord),
+            "com.atproto.sync.getRepo" => Ok(Ids::ComAtprotoSyncGetRepo),
+            "com.atproto.sync.listBlobs" => Ok(Ids::ComAtprotoSyncListBlobs),
+            "com.atproto.sync.listRepos" => Ok(Ids::ComAtprotoSyncListRepos),
+            "com.atproto.sync.notifyOfUpdate" => Ok(Ids::ComAtprotoSyncNotifyOfUpdate),
+            "com.atproto.sync.requestCrawl" => Ok(Ids::ComAtprotoSyncRequestCrawl),
+            "com.atproto.sync.subscribeRepos" => Ok(Ids::ComAtprotoSyncSubscribeRepos),
+            "com.atproto.temp.checkSignupQueue" => Ok(Ids::ComAtprotoTempCheckSignupQueue),
+            "com.atproto.temp.fetchLabels" => Ok(Ids::ComAtprotoTempFetchLabels),
+            "com.atproto.temp.requestPhoneVerification" => {
+                Ok(Ids::ComAtprotoTempRequestPhoneVerification)
+            }
+            "app.bsky.actor.defs" => Ok(Ids::AppBskyActorDefs),
+            "app.bsky.actor.getPreferences" => Ok(Ids::AppBskyActorGetPreferences),
+            "app.bsky.actor.getProfile" => Ok(Ids::AppBskyActorGetProfile),
+            "app.bsky.actor.getProfiles" => Ok(Ids::AppBskyActorGetProfiles),
+            "app.bsky.actor.getSuggestions" => Ok(Ids::AppBskyActorGetSuggestions),
+            "app.bsky.actor.profile" => Ok(Ids::AppBskyActorProfile),
+            "app.bsky.actor.putPreferences" => Ok(Ids::AppBskyActorPutPreferences),
+            "app.bsky.actor.searchActors" => Ok(Ids::AppBskyActorSearchActors),
+            "app.bsky.actor.searchActorsTypeahead" => Ok(Ids::AppBskyActorSearchActorsTypeahead),
+            "app.bsky.embed.external" => Ok(Ids::AppBskyEmbedExternal),
+            "app.bsky.embed.images" => Ok(Ids::AppBskyEmbedImages),
+            "app.bsky.embed.record" => Ok(Ids::AppBskyEmbedRecord),
+            "app.bsky.embed.recordWithMedia" => Ok(Ids::AppBskyEmbedRecordWithMedia),
+            "app.bsky.feed.defs" => Ok(Ids::AppBskyFeedDefs),
+            "app.bsky.feed.describeFeedGenerator" => Ok(Ids::AppBskyFeedDescribeFeedGenerator),
+            "app.bsky.feed.generator" => Ok(Ids::AppBskyFeedGenerator),
+            "app.bsky.feed.getActorFeeds" => Ok(Ids::AppBskyFeedGetActorFeeds),
+            "app.bsky.feed.getActorLikes" => Ok(Ids::AppBskyFeedGetActorLikes),
+            "app.bsky.feed.getAuthorFeed" => Ok(Ids::AppBskyFeedGetAuthorFeed),
+            "app.bsky.feed.getFeed" => Ok(Ids::AppBskyFeedGetFeed),
+            "app.bsky.feed.getFeedGenerator" => Ok(Ids::AppBskyFeedGetFeedGenerator),
+            "app.bsky.feed.getFeedGenerators" => Ok(Ids::AppBskyFeedGetFeedGenerators),
+            "app.bsky.feed.getFeedSkeleton" => Ok(Ids::AppBskyFeedGetFeedSkeleton),
+            "app.bsky.feed.getLikes" => Ok(Ids::AppBskyFeedGetLikes),
+            "app.bsky.feed.getListFeed" => Ok(Ids::AppBskyFeedGetListFeed),
+            "app.bsky.feed.getPostThread" => Ok(Ids::AppBskyFeedGetPostThread),
+            "app.bsky.feed.getPosts" => Ok(Ids::AppBskyFeedGetPosts),
+            "app.bsky.feed.getRepostedBy" => Ok(Ids::AppBskyFeedGetRepostedBy),
+            "app.bsky.feed.getSuggestedFeeds" => Ok(Ids::AppBskyFeedGetSuggestedFeeds),
+            "app.bsky.feed.getTimeline" => Ok(Ids::AppBskyFeedGetTimeline),
+            "app.bsky.feed.like" => Ok(Ids::AppBskyFeedLike),
+            "app.bsky.feed.post" => Ok(Ids::AppBskyFeedPost),
+            "app.bsky.feed.repost" => Ok(Ids::AppBskyFeedRepost),
+            "app.bsky.feed.searchPosts" => Ok(Ids::AppBskyFeedSearchPosts),
+            "app.bsky.feed.threadgate" => Ok(Ids::AppBskyFeedThreadgate),
+            "app.bsky.graph.block" => Ok(Ids::AppBskyGraphBlock),
+            "app.bsky.graph.defs" => Ok(Ids::AppBskyGraphDefs),
+            "app.bsky.graph.follow" => Ok(Ids::AppBskyGraphFollow),
+            "app.bsky.graph.getBlocks" => Ok(Ids::AppBskyGraphGetBlocks),
+            "app.bsky.graph.getFollowers" => Ok(Ids::AppBskyGraphGetFollowers),
+            "app.bsky.graph.getFollows" => Ok(Ids::AppBskyGraphGetFollows),
+            "app.bsky.graph.getList" => Ok(Ids::AppBskyGraphGetList),
+            "app.bsky.graph.getListBlocks" => Ok(Ids::AppBskyGraphGetListBlocks),
+            "app.bsky.graph.getListMutes" => Ok(Ids::AppBskyGraphGetListMutes),
+            "app.bsky.graph.getLists" => Ok(Ids::AppBskyGraphGetLists),
+            "app.bsky.graph.getMutes" => Ok(Ids::AppBskyGraphGetMutes),
+            "app.bsky.graph.getRelationships" => Ok(Ids::AppBskyGraphGetRelationships),
+            "app.bsky.graph.getSuggestedFollowsByActor" => {
+                Ok(Ids::AppBskyGraphGetSuggestedFollowsByActor)
+            }
+            "app.bsky.graph.list" => Ok(Ids::AppBskyGraphList),
+            "app.bsky.graph.listblock" => Ok(Ids::AppBskyGraphListblock),
+            "app.bsky.graph.listitem" => Ok(Ids::AppBskyGraphListitem),
+            "app.bsky.graph.muteActor" => Ok(Ids::AppBskyGraphMuteActor),
+            "app.bsky.graph.muteActorList" => Ok(Ids::AppBskyGraphMuteActorList),
+            "app.bsky.graph.unmuteActor" => Ok(Ids::AppBskyGraphUnmuteActor),
+            "app.bsky.graph.unmuteActorList" => Ok(Ids::AppBskyGraphUnmuteActorList),
+            "app.bsky.labeler.defs" => Ok(Ids::AppBskyLabelerDefs),
+            "app.bsky.labeler.getServices" => Ok(Ids::AppBskyLabelerGetServices),
+            "app.bsky.labeler.service" => Ok(Ids::AppBskyLabelerService),
+            "app.bsky.notification.getUnreadCount" => Ok(Ids::AppBskyNotificationGetUnreadCount),
+            "app.bsky.notification.listNotifications" => {
+                Ok(Ids::AppBskyNotificationListNotifications)
+            }
+            "app.bsky.notification.registerPush" => Ok(Ids::AppBskyNotificationRegisterPush),
+            "app.bsky.notification.updateSeen" => Ok(Ids::AppBskyNotificationUpdateSeen),
+            "app.bsky.richtext.facet" => Ok(Ids::AppBskyRichtextFacet),
+            "app.bsky.unspecced.defs" => Ok(Ids::AppBskyUnspeccedDefs),
+            "app.bsky.unspecced.getPopularFeedGenerators" => {
+                Ok(Ids::AppBskyUnspeccedGetPopularFeedGenerators)
+            }
+            "app.bsky.unspecced.getTaggedSuggestions" => {
+                Ok(Ids::AppBskyUnspeccedGetTaggedSuggestions)
+            }
+            "app.bsky.unspecced.searchActorsSkeleton" => {
+                Ok(Ids::AppBskyUnspeccedSearchActorsSkeleton)
+            }
+            "app.bsky.unspecced.searchPostsSkeleton" => {
+                Ok(Ids::AppBskyUnspeccedSearchPostsSkeleton)
+            }
+            "tools.ozone.communication.createTemplate" => {
+                Ok(Ids::ToolsOzoneCommunicationCreateTemplate)
+            }
+            "tools.ozone.communication.defs" => Ok(Ids::ToolsOzoneCommunicationDefs),
+            "tools.ozone.communication.deleteTemplate" => {
+                Ok(Ids::ToolsOzoneCommunicationDeleteTemplate)
+            }
+            "tools.ozone.communication.listTemplates" => {
+                Ok(Ids::ToolsOzoneCommunicationListTemplates)
+            }
+            "tools.ozone.communication.updateTemplate" => {
+                Ok(Ids::ToolsOzoneCommunicationUpdateTemplate)
+            }
+            "tools.ozone.moderation.defs" => Ok(Ids::ToolsOzoneModerationDefs),
+            "tools.ozone.moderation.emitEvent" => Ok(Ids::ToolsOzoneModerationEmitEvent),
+            "tools.ozone.moderation.getEvent" => Ok(Ids::ToolsOzoneModerationGetEvent),
+            "tools.ozone.moderation.getRecord" => Ok(Ids::ToolsOzoneModerationGetRecord),
+            "tools.ozone.moderation.getRepo" => Ok(Ids::ToolsOzoneModerationGetRepo),
+            "tools.ozone.moderation.queryEvents" => Ok(Ids::ToolsOzoneModerationQueryEvents),
+            "tools.ozone.moderation.queryStatuses" => Ok(Ids::ToolsOzoneModerationQueryStatuses),
+            "tools.ozone.moderation.searchRepos" => Ok(Ids::ToolsOzoneModerationSearchRepos),
+            "tools.ozone.server.getConfig" => Ok(Ids::ToolsOzoneServerGetConfig),
+            "tools.ozone.team.addMember" => Ok(Ids::ToolsOzoneTeamAddMember),
+            "tools.ozone.team.defs" => Ok(Ids::ToolsOzoneTeamDefs),
+            "tools.ozone.team.deleteMember" => Ok(Ids::ToolsOzoneTeamDeleteMember),
+            "tools.ozone.team.listMembers" => Ok(Ids::ToolsOzoneTeamListMembers),
+            "tools.ozone.team.updateMember" => Ok(Ids::ToolsOzoneTeamUpdateMember),
+            _ => bail!("Invalid NSID: `{s:?}` is not a valid nsid"),
         }
     }
 }

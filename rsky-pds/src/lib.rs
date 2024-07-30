@@ -6,6 +6,7 @@ extern crate mailchecker;
 extern crate rocket;
 extern crate serde;
 
+use crate::read_after_write::viewer::LocalViewerCreator;
 use crate::sequencer::Sequencer;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
@@ -33,15 +34,21 @@ pub struct SharedIdResolver {
     pub id_resolver: RwLock<IdResolver>,
 }
 
+pub struct SharedLocalViewer {
+    pub local_viewer: RwLock<LocalViewerCreator>,
+}
+
 pub mod account_manager;
 pub mod apis;
 pub mod auth_verifier;
 pub mod car;
 pub mod common;
+pub mod config;
+pub mod context;
 pub mod crawlers;
 pub mod db;
 pub mod image;
-pub mod lexicons;
+pub mod lexicon;
 pub mod mailer;
 pub mod models;
 pub mod pipethrough;

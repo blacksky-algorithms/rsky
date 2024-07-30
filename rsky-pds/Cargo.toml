@@ -65,6 +65,7 @@ atrium-api = "0.23.2"
 atrium-xrpc-client = "0.5.5"
 atrium-ipld = {package = "ipld-core", version = "0.4.1"}
 time = "^0.3.36"
+url = "2.5.2"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"

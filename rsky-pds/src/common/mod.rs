@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::time::SystemTime;
 use thiserror::Error;
+use url::Url;
 use urlencoding::encode;
 
 pub const RFC3339_VARIANT: &str = "%Y-%m-%dT%H:%M:%S%.3fZ";
@@ -28,6 +29,11 @@ pub enum BadContentTypeError {
 #[derive(Clone)]
 pub struct ContentType {
     pub name: String,
+}
+
+pub struct GetServiceEndpointOpts {
+    pub id: String,
+    pub r#type: Option<String>,
 }
 
 /// Used mainly as a way to parse out content-type from request
@@ -130,6 +136,44 @@ pub fn get_verification_material(
         }
     } else {
         None
+    }
+}
+
+pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> Option<String> {
+    let did = get_did(&doc);
+    match doc.service {
+        None => None,
+        Some(services) => {
+            let found = services.iter().find(|service| {
+                service.id == opts.id || service.id == format!("{}{}", did, opts.id)
+            });
+            match found {
+                None => None,
+                Some(found) => match opts.r#type {
+                    None => None,
+                    Some(opts_type) if found.r#type == opts_type => {
+                        validate_url(&found.service_endpoint)
+                    }
+                    _ => None,
+                },
+            }
+        }
+    }
+}
+
+// Check protocol and hostname to prevent potential SSRF
+pub fn validate_url(url_str: &String) -> Option<String> {
+    match Url::parse(url_str) {
+        Err(_) => None,
+        Ok(url) => {
+            return if !vec!["http", "https"].contains(&url.scheme()) {
+                None
+            } else if url.host().is_none() {
+                None
+            } else {
+                Some(url_str.clone())
+            }
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use crate::common;
 use crate::common::ipld::data_to_cbor_block;
 use crate::common::tid::{Ticker, TID};
 use crate::db::establish_connection;
-use crate::lexicons::LEXICONS;
+use crate::lexicon::LEXICONS;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
 use crate::repo::blob_refs::{BlobRef, JsonBlobRef};
@@ -647,7 +647,7 @@ pub fn blobs_for_write(record: RepoRecord, validate: bool) -> Result<Vec<Prepare
         .map(|FoundBlobRef { r#ref, path }| {
             let constraints: BlobConstraint = match (validate, record_type) {
                 (true, Some(record_type)) => {
-                    let properties: crate::lexicons::lexicons::Image2 = serde_json::from_value(
+                    let properties: crate::lexicon::lexicons::Image2 = serde_json::from_value(
                         CONSTRAINTS[record_type.as_str()][path.join("/")].clone(),
                     )?;
                     BlobConstraint {

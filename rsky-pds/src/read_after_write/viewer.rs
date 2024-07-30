@@ -26,10 +26,10 @@ use atrium_api::client::AtpServiceClient;
 use atrium_ipld::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use diesel::*;
+use futures::stream::{self, StreamExt};
 use libipld::Cid;
-use reqwest::header;
-use rocket::form::validate::Len;
-use rsky_lexicon::app::bsky::actor::{Profile, ProfileView, ProfileViewBasic};
+use reqwest::header::HeaderMap;
+use rsky_lexicon::app::bsky::actor::{Profile, ProfileView, ProfileViewBasic, ProfileViewDetailed};
 use rsky_lexicon::app::bsky::embed::external::{
     ExternalObject, View as ExternalView, ViewExternal,
 };
@@ -50,6 +50,8 @@ use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
+pub type LocalViewerCreator = Box<dyn Fn(ActorStore) -> LocalViewer + Send + Sync>;
+
 pub struct LocalViewerCreatorParams {
     pub account_manager: AccountManager,
     pub pds_hostname: String,
@@ -62,7 +64,7 @@ pub struct LocalViewer {
     pub did: String,
     pub actor_store: ActorStore,
     pub pds_hostname: String,
-    pub appview_agent: Option<String>,
+    pub appview_agent: Option<Agent>,
     pub appview_did: Option<String>,
     pub appview_cdn_url_pattern: Option<String>,
 }
@@ -71,7 +73,7 @@ impl LocalViewer {
     pub fn new(
         actor_store: ActorStore,
         pds_hostname: String,
-        appview_agent: Option<String>,
+        appview_agent: Option<Agent>,
         appview_did: Option<String>,
         appview_cdn_url_pattern: Option<String>,
     ) -> Self {
@@ -85,16 +87,29 @@ impl LocalViewer {
         }
     }
 
-    pub fn creator(params: LocalViewerCreatorParams) -> impl Fn(ActorStore) -> LocalViewer {
-        return move |actor_store: ActorStore| -> LocalViewer {
+    pub fn creator(params: LocalViewerCreatorParams) -> LocalViewerCreator {
+        return Box::new(move |actor_store: ActorStore| -> LocalViewer {
             LocalViewer::new(
                 actor_store,
                 params.pds_hostname.clone(),
-                params.appview_agent.clone(),
+                match params.appview_agent {
+                    None => None,
+                    Some(ref bsky_app_view_url) => {
+                        let client = ReqwestClientBuilder::new(bsky_app_view_url.clone())
+                            .client(
+                                reqwest::ClientBuilder::new()
+                                    .timeout(std::time::Duration::from_millis(1000))
+                                    .build()
+                                    .unwrap(),
+                            )
+                            .build();
+                        Some(AtpServiceClient::new(client))
+                    }
+                },
                 params.appview_did.clone(),
                 params.appview_cdn_url_pattern.clone(),
             )
-        };
+        });
     }
 
     pub fn get_image_url(&self, pattern: String, cid: String) -> String {
@@ -112,48 +127,21 @@ impl LocalViewer {
         }
     }
 
-    pub async fn service_auth_headers(&self, did: &String) -> Result<(String, String)> {
+    pub async fn service_auth_headers(&self, did: &String) -> Result<HeaderMap> {
         match &self.appview_did {
             None => bail!("Could not find bsky appview did"),
-            Some(aud) => {
+            Some(appview_did) => {
                 let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
                 let keypair =
                     SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
                 create_service_auth_headers(ServiceJwtParams {
                     iss: did.clone(),
-                    aud: aud.clone(),
+                    aud: appview_did.clone(),
                     exp: None,
                     keypair,
                 })
                 .await
             }
-        }
-    }
-
-    pub async fn get_atp_agent(&self) -> Result<Option<Agent>> {
-        match (&self.appview_agent, &self.appview_did) {
-            (Some(appview_agent), Some(appview_did)) => {
-                let mut headers = header::HeaderMap::new();
-                let service_auth = &self.service_auth_headers(appview_did).await?;
-                headers.insert(
-                    &*service_auth.0,
-                    header::HeaderValue::from_str(&service_auth.1)?,
-                );
-
-                let client = ReqwestClientBuilder::new(appview_agent)
-                    .client(
-                        reqwest::ClientBuilder::new()
-                            .timeout(std::time::Duration::from_millis(1000))
-                            .default_headers(headers)
-                            .build()?,
-                    )
-                    .build();
-                Ok(Some(AtpServiceClient::new(client)))
-            }
-            (Some(appview_agent), None) => Ok(Some(AtpServiceClient::new(ReqwestClient::new(
-                appview_agent,
-            )))),
-            _ => Ok(None),
         }
     }
 
@@ -238,9 +226,11 @@ impl LocalViewer {
             .collect::<Vec<RecordDescript<Post>>>();
         in_feed.reverse();
 
-        let maybe_formatted: Vec<Option<PostView>> = in_feed
+        let maybe_formatted: Vec<Option<PostView>> = stream::iter(in_feed)
+            .then(|p| async move { self.get_post(p).await })
+            .collect::<Vec<_>>()
+            .await
             .into_iter()
-            .map(async move |p| self.get_post(p).await)
             .collect::<Result<Vec<Option<PostView>>>>()?;
         let formatted: Vec<PostView> = maybe_formatted.into_iter().flatten().collect();
         for post in formatted {
@@ -375,8 +365,8 @@ impl LocalViewer {
         &self,
         embed: Record,
     ) -> Result<Option<record::ViewUnion>> {
-        match (&self.get_atp_agent().await, &self.appview_did) {
-            (Ok(Some(appview_agent)), Some(_)) => {
+        match (&self.appview_agent, &self.appview_did) {
+            (Some(appview_agent), Some(_)) => {
                 let collection = AtUri::new(embed.record.uri.clone(), None)?.get_collection();
                 if collection == Ids::AppBskyFeedPost.as_str() {
                     let res: AppBskyFeedGetPostsOutput = appview_agent
@@ -540,6 +530,65 @@ impl LocalViewer {
             description,
             avatar,
             labels: vec![],
+            indexed_at,
+        }
+    }
+
+    pub fn update_profile_detailed(
+        &self,
+        view: ProfileViewDetailed,
+        record: Profile,
+    ) -> ProfileViewDetailed {
+        let ProfileViewDetailed {
+            did,
+            handle,
+            display_name,
+            description,
+            avatar,
+            banner,
+            followers_count,
+            follows_count,
+            posts_count,
+            labels,
+            indexed_at,
+        } = view;
+        let ProfileView {
+            did,
+            handle,
+            display_name,
+            description,
+            avatar,
+            labels,
+            indexed_at,
+        } = self.update_profile_view(
+            ProfileView {
+                did,
+                handle,
+                display_name,
+                description,
+                avatar,
+                labels,
+                indexed_at,
+            },
+            record.clone(),
+        );
+        ProfileViewDetailed {
+            did,
+            handle,
+            display_name,
+            description,
+            avatar,
+            banner: match record.banner {
+                None => None,
+                Some(record_banner) => match record_banner.r#ref {
+                    Some(r#ref) => Some(self.get_image_url("banner".to_string(), r#ref.link)),
+                    None => None,
+                },
+            },
+            followers_count,
+            follows_count,
+            posts_count,
+            labels,
             indexed_at,
         }
     }

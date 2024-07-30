@@ -1,4 +1,4 @@
-use crate::lexicons::lexicons::Root;
+use crate::lexicon::lexicons::Root;
 use lazy_static::lazy_static;
 use std::fs;
 

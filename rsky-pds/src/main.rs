@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate rocket;
+use atrium_api::client::AtpServiceClient;
+use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use diesel::prelude::*;
 use diesel::sql_types::Int4;
 use dotenvy::dotenv;
@@ -17,12 +19,15 @@ use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
+use rsky_pds::account_manager::AccountManager;
 use rsky_pds::apis::*;
 use rsky_pds::common::env::env_list;
+use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
+use rsky_pds::read_after_write::viewer::{LocalViewer, LocalViewerCreatorParams};
 use rsky_pds::sequencer::Sequencer;
-use rsky_pds::SharedSequencer;
 use rsky_pds::{DbConn, SharedIdResolver};
+use rsky_pds::{SharedLocalViewer, SharedSequencer};
 use std::env;
 use tokio::sync::RwLock;
 
@@ -136,7 +141,7 @@ async fn rocket() -> _ {
         )),
     };
 
-    let config = aws_config::from_env()
+    let aws_sdk_config = aws_config::from_env()
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
@@ -150,6 +155,41 @@ async fn rocket() -> _ {
             )),
             did_cache: Some(DidCache::new(None, None)),
             backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
+        })),
+    };
+
+    let cfg = env_to_cfg();
+    // Keeping unused for other config purposes for now.
+    let _appview_agent = match cfg.bsky_app_view {
+        None => None,
+        Some(ref bsky_app_view) => {
+            let client = ReqwestClientBuilder::new(bsky_app_view.url.clone())
+                .client(
+                    reqwest::ClientBuilder::new()
+                        .timeout(std::time::Duration::from_millis(1000))
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+            Some(AtpServiceClient::new(client))
+        }
+    };
+    let local_viewer = SharedLocalViewer {
+        local_viewer: RwLock::new(LocalViewer::creator(LocalViewerCreatorParams {
+            account_manager: AccountManager {},
+            pds_hostname: cfg.service.hostname.clone(),
+            appview_agent: match cfg.bsky_app_view {
+                None => None,
+                Some(ref bsky_app_view) => Some(bsky_app_view.url.clone()),
+            },
+            appview_did: match cfg.bsky_app_view {
+                None => None,
+                Some(ref bsky_app_view) => Some(bsky_app_view.did.clone()),
+            },
+            appview_cdn_url_pattern: match cfg.bsky_app_view {
+                None => None,
+                Some(ref bsky_app_view) => bsky_app_view.cdn_url_pattern.clone(),
+            },
         })),
     };
 
@@ -251,6 +291,8 @@ async fn rocket() -> _ {
         .attach(DbConn::fairing())
         .attach(shield)
         .manage(sequencer)
-        .manage(config)
+        .manage(aws_sdk_config)
         .manage(id_resolver)
+        .manage(cfg)
+        .manage(local_viewer)
 }
