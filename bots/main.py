@@ -96,9 +96,9 @@ def parse_images(t):
     if includes:
         parsed_urls = [m.get('url') for m in includes.get('media',[]) if
                        m.get('type') == 'photo']
-        video_thumbnails = [m.get('preview_image_url') for m in includes.get('media',[]) if
-                            m.get('type') == 'video']
-        parsed_urls.extend(video_thumbnails)
+        #video_thumbnails = [m.get('preview_image_url') for m in includes.get('media',[]) if
+        #                    m.get('type') == 'video']
+        #parsed_urls.extend(video_thumbnails)
         return parsed_urls
     else:
         return []
@@ -123,7 +123,7 @@ def parse_embed_url(t, client):
                 blob = client.upload_blob(image_bytes).blob
 
             external = models.AppBskyEmbedExternal.External(
-                description=first_url['description'],
+                description=first_url.get('description',' '),
                 title=first_url['title'],
                 uri=first_url['unwound_url'],
                 thumb=blob
@@ -153,23 +153,23 @@ if __name__ == '__main__':
                         list_of_images = get_images(image_urls)
                         external_url = parse_embed_url(tweet, client)
 
-                        if list_of_images:
+                        if external_url:
+                            client.send_post(
+                                text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
+                                embed=external_url
+                            )
+                            print('Made external url post for {}'.format(json.dumps(tweet, indent=4)))
+                        elif list_of_images:
                             image_bytes = [i[0].getvalue() for i in list_of_images]
                             client.send_images(
                                 text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
                                 images=image_bytes,
                                 image_alts=[]
                             )
-                            print('Made image post for {}'.format(tweet_id))
-                        elif external_url:
-                            client.send_post(
-                                text=html.unescape(remove_twitter_link(tweet['data'].get('text'))),
-                                embed=external_url
-                            )
-                            print('Made external url post for {}'.format(tweet_id))
+                            print('Made image post for {}'.format(json.dumps(tweet, indent=4)))
                         else:
                             client.send_post(text=html.unescape(remove_twitter_link(tweet['data'].get('text'))))
-                            print('Made plain text post for {}'.format(tweet_id))
+                            print('Made plain text post for {}'.format(json.dumps(tweet, indent=4)))
 
                         cached_ids.add(tweet_id)
                         for edit in edit_history:
