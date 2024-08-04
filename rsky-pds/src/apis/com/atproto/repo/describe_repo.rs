@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::INVALID_HANDLE;
@@ -53,13 +53,13 @@ pub async fn describe_repo(
     repo: String,
     id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<DescribeRepoOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<DescribeRepoOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_describe_repo(repo, id_resolver, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("{error:?}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

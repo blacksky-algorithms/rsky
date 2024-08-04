@@ -1,6 +1,6 @@
 use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::auth_verifier::UserDidAuthOptional;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::DbConn;
@@ -113,7 +113,7 @@ pub async fn server_create_account(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     auth: UserDidAuthOptional,
-) -> Result<Json<CreateAccountOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<CreateAccountOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     // @TODO: Throw error for any plcOp input
 
     let _requester = match auth.access {
@@ -146,8 +146,8 @@ pub async fn server_create_account(
     // @TODO: Check that the invite code still has uses
 
     if error_msg.is_some() {
-        let internal_error = InternalErrorMessageResponse {
-            code: Some(InternalErrorCode::InternalError),
+        let internal_error = ErrorMessageResponse {
+            code: Some(ErrorCode::InternalServerError),
             message: error_msg,
         };
         return Err(status::Custom(
@@ -160,8 +160,8 @@ pub async fn server_create_account(
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

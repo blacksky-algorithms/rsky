@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::auth_verifier::AdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -37,12 +37,12 @@ async fn inner_update_account_email(body: Json<UpdateAccountEmailInput>) -> Resu
 pub async fn update_account_email(
     body: Json<UpdateAccountEmailInput>,
     _auth: AdminToken,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_update_account_email(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

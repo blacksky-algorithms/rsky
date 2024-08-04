@@ -1,6 +1,6 @@
 use crate::account_manager::{AccountManager, DisableInviteCodesOpts};
 use crate::auth_verifier::Moderator;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -27,12 +27,12 @@ async fn inner_disable_invite_codes(body: Json<DisableInviteCodesInput>) -> Resu
 pub async fn disable_invite_codes(
     body: Json<DisableInviteCodesInput>,
     _auth: Moderator,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_disable_invite_codes(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

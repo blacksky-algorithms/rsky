@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::Moderator;
 use crate::common::env::env_str;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use futures::try_join;
@@ -57,12 +57,12 @@ async fn inner_get_account_info(did: String) -> Result<AccountView> {
 pub async fn get_account_info(
     did: String,
     _auth: Moderator,
-) -> Result<Json<AccountView>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<AccountView>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_account_info(did).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityF
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -60,12 +60,12 @@ async fn inner_update_email(body: Json<UpdateEmailInput>, auth: AccessFull) -> R
 pub async fn update_email(
     body: Json<UpdateEmailInput>,
     auth: AccessFull,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_update_email(body, auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -1,5 +1,6 @@
 use crate::auth_verifier::AccessStandard;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::config::ServerConfig;
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
@@ -54,22 +55,30 @@ pub async fn get_profile(
     res: HandlerPipeThrough,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
-) -> Result<
-    ReadAfterWriteResponse<ProfileViewDetailed>,
-    status::Custom<Json<InternalErrorMessageResponse>>,
-> {
-    match inner_get_profile(actor, auth, res, s3_config, state_local_viewer).await {
-        Ok(response) => Ok(response),
-        Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
-                message: Some(error.to_string()),
+    cfg: &State<ServerConfig>,
+) -> Result<ReadAfterWriteResponse<ProfileViewDetailed>, status::Custom<Json<ErrorMessageResponse>>>
+{
+    match cfg.bsky_app_view {
+        None => {
+            let not_found = ErrorMessageResponse {
+                code: Some(ErrorCode::NotFound),
+                message: Some("not found".to_string()),
             };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            return Err(status::Custom(Status::NotFound, Json(not_found)));
         }
+        Some(_) => match inner_get_profile(actor, auth, res, s3_config, state_local_viewer).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let internal_error = ErrorMessageResponse {
+                    code: Some(ErrorCode::InternalServerError),
+                    message: Some(error.to_string()),
+                };
+                return Err(status::Custom(
+                    Status::InternalServerError,
+                    Json(internal_error),
+                ));
+            }
+        },
     }
 }
 

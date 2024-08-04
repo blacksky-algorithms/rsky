@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::{make_aturi, ActorStore};
 use anyhow::{bail, Result};
@@ -48,12 +48,12 @@ pub async fn get_record(
     rkey: String,
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<GetRecordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetRecordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_record(repo, collection, rkey, cid, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -1,5 +1,5 @@
 use crate::auth_verifier::AccessFull;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListMissingBlobsOpts;
 use crate::repo::ActorStore;
@@ -17,7 +17,7 @@ pub async fn list_missing_blobs(
     cursor: Option<String>,
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<ListMissingBlobsOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<ListMissingBlobsOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let limit: u16 = limit.unwrap_or(500);
 
@@ -37,8 +37,8 @@ pub async fn list_missing_blobs(
         }
         Err(error) => {
             eprintln!("{error:?}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             Err(status::Custom(

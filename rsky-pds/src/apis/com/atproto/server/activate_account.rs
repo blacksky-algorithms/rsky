@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::auth_verifier::AccessFull;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
@@ -71,13 +71,13 @@ pub async fn activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_activate_account(auth, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

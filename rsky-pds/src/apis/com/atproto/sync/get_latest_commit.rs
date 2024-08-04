@@ -1,7 +1,7 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
@@ -39,12 +39,12 @@ pub async fn get_latest_commit(
     did: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<Json<GetLatestCommitOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetLatestCommitOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_latest_commit(did, s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

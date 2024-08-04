@@ -1,6 +1,6 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::RecordPath;
 use crate::repo::ActorStore;
@@ -61,12 +61,12 @@ pub async fn get_record(
     commit: Option<String>, // DEPRECATED: referenced a repo commit by CID, and retrieved record as of that commit
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<BlockResponder, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<BlockResponder, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_record(did, collection, rkey, commit, s3_config, auth).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

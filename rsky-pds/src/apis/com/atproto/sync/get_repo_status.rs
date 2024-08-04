@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, FormattedAccountStatus,
 };
 use crate::apis::com::atproto::repo::assert_repo_availability;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -47,12 +47,12 @@ async fn inner_get_repo(did: String, s3_config: &State<SdkConfig>) -> Result<Get
 pub async fn get_repo_status(
     did: String,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<GetRepoStatusOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetRepoStatusOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_repo(did, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

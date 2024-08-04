@@ -3,7 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::get_keys_from_private_key_str;
 use crate::auth_verifier::AccessStandardCheckTakedown;
 use crate::common::env::env_str;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::{plc, SharedSequencer};
 use anyhow::{bail, Result};
 use rocket::http::Status;
@@ -79,12 +79,12 @@ pub async fn update_handle(
     body: Json<UpdateHandleInput>,
     sequencer: &State<SharedSequencer>,
     auth: AccessStandardCheckTakedown,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_update_handle(body, sequencer, auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

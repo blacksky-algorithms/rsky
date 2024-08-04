@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::{
@@ -126,12 +126,12 @@ pub async fn put_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<PutRecordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<PutRecordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_put_record(body, auth, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

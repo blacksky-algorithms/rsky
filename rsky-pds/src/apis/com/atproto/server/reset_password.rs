@@ -1,5 +1,5 @@
 use crate::account_manager::{AccountManager, ResetPasswordOpts};
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -12,13 +12,13 @@ use rsky_lexicon::com::atproto::server::ResetPasswordInput;
 )]
 pub async fn reset_password(
     body: Json<ResetPasswordInput>,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     let ResetPasswordInput { token, password } = body.into_inner();
     match AccountManager::reset_password(ResetPasswordOpts { token, password }).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

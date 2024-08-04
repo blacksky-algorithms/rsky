@@ -3,7 +3,7 @@ use crate::auth_verifier::Moderator;
 use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
-use crate::models::{models, InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{models, ErrorCode, ErrorMessageResponse};
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
@@ -339,13 +339,13 @@ pub async fn get_invite_codes(
     limit: Option<i64>,
     cursor: Option<String>,
     _auth: Moderator,
-) -> Result<Json<GetInviteCodesOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetInviteCodesOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_invite_codes(sort, limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

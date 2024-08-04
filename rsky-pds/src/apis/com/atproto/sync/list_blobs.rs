@@ -1,7 +1,7 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListBlobsOpts;
 use crate::repo::ActorStore;
@@ -58,12 +58,12 @@ pub async fn list_blobs(
     cursor: Option<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<Json<ListBlobsOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<ListBlobsOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_list_blobs(did, since, limit, cursor, s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

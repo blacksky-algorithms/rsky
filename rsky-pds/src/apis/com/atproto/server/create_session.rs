@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::INVALID_HANDLE;
 use anyhow::bail;
 use rocket::http::Status;
@@ -75,14 +75,14 @@ async fn inner_create_session(
 )]
 pub async fn create_session(
     body: Json<CreateSessionInput>,
-) -> Result<Json<CreateSessionOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<CreateSessionOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     // @TODO: Add rate limiting
 
     match inner_create_session(body).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

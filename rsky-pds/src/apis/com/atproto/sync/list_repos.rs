@@ -4,7 +4,7 @@ use crate::account_manager::helpers::account::{
 use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
@@ -269,12 +269,12 @@ async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<
 pub async fn list_repos(
     limit: Option<i64>,
     cursor: Option<String>,
-) -> Result<Json<ListReposOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<ListReposOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_list_repos(limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

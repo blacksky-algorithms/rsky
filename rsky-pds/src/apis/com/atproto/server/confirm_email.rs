@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, ConfirmEmailOpts};
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -50,13 +50,13 @@ async fn inner_confirm_email(
 pub async fn confirm_email(
     body: Json<ConfirmEmailInput>,
     auth: AccessStandardIncludeChecks,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_confirm_email(body, auth).await {
         Ok(()) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

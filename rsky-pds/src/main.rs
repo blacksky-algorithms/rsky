@@ -48,7 +48,7 @@ async fn health(
     connection: DbConn,
 ) -> Result<
     Json<rsky_pds::models::ServerVersion>,
-    status::Custom<Json<rsky_pds::models::InternalErrorMessageResponse>>,
+    status::Custom<Json<rsky_pds::models::ErrorMessageResponse>>,
 > {
     let result = connection
         .run(move |conn| {
@@ -66,14 +66,13 @@ async fn health(
             Ok(Json(version))
         }
         Err(error) => {
-            // TO DO: Throw 503
             eprintln!("Internal Error: {error}");
-            let internal_error = rsky_pds::models::InternalErrorMessageResponse {
-                code: Some(rsky_pds::models::InternalErrorCode::InternalError),
+            let internal_error = rsky_pds::models::ErrorMessageResponse {
+                code: Some(rsky_pds::models::ErrorCode::ServiceUnavailable),
                 message: Some(error.to_string()),
             };
             Err(status::Custom(
-                Status::InternalServerError,
+                Status::ServiceUnavailable,
                 Json(internal_error),
             ))
         }
@@ -81,9 +80,9 @@ async fn health(
 }
 
 #[catch(default)]
-async fn default_catcher() -> Json<rsky_pds::models::InternalErrorMessageResponse> {
-    let internal_error = rsky_pds::models::InternalErrorMessageResponse {
-        code: Some(rsky_pds::models::InternalErrorCode::InternalError),
+async fn default_catcher() -> Json<rsky_pds::models::ErrorMessageResponse> {
+    let internal_error = rsky_pds::models::ErrorMessageResponse {
+        code: Some(rsky_pds::models::ErrorCode::InternalServerError),
         message: Some("Internal error.".to_string()),
     };
     Json(internal_error)

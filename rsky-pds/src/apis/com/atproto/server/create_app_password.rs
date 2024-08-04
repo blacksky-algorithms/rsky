@@ -1,6 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AccessFull;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -14,7 +14,7 @@ use rsky_lexicon::com::atproto::server::{CreateAppPasswordInput, CreateAppPasswo
 pub async fn create_app_password(
     body: Json<CreateAppPasswordInput>,
     auth: AccessFull,
-) -> Result<Json<CreateAppPasswordOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<CreateAppPasswordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     let CreateAppPasswordInput { name } = body.into_inner();
     match AccountManager::create_app_password(auth.access.credentials.unwrap().did.unwrap(), name)
         .await
@@ -22,8 +22,8 @@ pub async fn create_app_password(
         Ok(app_password) => Ok(Json(app_password)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

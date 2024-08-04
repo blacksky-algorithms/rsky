@@ -4,7 +4,7 @@ use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -37,12 +37,12 @@ async fn inner_request_account_delete(auth: AccessStandardIncludeChecks) -> Resu
 #[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
 pub async fn request_account_delete(
     auth: AccessStandardIncludeChecks,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     match inner_request_account_delete(auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

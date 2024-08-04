@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::Moderator;
 use crate::mailer::moderation::{HtmlMailOpts, ModerationMailer};
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -49,12 +49,12 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
 pub async fn send_email(
     body: Json<SendMailInput>,
     _auth: Moderator,
-) -> Result<Json<SendMailOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<SendMailOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_send_email(body).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

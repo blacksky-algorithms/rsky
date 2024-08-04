@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
@@ -95,7 +95,7 @@ pub async fn list_records(
     // Flag to reverse the order of the returned records.
     reverse: Option<bool>,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<ListRecordsOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<ListRecordsOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     let limit = limit.unwrap_or(50);
     let reverse = reverse.unwrap_or(false);
 
@@ -106,8 +106,8 @@ pub async fn list_records(
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -2,7 +2,7 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use crate::car::read_car_bytes;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
@@ -60,12 +60,12 @@ pub async fn get_blocks(
     cids: Vec<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<BlockResponder, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<BlockResponder, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_blocks(did, cids, s3_config, auth).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

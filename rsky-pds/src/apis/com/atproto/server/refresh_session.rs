@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::{Credentials, Refresh};
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use rocket::http::Status;
@@ -46,13 +46,13 @@ async fn inner_refresh_session(auth: Refresh) -> Result<RefreshSessionOutput> {
 #[rocket::post("/xrpc/com.atproto.server.refreshSession")]
 pub async fn refresh_session(
     auth: Refresh,
-) -> Result<Json<RefreshSessionOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<RefreshSessionOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_refresh_session(auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(

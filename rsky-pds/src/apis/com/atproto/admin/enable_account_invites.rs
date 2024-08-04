@@ -1,6 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::Moderator;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::Result;
 use rocket::http::Status;
 use rocket::response::status;
@@ -15,13 +15,13 @@ use rsky_lexicon::com::atproto::admin::EnableAccountInvitesInput;
 pub async fn enable_account_invites(
     body: Json<EnableAccountInvitesInput>,
     _auth: Moderator,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     let EnableAccountInvitesInput { account, .. } = body.into_inner();
     match AccountManager::set_account_invites_disabled(&account, false).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

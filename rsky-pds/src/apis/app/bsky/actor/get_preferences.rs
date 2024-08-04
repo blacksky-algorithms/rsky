@@ -1,5 +1,5 @@
 use crate::auth_verifier::AccessStandard;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -34,12 +34,12 @@ async fn inner_get_preferences(
 pub async fn get_preferences(
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
-) -> Result<Json<GetPreferencesOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<GetPreferencesOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_preferences(s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -1,6 +1,6 @@
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::common::ContentType;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{BlobConstraint, PreparedBlobRef};
 use crate::repo::ActorStore;
@@ -72,13 +72,13 @@ pub async fn upload_blob(
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<BlobOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<BlobOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_upload_blob(auth, blob, content_type, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("{error:?}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

@@ -1,7 +1,7 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -48,7 +48,7 @@ pub async fn get_blob(
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<BlobResponder, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<BlobResponder, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_get_blob(did, cid, s3_config, auth).await {
         Ok(res) => {
             let (bytes, mime_type) = res;
@@ -66,16 +66,16 @@ pub async fn get_blob(
             return match error.downcast_ref() {
                 Some(GetObjectError::NoSuchKey(_)) => {
                     eprintln!("Error: {}", error);
-                    let internal_error = InternalErrorMessageResponse {
-                        code: Some(InternalErrorCode::NotFound),
+                    let internal_error = ErrorMessageResponse {
+                        code: Some(ErrorCode::NotFound),
                         message: Some("cannot find blob".to_owned()),
                     };
                     Err(status::Custom(Status::NotFound, Json(internal_error)))
                 }
                 _ => {
                     eprintln!("Error: {}", error);
-                    let internal_error = InternalErrorMessageResponse {
-                        code: Some(InternalErrorCode::InternalError),
+                    let internal_error = ErrorMessageResponse {
+                        code: Some(ErrorCode::InternalServerError),
                         message: Some(error.to_string()),
                     };
                     Err(status::Custom(

@@ -1,6 +1,6 @@
 use crate::account_manager::{AccountManager, UpdateAccountPasswordOpts};
 use crate::auth_verifier::AdminToken;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::Result;
 use rocket::http::Status;
 use rocket::response::status;
@@ -15,14 +15,14 @@ use rsky_lexicon::com::atproto::admin::UpdateAccountPasswordInput;
 pub async fn update_account_password(
     body: Json<UpdateAccountPasswordInput>,
     _auth: AdminToken,
-) -> Result<(), status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
     let UpdateAccountPasswordInput { did, password } = body.into_inner();
     match AccountManager::update_account_password(UpdateAccountPasswordOpts { did, password }).await
     {
         Ok(_) => Ok(()),
         Err(error) => {
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(

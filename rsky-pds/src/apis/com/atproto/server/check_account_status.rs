@@ -1,7 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::is_valid_did_doc_for_service;
 use crate::auth_verifier::AccessFull;
-use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
+use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -53,13 +53,13 @@ async fn inner_check_account_status(
 pub async fn check_account_status(
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<CheckAccountStatusOutput>, status::Custom<Json<InternalErrorMessageResponse>>> {
+) -> Result<Json<CheckAccountStatusOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     match inner_check_account_status(auth, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = InternalErrorMessageResponse {
-                code: Some(InternalErrorCode::InternalError),
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
                 message: Some("Internal error".to_string()),
             };
             return Err(status::Custom(
