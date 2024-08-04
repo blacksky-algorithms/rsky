@@ -79,6 +79,12 @@ pub struct ProfileViewDetailed {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetProfilesOutput {
+    pub profiles: Vec<ProfileViewDetailed>
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RefProfileAssociated {
     pub lists: Option<u64>,
     pub feedgens: Option<u64>,
