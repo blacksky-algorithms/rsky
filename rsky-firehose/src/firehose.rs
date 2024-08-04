@@ -1,7 +1,7 @@
+use anyhow::{bail, Result};
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::io::Cursor;
-use anyhow::{Result, bail};
 
 #[derive(Debug, Deserialize)]
 pub struct Header {
@@ -39,8 +39,11 @@ pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
         "#tombstone" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
         _ => {
             eprintln!("Received unknown header {:?}", header.type_.as_str());
-            bail!(format!("Received unknown header {:?}", header.type_.as_str()))
-        },
+            bail!(format!(
+                "Received unknown header {:?}",
+                header.type_.as_str()
+            ))
+        }
     };
 
     Ok((header, body))
