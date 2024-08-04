@@ -11,7 +11,7 @@ use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
 use serde::de::DeserializeOwned;
-use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
@@ -99,8 +99,11 @@ pub async fn format_url_and_aud<'r>(
     };
     match (service_url, aud) {
         (Some(service_url), Some(aud)) => {
-            let url =
+            let mut url =
                 Url::parse(format!("https://{0}{1}", req.uri().path(), service_url).as_str())?;
+            if let Some(params) = req.uri().query() {
+                url.set_query(Some(params.as_str()));
+            }
             let cfg = req.guard::<&State<ServerConfig>>().await.unwrap();
             if !cfg.service.dev_mode && !is_safe_url(url.clone()) {
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
@@ -247,16 +250,19 @@ pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
     };
     // Release borrow
     let encoding = encoding.to_string();
-    let res_headers =
-        RES_HEADERS_TO_FORWARD
-            .iter()
-            .fold(HeaderMap::new(), |mut acc: HeaderMap, cur| {
-                let _ = match res.headers().get(*cur) {
-                    Some(res_header_val) => acc.insert(*cur, res_header_val.clone()),
-                    None => None,
-                };
-                acc
-            });
+    let res_headers = RES_HEADERS_TO_FORWARD.clone().into_iter().fold(
+        BTreeMap::new(),
+        |mut acc: BTreeMap<String, String>, cur| {
+            let _ = match res.headers().get(cur) {
+                Some(res_header_val) => acc.insert(
+                    cur.to_string(),
+                    res_header_val.clone().to_str().unwrap().to_string(),
+                ),
+                None => None,
+            };
+            acc
+        },
+    );
     let buffer = read_array_buffer_res(res).await?;
     Ok(HandlerPipeThrough {
         encoding,

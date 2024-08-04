@@ -1,6 +1,7 @@
 use crate::auth_verifier::AccessStandard;
 use crate::models::{InternalErrorCode, InternalErrorMessageResponse};
 use crate::read_after_write::types::LocalRecords;
+use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
 use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
@@ -14,6 +15,35 @@ use rsky_lexicon::app::bsky::actor::ProfileViewDetailed;
 
 const METHOD_NSID: &'static str = "app.bsky.actor.getProfile";
 
+pub async fn inner_get_profile(
+    // Forwarded by original url in pipethrough
+    _actor: String,
+    auth: AccessStandard,
+    res: HandlerPipeThrough,
+    s3_config: &State<SdkConfig>,
+    state_local_viewer: &State<SharedLocalViewer>,
+) -> Result<ReadAfterWriteResponse<ProfileViewDetailed>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match requester {
+        None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Some(requester) => {
+            let read_afer_write_response = handle_read_after_write(
+                METHOD_NSID.to_string(),
+                requester,
+                res,
+                get_profile_munge,
+                s3_config,
+                state_local_viewer,
+            )
+            .await?;
+            Ok(read_afer_write_response)
+        }
+    }
+}
+
 /// Get detailed profile view of an actor. Does not require auth,
 /// but contains relevant metadata with auth.
 #[rocket::get("/xrpc/app.bsky.actor.getProfile?<actor>")]
@@ -24,17 +54,21 @@ pub async fn get_profile(
     res: HandlerPipeThrough,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
-) -> Result<Json<ProfileViewDetailed>, status::Custom<Json<InternalErrorMessageResponse>>> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
-    match requester {
-        None => {
-            todo!()
-        }
-        Some(requester) => {
-            todo!()
+) -> Result<
+    ReadAfterWriteResponse<ProfileViewDetailed>,
+    status::Custom<Json<InternalErrorMessageResponse>>,
+> {
+    match inner_get_profile(actor, auth, res, s3_config, state_local_viewer).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let internal_error = InternalErrorMessageResponse {
+                code: Some(InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
         }
     }
 }

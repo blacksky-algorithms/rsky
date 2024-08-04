@@ -10,30 +10,74 @@ use anyhow::Result;
 use aws_config::SdkConfig;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use reqwest::header::{HeaderMap, HeaderValue};
+use rocket::http::Status;
+use rocket::request::Request;
+use rocket::response::{self, Responder, Response};
 use rocket::State;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::time::SystemTime;
 
 const REPO_REV_HEADER: &'static str = "atproto-repo-rev";
 
 pub type MungeFn<T> = fn(LocalViewer, T, LocalRecords, String) -> Result<T>;
 
-pub struct HandlerResponse<T> {
+#[derive(Serialize)]
+pub struct HandlerResponse<T: Serialize> {
     pub encoding: String,
     pub body: T,
-    pub headers: Option<HeaderMap>,
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
-pub enum ReadAfterWriteResponse<T> {
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ReadAfterWriteResponse<T: Serialize> {
     HandlerResponse(HandlerResponse<T>),
     HandlerPipeThrough(HandlerPipeThrough),
 }
 
-pub fn get_repo_rev(headers: &HeaderMap) -> Result<Option<String>> {
+impl<'r, T: Serialize> Responder<'r, 'static> for ReadAfterWriteResponse<T> {
+    fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'static> {
+        match self {
+            ReadAfterWriteResponse::HandlerPipeThrough(pipethrough) => {
+                let mut builder = Response::build();
+                builder
+                    .status(Status::Ok)
+                    .raw_header("Content-Type", pipethrough.encoding)
+                    .sized_body(pipethrough.buffer.len(), Cursor::new(pipethrough.buffer));
+                if let Some(headers) = pipethrough.headers {
+                    for header in headers.into_iter() {
+                        builder.raw_header(header.0, header.1);
+                    }
+                }
+                builder.ok()
+            }
+            ReadAfterWriteResponse::HandlerResponse(handler_response) => {
+                let mut builder = Response::build();
+                let encoding = handler_response.encoding.clone();
+                let headers = handler_response.headers.clone();
+                let bytes = serde_json::to_vec(&handler_response).unwrap();
+                builder.sized_body(bytes.len(), Cursor::new(bytes));
+                builder
+                    .status(Status::Ok)
+                    .raw_header("Content-Type", encoding);
+                if let Some(headers) = headers {
+                    for header in headers.into_iter() {
+                        builder.raw_header(header.0, header.1);
+                    }
+                }
+                builder.ok()
+            }
+        }
+    }
+}
+
+pub fn get_repo_rev(headers: &BTreeMap<String, String>) -> Option<String> {
     match headers.get(REPO_REV_HEADER) {
-        None => Ok(None),
-        Some(value) => Ok(Some(value.to_str()?.to_string())),
+        None => None,
+        Some(value) => Some(value.clone()),
     }
 }
 
@@ -62,7 +106,7 @@ pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
     }
 }
 
-pub async fn handle_read_after_write<T: DeserializeOwned>(
+pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     nsid: String,
     requester: String,
     res: HandlerPipeThrough,
@@ -92,7 +136,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned>(
     }
 }
 
-pub async fn read_after_write_internal<T: DeserializeOwned>(
+pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     nsid: String,
     requester: String,
     res: HandlerPipeThrough,
@@ -100,7 +144,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned>(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
 ) -> Result<ReadAfterWriteResponse<T>> {
-    let rev = get_repo_rev(&res.headers.clone().unwrap_or_else(|| HeaderMap::new()))?;
+    let rev = get_repo_rev(&res.headers.clone().unwrap_or_else(|| BTreeMap::new()));
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(rev) => {
@@ -123,18 +167,18 @@ pub async fn read_after_write_internal<T: DeserializeOwned>(
     }
 }
 
-pub fn format_munged_response<T>(body: T, lag: Option<usize>) -> Result<HandlerResponse<T>> {
+pub fn format_munged_response<T: DeserializeOwned + serde::Serialize>(
+    body: T,
+    lag: Option<usize>,
+) -> Result<HandlerResponse<T>> {
     Ok(HandlerResponse {
         encoding: "application/json".to_string(),
         body,
         headers: match lag {
             None => None,
             Some(lag) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    "Atproto-Upstream-Lag",
-                    HeaderValue::from_str(lag.to_string().as_str())?,
-                );
+                let mut headers = BTreeMap::new();
+                headers.insert("Atproto-Upstream-Lag".to_string(), lag.to_string());
                 Some(headers)
             }
         },

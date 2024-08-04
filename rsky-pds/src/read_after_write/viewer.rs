@@ -466,12 +466,11 @@ impl LocalViewer {
         let ProfileViewBasic {
             did,
             handle,
-            display_name,
-            avatar,
             associated,
             viewer,
             labels,
             created_at,
+            ..
         } = view;
         ProfileViewBasic {
             did,
@@ -506,10 +505,7 @@ impl LocalViewer {
             handle,
             display_name,
             avatar,
-            associated,
-            viewer,
-            labels,
-            created_at,
+            ..
         } = self.update_profile_view_basic(
             ProfileViewBasic {
                 did,
@@ -545,12 +541,12 @@ impl LocalViewer {
             display_name,
             description,
             avatar,
-            banner,
             followers_count,
             follows_count,
             posts_count,
             labels,
             indexed_at,
+            ..
         } = view;
         let ProfileView {
             did,

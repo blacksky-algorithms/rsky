@@ -1,12 +1,12 @@
 use crate::auth_verifier::AuthError;
-use reqwest::header::HeaderMap;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HandlerPipeThrough {
     pub encoding: String,
     pub buffer: Vec<u8>,
-    pub headers: Option<HeaderMap>,
+    pub headers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Error, Debug)]
