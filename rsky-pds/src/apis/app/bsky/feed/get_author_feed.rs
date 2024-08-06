@@ -19,7 +19,7 @@ const METHOD_NSID: &'static str = "app.bsky.feed.getAuthorFeed";
 
 pub async fn inner_get_author_feed(
     _actor: String,
-    _limit: Option<u16>,
+    _limit: Option<u8>,
     _cursor: Option<String>,
     _filter: Option<String>,
     auth: AccessStandard,
@@ -52,7 +52,7 @@ pub async fn inner_get_author_feed(
 #[rocket::get("/xrpc/app.bsky.feed.getAuthorFeed?<actor>&<limit>&<cursor>&<filter>")]
 pub async fn get_author_feed(
     actor: String,
-    limit: Option<u16>,
+    limit: Option<u8>,
     cursor: Option<String>,
     filter: Option<String>, // Combinations of post/repost types to include in response.
     auth: AccessStandard,

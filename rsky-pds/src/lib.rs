@@ -8,6 +8,8 @@ extern crate serde;
 
 use crate::read_after_write::viewer::LocalViewerCreator;
 use crate::sequencer::Sequencer;
+use atrium_api::client::AtpServiceClient;
+use atrium_xrpc_client::reqwest::ReqwestClient;
 use diesel::pg::PgConnection;
 use rocket_sync_db_pools::database;
 use rsky_identity::IdResolver;
@@ -36,6 +38,10 @@ pub struct SharedIdResolver {
 
 pub struct SharedLocalViewer {
     pub local_viewer: RwLock<LocalViewerCreator>,
+}
+
+pub struct SharedATPAgent {
+    pub app_view_agent: Option<RwLock<AtpServiceClient<ReqwestClient>>>,
 }
 
 pub mod account_manager;

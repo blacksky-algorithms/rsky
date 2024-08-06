@@ -18,7 +18,7 @@ const METHOD_NSID: &'static str = "app.bsky.feed.getActorLikes";
 
 pub async fn inner_get_actor_likes(
     _actor: String,
-    _limit: Option<u16>,
+    _limit: Option<u8>,
     _cursor: Option<String>,
     auth: AccessStandard,
     res: HandlerPipeThrough,
@@ -50,7 +50,7 @@ pub async fn inner_get_actor_likes(
 #[rocket::get("/xrpc/app.bsky.feed.getActorLikes?<actor>&<limit>&<cursor>")]
 pub async fn get_actor_likes(
     actor: String,
-    limit: Option<u16>,
+    limit: Option<u8>,
     cursor: Option<String>,
     auth: AccessStandard,
     res: HandlerPipeThrough,

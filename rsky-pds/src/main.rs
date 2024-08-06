@@ -26,7 +26,7 @@ use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::read_after_write::viewer::{LocalViewer, LocalViewerCreatorParams};
 use rsky_pds::sequencer::Sequencer;
-use rsky_pds::{DbConn, SharedIdResolver};
+use rsky_pds::{DbConn, SharedATPAgent, SharedIdResolver};
 use rsky_pds::{SharedLocalViewer, SharedSequencer};
 use std::env;
 use tokio::sync::RwLock;
@@ -159,8 +159,10 @@ async fn rocket() -> _ {
 
     let cfg = env_to_cfg();
     // Keeping unused for other config purposes for now.
-    let _appview_agent = match cfg.bsky_app_view {
-        None => None,
+    let app_view_agent = match cfg.bsky_app_view {
+        None => SharedATPAgent {
+            app_view_agent: None,
+        },
         Some(ref bsky_app_view) => {
             let client = ReqwestClientBuilder::new(bsky_app_view.url.clone())
                 .client(
@@ -170,7 +172,9 @@ async fn rocket() -> _ {
                         .unwrap(),
                 )
                 .build();
-            Some(AtpServiceClient::new(client))
+            SharedATPAgent {
+                app_view_agent: Some(RwLock::new(AtpServiceClient::new(client))),
+            }
         }
     };
     let local_viewer = SharedLocalViewer {
@@ -281,4 +285,5 @@ async fn rocket() -> _ {
         .manage(id_resolver)
         .manage(cfg)
         .manage(local_viewer)
+        .manage(app_view_agent)
 }
