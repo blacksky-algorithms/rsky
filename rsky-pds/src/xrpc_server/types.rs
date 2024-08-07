@@ -1,4 +1,5 @@
 use crate::auth_verifier::AuthError;
+use reqwest::header::HeaderMap;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -13,8 +14,13 @@ pub struct HandlerPipeThrough {
 pub enum XRPCError {
     #[error("pipethrough network error")]
     UpstreamFailure,
-    #[error("{0}")]
-    FailedResponse(String),
+    #[error("failed request {status:?}")]
+    FailedResponse {
+        status: String,
+        error: Option<String>,
+        message: Option<String>,
+        headers: HeaderMap,
+    },
 }
 
 #[derive(Error, Debug)]

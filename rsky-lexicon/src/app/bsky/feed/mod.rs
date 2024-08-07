@@ -120,6 +120,16 @@ pub enum ReplyRefUnion {
     BlockedPost(BlockedPost),
 }
 
+impl ReplyRefUnion {
+    pub fn uri(&self) -> &str {
+        match self {
+            ReplyRefUnion::PostView(post) => post.uri.as_str(),
+            ReplyRefUnion::NotFoundPost(post) => post.uri.as_str(),
+            ReplyRefUnion::BlockedPost(post) => post.uri.as_str()
+        }
+    }
+}
+
 /// Deprecated: use facets instead.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct EntityRef {
@@ -156,6 +166,8 @@ pub struct GetLikesOutput {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ThreadViewPost {
     pub post: PostView,
+    pub parent: Option<Box<ThreadViewPostEnum>>,
+    pub replies: Option<Vec<Box<ThreadViewPostEnum>>>
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -210,6 +222,8 @@ pub enum ThreadViewPostEnum {
     ThreadViewPost(ThreadViewPost),
     #[serde(rename = "app.bsky.feed.defs#notFoundPost")]
     NotFoundPost(NotFoundPost),
+    #[serde(rename = "app.bsky.feed.defs#blockedPost")]
+    BlockedPost(BlockedPost),
 }
 
 ///api.bsky.feed.getPostThread

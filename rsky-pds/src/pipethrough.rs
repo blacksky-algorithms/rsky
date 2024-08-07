@@ -219,17 +219,17 @@ pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
             println!("@LOG WARN: pipethrough network error {}", e.to_string());
             bail!(InvalidRequestError::XRPCError(XRPCError::UpstreamFailure))
         }
-        Ok(res) => {
-            match res.error_for_status() {
-                Ok(res) => Ok(res),
-                Err(err) => {
-                    // @TODO add additional error logging
-                    bail!(InvalidRequestError::XRPCError(XRPCError::FailedResponse(
-                        err.to_string()
-                    )))
-                }
+        Ok(res) => match res.error_for_status_ref() {
+            Ok(_) => Ok(res),
+            Err(err) => {
+                bail!(InvalidRequestError::XRPCError(XRPCError::FailedResponse {
+                    status: res.status().to_string(),
+                    error: Some(err.to_string()),
+                    message: Some(err.to_string()),
+                    headers: res.headers().clone()
+                }))
             }
-        }
+        },
     }
 }
 
