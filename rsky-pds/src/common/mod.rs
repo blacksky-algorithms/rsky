@@ -139,6 +139,16 @@ pub fn get_verification_material(
     }
 }
 
+pub fn get_notif_endpoint(doc: DidDocument) -> Option<String> {
+    get_service_endpoint(
+        doc,
+        GetServiceEndpointOpts {
+            id: "#bsky_notif".to_string(),
+            r#type: Some("BskyNotificationService".to_string()),
+        },
+    )
+}
+
 pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> Option<String> {
     let did = get_did(&doc);
     match doc.service {

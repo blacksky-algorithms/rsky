@@ -23,25 +23,20 @@ pub async fn inner_get_profiles(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
 ) -> Result<ReadAfterWriteResponse<GetProfilesOutput>> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
+    let requester: String = match auth.access.credentials {
+        None => "".to_string(),
+        Some(credentials) => credentials.did.unwrap_or("".to_string()),
     };
-    match requester {
-        None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
-        Some(requester) => {
-            let read_afer_write_response = handle_read_after_write(
-                METHOD_NSID.to_string(),
-                requester,
-                res,
-                get_profiles_munge,
-                s3_config,
-                state_local_viewer,
-            )
-            .await?;
-            Ok(read_afer_write_response)
-        }
-    }
+    let read_afer_write_response = handle_read_after_write(
+        METHOD_NSID.to_string(),
+        requester,
+        res,
+        get_profiles_munge,
+        s3_config,
+        state_local_viewer,
+    )
+    .await?;
+    Ok(read_afer_write_response)
 }
 
 /// Get detailed profile views of multiple actors.

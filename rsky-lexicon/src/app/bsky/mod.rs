@@ -4,3 +4,4 @@ pub mod feed;
 pub mod graph;
 pub mod labeler;
 pub mod richtext;
+pub mod notification;
