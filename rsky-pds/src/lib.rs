@@ -15,7 +15,7 @@ use rocket_sync_db_pools::database;
 use rsky_identity::IdResolver;
 use tokio::sync::RwLock;
 
-static APP_USER_AGENT: &str = concat!(
+pub static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_HOMEPAGE"),
     "@",
     env!("CARGO_PKG_NAME"),

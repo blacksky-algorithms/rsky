@@ -8,7 +8,7 @@ use crate::read_after_write::util;
 use crate::repo::types::Ids;
 use crate::repo::ActorStore;
 use crate::xrpc_server::auth::create_service_auth_headers;
-use crate::INVALID_HANDLE;
+use crate::{APP_USER_AGENT, INVALID_HANDLE};
 use anyhow::{bail, Result};
 use atrium_api::app::bsky::feed::get_feed_generator::{
     Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
@@ -98,6 +98,7 @@ impl LocalViewer {
                         let client = ReqwestClientBuilder::new(bsky_app_view_url.clone())
                             .client(
                                 reqwest::ClientBuilder::new()
+                                    .user_agent(APP_USER_AGENT)
                                     .timeout(std::time::Duration::from_millis(1000))
                                     .build()
                                     .unwrap(),

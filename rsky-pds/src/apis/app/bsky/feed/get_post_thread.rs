@@ -10,7 +10,7 @@ use crate::read_after_write::viewer::LocalViewer;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
-use crate::SharedLocalViewer;
+use crate::{SharedLocalViewer, APP_USER_AGENT};
 use anyhow::{anyhow, Result};
 use atrium_api::app::bsky::feed::get_post_thread::{
     Parameters as AppBskyFeedGetPostThreadParams, ParametersData as AppBskyFeedGetPostThreadData,
@@ -381,6 +381,7 @@ pub async fn read_after_write_not_found(
                                                 )
                                                 .client(
                                                     reqwest::ClientBuilder::new()
+                                                        .user_agent(APP_USER_AGENT)
                                                         .timeout(std::time::Duration::from_millis(
                                                             1000,
                                                         ))

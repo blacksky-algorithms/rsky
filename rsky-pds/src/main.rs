@@ -26,8 +26,9 @@ use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::read_after_write::viewer::{LocalViewer, LocalViewerCreatorParams};
 use rsky_pds::sequencer::Sequencer;
-use rsky_pds::{DbConn, SharedATPAgent, SharedIdResolver};
-use rsky_pds::{SharedLocalViewer, SharedSequencer};
+use rsky_pds::{
+    DbConn, SharedATPAgent, SharedIdResolver, SharedLocalViewer, SharedSequencer, APP_USER_AGENT,
+};
 use std::env;
 use tokio::sync::RwLock;
 
@@ -167,6 +168,7 @@ async fn rocket() -> _ {
             let client = ReqwestClientBuilder::new(bsky_app_view.url.clone())
                 .client(
                     reqwest::ClientBuilder::new()
+                        .user_agent(APP_USER_AGENT)
                         .timeout(std::time::Duration::from_millis(1000))
                         .build()
                         .unwrap(),

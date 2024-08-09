@@ -3,7 +3,7 @@ use crate::auth_verifier::AccessStandardSignupQueued;
 use crate::common::get_notif_endpoint;
 use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::{context, SharedIdResolver};
+use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{anyhow, bail, Result};
 use atrium_api::app::bsky::notification::register_push::{
     Input as AppBskyNotificationRegisterPushInput, InputData as AppBskyNotificationRegisterPushData,
@@ -40,6 +40,7 @@ pub async fn inner_register_push(
     let client = ReqwestClientBuilder::new(app_view_url)
         .client(
             reqwest::ClientBuilder::new()
+                .user_agent(APP_USER_AGENT)
                 .timeout(std::time::Duration::from_millis(1000))
                 .default_headers(auth_headers.clone())
                 .build()
@@ -72,6 +73,7 @@ pub async fn inner_register_push(
     let client = ReqwestClientBuilder::new(notif_endpoint)
         .client(
             reqwest::ClientBuilder::new()
+                .user_agent(APP_USER_AGENT)
                 .timeout(std::time::Duration::from_millis(1000))
                 .default_headers(auth_headers)
                 .build()
