@@ -50,14 +50,14 @@ pub struct ConvoView {
     pub id: String,
     pub rev: String,
     pub members: Vec<ProfileViewBasic>,
-    pub last_message: Option<LastMessageEnum>,
+    pub last_message: Option<MessageViewEnum>,
     pub muted: bool,
     pub unread_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum LastMessageEnum {
+pub enum MessageViewEnum {
     MessageView(MessageView),
     DeletedMessageView(DeletedMessageView),
 }
@@ -66,4 +66,59 @@ pub enum LastMessageEnum {
 #[serde(rename_all = "camelCase")]
 pub struct GetConvoOutput {
     pub convo: ConvoView,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "chat.bsky.convo.defs#logBeginConvo")]
+#[serde(rename_all = "camelCase")]
+pub struct LogBeginConvo {
+    pub rev: String,
+    pub convo_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "chat.bsky.convo.defs#logLeaveConvo")]
+#[serde(rename_all = "camelCase")]
+pub struct LogLeaveConvo {
+    pub rev: String,
+    pub convo_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "chat.bsky.convo.defs#logCreateMessage")]
+#[serde(rename_all = "camelCase")]
+pub struct LogCreateMessage {
+    pub rev: String,
+    pub convo_id: String,
+    pub message: MessageViewEnum,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+#[serde(rename = "chat.bsky.convo.defs#logDeleteMessage")]
+#[serde(rename_all = "camelCase")]
+pub struct LogDeleteMessage {
+    pub rev: String,
+    pub convo_id: String,
+    pub message: MessageViewEnum,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum LogEnum {
+    LogBeginConvo(LogBeginConvo),
+    LogLeaveConvo(LogLeaveConvo),
+    LogCreateMessage(LogCreateMessage),
+    LogDeleteMessage(LogDeleteMessage),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLogOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub logs: Vec<LogEnum>,
 }
