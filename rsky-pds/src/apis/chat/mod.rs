@@ -8,7 +8,9 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::chat::bsky::convo::{
     DeleteMessageForSelfInput, DeletedMessageView, GetConvoOutput, GetLogOutput, GetMessagesOutput,
-    LeaveConvoInput, LeaveConvoOutput, ListConvosOutput,
+    LeaveConvoInput, LeaveConvoOutput, ListConvosOutput, MessageView, MuteConvoInput,
+    MuteConvoOutput, SendMessageBatchInput, SendMessageBatchOutput, SendMessageInput,
+    UnmuteConvoInput, UnmuteConvoOutput, UpdateReadInput, UpdateReadOutput,
 };
 
 #[rocket::post("/xrpc/chat.bsky.actor.deleteAccount")]
@@ -197,10 +199,7 @@ pub async fn get_messages(
     }
 }
 
-#[rocket::post(
-    "/xrpc/chat.bsky.actor.leaveConvo",
-    format = "json",
-    data = "<body>")]
+#[rocket::post("/xrpc/chat.bsky.actor.leaveConvo", format = "json", data = "<body>")]
 pub async fn leave_convo(
     body: Json<LeaveConvoInput>,
     auth: AccessPrivileged,
@@ -238,6 +237,138 @@ pub async fn list_convos(
         Some(credentials) => credentials.did,
     };
     match pipethrough(&req, requester, None).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::post("/xrpc/chat.bsky.actor.muteConvo", format = "json", data = "<body>")]
+pub async fn mute_convo(
+    body: Json<MuteConvoInput>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<MuteConvoOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::post("/xrpc/chat.bsky.actor.sendMessage", format = "json", data = "<body>")]
+pub async fn send_message(
+    body: Json<SendMessageInput>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<MessageView>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::post(
+    "/xrpc/chat.bsky.actor.sendMessageBatch",
+    format = "json",
+    data = "<body>"
+)]
+pub async fn send_message_batch(
+    body: Json<SendMessageBatchInput>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<
+    ReadAfterWriteResponse<SendMessageBatchOutput>,
+    status::Custom<Json<ErrorMessageResponse>>,
+> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::post("/xrpc/chat.bsky.actor.unmuteConvo", format = "json", data = "<body>")]
+pub async fn unmute_convo(
+    body: Json<UnmuteConvoInput>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<UnmuteConvoOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::post("/xrpc/chat.bsky.actor.updateRead", format = "json", data = "<body>")]
+pub async fn update_read(
+    body: Json<UpdateReadInput>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<UpdateReadOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {

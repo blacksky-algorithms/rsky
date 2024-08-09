@@ -1,4 +1,4 @@
-use crate::app::bsky::embed::record::View as EmbedRecordView;
+use crate::app::bsky::embed::record::{Record, View as EmbedRecordView};
 use crate::app::bsky::richtext::Facet;
 use crate::chat::bsky::actor::ProfileViewBasic;
 use chrono::{DateTime, Utc};
@@ -148,4 +148,76 @@ pub struct ListConvosOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub convos: Vec<ConvoView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MuteConvoInput {
+    pub convo_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MuteConvoOutput {
+    pub convo: ConvoView,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageInput {
+    pub convo_id: String,
+    pub message: MessageInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageInput {
+    pub text: String,
+    // Annotations of text (mentions, URLs, hashtags, etc)
+    pub facets: Option<Vec<Facet>>,
+    pub embed: Option<Record>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageBatchInput {
+    pub items: Vec<BatchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageBatchOutput {
+    pub items: Vec<MessageView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItem {
+    pub convo_id: String,
+    pub message: MessageInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmuteConvoInput {
+    pub convo_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmuteConvoOutput {
+    pub convo: ConvoView,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateReadInput {
+    pub convo_id: String,
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateReadOutput {
+    pub convo: ConvoView,
 }
