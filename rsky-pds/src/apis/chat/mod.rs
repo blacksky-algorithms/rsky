@@ -8,6 +8,30 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::chat::convo::{DeleteMessageForSelfInput, DeletedMessageView};
 
+#[rocket::post("/xrpc/chat.bsky.actor.deleteAccount")]
+pub async fn delete_account(
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough_procedure::<()>(&req, requester, None).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
 #[rocket::post(
     "/xrpc/chat.bsky.convo.deleteMessageForSelf",
     format = "json",
