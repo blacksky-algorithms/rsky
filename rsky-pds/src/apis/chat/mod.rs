@@ -7,7 +7,7 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::chat::bsky::convo::{
-    DeleteMessageForSelfInput, DeletedMessageView, GetConvoOutput, GetLogOutput,
+    DeleteMessageForSelfInput, DeletedMessageView, GetConvoOutput, GetLogOutput, GetMessagesOutput,
 };
 
 #[rocket::post("/xrpc/chat.bsky.actor.deleteAccount")]
@@ -148,6 +148,35 @@ pub async fn get_log(
     auth: AccessPrivileged,
     req: ProxyRequest<'_>,
 ) -> Result<ReadAfterWriteResponse<GetLogOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough(&req, requester, None).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[allow(unused_variables)]
+#[allow(non_snake_case)]
+#[rocket::get("/xrpc/chat.bsky.actor.getMessages?<convoId>&<limit>&<cursor>")]
+pub async fn get_messages(
+    convoId: String,
+    limit: Option<u8>,
+    cursor: Option<String>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<GetMessagesOutput>, status::Custom<Json<ErrorMessageResponse>>> {
     let requester: Option<String> = match auth.access.credentials {
         None => None,
         Some(credentials) => credentials.did,

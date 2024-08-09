@@ -122,3 +122,9 @@ pub struct GetLogOutput {
     pub cursor: Option<String>,
     pub logs: Vec<LogEnum>,
 }
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetMessagesOutput {
+    pub messages: Vec<MessageViewEnum>,
+}
