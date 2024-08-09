@@ -277,6 +277,7 @@ async fn rocket() -> _ {
                 chat::delete_account,
                 chat::export_account_data,
                 chat::get_convo,
+                chat::get_convo_for_members,
                 all_options
             ],
         )

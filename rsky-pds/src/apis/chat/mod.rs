@@ -114,3 +114,30 @@ pub async fn get_convo(
         }
     }
 }
+
+#[allow(unused_variables)]
+#[allow(non_snake_case)]
+#[rocket::get("/xrpc/chat.bsky.actor.getConvoForMembers?<members>")]
+pub async fn get_convo_for_members(
+    members: Vec<String>,
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<GetConvoOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough(&req, requester, None).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
