@@ -1,6 +1,6 @@
 use crate::auth_verifier::AccessPrivileged;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::pipethrough::{pipethrough_procedure, ProxyRequest};
+use crate::pipethrough::{pipethrough, pipethrough_procedure, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
 use anyhow::Result;
 use rocket::http::Status;
@@ -19,6 +19,30 @@ pub async fn delete_account(
     };
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(_) => Ok(()),
+        Err(error) => {
+            let internal_error = ErrorMessageResponse {
+                code: Some(ErrorCode::InternalServerError),
+                message: Some(error.to_string()),
+            };
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ));
+        }
+    }
+}
+
+#[rocket::get("/xrpc/chat.bsky.actor.exportAccountData")]
+pub async fn export_account_data(
+    auth: AccessPrivileged,
+    req: ProxyRequest<'_>,
+) -> Result<ReadAfterWriteResponse<Vec<u8>>, status::Custom<Json<ErrorMessageResponse>>> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+    match pipethrough(&req, requester, None).await {
+        Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
