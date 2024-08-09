@@ -80,7 +80,7 @@ pub struct ProfileViewDetailed {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetProfilesOutput {
-    pub profiles: Vec<ProfileViewDetailed>
+    pub profiles: Vec<ProfileViewDetailed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

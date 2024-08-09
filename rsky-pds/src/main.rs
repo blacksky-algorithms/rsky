@@ -275,6 +275,8 @@ async fn rocket() -> _ {
                 app::bsky::notification::register_push::register_push,
                 chat::delete_message_for_self,
                 chat::delete_account,
+                chat::export_account_data,
+                chat::get_convo,
                 all_options
             ],
         )

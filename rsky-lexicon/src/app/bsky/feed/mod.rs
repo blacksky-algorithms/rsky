@@ -125,7 +125,7 @@ impl ReplyRefUnion {
         match self {
             ReplyRefUnion::PostView(post) => post.uri.as_str(),
             ReplyRefUnion::NotFoundPost(post) => post.uri.as_str(),
-            ReplyRefUnion::BlockedPost(post) => post.uri.as_str()
+            ReplyRefUnion::BlockedPost(post) => post.uri.as_str(),
         }
     }
 }
@@ -167,7 +167,7 @@ pub struct GetLikesOutput {
 pub struct ThreadViewPost {
     pub post: PostView,
     pub parent: Option<Box<ThreadViewPostEnum>>,
-    pub replies: Option<Vec<Box<ThreadViewPostEnum>>>
+    pub replies: Option<Vec<Box<ThreadViewPostEnum>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
