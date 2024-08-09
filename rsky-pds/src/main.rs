@@ -273,6 +273,7 @@ async fn rocket() -> _ {
                 app::bsky::feed::get_post_thread::get_post_thread,
                 app::bsky::feed::get_timeline::get_timeline,
                 app::bsky::notification::register_push::register_push,
+                chat::delete_message_for_self,
                 all_options
             ],
         )

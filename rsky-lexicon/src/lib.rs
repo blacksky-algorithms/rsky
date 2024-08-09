@@ -6,3 +6,4 @@ extern crate serde_json;
 
 pub mod app;
 pub mod com;
+pub mod chat;

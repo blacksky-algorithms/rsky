@@ -1,10 +1,10 @@
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::ServerConfig;
 use crate::models::ErrorMessageResponse;
-use crate::pipethrough::pipethrough;
+use crate::pipethrough::{pipethrough, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError};
-use crate::SharedATPAgent;
+use crate::{SharedATPAgent, SharedIdResolver};
 use anyhow::{anyhow, Result};
 use atrium_api::app::bsky::feed::get_feed_generator::{
     Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
@@ -83,7 +83,31 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                         ))
                                     }
                                 };
-                                match pipethrough(req, requester, Some(data.view.did.to_string()))
+                                let headers = req.headers().clone().into_iter().fold(
+                                    BTreeMap::new(),
+                                    |mut acc: BTreeMap<String, String>, cur| {
+                                        let _ = acc.insert(
+                                            cur.name().to_string(),
+                                            cur.value().to_string(),
+                                        );
+                                        acc
+                                    },
+                                );
+                                let req = ProxyRequest {
+                                    headers,
+                                    query: match req.uri().query() {
+                                        None => None,
+                                        Some(query) => Some(query.to_string()),
+                                    },
+                                    path: req.uri().path().to_string(),
+                                    method: req.method(),
+                                    id_resolver: req
+                                        .guard::<&State<SharedIdResolver>>()
+                                        .await
+                                        .unwrap(),
+                                    cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+                                };
+                                match pipethrough(&req, requester, Some(data.view.did.to_string()))
                                     .await
                                 {
                                     Ok(res) => Outcome::Success(Self {

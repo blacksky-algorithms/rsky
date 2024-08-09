@@ -26,6 +26,15 @@ pub struct ProxyHeader {
     pub service_url: String,
 }
 
+pub struct ProxyRequest<'r> {
+    pub headers: BTreeMap<String, String>,
+    pub query: Option<String>,
+    pub path: String,
+    pub method: Method,
+    pub id_resolver: &'r State<SharedIdResolver>,
+    pub cfg: &'r State<ServerConfig>,
+}
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for HandlerPipeThrough {
     type Error = anyhow::Error;
@@ -38,7 +47,25 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     None => None,
                     Some(credentials) => credentials.did,
                 };
-                match pipethrough(req, requester, None).await {
+                let headers = req.headers().clone().into_iter().fold(
+                    BTreeMap::new(),
+                    |mut acc: BTreeMap<String, String>, cur| {
+                        let _ = acc.insert(cur.name().to_string(), cur.value().to_string());
+                        acc
+                    },
+                );
+                let req = ProxyRequest {
+                    headers,
+                    query: match req.uri().query() {
+                        None => None,
+                        Some(query) => Some(query.to_string()),
+                    },
+                    path: req.uri().path().to_string(),
+                    method: req.method(),
+                    id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
+                    cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+                };
+                match pipethrough(&req, requester, None).await {
                     Ok(res) => Outcome::Success(res),
                     Err(error) => Outcome::Error((Status::BadRequest, error)),
                 }
@@ -52,14 +79,56 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
     }
 }
 
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ProxyRequest<'r> {
+    type Error = anyhow::Error;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let headers = req.headers().clone().into_iter().fold(
+            BTreeMap::new(),
+            |mut acc: BTreeMap<String, String>, cur| {
+                let _ = acc.insert(cur.name().to_string(), cur.value().to_string());
+                acc
+            },
+        );
+        Outcome::Success(Self {
+            headers,
+            query: match req.uri().query() {
+                None => None,
+                Some(query) => Some(query.to_string()),
+            },
+            path: req.uri().path().to_string(),
+            method: req.method(),
+            id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
+            cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+        })
+    }
+}
+
 pub async fn pipethrough<'r>(
-    req: &'r Request<'_>,
+    req: &'r ProxyRequest<'_>,
     requester: Option<String>,
     aud_override: Option<String>,
 ) -> Result<HandlerPipeThrough> {
     let UrlAndAud { url, aud } = format_url_and_aud(req, aud_override).await?;
     let headers = format_headers(req, aud, requester).await?;
     let req_init = format_req_init(req, url, headers, None)?;
+    let res = make_request(req_init).await?;
+    parse_proxy_res(res).await
+}
+
+pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
+    req: &'r ProxyRequest<'_>,
+    requester: Option<String>,
+    body: Option<T>,
+) -> Result<HandlerPipeThrough> {
+    let UrlAndAud { url, aud } = format_url_and_aud(req, None).await?;
+    let headers = format_headers(req, aud, requester).await?;
+    let encoded_body: Option<Vec<u8>> = match body {
+        None => None,
+        Some(body) => Some(serde_json::to_string(&body)?.into_bytes()),
+    };
+    let req_init = format_req_init(req, url, headers, encoded_body)?;
     let res = make_request(req_init).await?;
     parse_proxy_res(res).await
 }
@@ -75,7 +144,7 @@ const REQ_HEADERS_TO_FORWARD: [&'static str; 4] = [
 ];
 
 pub async fn format_url_and_aud<'r>(
-    req: &'r Request<'_>,
+    req: &'r ProxyRequest<'_>,
     aud_override: Option<String>,
 ) -> Result<UrlAndAud> {
     let proxy_to = parse_proxy_header(req).await?;
@@ -99,25 +168,21 @@ pub async fn format_url_and_aud<'r>(
     };
     match (service_url, aud) {
         (Some(service_url), Some(aud)) => {
-            let mut url =
-                Url::parse(format!("https://{0}{1}", req.uri().path(), service_url).as_str())?;
-            if let Some(params) = req.uri().query() {
+            let mut url = Url::parse(format!("https://{0}{1}", req.path, service_url).as_str())?;
+            if let Some(ref params) = req.query {
                 url.set_query(Some(params.as_str()));
             }
-            let cfg = req.guard::<&State<ServerConfig>>().await.unwrap();
-            if !cfg.service.dev_mode && !is_safe_url(url.clone()) {
+            if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
             Ok(UrlAndAud { url, aud })
         }
-        _ => bail!(InvalidRequestError::NoServiceConfigured(
-            req.uri().path().to_string()
-        )),
+        _ => bail!(InvalidRequestError::NoServiceConfigured(req.path.clone())),
     }
 }
 
 pub async fn format_headers<'r>(
-    req: &'r Request<'_>,
+    req: &'r ProxyRequest<'_>,
     aud: String,
     requester: Option<String>,
 ) -> Result<HeaderMap> {
@@ -127,8 +192,8 @@ pub async fn format_headers<'r>(
     };
     // forward select headers to upstream services
     for header in REQ_HEADERS_TO_FORWARD {
-        let val = req.headers().get(header);
-        if let Some(val) = val.last() {
+        let val = req.headers.get(header);
+        if let Some(val) = val {
             headers.insert(header, HeaderValue::from_str(val)?);
         }
     }
@@ -137,12 +202,12 @@ pub async fn format_headers<'r>(
 }
 
 pub fn format_req_init(
-    req: &Request,
+    req: &ProxyRequest,
     url: Url,
     headers: HeaderMap,
     body: Option<Vec<u8>>,
 ) -> Result<RequestBuilder> {
-    match req.method() {
+    match req.method {
         Method::Get => {
             let client = Client::builder()
                 .user_agent(APP_USER_AGENT)
@@ -174,9 +239,9 @@ pub fn format_req_init(
     }
 }
 
-pub async fn parse_proxy_header<'r>(req: &'r Request<'_>) -> Result<Option<ProxyHeader>> {
-    let headers = req.headers();
-    let proxy_to: Option<&str> = headers.get("atproto-proxy").last();
+pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<ProxyHeader>> {
+    let headers = &req.headers;
+    let proxy_to: Option<&String> = headers.get("atproto-proxy");
     match proxy_to {
         None => Ok(None),
         Some(proxy_to) => {
@@ -184,7 +249,7 @@ pub async fn parse_proxy_header<'r>(req: &'r Request<'_>) -> Result<Option<Proxy
             match (parts.get(0), parts.get(1), parts.get(2)) {
                 (Some(did), Some(service_id), None) => {
                     let did = did.to_string();
-                    let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
+                    let id_resolver = req.id_resolver;
                     let mut lock = id_resolver.id_resolver.write().await;
                     match lock.did.resolve(did.clone(), None).await? {
                         None => bail!(InvalidRequestError::CannotResolveProxyDid),
@@ -274,9 +339,9 @@ pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
 // Utils
 // -------------------
 
-pub async fn default_service<'r>(req: &'r Request<'_>) -> Option<ServiceConfig> {
-    let cfg = req.guard::<&State<ServerConfig>>().await.unwrap();
-    let nsid = req.uri().path().as_str().replace("/xrpc/", "");
+pub async fn default_service<'r>(req: &'r ProxyRequest<'_>) -> Option<ServiceConfig> {
+    let cfg = req.cfg;
+    let nsid = req.path.as_str().replace("/xrpc/", "");
     match Ids::from_str(&nsid) {
         Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
         Ok(Ids::ToolsOzoneTeamDeleteMember) => cfg.mod_service.clone(),

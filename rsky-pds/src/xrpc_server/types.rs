@@ -10,6 +10,14 @@ pub struct HandlerPipeThrough {
     pub headers: Option<BTreeMap<String, String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HandlerPipeThroughProcedure<T: serde::Serialize> {
+    pub encoding: String,
+    pub buffer: Vec<u8>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub body: Option<T>,
+}
+
 #[derive(Error, Debug)]
 pub enum XRPCError {
     #[error("pipethrough network error")]
