@@ -128,3 +128,10 @@ pub struct GetLogOutput {
 pub struct GetMessagesOutput {
     pub messages: Vec<MessageViewEnum>,
 }
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaveConvoOutput {
+    pub convo_id: String,
+    pub rev: String,
+}

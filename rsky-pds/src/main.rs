@@ -280,6 +280,7 @@ async fn rocket() -> _ {
                 chat::get_convo_for_members,
                 chat::get_log,
                 chat::get_messages,
+                chat::leave_convo,
                 all_options
             ],
         )
