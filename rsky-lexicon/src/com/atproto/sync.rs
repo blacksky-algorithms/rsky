@@ -1,27 +1,32 @@
 use chrono::{DateTime, Utc};
+use std::fmt;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposCommitOperation {
     pub path: String,
     pub action: String,
     pub cid: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Represents an update of repository state. Note that empty commits are allowed,
+/// which include no repo data changes, but an update to rev and signature.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposCommit {
+    pub r#type: String, // 'commit'
+    pub seq: i64,
+    pub time: DateTime<Utc>,
+    pub rebase: bool,
+    #[serde(rename = "tooBig")]
+    pub too_big: bool,
+    pub repo: String,
+    pub commit: String,
+    pub prev: Option<String>,
+    pub rev: String,
+    pub since: Option<String>,
     #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
-    pub commit: String,
-    #[serde(rename(deserialize = "ops"))]
-    pub operations: Vec<SubscribeReposCommitOperation>,
-    pub prev: Option<String>,
-    pub rebase: bool,
-    pub repo: String,
-    #[serde(rename(deserialize = "seq"))]
-    pub sequence: i64,
-    pub time: DateTime<Utc>,
-    #[serde(rename(deserialize = "tooBig"))]
-    pub too_big: bool,
+    pub ops: Vec<SubscribeReposCommitOperation>,
+    pub blobs: Vec<String>,
 }
 
 /// Get the current commit CID & revision of the specified repo. Does not require auth.
@@ -71,25 +76,68 @@ pub enum RepoStatus {
     Deactivated,
 }
 
-#[derive(Debug, Deserialize)]
+/// DEPRECATED -- Use #identity event instead
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposHandle {
+    pub r#type: String, // 'handle'
     pub did: String,
     pub handle: String,
-    #[serde(rename(deserialize = "seq"))]
-    pub sequence: i64,
+    pub seq: i64,
     pub time: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SubscribeReposTombstone {
+/// Represents a change to an account's identity. Could be an updated handle, signing key, or
+/// pds hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposIdentity {
+    pub r#type: String, // 'identity'
     pub did: String,
-    #[serde(rename(deserialize = "seq"))]
-    pub sequence: i64,
+    pub handle: Option<String>,
+    pub seq: i64,
+    pub time: DateTime<Utc>,
+}
+
+/// Represents a change to an account's identity. Could be an updated handle, signing key, or
+/// pds hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposAccount {
+    pub r#type: String, // 'account'
+    pub seq: i64,
+    pub did: String,
+    pub time: DateTime<Utc>,
+    pub active: bool,
+    pub status: Option<AccountStatus>,
+}
+
+/// If active=false, this optional field indicates a reason for why the account is not active.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountStatus {
+    Takendown,
+    Suspended,
+    Deleted,
+    Deactivated,
+}
+
+impl fmt::Display for AccountStatus {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// DEPRECATED -- Use #account event instead
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposTombstone {
+    pub r#type: String, // 'tombstone'
+    pub did: String,
+    pub seq: i64,
     pub time: DateTime<Utc>,
 }
 
 pub enum SubscribeRepos {
     Commit(SubscribeReposCommit),
+    Identity(SubscribeReposIdentity),
+    Account(SubscribeReposAccount),
     Handle(SubscribeReposHandle),
     Tombstone(SubscribeReposTombstone),
 }

@@ -9,12 +9,23 @@ use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::util::format_data_key;
 use anyhow::Result;
 use libipld::Cid;
+use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum CommitEvtOpAction {
     Create,
     Update,
     Delete,
+}
+
+impl CommitEvtOpAction {
+    pub fn to_string(&self) -> String {
+        match self {
+            CommitEvtOpAction::Create => "create".to_string(),
+            CommitEvtOpAction::Update => "update".to_string(),
+            CommitEvtOpAction::Delete => "delete".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -47,6 +58,7 @@ pub struct HandleEvt {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IdentityEvt {
     pub did: String,
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -54,7 +66,7 @@ pub struct AccountEvt {
     pub did: String,
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<AccountStatus>,
+    pub status: Option<LexiconAccountStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -139,7 +151,25 @@ pub struct TypedTombstoneEvt {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub enum SeqEvt {}
+pub enum SeqEvt {
+    TypedCommitEvt(TypedCommitEvt),
+    TypedHandleEvt(TypedHandleEvt),
+    TypedIdentityEvt(TypedIdentityEvt),
+    TypedAccountEvt(TypedAccountEvt),
+    TypedTombstoneEvt(TypedTombstoneEvt),
+}
+
+impl SeqEvt {
+    pub fn seq(&self) -> i64 {
+        match self {
+            SeqEvt::TypedCommitEvt(this) => this.seq,
+            SeqEvt::TypedHandleEvt(this) => this.seq,
+            SeqEvt::TypedIdentityEvt(this) => this.seq,
+            SeqEvt::TypedAccountEvt(this) => this.seq,
+            SeqEvt::TypedTombstoneEvt(this) => this.seq,
+        }
+    }
+}
 
 pub async fn format_seq_commit(
     did: String,
@@ -223,8 +253,17 @@ pub async fn format_seq_handle_update(did: String, handle: String) -> Result<mod
     ))
 }
 
-pub async fn format_seq_identity_evt(did: String) -> Result<models::RepoSeq> {
-    let evt = IdentityEvt { did: did.clone() };
+pub async fn format_seq_identity_evt(
+    did: String,
+    handle: Option<String>,
+) -> Result<models::RepoSeq> {
+    let mut evt = IdentityEvt {
+        did: did.clone(),
+        handle: None,
+    };
+    if let Some(handle) = handle {
+        evt.handle = Some(handle);
+    }
     Ok(models::RepoSeq::new(
         did,
         "identity".to_string(),
@@ -240,7 +279,13 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
         status: None,
     };
     if !matches!(status, AccountStatus::Active) {
-        evt.status = Some(status);
+        evt.status = Some(match status {
+            AccountStatus::Takendown => LexiconAccountStatus::Takendown,
+            AccountStatus::Suspended => LexiconAccountStatus::Suspended,
+            AccountStatus::Deleted => LexiconAccountStatus::Deleted,
+            AccountStatus::Deactivated => LexiconAccountStatus::Deactivated,
+            _ => panic!("Conditional failed and allowed an invalid account status."),
+        });
     }
 
     Ok(models::RepoSeq::new(

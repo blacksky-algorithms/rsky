@@ -1,3 +1,4 @@
+use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::models::{ErrorCode, ErrorMessageResponse};
@@ -88,9 +89,12 @@ async fn create(
 
     if !deactivated {
         let mut lock = sequencer.sequencer.write().await;
+        lock.sequence_identity_evt(did.clone(), Some(handle.clone()))
+            .await?;
+        lock.sequence_account_evt(did.clone(), AccountStatus::Active)
+            .await?;
         lock.sequence_commit(did.clone(), commit.clone(), vec![])
             .await?;
-        lock.sequence_identity_evt(did.clone()).await?;
     }
     AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev)?;
     Ok(CreateAccountOutput {

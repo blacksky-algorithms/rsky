@@ -43,7 +43,8 @@ async fn inner_update_account_handle(
         }
     }
     let mut lock = sequencer.sequencer.write().await;
-    lock.sequence_identity_evt(did.clone()).await?;
+    lock.sequence_identity_evt(did.clone(), Some(handle.clone()))
+        .await?;
     lock.sequence_handle_update(did.clone(), handle.clone())
         .await?;
     Ok(())

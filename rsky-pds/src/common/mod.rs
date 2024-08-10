@@ -187,6 +187,7 @@ pub fn validate_url(url_str: &String) -> Option<String> {
     }
 }
 
+pub mod r#async;
 pub mod env;
 pub mod ipld;
 pub mod sign;

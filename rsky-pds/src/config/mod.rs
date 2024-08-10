@@ -1,4 +1,5 @@
 use crate::common::env::{env_bool, env_int, env_str};
+use crate::common::time::DAY;
 use crate::context;
 use anyhow::{bail, Result};
 use reqwest::header::HeaderMap;
@@ -9,6 +10,7 @@ pub struct ServerConfig {
     pub mod_service: Option<ServiceConfig>,
     pub report_service: Option<ServiceConfig>,
     pub bsky_app_view: Option<ServiceConfig>,
+    pub subscription: SubscriptionConfig,
 }
 
 /// BksyAppViewConfig, ModServiceConfig, ReportServiceConfig, etc.
@@ -17,6 +19,12 @@ pub struct ServiceConfig {
     pub url: String,
     pub did: String,
     pub cdn_url_pattern: Option<String>, // for BksyAppViewConfig, otherwise None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionConfig {
+    pub max_buffer: u64,
+    pub repo_backfill_limit_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,15 +92,22 @@ pub fn env_to_cfg() -> ServerConfig {
             cdn_url_pattern: None,
         }),
     };
+
     // if there's a mod service, default report service into it
     if mod_service_cfg.is_some() && report_service_cfg.is_none() {
         report_service_cfg = mod_service_cfg.clone();
     }
+    let subscription_cfg = SubscriptionConfig {
+        max_buffer: env_int("PDS_MAX_SUBSCRIPTION_BUFFER").unwrap_or(500) as u64,
+        repo_backfill_limit_ms: env_int("PDS_REPO_BACKFILL_LIMIT_MS").unwrap_or(DAY as usize)
+            as u64,
+    };
     ServerConfig {
         service: service_cfg,
         mod_service: mod_service_cfg,
         report_service: report_service_cfg,
         bsky_app_view: bsky_app_view_cfg,
+        subscription: subscription_cfg,
     }
 }
 

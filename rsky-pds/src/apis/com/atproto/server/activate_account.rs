@@ -52,8 +52,9 @@ async fn inner_activate_account(
         };
 
         // @NOTE: we're over-emitting for now for backwards compatibility, can reduce this in the future
+        let status = AccountManager::get_account_status(&requester).await?;
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_identity_evt(requester.clone()).await?;
+        lock.sequence_account_evt(requester.clone(), status).await?;
         lock.sequence_handle_update(
             requester.clone(),
             account.handle.unwrap_or(INVALID_HANDLE.to_string()),

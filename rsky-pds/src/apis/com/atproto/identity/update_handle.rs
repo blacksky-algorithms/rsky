@@ -46,7 +46,10 @@ async fn inner_update_handle(
         }
     }
     let mut lock = sequencer.sequencer.write().await;
-    match lock.sequence_identity_evt(requester.clone()).await {
+    match lock
+        .sequence_identity_evt(requester.clone(), Some(handle.clone()))
+        .await
+    {
         Ok(_) => (),
         Err(error) => eprintln!(
             "Error: {}; DID: {}; Handle: {}",

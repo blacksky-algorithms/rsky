@@ -1,4 +1,4 @@
-use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags};
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AdminToken;
 use crate::models::models::EmailTokenPurpose;
@@ -50,10 +50,12 @@ async fn inner_delete_account(
         actor_store.destroy().await?;
         AccountManager::delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_identity_evt(did.clone()).await?;
-        lock.sequence_tombstone(did.clone()).await?;
+        let account_seq = lock
+            .sequence_account_evt(did.clone(), AccountStatus::Deleted)
+            .await?;
+        let tombstone_seq = lock.sequence_tombstone(did.clone()).await?;
 
-        sequencer::delete_all_for_user(&did).await?;
+        sequencer::delete_all_for_user(&did, Some(vec![account_seq, tombstone_seq])).await?;
         Ok(())
     } else {
         bail!("account not found")

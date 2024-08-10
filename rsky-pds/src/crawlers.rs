@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 const NOTIFY_THRESHOLD: i32 = 20 * MINUTE; // 20 minutes;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Crawlers {
     pub hostname: String,
     pub crawlers: Vec<String>,
