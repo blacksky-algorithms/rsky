@@ -11,6 +11,7 @@ pub struct ServerConfig {
     pub report_service: Option<ServiceConfig>,
     pub bsky_app_view: Option<ServiceConfig>,
     pub subscription: SubscriptionConfig,
+    pub invites: InvitesConfig,
 }
 
 /// BksyAppViewConfig, ModServiceConfig, ReportServiceConfig, etc.
@@ -25,6 +26,13 @@ pub struct ServiceConfig {
 pub struct SubscriptionConfig {
     pub max_buffer: u64,
     pub repo_backfill_limit_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvitesConfig {
+    pub required: bool,
+    pub interval: Option<usize>,
+    pub epoch: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,12 +110,26 @@ pub fn env_to_cfg() -> ServerConfig {
         repo_backfill_limit_ms: env_int("PDS_REPO_BACKFILL_LIMIT_MS").unwrap_or(DAY as usize)
             as u64,
     };
+    // default to being required if left undefined
+    let invites_cfg = match env_bool("PDS_INVITE_REQUIRED").unwrap_or(true) {
+        false => InvitesConfig {
+            required: false,
+            interval: None,
+            epoch: None,
+        },
+        true => InvitesConfig {
+            required: true,
+            interval: env_int("PDS_INVITE_INTERVAL"),
+            epoch: Some(env_int("PDS_INVITE_EPOCH").unwrap_or(0)),
+        },
+    };
     ServerConfig {
         service: service_cfg,
         mod_service: mod_service_cfg,
         report_service: report_service_cfg,
         bsky_app_view: bsky_app_view_cfg,
         subscription: subscription_cfg,
+        invites: invites_cfg,
     }
 }
 

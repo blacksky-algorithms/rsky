@@ -139,7 +139,7 @@ impl AccountManager {
         let now = common::now();
 
         if let Some(invite_code) = invite_code.clone() {
-            invite::ensure_invite_is_available(invite_code)?;
+            invite::ensure_invite_is_available(invite_code).await?;
         }
         account::register_actor(did.clone(), handle, deactivated)?;
         if let (Some(email), Some(password_encrypted)) = (email, password_encrypted) {
@@ -310,6 +310,10 @@ impl AccountManager {
     }
     // Invites
     // ----------
+
+    pub async fn ensure_invite_is_available(code: String) -> Result<()> {
+        invite::ensure_invite_is_available(code).await
+    }
 
     pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
         invite::create_invite_codes(to_create, use_count).await

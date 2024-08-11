@@ -2,7 +2,7 @@ extern crate unsigned_varint;
 use crate::common::env::{env_int, env_str};
 use crate::common::sign::atproto_sign;
 use crate::models::*;
-use crate::{plc, APP_USER_AGENT};
+use crate::{plc, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use data_encoding::BASE32;
 use diesel::prelude::*;
@@ -12,6 +12,8 @@ use multibase::Base::Base58Btc;
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest;
 use rocket::form::validate::Contains;
+use rocket::State;
+use rsky_identity::types::DidDocument;
 use rsky_lexicon::com::atproto::server::CreateAccountInput;
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
 use serde_json::Value;
@@ -71,6 +73,24 @@ pub fn get_random_token() -> String {
         .map(char::from)
         .collect();
     token[0..5].to_owned() + "-" + &token[5..10]
+}
+
+pub async fn safe_resolve_did_doc(
+    id_resolver: &State<SharedIdResolver>,
+    did: &String,
+    force_refresh: Option<bool>,
+) -> Result<Option<DidDocument>> {
+    let mut lock = id_resolver.id_resolver.write().await;
+    match lock.did.resolve(did.clone(), force_refresh).await {
+        Ok(did_doc) => Ok(did_doc),
+        Err(err) => {
+            eprintln!(
+                "@LOG: failed to resolve did doc for `{did}` with error: `{}`",
+                err.to_string()
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// generate an invite code preceded by the hostname

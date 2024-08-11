@@ -14,7 +14,7 @@ use std::mem;
 pub type CodeUse = LexiconInviteCodeUse;
 pub type CodeDetail = LexiconInviteCode;
 
-pub fn ensure_invite_is_available(invite_code: String) -> Result<()> {
+pub async fn ensure_invite_is_available(invite_code: String) -> Result<()> {
     use crate::schema::pds::actor::dsl as ActorSchema;
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     use crate::schema::pds::invite_code_use::dsl as InviteCodeUseSchema;

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInviteCodeInput {
@@ -143,7 +144,7 @@ pub struct CreateAccountOutput {
     pub handle: String,
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
     #[serde(rename = "accessJwt")]
     pub access_jwt: String,
     #[serde(rename = "refreshJwt")]
