@@ -130,12 +130,13 @@ async fn rocket() -> _ {
     let figment = rocket::Config::figment()
         .merge(("databases", map!["pg_db" => db]))
         .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
+    let cfg = env_to_cfg();
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::new(
             Crawlers::new(
-                env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
-                vec![env::var("PDS_CRAWLER").unwrap_or("https://bgs.bsky-sandbox.dev".to_owned())],
+                cfg.service.hostname.clone(),
+                cfg.crawlers.clone()
             ),
             None,
         )),
@@ -158,7 +159,6 @@ async fn rocket() -> _ {
         })),
     };
 
-    let cfg = env_to_cfg();
     // Keeping unused for other config purposes for now.
     let app_view_agent = match cfg.bsky_app_view {
         None => SharedATPAgent {

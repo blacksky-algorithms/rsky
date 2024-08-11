@@ -1,4 +1,4 @@
-use crate::common::env::{env_bool, env_int, env_str};
+use crate::common::env::{env_bool, env_int, env_list, env_str};
 use crate::common::time::DAY;
 use crate::context;
 use anyhow::{bail, Result};
@@ -12,6 +12,7 @@ pub struct ServerConfig {
     pub bsky_app_view: Option<ServiceConfig>,
     pub subscription: SubscriptionConfig,
     pub invites: InvitesConfig,
+    pub crawlers: Vec<String>,
 }
 
 /// BksyAppViewConfig, ModServiceConfig, ReportServiceConfig, etc.
@@ -123,6 +124,8 @@ pub fn env_to_cfg() -> ServerConfig {
             epoch: Some(env_int("PDS_INVITE_EPOCH").unwrap_or(0)),
         },
     };
+    let crawlers_cfg = env_list("PDS_CRAWLERS");
+    
     ServerConfig {
         service: service_cfg,
         mod_service: mod_service_cfg,
@@ -130,6 +133,7 @@ pub fn env_to_cfg() -> ServerConfig {
         bsky_app_view: bsky_app_view_cfg,
         subscription: subscription_cfg,
         invites: invites_cfg,
+        crawlers: crawlers_cfg
     }
 }
 

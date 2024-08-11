@@ -222,20 +222,20 @@ pub async fn create_did_and_plc_op(
     println!("Created DID {did_plc:#}");
     println!("publishing......");
 
+    println!("Create Op: {:?}",create_op);
     // @TODO: Use plc::Client instead
     let plc_url = format!(
         "https://{0}/{1}",
         env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
         did_plc
     );
+    println!("Publishing to {plc_url}");
     let client = reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
         .build()?;
     let response = client
         .post(plc_url)
         .json(&create_op)
-        .header("Connection", "Keep-Alive")
-        .header("Keep-Alive", "timeout=5, max=1000")
         .send()
         .await?;
     let res = &response;
