@@ -12,7 +12,7 @@ use thiserror::Error;
 pub struct AsyncBufferFullError(pub usize);
 
 pub struct AsyncBuffer<T> {
-    buffer: Arc<Mutex<VecDeque<T>>>,
+    pub buffer: Arc<Mutex<VecDeque<T>>>,
     closed: Arc<Mutex<bool>>,
     waker: Arc<Mutex<Option<Waker>>>,
     to_throw: Arc<Mutex<Option<Box<dyn Error + Send + Sync>>>>,
@@ -71,11 +71,11 @@ impl<T> AsyncBuffer<T> {
     }
 }
 
-impl<T: Unpin> Stream for AsyncBuffer<T> {
+impl<T: Unpin + std::fmt::Debug> Stream for AsyncBuffer<T> {
     type Item = Result<T, Box<dyn Error + Send + Sync>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        println!("@LOG: Entered poll_next");
+        println!("@LOG: Entered poll_next: {:?}", self.buffer);
 
         // Lock the closed state
         let closed = *self.closed.lock().unwrap();

@@ -63,7 +63,7 @@ impl Sequencer {
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
-        EVENT_EMITTER.write().await.emit("close", ()).await.unwrap();
+        EVENT_EMITTER.write().await.emit("close", ());
     }
 
     pub async fn curr(&self) -> Result<Option<i64>> {
@@ -283,15 +283,12 @@ impl Stream for Sequencer {
             Ok(evts) => {
                 if evts.len() > 0 {
                     self.tries_with_no_results = 0;
-                    futures::executor::block_on(
-                        futures::executor::block_on(EVENT_EMITTER.write()).emit(
-                            "events",
-                            evts.iter()
-                                .map(|evt| serde_json::to_string(evt).unwrap())
-                                .collect::<Vec<String>>(),
-                        ),
-                    )
-                    .unwrap();
+                    futures::executor::block_on(EVENT_EMITTER.write()).emit(
+                        "events",
+                        evts.iter()
+                            .map(|evt| serde_json::to_string(evt).unwrap())
+                            .collect::<Vec<String>>(),
+                    );
                     self.last_seen = match evts.last() {
                         None => self.last_seen,
                         Some(last_evt) => Some(last_evt.seq()),

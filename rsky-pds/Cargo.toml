@@ -67,6 +67,7 @@ atrium-ipld = {package = "ipld-core", version = "0.4.1"}
 time = "^0.3.36"
 url = "2.5.2"
 async-event-emitter = "0.1.3"
+event-emitter-rs = "0.1.4"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"

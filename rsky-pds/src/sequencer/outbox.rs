@@ -7,6 +7,7 @@ use futures::stream::Stream;
 use futures::{pin_mut, StreamExt};
 use rocket::async_stream::try_stream;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
@@ -72,6 +73,7 @@ impl Outbox {
             let cutover_buffer = Arc::clone(&self.cutover_buffer);
 
             let add_to_buffer = move |evts: Vec<String>| {
+                println!("@LOG: add_to_buffer {evts:?}");
                 let evts = evts
                     .into_iter()
                     .map(|evt| serde_json::from_str(evt.as_str()).unwrap())
@@ -84,19 +86,22 @@ impl Outbox {
                     if *caught_up.read().await {
                         let out_lock = out_buffer.write().await;
                         out_lock.push_many(evts);
+                        println!("@LOG: out_buffer from within event responder: {:?}",out_lock.buffer);
                     } else {
                         let mut cut_lock = cutover_buffer.write().await;
                         cut_lock.extend(evts);
+                        println!("@LOG: cut_lock from within event responder: {:?}",cut_lock);
                     }
                 }
             };
 
             EVENT_EMITTER.write().await.on("events", move |evts| {
-                let value = add_to_buffer.clone();
-                async move {
-                    tokio::spawn(value(evts));
-                    ()
-                }
+                let rt = Runtime::new().unwrap();
+                // By entering the context, we tie `tokio::spawn` to this executor.
+                let _guard = rt.enter();
+                rt.block_on(tokio::spawn(
+                    add_to_buffer(evts)
+                )).unwrap();
             });
 
             if let Some(cursor) = backfill_cursor {
