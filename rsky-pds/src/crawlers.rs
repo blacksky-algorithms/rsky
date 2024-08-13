@@ -47,8 +47,6 @@ impl Crawlers {
                     client
                         .post(format!("{}/xrpc/com.atproto.sync.requestCrawl", service))
                         .json(&record)
-                        .header("Connection", "Keep-Alive")
-                        .header("Keep-Alive", "timeout=5, max=1000")
                         .send()
                         .await?,
                 )

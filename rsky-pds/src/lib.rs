@@ -8,9 +8,11 @@ extern crate serde;
 
 use crate::read_after_write::viewer::LocalViewerCreator;
 use crate::sequencer::Sequencer;
+use async_event_emitter::AsyncEventEmitter;
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClient;
 use diesel::pg::PgConnection;
+use lazy_static::lazy_static;
 use rocket_sync_db_pools::database;
 use rsky_identity::IdResolver;
 use tokio::sync::RwLock;
@@ -42,6 +44,12 @@ pub struct SharedLocalViewer {
 
 pub struct SharedATPAgent {
     pub app_view_agent: Option<RwLock<AtpServiceClient<ReqwestClient>>>,
+}
+
+// Use lazy_static! because the size of EventEmitter is not known at compile time
+lazy_static! {
+    // Export the emitter with `pub` keyword
+    pub static ref EVENT_EMITTER: RwLock<AsyncEventEmitter> = RwLock::new(AsyncEventEmitter::new());
 }
 
 pub mod account_manager;

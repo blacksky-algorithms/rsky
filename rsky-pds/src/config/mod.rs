@@ -125,7 +125,7 @@ pub fn env_to_cfg() -> ServerConfig {
         },
     };
     let crawlers_cfg = env_list("PDS_CRAWLERS");
-    
+
     ServerConfig {
         service: service_cfg,
         mod_service: mod_service_cfg,
@@ -133,7 +133,7 @@ pub fn env_to_cfg() -> ServerConfig {
         bsky_app_view: bsky_app_view_cfg,
         subscription: subscription_cfg,
         invites: invites_cfg,
-        crawlers: crawlers_cfg
+        crawlers: crawlers_cfg,
     }
 }
 

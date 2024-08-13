@@ -134,13 +134,12 @@ async fn rocket() -> _ {
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::new(
-            Crawlers::new(
-                cfg.service.hostname.clone(),
-                cfg.crawlers.clone()
-            ),
+            Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
             None,
         )),
     };
+    let mut background_sequencer = sequencer.sequencer.write().await.clone();
+    tokio::spawn(async move { background_sequencer.start().await });
 
     let aws_sdk_config = aws_config::from_env()
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))

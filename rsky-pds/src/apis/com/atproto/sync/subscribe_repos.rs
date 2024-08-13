@@ -39,9 +39,9 @@ pub async fn subscribe_repos<'a>(
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
-        let lock = sequencer.sequencer.write().await;
+        let sequencer_lock = sequencer.sequencer.read().await;
         let mut outbox = Outbox::new(
-            lock.clone(),
+            sequencer_lock.clone(),
             Some(OutboxOpts {
                 max_buffer_size: cfg.subscription.repo_backfill_limit_ms as usize,
             }),
@@ -52,7 +52,7 @@ pub async fn subscribe_repos<'a>(
 
         let mut outbox_cursor: Option<i64> = None;
         if let Some(cursor) = cursor {
-            let next = match lock.next(cursor).await {
+            let next = match sequencer_lock.next_seq(cursor).await {
                 Ok(next) => next,
                 Err(_) => {
                     yield Message::Text(json!({
@@ -63,7 +63,7 @@ pub async fn subscribe_repos<'a>(
                     return;
                 }
             };
-            let curr = match lock.curr().await {
+            let curr = match sequencer_lock.curr().await {
                 Ok(curr) => curr,
                 Err(_) => {
                     yield Message::Text(json!({
@@ -87,7 +87,7 @@ pub async fn subscribe_repos<'a>(
                             "name": "OutdatedCursor",
                             "message": "Requested cursor exceeded limit. Possibly missing events"
                         }).to_string());
-                        match lock.earliest_after_time(backfill_time).await {
+                        match sequencer_lock.earliest_after_time(backfill_time).await {
                             Ok(Some(start_evt)) if start_evt.seq.is_some() => outbox_cursor = Some(start_evt.seq.unwrap() - 1),
                             Ok(None) => outbox_cursor = None,
                             _ => {
@@ -105,9 +105,11 @@ pub async fn subscribe_repos<'a>(
             }
         }
 
-        let event_stream = outbox.events(outbox_cursor);
+        println!("@LOG: Opening event stream");
+        let event_stream = outbox.events(outbox_cursor).await;
         pin_mut!(event_stream);
         while let Some(evt) = event_stream.next().await {
+
             let evt = match evt {
                 Ok(evt) => evt,
                 Err(_) => {

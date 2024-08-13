@@ -9,9 +9,11 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
 use rsky_identity::did::atproto_data::VerificationMaterial;
 use rsky_identity::types::DidDocument;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use url::Url;
 use urlencoding::encode;
@@ -60,6 +62,10 @@ pub fn now() -> String {
     format!("{}", dt.format(RFC3339_VARIANT))
 }
 
+pub fn wait(ms: u64) {
+    thread::sleep(Duration::from_millis(ms))
+}
+
 pub fn beginning_of_time() -> String {
     let beginning_of_time = SystemTime::UNIX_EPOCH;
     let dt: DateTime<UtcOffset> = beginning_of_time.into();
@@ -85,6 +91,13 @@ pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
     let cbor_bytes = serde_ipld_dagcbor::to_vec(&map)?;
 
     Ok(cbor_bytes)
+}
+
+pub fn cbor_to_struct<T: DeserializeOwned>(bytes: Vec<u8>) -> Result<T> {
+    let map = serde_ipld_dagcbor::from_slice::<IndexMap<String, Value>>(bytes.as_slice())?;
+    let json = serde_json::to_string(&map)?;
+    let obj = serde_json::from_str::<T>(&json)?;
+    Ok(obj)
 }
 
 pub fn json_to_b64url<T: Serialize>(obj: &T) -> Result<String> {

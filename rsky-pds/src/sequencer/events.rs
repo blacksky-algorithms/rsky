@@ -10,6 +10,8 @@ use crate::repo::util::format_data_key;
 use anyhow::Result;
 use libipld::Cid;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
+use serde::de::Error as DeserializerError;
+use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum CommitEvtOpAction {
@@ -150,13 +152,49 @@ pub struct TypedTombstoneEvt {
     pub evt: TombstoneEvt,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
 pub enum SeqEvt {
     TypedCommitEvt(TypedCommitEvt),
     TypedHandleEvt(TypedHandleEvt),
     TypedIdentityEvt(TypedIdentityEvt),
     TypedAccountEvt(TypedAccountEvt),
     TypedTombstoneEvt(TypedTombstoneEvt),
+}
+
+impl<'de> Deserialize<'de> for SeqEvt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // Implement logic to determine the correct variant based on the "type" field
+        // and deserialize accordingly
+
+        // Example:
+        if let Some(typ) = value.get("type") {
+            match typ.as_str() {
+                Some("commit") => Ok(SeqEvt::TypedCommitEvt(
+                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
+                )),
+                Some("handle") => Ok(SeqEvt::TypedHandleEvt(
+                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
+                )),
+                Some("identity") => Ok(SeqEvt::TypedIdentityEvt(
+                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
+                )),
+                Some("account") => Ok(SeqEvt::TypedAccountEvt(
+                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
+                )),
+                Some("tombstone") => Ok(SeqEvt::TypedTombstoneEvt(
+                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
+                )),
+                _ => Err(DeserializerError::custom("Unknown event type")),
+            }
+        } else {
+            Err(DeserializerError::missing_field("type"))
+        }
+    }
 }
 
 impl SeqEvt {

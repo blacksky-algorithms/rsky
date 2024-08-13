@@ -222,7 +222,7 @@ pub async fn create_did_and_plc_op(
     println!("Created DID {did_plc:#}");
     println!("publishing......");
 
-    println!("Create Op: {:?}",create_op);
+    println!("Create Op: {:?}", create_op);
     // @TODO: Use plc::Client instead
     let plc_url = format!(
         "https://{0}/{1}",
@@ -233,11 +233,7 @@ pub async fn create_did_and_plc_op(
     let client = reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
         .build()?;
-    let response = client
-        .post(plc_url)
-        .json(&create_op)
-        .send()
-        .await?;
+    let response = client.post(plc_url).json(&create_op).send().await?;
     let res = &response;
     match res.error_for_status_ref() {
         Ok(_res) => Ok(did_plc.into()),

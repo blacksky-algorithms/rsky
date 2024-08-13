@@ -1,15 +1,22 @@
 use crate::account_manager::helpers::account::AccountStatus;
+use crate::common::time::SECOND;
+use crate::common::{cbor_to_struct, wait};
 use crate::crawlers::Crawlers;
 use crate::db::establish_connection;
 use crate::models;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::sequencer::events::{
     format_seq_account_evt, format_seq_commit, format_seq_handle_update, format_seq_identity_evt,
-    format_seq_tombstone, AccountEvt, CommitEvt, HandleEvt, IdentityEvt, SeqEvt, TombstoneEvt,
-    TypedAccountEvt, TypedCommitEvt, TypedHandleEvt, TypedIdentityEvt, TypedTombstoneEvt,
+    format_seq_tombstone, SeqEvt, TypedAccountEvt, TypedCommitEvt, TypedHandleEvt,
+    TypedIdentityEvt, TypedTombstoneEvt,
 };
+use crate::EVENT_EMITTER;
 use anyhow::Result;
 use diesel::*;
+use futures::{Stream, StreamExt};
+use std::cmp;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 
 pub struct RequestSeqRangeOpts {
     pub earliest_seq: Option<i64>,
@@ -21,7 +28,8 @@ pub struct RequestSeqRangeOpts {
 #[derive(Debug, Clone)]
 pub struct Sequencer {
     pub destroyed: bool,
-    pub tries_with_no_results: u64,
+    pub tries_with_no_results: u32,
+    pub waker: Option<Waker>,
     pub crawlers: Crawlers,
     pub last_seen: Option<i64>,
 }
@@ -32,8 +40,30 @@ impl Sequencer {
             destroyed: false,
             tries_with_no_results: 0,
             last_seen: Some(last_seen.unwrap_or(0)),
+            waker: None,
             crawlers,
         }
+    }
+
+    pub async fn start(&mut self) -> Result<()> {
+        let curr = self.curr().await?;
+        self.last_seen = Some(curr.unwrap_or(0));
+        if self.waker.is_none() {
+            loop {
+                while let Some(_) = self.next().await {
+                    ()
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn destroy(&mut self) {
+        self.destroyed = true;
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+        EVENT_EMITTER.write().await.emit("close", ()).await.unwrap();
     }
 
     pub async fn curr(&self) -> Result<Option<i64>> {
@@ -51,7 +81,7 @@ impl Sequencer {
         }
     }
 
-    pub async fn next(&self, cursor: i64) -> Result<Option<models::RepoSeq>> {
+    pub async fn next_seq(&self, cursor: i64) -> Result<Option<models::RepoSeq>> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
         let conn = &mut establish_connection()?;
 
@@ -121,41 +151,35 @@ impl Sequencer {
                             r#type: "commit".to_string(),
                             seq,
                             time: row.sequenced_at,
-                            evt: serde_ipld_dagcbor::from_slice::<CommitEvt>(row.event.as_slice())?,
+                            evt: cbor_to_struct(row.event)?,
                         }));
                     } else if row.event_type == "handle" {
                         seq_evts.push(SeqEvt::TypedHandleEvt(TypedHandleEvt {
                             r#type: "handle".to_string(),
                             seq,
                             time: row.sequenced_at,
-                            evt: serde_ipld_dagcbor::from_slice::<HandleEvt>(row.event.as_slice())?,
+                            evt: cbor_to_struct(row.event)?,
                         }));
                     } else if row.event_type == "identity" {
                         seq_evts.push(SeqEvt::TypedIdentityEvt(TypedIdentityEvt {
                             r#type: "identity".to_string(),
                             seq,
                             time: row.sequenced_at,
-                            evt: serde_ipld_dagcbor::from_slice::<IdentityEvt>(
-                                row.event.as_slice(),
-                            )?,
+                            evt: cbor_to_struct(row.event)?,
                         }));
                     } else if row.event_type == "account" {
                         seq_evts.push(SeqEvt::TypedAccountEvt(TypedAccountEvt {
                             r#type: "account".to_string(),
                             seq,
                             time: row.sequenced_at,
-                            evt: serde_ipld_dagcbor::from_slice::<AccountEvt>(
-                                row.event.as_slice(),
-                            )?,
+                            evt: cbor_to_struct(row.event)?,
                         }));
                     } else if row.event_type == "tombstone" {
                         seq_evts.push(SeqEvt::TypedTombstoneEvt(TypedTombstoneEvt {
                             r#type: "tombstone".to_string(),
                             seq,
                             time: row.sequenced_at,
-                            evt: serde_ipld_dagcbor::from_slice::<TombstoneEvt>(
-                                row.event.as_slice(),
-                            )?,
+                            evt: cbor_to_struct(row.event)?,
                         }));
                     }
                 }
@@ -163,6 +187,18 @@ impl Sequencer {
         }
 
         Ok(seq_evts)
+    }
+
+    async fn exponential_backoff(&mut self) -> () {
+        self.tries_with_no_results += 1;
+        let wait_time = cmp::min(
+            2u64.checked_pow(self.tries_with_no_results).unwrap_or(2),
+            SECOND as u64,
+        );
+        wait(wait_time);
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
     }
 
     pub async fn sequence_evt(&mut self, evt: models::RepoSeq) -> Result<i64> {
@@ -217,6 +253,58 @@ impl Sequencer {
     pub async fn sequence_tombstone(&mut self, did: String) -> Result<i64> {
         let evt = format_seq_tombstone(did).await?;
         self.sequence_evt(evt).await
+    }
+}
+
+impl Stream for Sequencer {
+    type Item = Result<(), anyhow::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.destroyed {
+            return Poll::Ready(None);
+        }
+        // if already polling, do not start another poll
+        return match futures::executor::block_on(self.request_seq_range(RequestSeqRangeOpts {
+            earliest_seq: self.last_seen,
+            latest_seq: None,
+            earliest_time: None,
+            limit: Some(1000),
+        })) {
+            Err(err) => {
+                eprintln!(
+                    "@LOG: sequencer failed to poll db, err: {}, last_seen: {:?}",
+                    err.to_string(),
+                    self.last_seen
+                );
+                self.waker = Some(cx.waker().clone());
+                futures::executor::block_on(self.exponential_backoff());
+                Poll::Ready(Some(Err(err)))
+            }
+            Ok(evts) => {
+                if evts.len() > 0 {
+                    self.tries_with_no_results = 0;
+                    futures::executor::block_on(
+                        futures::executor::block_on(EVENT_EMITTER.write()).emit(
+                            "events",
+                            evts.iter()
+                                .map(|evt| serde_json::to_string(evt).unwrap())
+                                .collect::<Vec<String>>(),
+                        ),
+                    )
+                    .unwrap();
+                    self.last_seen = match evts.last() {
+                        None => self.last_seen,
+                        Some(last_evt) => Some(last_evt.seq()),
+                    };
+                    self.waker = Some(cx.waker().clone());
+                    Poll::Ready(Some(Ok(())))
+                } else {
+                    self.waker = Some(cx.waker().clone());
+                    futures::executor::block_on(self.exponential_backoff());
+                    Poll::Pending
+                }
+            }
+        };
     }
 }
 
