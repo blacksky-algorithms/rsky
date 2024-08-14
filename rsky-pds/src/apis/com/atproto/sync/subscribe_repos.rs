@@ -10,7 +10,7 @@ use crate::SharedSequencer;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration};
 use futures::{pin_mut, StreamExt};
-use rocket::State;
+use rocket::{Shutdown, State};
 use rsky_lexicon::com::atproto::sync::{
     SubscribeReposAccount, SubscribeReposCommit, SubscribeReposCommitOperation,
     SubscribeReposHandle, SubscribeReposIdentity, SubscribeReposTombstone,
@@ -18,6 +18,9 @@ use rsky_lexicon::com::atproto::sync::{
 use serde_json::json;
 use std::time::SystemTime;
 use ws::Message;
+use rocket::tokio::select;
+use crate::crawlers::Crawlers;
+use crate::sequencer::Sequencer;
 
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
@@ -34,17 +37,20 @@ fn get_backfill_limit(ms: u64) -> String {
 #[allow(unused_variables)]
 pub async fn subscribe_repos<'a>(
     cursor: Option<i64>,
-    sequencer: &'a State<SharedSequencer>,
     cfg: &'a State<ServerConfig>,
+    mut shutdown: Shutdown,
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
-        let sequencer_lock = sequencer.sequencer.read().await;
+        let sequencer_lock = Sequencer::new(
+            Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
+            None,
+        );
         let mut outbox = Outbox::new(
             sequencer_lock.clone(),
             Some(OutboxOpts {
                 max_buffer_size: cfg.subscription.repo_backfill_limit_ms as usize,
-            }),
+            })
         );
 
         println!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
@@ -108,154 +114,166 @@ pub async fn subscribe_repos<'a>(
         println!("@LOG: Opening event stream");
         let event_stream = outbox.events(outbox_cursor).await;
         pin_mut!(event_stream);
-        while let Some(evt) = event_stream.next().await {
-
-            let evt = match evt {
-                Ok(evt) => evt,
-                Err(_) => {
-                    yield Message::Text(json!({
-                        "$type": "#error",
-                        "name": "EventStreamError",
-                        "message": "Failed to fetch event from stream."
-                    }).to_string());
-                    return;
-                }
-            };
-
-            match evt {
-                SeqEvt::TypedCommitEvt(commit) => {
-                    let TypedCommitEvt { r#type, seq, time, evt } = commit;
-                    let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs } = evt;
-                    let subscribe_commit_evt = SubscribeReposCommit {
-                        r#type,
-                        seq,
-                        time: from_str_to_utc(&time),
-                        rebase,
-                        too_big,
-                        repo,
-                        commit: commit.to_string(),
-                        prev: match prev {
-                            None => None,
-                            Some(prev) => Some(prev.to_string())
+        loop {
+            select! {
+                evt = event_stream.next() => {
+                    let evt = match evt {
+                        Some(Ok(evt)) => evt,
+                        Some(Err(err)) => {
+                            yield Message::Text(json!({
+                                "$type": "#error",
+                                "name": "EventStreamError",
+                                "message": err.to_string()
+                            }).to_string());
+                            return;
                         },
-                        rev,
-                        since,
-                        blocks,
-                        ops: ops.into_iter().map(|op| SubscribeReposCommitOperation {
-                            path: op.path,
-                            cid: match op.cid {
-                                None => None,
-                                Some(cid) => Some(cid.to_string())
-                            },
-                            action: op.action.to_string()
-                        }).collect::<Vec<SubscribeReposCommitOperation>>(),
-                        blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
-                    };
-                    let json_string = match serde_json::to_string(&subscribe_commit_evt) {
-                        Ok(json_string) => json_string,
-                        Err(_) => {
+                        None => {
                             yield Message::Text(json!({
                                 "$type": "#error",
-                                "name": "SerializationError",
-                                "message": "Failed to serialize event to JSON."
+                                "name": "EventStreamError",
+                                "message": "Failed to fetch event from stream."
                             }).to_string());
                             return;
                         }
                     };
-                    yield Message::Text(json_string);
-                },
-                SeqEvt::TypedHandleEvt(handle) => {
-                    let TypedHandleEvt { r#type, seq, time, evt } = handle;
-                    let HandleEvt { did, handle } = evt;
-                    let subscribe_handle_evt = SubscribeReposHandle {
-                        r#type,
-                        did,
-                        handle,
-                        seq,
-                        time: from_str_to_utc(&time),
-                    };
-                    let json_string = match serde_json::to_string(&subscribe_handle_evt) {
-                        Ok(json_string) => json_string,
-                        Err(_) => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "SerializationError",
-                                "message": "Failed to serialize event to JSON."
-                            }).to_string());
-                            return;
+
+                    match evt {
+                        SeqEvt::TypedCommitEvt(commit) => {
+                            let TypedCommitEvt { r#type, seq, time, evt } = commit;
+                            let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs } = evt;
+                            let subscribe_commit_evt = SubscribeReposCommit {
+                                r#type,
+                                seq,
+                                time: from_str_to_utc(&time),
+                                rebase,
+                                too_big,
+                                repo,
+                                commit: commit.to_string(),
+                                prev: match prev {
+                                    None => None,
+                                    Some(prev) => Some(prev.to_string())
+                                },
+                                rev,
+                                since,
+                                blocks,
+                                ops: ops.into_iter().map(|op| SubscribeReposCommitOperation {
+                                    path: op.path,
+                                    cid: match op.cid {
+                                        None => None,
+                                        Some(cid) => Some(cid.to_string())
+                                    },
+                                    action: op.action.to_string()
+                                }).collect::<Vec<SubscribeReposCommitOperation>>(),
+                                blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
+                            };
+                            let json_string = match serde_json::to_string(&subscribe_commit_evt) {
+                                Ok(json_string) => json_string,
+                                Err(_) => {
+                                    yield Message::Text(json!({
+                                        "$type": "#error",
+                                        "name": "SerializationError",
+                                        "message": "Failed to serialize event to JSON."
+                                    }).to_string());
+                                    return;
+                                }
+                            };
+                            yield Message::Text(json_string);
+                        },
+                        SeqEvt::TypedHandleEvt(handle) => {
+                            let TypedHandleEvt { r#type, seq, time, evt } = handle;
+                            let HandleEvt { did, handle } = evt;
+                            let subscribe_handle_evt = SubscribeReposHandle {
+                                r#type,
+                                did,
+                                handle,
+                                seq,
+                                time: from_str_to_utc(&time),
+                            };
+                            let json_string = match serde_json::to_string(&subscribe_handle_evt) {
+                                Ok(json_string) => json_string,
+                                Err(_) => {
+                                    yield Message::Text(json!({
+                                        "$type": "#error",
+                                        "name": "SerializationError",
+                                        "message": "Failed to serialize event to JSON."
+                                    }).to_string());
+                                    return;
+                                }
+                            };
+                            yield Message::Text(json_string);
+                        },
+                        SeqEvt::TypedIdentityEvt(identity) => {
+                            let TypedIdentityEvt { r#type, seq, time, evt } = identity;
+                            let IdentityEvt { did, handle } = evt;
+                            let subscribe_identity_evt = SubscribeReposIdentity {
+                                r#type,
+                                did,
+                                seq,
+                                handle,
+                                time: from_str_to_utc(&time),
+                            };
+                            let json_string = match serde_json::to_string(&subscribe_identity_evt) {
+                                Ok(json_string) => json_string,
+                                Err(_) => {
+                                    yield Message::Text(json!({
+                                        "$type": "#error",
+                                        "name": "SerializationError",
+                                        "message": "Failed to serialize event to JSON."
+                                    }).to_string());
+                                    return;
+                                }
+                            };
+                            yield Message::Text(json_string);
+                        },
+                        SeqEvt::TypedAccountEvt(account) => {
+                            let TypedAccountEvt { r#type, seq, time, evt } = account;
+                            let AccountEvt { did, active, status } = evt;
+                            let subscribe_account_evt = SubscribeReposAccount {
+                                r#type,
+                                did,
+                                seq,
+                                status,
+                                active,
+                                time: from_str_to_utc(&time),
+                            };
+                            let json_string = match serde_json::to_string(&subscribe_account_evt) {
+                                Ok(json_string) => json_string,
+                                Err(_) => {
+                                    yield Message::Text(json!({
+                                        "$type": "#error",
+                                        "name": "SerializationError",
+                                        "message": "Failed to serialize event to JSON."
+                                    }).to_string());
+                                    return;
+                                }
+                            };
+                            yield Message::Text(json_string);
+                        },
+                        SeqEvt::TypedTombstoneEvt(tombstone) => {
+                            let TypedTombstoneEvt { r#type, seq, time, evt } = tombstone;
+                            let TombstoneEvt { did } = evt;
+                            let subscribe_tombstone_evt = SubscribeReposTombstone {
+                                r#type,
+                                did,
+                                seq,
+                                time: from_str_to_utc(&time),
+                            };
+                            let json_string = match serde_json::to_string(&subscribe_tombstone_evt) {
+                                Ok(json_string) => json_string,
+                                Err(_) => {
+                                    yield Message::Text(json!({
+                                        "$type": "#error",
+                                        "name": "SerializationError",
+                                        "message": "Failed to serialize event to JSON."
+                                    }).to_string());
+                                    return;
+                                }
+                            };
+                            yield Message::Text(json_string);
                         }
-                    };
-                    yield Message::Text(json_string);
-                },
-                SeqEvt::TypedIdentityEvt(identity) => {
-                    let TypedIdentityEvt { r#type, seq, time, evt } = identity;
-                    let IdentityEvt { did, handle } = evt;
-                    let subscribe_identity_evt = SubscribeReposIdentity {
-                        r#type,
-                        did,
-                        seq,
-                        handle,
-                        time: from_str_to_utc(&time),
-                    };
-                    let json_string = match serde_json::to_string(&subscribe_identity_evt) {
-                        Ok(json_string) => json_string,
-                        Err(_) => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "SerializationError",
-                                "message": "Failed to serialize event to JSON."
-                            }).to_string());
-                            return;
-                        }
-                    };
-                    yield Message::Text(json_string);
-                },
-                SeqEvt::TypedAccountEvt(account) => {
-                    let TypedAccountEvt { r#type, seq, time, evt } = account;
-                    let AccountEvt { did, active, status } = evt;
-                    let subscribe_account_evt = SubscribeReposAccount {
-                        r#type,
-                        did,
-                        seq,
-                        status,
-                        active,
-                        time: from_str_to_utc(&time),
-                    };
-                    let json_string = match serde_json::to_string(&subscribe_account_evt) {
-                        Ok(json_string) => json_string,
-                        Err(_) => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "SerializationError",
-                                "message": "Failed to serialize event to JSON."
-                            }).to_string());
-                            return;
-                        }
-                    };
-                    yield Message::Text(json_string);
-                },
-                SeqEvt::TypedTombstoneEvt(tombstone) => {
-                    let TypedTombstoneEvt { r#type, seq, time, evt } = tombstone;
-                    let TombstoneEvt { did } = evt;
-                    let subscribe_tombstone_evt = SubscribeReposTombstone {
-                        r#type,
-                        did,
-                        seq,
-                        time: from_str_to_utc(&time),
-                    };
-                    let json_string = match serde_json::to_string(&subscribe_tombstone_evt) {
-                        Ok(json_string) => json_string,
-                        Err(_) => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "SerializationError",
-                                "message": "Failed to serialize event to JSON."
-                            }).to_string());
-                            return;
-                        }
-                    };
-                    yield Message::Text(json_string);
+                    }
                 }
+                _ = &mut shutdown => break
             }
         }
     }

@@ -1,4 +1,3 @@
-use crate::common::r#async::{AsyncBuffer, AsyncBufferFullError};
 use crate::sequencer::events::SeqEvt;
 use crate::sequencer::{RequestSeqRangeOpts, Sequencer};
 use crate::EVENT_EMITTER;
@@ -8,29 +7,24 @@ use futures::{pin_mut, StreamExt};
 use rocket::async_stream::try_stream;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::sync::Mutex;
+use crate::common::r#async::{AsyncBuffer, AsyncBufferFullError};
 
 #[derive(Debug, Clone)]
 pub struct OutboxOpts {
     pub max_buffer_size: usize,
 }
 
-#[derive(Debug, Clone)]
-pub enum BackfillState {
-    Requesting,
-    Yielding,
-    Done,
-}
 
 pub struct Outbox {
-    caught_up: Arc<RwLock<bool>>,
+    caught_up: Arc<Mutex<bool>>,
     pub last_seen: i64,
-    pub cutover_buffer: Arc<RwLock<Vec<SeqEvt>>>,
-    pub out_buffer: Arc<RwLock<AsyncBuffer<SeqEvt>>>,
+    pub cutover_buffer: Arc<Mutex<Vec<SeqEvt>>>,
+    pub out_buffer: Arc<Mutex<AsyncBuffer<SeqEvt>>>,
     pub sequencer: Sequencer,
-    pub state: BackfillState,
     pub backfill_cursor: Option<i64>,
+    closed: bool,
+    max_size: Option<usize>,
 }
 
 const PAGE_SIZE: i64 = 500;
@@ -42,12 +36,13 @@ impl Outbox {
         });
         Self {
             sequencer,
-            caught_up: Arc::new(RwLock::new(false)),
+            caught_up: Arc::new(Mutex::new(false)),
             last_seen: -1,
-            cutover_buffer: Arc::new(RwLock::new(vec![])),
-            out_buffer: Arc::new(RwLock::new(AsyncBuffer::new(Some(max_buffer_size)))),
-            state: BackfillState::Requesting,
+            cutover_buffer: Arc::new(Mutex::new(vec![])),
+            out_buffer: Arc::new(Mutex::new(AsyncBuffer::new(Some(max_buffer_size)))),
             backfill_cursor: None,
+            closed: false,
+            max_size: Some(max_buffer_size),
         }
     }
 
@@ -64,8 +59,8 @@ impl Outbox {
                     yield evt;
                 }
             } else {
-                let mut caught_up_lock = self.caught_up.write().await;
-                *caught_up_lock = true;
+                let mut bool_lock = self.caught_up.lock().await;
+                *bool_lock = true;
             }
 
             let caught_up = Arc::clone(&self.caught_up);
@@ -83,14 +78,12 @@ impl Outbox {
                 let cutover_buffer = Arc::clone(&cutover_buffer);
 
                 async move {
-                    if *caught_up.read().await {
-                        let out_lock = out_buffer.write().await;
-                        out_lock.push_many(evts);
-                        println!("@LOG: out_buffer from within event responder: {:?}",out_lock.buffer);
+                    if *caught_up.lock().await {
+                        out_buffer.lock().await.push_many(evts);
+                        println!("@LOG: out_buffer from within event responder.");
                     } else {
-                        let mut cut_lock = cutover_buffer.write().await;
-                        cut_lock.extend(evts);
-                        println!("@LOG: cut_lock from within event responder: {:?}",cut_lock);
+                        cutover_buffer.lock().await.extend(evts);
+                        println!("@LOG: cut_lock from within event responder");
                     }
                 }
             };
@@ -117,19 +110,19 @@ impl Outbox {
                     limit: Some(PAGE_SIZE),
                 }).await?;
                 {
-                    let out_lock = self.out_buffer.write().await;
-                    let mut cutover_lock = self.cutover_buffer.write().await;
-                    out_lock.push_many(cutover_evts);
-                    out_lock.push_many(cutover_lock.drain(..).collect());
+                    let out_buffer_lock = self.out_buffer.lock().await;
+                    let mut cutover_lock = self.cutover_buffer.lock().await;
+                    out_buffer_lock.push_many(cutover_evts);
+                    out_buffer_lock.push_many(cutover_lock.drain(..).collect());
                 }
-                let mut caught_up_lock = self.caught_up.write().await;
-                *caught_up_lock = true;
+                let mut bool_lock = self.caught_up.lock().await;
+                *bool_lock = true;
             } else {
-                let mut caught_up_lock = self.caught_up.write().await;
-                *caught_up_lock = true;
+                let mut bool_lock = self.caught_up.lock().await;
+                *bool_lock = true;
             }
-
-            while let Ok(Some(res)) = timeout(Duration::from_secs(15),self.out_buffer.write().await.next()).await {
+            
+            while let Some(res) = self.out_buffer.lock().await.next().await {
                 println!("@LOG: Got event from buffer.");
                 let evt = res.map_err(|error| {
                     match error.downcast_ref() {
@@ -138,12 +131,14 @@ impl Outbox {
                     }
                 })?;
                 println!("@LOG: Got seqevent {evt:?}.");
+
                 if evt.seq() > self.last_seen {
                     self.last_seen = evt.seq();
                     println!("@LOG: yielding {evt:?}.");
                     yield evt;
                 }
             }
+            println!("Leaving events.");
         }
     }
 

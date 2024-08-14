@@ -1,9 +1,12 @@
+use crate::common::time::SECOND;
+use crate::common::wait;
 use futures::stream::Stream;
 use futures::task::{Context, Poll};
+use std::cmp;
 use std::collections::VecDeque;
 use std::error::Error;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Waker;
 use thiserror::Error;
 
@@ -17,6 +20,7 @@ pub struct AsyncBuffer<T> {
     waker: Arc<Mutex<Option<Waker>>>,
     to_throw: Arc<Mutex<Option<Box<dyn Error + Send + Sync>>>>,
     max_size: Option<usize>,
+    tries_with_no_results: Arc<Mutex<u32>>,
 }
 
 impl<T> AsyncBuffer<T> {
@@ -27,6 +31,7 @@ impl<T> AsyncBuffer<T> {
             waker: Arc::new(Mutex::new(None)),
             to_throw: Arc::new(Mutex::new(None)),
             max_size,
+            tries_with_no_results: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -69,14 +74,25 @@ impl<T> AsyncBuffer<T> {
             waker.wake();
         }
     }
+
+    fn exponential_backoff(&self, mut waker: MutexGuard<Option<Waker>>) -> () {
+        let mut tries_with_no_results = self.tries_with_no_results.lock().unwrap();
+        *tries_with_no_results += 1;
+        let wait_time = cmp::min(
+            2u64.checked_pow(*tries_with_no_results).unwrap_or(2),
+            SECOND as u64,
+        );
+        wait(wait_time);
+        if let Some(waker) = waker.take() {
+            waker.wake();
+        }
+    }
 }
 
 impl<T: Unpin + std::fmt::Debug> Stream for AsyncBuffer<T> {
     type Item = Result<T, Box<dyn Error + Send + Sync>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        println!("@LOG: Entered poll_next: {:?}", self.buffer);
-
         // Lock the closed state
         let closed = *self.closed.lock().unwrap();
         let mut buffer = self.buffer.lock().unwrap();
@@ -115,9 +131,12 @@ impl<T: Unpin + std::fmt::Debug> Stream for AsyncBuffer<T> {
         // Retrieve the next item from the buffer
         if let Some(first) = buffer.pop_front() {
             println!("@LOG: poll_next pop_front.");
+            let mut tries_with_no_results = self.tries_with_no_results.lock().unwrap();
+            *tries_with_no_results = 0;
             return Poll::Ready(Some(Ok(first)));
         } else {
-            println!("@LOG: poll_next poll::pending.");
+            drop(buffer);
+            self.exponential_backoff(waker);
             return Poll::Pending;
         }
     }
