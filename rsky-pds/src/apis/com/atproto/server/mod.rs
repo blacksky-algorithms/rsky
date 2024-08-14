@@ -222,7 +222,6 @@ pub async fn create_did_and_plc_op(
     println!("Created DID {did_plc:#}");
     println!("publishing......");
 
-    println!("Create Op: {:?}", create_op);
     // @TODO: Use plc::Client instead
     let plc_url = format!(
         "https://{0}/{1}",

@@ -6,7 +6,6 @@ use crate::sequencer::events::{
     TypedCommitEvt, TypedHandleEvt, TypedIdentityEvt, TypedTombstoneEvt,
 };
 use crate::sequencer::outbox::{Outbox, OutboxOpts};
-use crate::SharedSequencer;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration};
 use futures::{pin_mut, StreamExt};
@@ -111,8 +110,8 @@ pub async fn subscribe_repos<'a>(
             }
         }
 
-        println!("@LOG: Opening event stream");
         let event_stream = outbox.events(outbox_cursor).await;
+        pin_mut!(ws);
         pin_mut!(event_stream);
         loop {
             select! {
@@ -273,6 +272,34 @@ pub async fn subscribe_repos<'a>(
                         }
                     }
                 }
+               message = ws.next() => {
+                    match message {
+                        Some(Ok(message)) => {
+                            match message {
+                                ws::Message::Close(close_frame) => {
+                                    // Handle Close message
+                                    println!("Received Close message: {:?}", close_frame);
+                                    let close_frame = ws::frame::CloseFrame {
+                                        code: ws::frame::CloseCode::Normal,
+                                        reason: "Client disconnected".to_string().into(),
+                                    };
+                                    break;
+                                },
+                                _ => {
+                                    println!("Received other message: {:?}", message);
+                                }
+                            }
+                        },
+                        Some(Err(err)) => {
+                            println!("WebSocket error: {:?}", err);
+                            break;
+                        },
+                        None => {
+                            println!("WebSocket closed.");
+                            break;
+                        }
+                    }
+                },
                 _ = &mut shutdown => break
             }
         }

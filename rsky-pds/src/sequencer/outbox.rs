@@ -1,3 +1,4 @@
+use crate::common::r#async::{AsyncBuffer, AsyncBufferFullError};
 use crate::sequencer::events::SeqEvt;
 use crate::sequencer::{RequestSeqRangeOpts, Sequencer};
 use crate::EVENT_EMITTER;
@@ -7,24 +8,21 @@ use futures::{pin_mut, StreamExt};
 use rocket::async_stream::try_stream;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
-use crate::common::r#async::{AsyncBuffer, AsyncBufferFullError};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone)]
 pub struct OutboxOpts {
     pub max_buffer_size: usize,
 }
 
-
 pub struct Outbox {
     caught_up: Arc<Mutex<bool>>,
     pub last_seen: i64,
     pub cutover_buffer: Arc<Mutex<Vec<SeqEvt>>>,
-    pub out_buffer: Arc<Mutex<AsyncBuffer<SeqEvt>>>,
+    pub out_buffer: Arc<RwLock<AsyncBuffer<SeqEvt>>>,
     pub sequencer: Sequencer,
     pub backfill_cursor: Option<i64>,
-    closed: bool,
-    max_size: Option<usize>,
 }
 
 const PAGE_SIZE: i64 = 500;
@@ -39,10 +37,8 @@ impl Outbox {
             caught_up: Arc::new(Mutex::new(false)),
             last_seen: -1,
             cutover_buffer: Arc::new(Mutex::new(vec![])),
-            out_buffer: Arc::new(Mutex::new(AsyncBuffer::new(Some(max_buffer_size)))),
+            out_buffer: Arc::new(RwLock::new(AsyncBuffer::new(Some(max_buffer_size)))),
             backfill_cursor: None,
-            closed: false,
-            max_size: Some(max_buffer_size),
         }
     }
 
@@ -50,7 +46,6 @@ impl Outbox {
         &'a mut self,
         backfill_cursor: Option<i64>,
     ) -> impl Stream<Item = Result<SeqEvt>> + 'a {
-        println!("@LOG: Trying stream");
         try_stream! {
             if let Some(cursor) = backfill_cursor {
                 let backfill_stream = self.get_backfill(cursor).await;
@@ -68,7 +63,6 @@ impl Outbox {
             let cutover_buffer = Arc::clone(&self.cutover_buffer);
 
             let add_to_buffer = move |evts: Vec<String>| {
-                println!("@LOG: add_to_buffer {evts:?}");
                 let evts = evts
                     .into_iter()
                     .map(|evt| serde_json::from_str(evt.as_str()).unwrap())
@@ -79,11 +73,9 @@ impl Outbox {
 
                 async move {
                     if *caught_up.lock().await {
-                        out_buffer.lock().await.push_many(evts);
-                        println!("@LOG: out_buffer from within event responder.");
+                        out_buffer.read().await.push_many(evts);
                     } else {
                         cutover_buffer.lock().await.extend(evts);
-                        println!("@LOG: cut_lock from within event responder");
                     }
                 }
             };
@@ -110,7 +102,7 @@ impl Outbox {
                     limit: Some(PAGE_SIZE),
                 }).await?;
                 {
-                    let out_buffer_lock = self.out_buffer.lock().await;
+                    let out_buffer_lock = self.out_buffer.read().await;
                     let mut cutover_lock = self.cutover_buffer.lock().await;
                     out_buffer_lock.push_many(cutover_evts);
                     out_buffer_lock.push_many(cutover_lock.drain(..).collect());
@@ -121,24 +113,21 @@ impl Outbox {
                 let mut bool_lock = self.caught_up.lock().await;
                 *bool_lock = true;
             }
-            
-            while let Some(res) = self.out_buffer.lock().await.next().await {
-                println!("@LOG: Got event from buffer.");
-                let evt = res.map_err(|error| {
-                    match error.downcast_ref() {
-                        Some(AsyncBufferFullError(_)) => anyhow!("Stream consumer too slow.".to_string()),
-                        _ => anyhow!(error.to_string())
-                    }
-                })?;
-                println!("@LOG: Got seqevent {evt:?}.");
 
-                if evt.seq() > self.last_seen {
-                    self.last_seen = evt.seq();
-                    println!("@LOG: yielding {evt:?}.");
-                    yield evt;
+            loop {
+                while let Ok(Some(res)) = timeout(Duration::from_secs(2),self.out_buffer.write().await.next()).await {
+                    let evt = res.map_err(|error| {
+                        match error.downcast_ref() {
+                            Some(AsyncBufferFullError(_)) => anyhow!("Stream consumer too slow.".to_string()),
+                            _ => anyhow!(error.to_string())
+                        }
+                    })?;
+                    if evt.seq() > self.last_seen {
+                        self.last_seen = evt.seq();
+                        yield evt;
+                    }
                 }
             }
-            println!("Leaving events.");
         }
     }
 
@@ -146,7 +135,6 @@ impl Outbox {
         &'a mut self,
         backfill_cursor: i64,
     ) -> impl Stream<Item = Result<SeqEvt>> + 'a {
-        println!("@LOG: Trying backfill");
         try_stream! {
             loop {
                 let earliest_seq = if self.last_seen > -1 {

@@ -36,7 +36,6 @@ impl<T> AsyncBuffer<T> {
     }
 
     pub fn push(&self, item: T) {
-        println!("@LOG: Pushing to buffer.");
         let mut buffer = self.buffer.lock().unwrap();
         buffer.push_back(item);
         if let Some(waker) = self.waker.lock().unwrap().take() {
@@ -45,7 +44,6 @@ impl<T> AsyncBuffer<T> {
     }
 
     pub fn push_many(&self, items: Vec<T>) {
-        println!("@LOG: Pushing many to buffer.");
         let mut buffer = self.buffer.lock().unwrap();
         for item in items {
             buffer.push_back(item);
@@ -56,7 +54,6 @@ impl<T> AsyncBuffer<T> {
     }
 
     pub fn throw(&self, err: Box<dyn Error + Send + Sync>) {
-        println!("@LOG: Asyncbuffer throwing error.");
         let mut to_throw = self.to_throw.lock().unwrap();
         *to_throw = Some(err);
         let mut closed = self.closed.lock().unwrap();
@@ -67,7 +64,6 @@ impl<T> AsyncBuffer<T> {
     }
 
     pub fn close(&self) {
-        println!("@LOG: Closing Asyncbuffer.");
         let mut closed = self.closed.lock().unwrap();
         *closed = true;
         if let Some(waker) = self.waker.lock().unwrap().take() {
@@ -98,7 +94,6 @@ impl<T: Unpin + std::fmt::Debug> Stream for AsyncBuffer<T> {
         let mut buffer = self.buffer.lock().unwrap();
 
         if closed && buffer.is_empty() {
-            println!("@LOG: Buffer closed or empty");
             let mut to_throw = self.to_throw.lock().unwrap();
             return if let Some(err) = to_throw.take() {
                 Poll::Ready(Some(Err(err)))
@@ -116,28 +111,25 @@ impl<T: Unpin + std::fmt::Debug> Stream for AsyncBuffer<T> {
         // Check if there is an error to throw
         let mut to_throw = self.to_throw.lock().unwrap();
         if let Some(err) = to_throw.take() {
-            println!("@LOG: poll_next err.");
             return Poll::Ready(Some(Err(err)));
         }
 
         // Check if the buffer size exceeds the max_size
         if let Some(max_size) = self.max_size {
             if buffer.len() > max_size {
-                println!("@LOG: poll_next max_size.");
                 return Poll::Ready(Some(Err(Box::new(AsyncBufferFullError(max_size)))));
             }
         }
 
         // Retrieve the next item from the buffer
-        if let Some(first) = buffer.pop_front() {
-            println!("@LOG: poll_next pop_front.");
+        return if let Some(first) = buffer.pop_front() {
             let mut tries_with_no_results = self.tries_with_no_results.lock().unwrap();
             *tries_with_no_results = 0;
-            return Poll::Ready(Some(Ok(first)));
+            Poll::Ready(Some(Ok(first)))
         } else {
             drop(buffer);
             self.exponential_backoff(waker);
-            return Poll::Pending;
-        }
+            Poll::Pending
+        };
     }
 }
