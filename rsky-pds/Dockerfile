@@ -1,9 +1,9 @@
 # Use the official Rust image.
 # https://hub.docker.com/_/rust
-FROM rust:latest
+FROM --platform=linux/amd64 rust:latest
 
 # Install cmake and other build tools
-RUN apt-get update && apt-get install -y cmake build-essential
+RUN apt-get update && apt-get install -y cmake build-essential libclang-dev
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
