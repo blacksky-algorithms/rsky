@@ -72,3 +72,6 @@ event-emitter-rs = "0.1.4"
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"
 features = ["diesel_postgres_pool"]
+
+[profile.release]
+debug = 2  # Or any level from 0 to 2
