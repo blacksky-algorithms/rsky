@@ -1,6 +1,6 @@
 # Use the official Rust image.
 # https://hub.docker.com/_/rust
-FROM rust
+FROM --platform=linux/amd64 rust
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky

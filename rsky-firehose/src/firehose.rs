@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::io::Cursor;
@@ -28,7 +29,7 @@ impl From<serde_ipld_dagcbor::DecodeError<std::io::Error>> for Error {
     }
 }
 
-pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos), Error> {
+pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
     let mut reader = Cursor::new(data);
 
     let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
@@ -36,7 +37,13 @@ pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos), Error> {
         "#commit" => SubscribeRepos::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#handle" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#tombstone" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        _ => unreachable!(),
+        _ => {
+            eprintln!("Received unknown header {:?}", header.type_.as_str());
+            bail!(format!(
+                "Received unknown header {:?}",
+                header.type_.as_str()
+            ))
+        }
     };
 
     Ok((header, body))

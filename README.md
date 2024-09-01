@@ -2,7 +2,7 @@
 
 <p><strong>An ATProtocol Feed Generator framework, built in Rust.</strong></p>
 
-[![dependency status](https://deps.rs/repo/github/blacksky-algorithms/rsky/status.svg?style=flat-square)](https://deps.rs/repo/github/blacksky-algorithms/rsky) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Ceasefire Now](https://badge.techforpalestine.org/default)](https://techforpalestine.org/learn-more) [![dependency status](https://deps.rs/repo/github/blacksky-algorithms/rsky/status.svg?style=flat-square)](https://deps.rs/repo/github/blacksky-algorithms/rsky) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 This is a starter kit for creating ATProto Feed Generators. It's not feature complete, but should give you a good starting ground off of which to build and deploy a feed. It is designed as 2 binaries: a firehose subscriber and an HTTP server for returning skeletons.
 

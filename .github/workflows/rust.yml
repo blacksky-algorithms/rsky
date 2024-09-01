@@ -1,0 +1,60 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo check
+      run: cargo check
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo build
+      run: cargo build --release
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo test
+      run: cargo test 
+
+  # clippy:
+  #   runs-on: ubuntu-latest
+  #   needs: test
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+  #   - name: Rust Cache
+  #     uses: Swatinem/rust-cache@v2
+  #   - name: Run Clippy
+  #     run: cargo clippy  -- -D warnings
+
+  formatting:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo fmt
+      run: cargo fmt -- --check

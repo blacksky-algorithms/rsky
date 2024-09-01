@@ -8,11 +8,11 @@ use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::env;
 use std::io::Cursor;
+use std::{thread, time::Duration};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
-use std::{thread, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "$type")]
@@ -294,7 +294,7 @@ async fn main() {
                         process(message, &client).await;
                     });
                 }
-            },
+            }
             Err(error) => {
                 eprintln!("Error connecting to {default_subscriber_path:?}. Waiting to reconnect: {error:?}");
                 thread::sleep(Duration::from_millis(500));

@@ -18,7 +18,6 @@ tokio = { version = "1.28.0", features = ["full"] }
 tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
 url = "2.3.1"
 chrono = { version = "0.4.24", features = ["serde"] }
-cid = { version = "0.10.1", features = ["serde-codec"] }
 derive_builder = "0.12.0"
 miette = "5.8.0"
 parking_lot = "0.12.1"
@@ -32,3 +31,5 @@ serde_cbor = "0.11.2"
 thiserror = "1.0.40"
 dotenvy = "0.15.7"
 retry = "2.0.0"
+anyhow = "1.0.81"
+libipld = { version = "0.16.0", features = ["serde-codec"] }

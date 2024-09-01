@@ -505,6 +505,7 @@ pub async fn queue_creation(
                     let is_member = is_included(vec![&req.author].into(), conn).unwrap_or(false);
                     let is_blocked = is_excluded(vec![&req.author].into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
+                    let mut post_text_original = String::new();
                     let mut post_images = Vec::new();
                     let mut new_post = Post {
                         uri: req.uri,
@@ -526,6 +527,7 @@ pub async fn queue_creation(
                     };
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
+                        post_text_original = post_record.text.clone();
                         post_text = post_record.text.to_lowercase();
                         let post_created_at = format!("{}", post_record.created_at.format("%+"));
                         if let Some(reply) = post_record.reply {
@@ -610,7 +612,7 @@ pub async fn queue_creation(
                     }
 
                     let hashtags = extract_hashtags(&post_text);
-                    new_post.text = Some(post_text.clone());
+                    new_post.text = Some(post_text_original);
 
                     if (is_member ||
                         hashtags.contains("#blacksky") ||
