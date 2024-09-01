@@ -1,12 +1,12 @@
 [package]
 name = "rsky-firehose"
 version = "0.0.1"
-authors = ["him@rudyfraser.com"]
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "A framework for subscribing to the AT Protocol firehose, in Rust."
 license = "Apache-2.0"
 edition = "2021"
 publish = true
-homepage = "https://github.com/blacksky-algorithms/rsky"
+homepage = "https://blackskyweb.xyz"
 repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-firehose"
 documentation = "https://docs.rs/rsky-firehose"
 

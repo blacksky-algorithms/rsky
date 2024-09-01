@@ -1,0 +1,22 @@
+[package]
+name = "rsky-identity"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Rust library for decentralized identities in atproto using DIDs and handles."
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-identity"
+documentation = "https://docs.rs/rsky-identity"
+
+[dependencies]
+anyhow = "1.0.82"
+reqwest = { version = "0.12.3", features = ["json","blocking"] }
+serde_json = { version = "1.0.115",features = ["preserve_order"] }
+urlencoding = "2.1.3"
+thiserror = "1.0.58"
+url = "2.5.0"
+serde = { version = "1.0.197", features = ["derive"] }
+rsky-crypto = { workspace = true }
+hickory-resolver = "0.24.1"

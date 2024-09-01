@@ -1,10 +1,11 @@
 [package]
 name = "rsky-lexicon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = true
 description = "Bluesky API library"
-homepage = "https://github.com/blacksky-algorithms/rsky"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+homepage = "https://blackskyweb.xyz"
 repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-lexicon"
 license = "Apache-2.0"
 keywords = ["bluesky", "atproto"]
@@ -22,4 +23,5 @@ serde_cbor = "0.11.2"
 serde_derive = "^1.0"
 serde_bytes = "0.11.9"
 thiserror = "1.0.40"
-libipld = { version = "0.16.0", features = ["serde-codec"] }
+secp256k1 = { version = "0.28.2", features = ["serde", "rand"] }
+libipld = "0.16.0"

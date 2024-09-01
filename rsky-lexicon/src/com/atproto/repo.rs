@@ -1,120 +1,222 @@
-use libipld::cid::Cid;
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_cbor::tags::Tagged;
+use serde_json::Value;
 
-const CBOR_TAG_CID: u64 = 42;
-const MULTIBASE_IDENTITY: u8 = 0;
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StrongRef {
     pub uri: String,
     pub cid: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Record<T> {
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Record {
     pub uri: String,
     pub cid: String,
-    pub value: T,
+    pub value: Value,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListRecordsOutput<T> {
-    pub cursor: Option<String>,
-    pub records: Vec<Record<T>>,
-}
-
-#[derive(Serialize)]
-pub struct CreateRecord<'a, T> {
-    pub repo: &'a str,
-    pub collection: &'a str,
-    pub record: T,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateRecordOutput {
-    pub cid: String,
-    pub uri: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CreateUploadBlob {
-    pub blob: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Link {
     #[serde(rename(deserialize = "$link", serialize = "$link"))]
     pub link: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Blob {
     #[serde(
         rename(deserialize = "$type", serialize = "$type"),
         skip_serializing_if = "Option::is_none"
     )]
-    pub rust_type: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default = "default_resource",
-        deserialize_with = "deserialize_cid_v1"
-    )]
-    pub r#ref: Option<Cid>,
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
-    pub size: Option<usize>,
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original: Option<OriginalBlob>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OriginalBlob {
     #[serde(
         rename(deserialize = "$type", serialize = "$type"),
         skip_serializing_if = "Option::is_none"
     )]
-    pub rust_type: Option<String>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default = "default_resource",
-        deserialize_with = "deserialize_cid_v1"
-    )]
-    pub r#ref: Option<Cid>,
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
     pub mime_type: String,
-    pub size: usize,
+    pub size: i64,
 }
 
-fn default_resource() -> Option<Cid> {
-    None
+/// Create a single new repository record. Requires auth, implemented by PDS.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CreateRecordInput {
+    /// The handle or DID of the repo (aka, current account)
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The record itself. Must contain a $type field.
+    pub record: Value,
+    /// The Record Key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rkey: Option<String>,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<bool>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Write a repository record, creating or updating it as needed. Requires auth, implemented by PDS.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PutRecordInput {
+    /// The handle or DID of the repo (aka, current account)
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The Record Key.
+    pub rkey: String,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<bool>, // Default 'true'
+    /// The record itself. Must contain a $type field.
+    pub record: Value,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapRecord")]
+    pub swap_record: Option<String>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
+/// Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeleteRecordInput {
+    /// The handle or DID of the repo (aka, current account).
+    pub repo: String,
+    /// The NSID of the record collection.
+    pub collection: String,
+    /// The Record Key.
+    pub rkey: String,
+    /// Compare and swap with the previous record by CID.
+    #[serde(rename = "swapRecord", skip_serializing_if = "Option::is_none")]
+    pub swap_record: Option<String>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
+/// Apply a batch transaction of repository creates, updates, and deletes.
+/// Requires auth, implemented by PDS.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ApplyWritesInput {
+    /// The handle or DID of the repo (aka, current account).
+    pub repo: String,
+    /// Can be set to 'false' to skip Lexicon schema validation of record data, for all operations.
+    pub validate: Option<bool>,
+    /// The Record Key.
+    pub writes: Vec<ApplyWritesInputRefWrite>,
+    /// Compare and swap with the previous commit by CID.
+    #[serde(rename = "swapCommit", skip_serializing_if = "Option::is_none")]
+    pub swap_commit: Option<String>,
+}
+
+/// Get a single record from a repository. Does not require auth.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct GetRecordOutput {
+    pub uri: String,
+    /// The CID of the version of the record. If not specified, then return the most recent version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ListRecordsOutput {
+    pub cursor: Option<String>,
+    pub records: Vec<Record>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CreateRecordOutput {
+    pub cid: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PutRecordOutput {
+    pub cid: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BlobOutput {
     pub blob: Blob,
 }
 
-fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Option<Cid>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let buf = Tagged::<serde_bytes::ByteBuf>::deserialize(deserializer)?;
-    match buf.tag {
-        Some(CBOR_TAG_CID) | None => {
-            let mut bz = buf.value.into_vec();
+/// Returns a list of missing blobs for the requesting account.
+/// Intended to be used in the account migration flow.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ListMissingBlobsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub blobs: Vec<ListMissingBlobsRefRecordBlob>,
+}
 
-            if bz.first() == Some(&MULTIBASE_IDENTITY) {
-                bz.remove(0);
-            }
+/// Get information about an account and repository, including the list of collections.
+/// Does not require auth.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DescribeRepoOutput {
+    pub handle: String,
+    pub did: String,
+    /// The complete DID document for this account.
+    #[serde(rename = "didDoc")]
+    pub did_doc: Value,
+    /// List of all the collections (NSIDs) for which this repo contains at least one record.
+    pub collections: Vec<String>,
+    /// Indicates if handle is currently valid (resolves bi-directionally)
+    #[serde(rename = "handleIsCorrect")]
+    pub handle_is_correct: bool,
+}
 
-            Ok(Some(Cid::try_from(bz).map_err(|e| {
-                serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
-            })?))
-        }
-        Some(_) => Err(serde::de::Error::custom("unexpected tag")),
-    }
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum ApplyWritesInputRefWrite {
+    Create(RefWriteCreate),
+    Update(RefWriteUpdate),
+    Delete(RefWriteDelete),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ListMissingBlobsRefRecordBlob {
+    pub cid: String,
+    pub record_uri: String,
+}
+
+/// Operation which creates a new record.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RefWriteCreate {
+    pub collection: String,
+    pub rkey: Option<String>,
+    pub value: Value,
+}
+
+/// Operation which updates an existing record.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RefWriteUpdate {
+    pub collection: String,
+    pub rkey: String,
+    pub value: Value,
+}
+
+/// Operation which deletes an existing record.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RefWriteDelete {
+    pub collection: String,
+    pub rkey: String,
 }

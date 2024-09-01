@@ -111,7 +111,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                         &commit.sequence,
                         client,
                     )
-                    .await;
+                        .await;
                     match resp {
                         Ok(()) => (),
                         Err(error) => eprintln!("Failed to update cursor: {error:?}"),
@@ -281,12 +281,11 @@ async fn main() {
                     "{}/xrpc/com.atproto.sync.subscribeRepos",
                     default_subscriber_path
                 )
-                .as_str(),
+                    .as_str(),
             )
-            .unwrap(),
+                .unwrap(),
         )
-        .await
-        {
+            .await {
             Ok((mut socket, _response)) => {
                 println!("Connected to {default_subscriber_path:?}.");
                 while let Some(Ok(Message::Binary(message))) = socket.next().await {

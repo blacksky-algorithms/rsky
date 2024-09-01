@@ -1,0 +1,17 @@
+[package]
+name = "rsky-crypto"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Rust library providing basic cryptographic helpers as needed in atproto"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-crypto"
+documentation = "https://docs.rs/rsky-crypto"
+
+[dependencies]
+multibase = "0.9.1"
+secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes"] }
+anyhow = "1.0.79"
+p256 = { version = "0.13.2", features = ["ecdsa","arithmetic","alloc"] }

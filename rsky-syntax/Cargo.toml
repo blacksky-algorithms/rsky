@@ -1,0 +1,19 @@
+[package]
+name = "rsky-syntax"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Rust library of validation helpers for identifier strings"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-syntax"
+documentation = "https://docs.rs/rsky-syntax"
+
+[dependencies]
+anyhow = "1.0.86"
+lazy_static = "1.5.0"
+regex = "1.10.5"
+serde = { version = "1.0.160", features = ["derive"] }
+serde_derive = "^1.0"
+url = "2.5.2"

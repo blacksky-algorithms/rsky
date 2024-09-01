@@ -9,6 +9,8 @@ NOTE.md
 .graveyard/
 /labeler/*.json
 /labeler/*.tsv
+Rocket.toml
+*.pem
 
 # dotenv environment variable files
 .env
@@ -19,4 +21,5 @@ NOTE.md
 .env.prod
 .env*.bak
 /venv/
+rustc-*.txt
 /botenv/
