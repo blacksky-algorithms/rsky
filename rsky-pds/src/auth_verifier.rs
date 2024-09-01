@@ -21,7 +21,7 @@ use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum AuthScope {
     Access,
     Refresh,

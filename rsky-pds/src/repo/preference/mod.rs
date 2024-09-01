@@ -64,9 +64,10 @@ impl PreferenceReader {
             true => {
                 let not_in_scope = values
                     .iter()
-                    .filter(|value| pref_in_scope(scope.clone(), value.get_type()))
+                    .filter(|value| !pref_in_scope(scope.clone(), value.get_type()))
                     .collect::<Vec<&RefPreferences>>();
                 if not_in_scope.len() > 0 {
+                    println!("@LOG: PreferenceReader::put_preferences() debug scope: {:?}, values: {:?}",scope, values);
                     bail!("Do not have authorization to set preferences.");
                 }
                 // get all current prefs for user and prep new pref rows
