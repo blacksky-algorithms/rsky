@@ -16,9 +16,15 @@ use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
+pub struct OverrideOpts {
+    pub aud: Option<String>,
+    pub lxm: Option<String>
+}
+
 pub struct UrlAndAud {
     pub url: Url,
     pub aud: String,
+    pub lxm: String
 }
 
 pub struct ProxyHeader {
@@ -65,7 +71,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                 };
-                match pipethrough(&req, requester, None).await {
+                match pipethrough(&req, requester, OverrideOpts{aud: None, lxm: None}).await {
                     Ok(res) => Outcome::Success(res),
                     Err(error) => Outcome::Error((Status::BadRequest, error)),
                 }
@@ -108,10 +114,11 @@ impl<'r> FromRequest<'r> for ProxyRequest<'r> {
 pub async fn pipethrough<'r>(
     req: &'r ProxyRequest<'_>,
     requester: Option<String>,
-    aud_override: Option<String>,
+    override_opts: OverrideOpts,
 ) -> Result<HandlerPipeThrough> {
-    let UrlAndAud { url, aud } = format_url_and_aud(req, aud_override).await?;
-    let headers = format_headers(req, aud, requester).await?;
+    let UrlAndAud { url, aud, lxm: nsid } = format_url_and_aud(req, override_opts.aud).await?;
+    let lxm = override_opts.lxm.unwrap_or(nsid);
+    let headers = format_headers(req, aud, lxm, requester).await?;
     let req_init = format_req_init(req, url, headers, None)?;
     let res = make_request(req_init).await?;
     parse_proxy_res(res).await
@@ -122,8 +129,8 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
     requester: Option<String>,
     body: Option<T>,
 ) -> Result<HandlerPipeThrough> {
-    let UrlAndAud { url, aud } = format_url_and_aud(req, None).await?;
-    let headers = format_headers(req, aud, requester).await?;
+    let UrlAndAud { url, aud, lxm: nsid } = format_url_and_aud(req, None).await?;
+    let headers = format_headers(req, aud, nsid, requester).await?;
     let encoded_body: Option<Vec<u8>> = match body {
         None => None,
         Some(body) => Some(serde_json::to_string(&body)?.into_bytes()),
@@ -148,9 +155,13 @@ pub async fn format_url_and_aud<'r>(
     aud_override: Option<String>,
 ) -> Result<UrlAndAud> {
     let proxy_to = parse_proxy_header(req).await?;
-    let default_proxy = default_service(req).await;
+    let nsid = parse_req_nsid(req);
+    let default_proxy = default_service(req, &nsid).await;
     let service_url = match proxy_to {
-        Some(ref proxy_to) => Some(proxy_to.service_url.clone()),
+        Some(ref proxy_to) => {
+            println!("@LOG: format_url_and_aud() proxy_to: {:?}", proxy_to.service_url);
+            Some(proxy_to.service_url.clone())
+        },
         None => match default_proxy {
             Some(ref default_proxy) => Some(default_proxy.url.clone()),
             None => None,
@@ -168,14 +179,14 @@ pub async fn format_url_and_aud<'r>(
     };
     match (service_url, aud) {
         (Some(service_url), Some(aud)) => {
-            let mut url = Url::parse(format!("https://{0}{1}", req.path, service_url).as_str())?;
+            let mut url = Url::parse(format!("{0}{1}", service_url, req.path).as_str())?;
             if let Some(ref params) = req.query {
                 url.set_query(Some(params.as_str()));
             }
             if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
-            Ok(UrlAndAud { url, aud })
+            Ok(UrlAndAud { url, aud, lxm: nsid })
         }
         _ => bail!(InvalidRequestError::NoServiceConfigured(req.path.clone())),
     }
@@ -184,10 +195,11 @@ pub async fn format_url_and_aud<'r>(
 pub async fn format_headers<'r>(
     req: &'r ProxyRequest<'_>,
     aud: String,
+    lxm: String,
     requester: Option<String>,
 ) -> Result<HeaderMap> {
     let mut headers: HeaderMap = match requester {
-        Some(requester) => context::service_auth_headers(&requester, &aud).await?,
+        Some(requester) => context::service_auth_headers(&requester, &aud, &lxm).await?,
         None => HeaderMap::new(),
     };
     // forward select headers to upstream services
@@ -198,6 +210,7 @@ pub async fn format_headers<'r>(
         }
     }
     assert!(headers.contains_key(AUTHORIZATION));
+    println!("{headers:?}");
     Ok(headers)
 }
 
@@ -274,6 +287,19 @@ pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<
     }
 }
 
+pub fn parse_req_nsid(req: &ProxyRequest) -> String {
+    let nsid = req.path.as_str().replace("/xrpc/", "");
+    match nsid.ends_with("/") {
+        false => nsid,
+        true => nsid.trim_end_matches(
+                |c| c == nsid
+                    .chars()
+                    .last()
+                    .unwrap()
+            ).to_string()
+    }
+}
+
 // Sending request
 // -------------------
 
@@ -339,10 +365,9 @@ pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
 // Utils
 // -------------------
 
-pub async fn default_service<'r>(req: &'r ProxyRequest<'_>) -> Option<ServiceConfig> {
+pub async fn default_service<'r>(req: &'r ProxyRequest<'_>, nsid: &String) -> Option<ServiceConfig> {
     let cfg = req.cfg;
-    let nsid = req.path.as_str().replace("/xrpc/", "");
-    match Ids::from_str(&nsid) {
+    match Ids::from_str(nsid) {
         Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
         Ok(Ids::ToolsOzoneTeamDeleteMember) => cfg.mod_service.clone(),
         Ok(Ids::ToolsOzoneTeamUpdateMember) => cfg.mod_service.clone(),

@@ -54,12 +54,12 @@ pub async fn get_blob(
             let (bytes, mime_type) = res;
             Ok(BlobResponder(
                 bytes.clone(),
-                Header::new("Content-Length", bytes.len().to_string()),
+                Header::new("content-length", bytes.len().to_string()),
                 Header::new(
-                    "Content-Type",
+                    "content-type",
                     mime_type.unwrap_or("application/octet-stream".to_string()),
                 ),
-                Header::new("Content-Security-Policy", "default-src 'none'; sandbox"),
+                Header::new("content-security-policy", "default-src 'none'; sandbox"),
             ))
         }
         Err(error) => {

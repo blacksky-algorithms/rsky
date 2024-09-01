@@ -17,6 +17,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::notification::RegisterPushInput;
+use crate::repo::types::Ids;
 
 pub async fn inner_register_push(
     body: Json<RegisterPushInput>,
@@ -35,7 +36,8 @@ pub async fn inner_register_push(
         None => "".to_string(),
         Some(credentials) => credentials.did.unwrap_or("".to_string()),
     };
-    let auth_headers = context::service_auth_headers(&did, &service_did).await?;
+    let nsid = Ids::AppBskyFeedGetFeedGenerator.as_str().to_string();
+    let auth_headers = context::service_auth_headers(&did, &service_did, &nsid).await?;
 
     let client = ReqwestClientBuilder::new(app_view_url)
         .client(

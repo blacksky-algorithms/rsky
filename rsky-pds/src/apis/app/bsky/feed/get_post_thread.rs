@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
+use crate::repo::types::Ids;
 
 const METHOD_NSID: &'static str = "app.bsky.feed.getPostThread";
 
@@ -374,8 +375,9 @@ pub async fn read_after_write_not_found(
                                         match &cfg.bsky_app_view {
                                             None => (),
                                             Some(bsky_app_view) => {
+                                                let nsid = Ids::AppBskyFeedGetPostThread.as_str().to_string();
                                                 let headers =
-                                                    cfg.appview_auth_headers(&requester).await?;
+                                                    cfg.appview_auth_headers(&requester, &nsid).await?;
                                                 let client = ReqwestClientBuilder::new(
                                                     bsky_app_view.url.clone(),
                                                 )

@@ -17,7 +17,7 @@ multihash = "0.16"
 tokio = { version = "1.28.2",features = ["full"] }
 
 # for everything else
-rocket = { version = "=0.5.1", features = ["json"] }
+rocket = { version = "=0.5.1", features = ["json","tls"] }
 dotenvy = "0.15"
 rsky-lexicon = { workspace = true }
 rsky-identity = { workspace = true }

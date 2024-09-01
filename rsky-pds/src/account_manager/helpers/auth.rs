@@ -44,6 +44,8 @@ pub struct ServiceJwtPayload {
     pub iss: String,
     pub aud: String,
     pub exp: Option<u64>,
+    pub lxm: Option<String>,
+    pub jti: Option<String>
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -56,6 +58,8 @@ pub struct ServiceJwtParams {
     pub iss: String,
     pub aud: String,
     pub exp: Option<u64>,
+    pub lxm: Option<String>,
+    pub jti: Option<String>,
     pub keypair: SecretKey,
 }
 
@@ -160,6 +164,8 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
     let exp = params
         .exp
         .unwrap_or(((now + MINUTE as usize) / 1000) as u64);
+    let lxm = params.lxm;
+    let jti = get_random_str();
     let header = ServiceJwtHeader {
         typ: "JWT".to_string(),
         alg: "ES256K".to_string(),
@@ -168,6 +174,8 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
         iss,
         aud,
         exp: Some(exp),
+        lxm,
+        jti: Some(jti),
     };
     let to_sign_str = format!(
         "{0}.{1}",

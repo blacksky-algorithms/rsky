@@ -81,6 +81,7 @@ pub async fn create_session(
     match inner_create_session(body).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("{error:?}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

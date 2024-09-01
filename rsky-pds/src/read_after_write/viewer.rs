@@ -47,6 +47,7 @@ use rsky_syntax::aturi::AtUri;
 use secp256k1::SecretKey;
 use std::env;
 use std::str::FromStr;
+use atrium_api::agent::AtpAgent;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
@@ -65,6 +66,7 @@ pub struct LocalViewer {
     pub actor_store: ActorStore,
     pub pds_hostname: String,
     pub appview_agent: Option<Agent>,
+    appview_agent_str: Option<String>,
     pub appview_did: Option<String>,
     pub appview_cdn_url_pattern: Option<String>,
 }
@@ -74,6 +76,7 @@ impl LocalViewer {
         actor_store: ActorStore,
         pds_hostname: String,
         appview_agent: Option<Agent>,
+        appview_agent_str: Option<String>,
         appview_did: Option<String>,
         appview_cdn_url_pattern: Option<String>,
     ) -> Self {
@@ -82,6 +85,7 @@ impl LocalViewer {
             actor_store,
             pds_hostname,
             appview_agent,
+            appview_agent_str,
             appview_did,
             appview_cdn_url_pattern,
         }
@@ -107,6 +111,7 @@ impl LocalViewer {
                         Some(AtpServiceClient::new(client))
                     }
                 },
+                params.appview_agent,
                 params.appview_did.clone(),
                 params.appview_cdn_url_pattern.clone(),
             )
@@ -128,7 +133,7 @@ impl LocalViewer {
         }
     }
 
-    pub async fn service_auth_headers(&self, did: &String) -> Result<HeaderMap> {
+    pub async fn service_auth_headers(&self, did: &String, lxm: &String) -> Result<HeaderMap> {
         match &self.appview_did {
             None => bail!("Could not find bsky appview did"),
             Some(appview_did) => {
@@ -139,6 +144,8 @@ impl LocalViewer {
                     iss: did.clone(),
                     aud: appview_did.clone(),
                     exp: None,
+                    lxm: Some(lxm.clone()),
+                    jti: None,
                     keypair,
                 })
                 .await
@@ -367,9 +374,10 @@ impl LocalViewer {
         embed: Record,
     ) -> Result<Option<record::ViewUnion>> {
         match (&self.appview_agent, &self.appview_did) {
-            (Some(appview_agent), Some(_)) => {
+            (Some(_), Some(_)) => {
                 let collection = AtUri::new(embed.record.uri.clone(), None)?.get_collection();
                 if collection == Ids::AppBskyFeedPost.as_str() {
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
                     let res: AppBskyFeedGetPostsOutput = appview_agent
                         .service
                         .app
@@ -405,6 +413,7 @@ impl LocalViewer {
                         }
                     }
                 } else if collection == Ids::AppBskyFeedGenerator.as_str() {
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
                     let res: AppBskyFeedGetFeedGeneratorOutput = appview_agent
                         .service
                         .app
@@ -421,6 +430,7 @@ impl LocalViewer {
                         serde_json::from_value(serde_json::to_value(&res.view)?)?;
                     Ok(Some(record::ViewUnion::GeneratorView(generator_view)))
                 } else if collection == Ids::AppBskyGraphList.as_str() {
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
                     let res: AppBskyGraphGetListOutput = appview_agent
                         .service
                         .app
@@ -588,6 +598,21 @@ impl LocalViewer {
             labels,
             indexed_at,
         }
+    }
+    
+    async fn get_authenticated_agent_for_nsid(&self, nsid: &String) -> Result<AtpServiceClient<ReqwestClient>> {
+        let auth_headers = self.service_auth_headers(&self.did, nsid).await?;
+        let client = ReqwestClientBuilder::new()
+            .client(
+                reqwest::ClientBuilder::new()
+                    .user_agent(APP_USER_AGENT)
+                    .timeout(std::time::Duration::from_millis(1000))
+                    .default_headers(auth_headers)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        Ok(AtpServiceClient::new(client))
     }
 }
 
