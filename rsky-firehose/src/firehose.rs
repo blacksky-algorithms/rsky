@@ -36,7 +36,9 @@ pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
     let body = match header.type_.as_str() {
         "#commit" => SubscribeRepos::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#handle" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        "#tombstone" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        "#tombstone" => SubscribeRepos::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        "#account" => SubscribeRepos::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        "#identity" => SubscribeRepos::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
         _ => {
             eprintln!("Received unknown header {:?}", header.type_.as_str());
             bail!(format!(

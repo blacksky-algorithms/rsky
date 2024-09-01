@@ -1,3 +1,5 @@
+use crate::com::atproto::sync::{default_resource, deserialize_option_cid_v1};
+use lexicon_cid::Cid;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -26,8 +28,12 @@ pub struct Blob {
         skip_serializing_if = "Option::is_none"
     )]
     pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<Link>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default = "default_resource",
+        deserialize_with = "deserialize_option_cid_v1"
+    )]
+    pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]
@@ -44,8 +50,12 @@ pub struct OriginalBlob {
         skip_serializing_if = "Option::is_none"
     )]
     pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<Link>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default = "default_resource",
+        deserialize_with = "deserialize_option_cid_v1"
+    )]
+    pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
     #[serde(rename(deserialize = "mimeType", serialize = "mimeType"))]

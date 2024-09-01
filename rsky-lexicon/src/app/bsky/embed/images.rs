@@ -2,8 +2,6 @@ use crate::com::atproto::repo::Blob;
 
 /// A set of images embedded in a Bluesky record (eg, a post).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "$type")]
-#[serde(rename = "app.bsky.embed.images")]
 #[serde(rename_all = "camelCase")]
 pub struct Images {
     pub images: Vec<Image>,

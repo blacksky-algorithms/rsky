@@ -22,6 +22,7 @@ pub struct CORS;
 
 use rocket::request::{FromRequest, Outcome};
 
+#[allow(dead_code)]
 struct ApiKey<'r>(&'r str);
 
 #[derive(Debug)]
@@ -49,13 +50,13 @@ impl<'r> FromRequest<'r> for ApiKey<'r> {
         if let Ok(token_result) = env::var("RSKY_API_KEY") {
             token = token_result;
         } else {
-            return Outcome::Failure((Status::BadRequest, ApiKeyError::Invalid));
+            return Outcome::Error((Status::BadRequest, ApiKeyError::Invalid));
         }
 
         match req.headers().get_one("X-RSKY-KEY") {
-            None => Outcome::Failure((Status::Unauthorized, ApiKeyError::Missing)),
+            None => Outcome::Error((Status::Unauthorized, ApiKeyError::Missing)),
             Some(key) if key == token => Outcome::Success(ApiKey(key)),
-            Some(_) => Outcome::Failure((Status::Unauthorized, ApiKeyError::Invalid)),
+            Some(_) => Outcome::Error((Status::Unauthorized, ApiKeyError::Invalid)),
         }
     }
 }
@@ -67,9 +68,9 @@ impl<'r> FromRequest<'r> for AccessToken {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         match req.headers().get_one("Authorization") {
-            None => Outcome::Failure((Status::Unauthorized, AccessTokenError::Missing)),
+            None => Outcome::Error((Status::Unauthorized, AccessTokenError::Missing)),
             Some(token) if !token.starts_with("Bearer ") => {
-                Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
             }
             Some(token) => {
                 println!("Visited by {token:?}");
@@ -80,11 +81,11 @@ impl<'r> FromRequest<'r> for AccessToken {
                         Ok(jwt_object) => Outcome::Success(AccessToken(jwt_object)),
                         Err(error) => {
                             eprintln!("Error decoding jwt. {error:?}");
-                            Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                            Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
                         }
                     }
                 } else {
-                    Outcome::Failure((Status::Unauthorized, AccessTokenError::Invalid))
+                    Outcome::Error((Status::Unauthorized, AccessTokenError::Invalid))
                 }
             }
         }
@@ -146,9 +147,9 @@ fn get_banned_response() -> rsky_feedgen::models::AlgoResponse {
     format = "json"
 )]
 async fn index(
-    feed: Option<String>,
+    feed: Option<&str>,
     limit: Option<i64>,
-    cursor: Option<String>,
+    cursor: Option<&str>,
     connection: ReadReplicaConn,
     _token: Result<AccessToken, AccessTokenError>,
 ) -> Result<
@@ -161,7 +162,7 @@ async fn index(
         match serde_json::from_str::<JwtParts>(&jwt.0) {
             Ok(jwt_obj) => {
                 let did = jwt_obj.iss;
-                match rsky_feedgen::apis::add_visitor(did.clone(), jwt_obj.aud, feed.clone()) {
+                match rsky_feedgen::apis::add_visitor(did.clone(), jwt_obj.aud, feed.to_string()) {
                     Ok(_) => {
                         if BANNED_FROM_TV.contains(&did.as_str()) {
                             is_banned = true;
@@ -175,13 +176,13 @@ async fn index(
         }
     } else {
         let service_did = env::var("FEEDGEN_SERVICE_DID").unwrap_or("".into());
-        match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did, feed.clone()) {
+        match rsky_feedgen::apis::add_visitor("anonymous".into(), service_did, feed.to_string()) {
             Ok(_) => (),
             Err(_) => eprintln!("Failed to write anonymous visitor."),
         }
     }
     match feed {
-        _blacksky if _blacksky.as_str() == BLACKSKY && !is_banned => {
+        _blacksky if _blacksky == BLACKSKY && !is_banned => {
             match rsky_feedgen::apis::get_all_posts(None, limit, cursor, true, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -197,7 +198,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_og if _blacksky_og.as_str() == BLACKSKY_OG && !is_banned => {
+        _blacksky_og if _blacksky_og == BLACKSKY_OG && !is_banned => {
             match rsky_feedgen::apis::get_all_posts(None, limit, cursor, false, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -213,7 +214,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_trend if _blacksky_trend.as_str() == BLACKSKY_TREND && !is_banned => {
+        _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && !is_banned => {
             match rsky_feedgen::apis::get_blacksky_trending(limit, cursor, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -229,7 +230,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_edu if _blacksky_edu.as_str() == BLACKSKY_EDU && !is_banned => {
+        _blacksky_edu if _blacksky_edu == BLACKSKY_EDU && !is_banned => {
             match rsky_feedgen::apis::get_posts_by_membership(
                 None,
                 limit,
@@ -254,7 +255,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && !is_banned => {
+        _blacksky_fr if _blacksky_fr == BLACKSKY_FR && !is_banned => {
             match rsky_feedgen::apis::get_all_posts(
                 Some("fr".into()),
                 limit,
@@ -278,7 +279,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && !is_banned => {
+        _blacksky_pt if _blacksky_pt == BLACKSKY_PT && !is_banned => {
             match rsky_feedgen::apis::get_all_posts(
                 Some("pt".into()),
                 limit,
@@ -302,7 +303,7 @@ async fn index(
                 }
             }
         }
-        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && !is_banned => {
+        _blacksky_nsfw if _blacksky_nsfw == BLACKSKY_NSFW && !is_banned => {
             match rsky_feedgen::apis::get_blacksky_nsfw(limit, cursor, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -318,31 +319,31 @@ async fn index(
                 }
             }
         }
-        _blacksky if _blacksky.as_str() == BLACKSKY && is_banned => {
+        _blacksky if _blacksky == BLACKSKY && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_og if _blacksky_og.as_str() == BLACKSKY_OG && is_banned => {
+        _blacksky_og if _blacksky_og == BLACKSKY_OG && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_trend if _blacksky_trend.as_str() == BLACKSKY_TREND && is_banned => {
+        _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_fr if _blacksky_fr.as_str() == BLACKSKY_FR && is_banned => {
+        _blacksky_fr if _blacksky_fr == BLACKSKY_FR && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_pt if _blacksky_pt.as_str() == BLACKSKY_PT && is_banned => {
+        _blacksky_pt if _blacksky_pt == BLACKSKY_PT && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_nsfw if _blacksky_nsfw.as_str() == BLACKSKY_NSFW && is_banned => {
+        _blacksky_nsfw if _blacksky_nsfw == BLACKSKY_NSFW && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
-        _blacksky_edu if _blacksky_edu.as_str() == BLACKSKY_EDU && is_banned => {
+        _blacksky_edu if _blacksky_edu == BLACKSKY_EDU && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
@@ -361,12 +362,12 @@ async fn index(
 
 #[put("/cursor?<service>&<sequence>")]
 async fn update_cursor(
-    service: String,
+    service: &str,
     sequence: i64,
     _key: ApiKey<'_>,
     connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::update_cursor(service, sequence, connection).await {
+    match rsky_feedgen::apis::update_cursor(service.to_string(), sequence, connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -384,14 +385,14 @@ async fn update_cursor(
 
 #[get("/cursor?<service>", format = "json")]
 async fn get_cursor(
-    service: String,
+    service: &str,
     _key: ApiKey<'_>,
     connection: ReadReplicaConn,
 ) -> Result<
     Json<rsky_feedgen::models::SubState>,
     status::Custom<Json<rsky_feedgen::models::PathUnknownErrorMessageResponse>>,
 > {
-    match rsky_feedgen::apis::get_cursor(service, connection).await {
+    match rsky_feedgen::apis::get_cursor(service.to_string(), connection).await {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -406,12 +407,12 @@ async fn get_cursor(
 
 #[put("/queue/<lex>/create", format = "json", data = "<body>")]
 async fn queue_creation(
-    lex: String,
+    lex: &str,
     body: Json<Vec<rsky_feedgen::models::CreateRequest>>,
     _key: ApiKey<'_>,
     connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_creation(lex, body.into_inner(), connection).await {
+    match rsky_feedgen::apis::queue_creation(lex.to_string(), body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");
@@ -429,12 +430,12 @@ async fn queue_creation(
 
 #[put("/queue/<lex>/delete", format = "json", data = "<body>")]
 async fn queue_deletion(
-    lex: String,
+    lex: &str,
     body: Json<Vec<rsky_feedgen::models::DeleteRequest>>,
     _key: ApiKey<'_>,
     connection: WriteDbConn,
 ) -> Result<(), status::Custom<Json<rsky_feedgen::models::InternalErrorMessageResponse>>> {
-    match rsky_feedgen::apis::queue_deletion(lex, body.into_inner(), connection).await {
+    match rsky_feedgen::apis::queue_deletion(lex.to_string(), body.into_inner(), connection).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("Internal Error: {error}");

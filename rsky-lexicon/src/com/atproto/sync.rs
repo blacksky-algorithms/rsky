@@ -1,26 +1,36 @@
 use chrono::{DateTime, Utc};
+use lexicon_cid::Cid;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_cbor::tags::Tagged;
 use std::fmt;
+
+const CBOR_TAG_CID: u64 = 42;
+const MULTIBASE_IDENTITY: u8 = 0;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposCommitOperation {
     pub path: String,
     pub action: String,
-    pub cid: Option<String>,
+    pub cid: Option<Cid>,
 }
 
 /// Represents an update of repository state. Note that empty commits are allowed,
 /// which include no repo data changes, but an update to rev and signature.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposCommit {
-    pub r#type: String, // 'commit'
     pub seq: i64,
     pub time: DateTime<Utc>,
     pub rebase: bool,
     #[serde(rename = "tooBig")]
     pub too_big: bool,
     pub repo: String,
-    pub commit: String,
-    pub prev: Option<String>,
+    #[serde(deserialize_with = "deserialize_cid_v1")]
+    pub commit: Cid,
+    #[serde(
+        default = "default_resource",
+        deserialize_with = "deserialize_option_cid_v1"
+    )]
+    pub prev: Option<Cid>,
     pub rev: String,
     pub since: Option<String>,
     #[serde(with = "serde_bytes")]
@@ -79,7 +89,6 @@ pub enum RepoStatus {
 /// DEPRECATED -- Use #identity event instead
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposHandle {
-    pub r#type: String, // 'handle'
     pub did: String,
     pub handle: String,
     pub seq: i64,
@@ -90,7 +99,6 @@ pub struct SubscribeReposHandle {
 /// pds hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposIdentity {
-    pub r#type: String, // 'identity'
     pub did: String,
     pub handle: Option<String>,
     pub seq: i64,
@@ -101,7 +109,6 @@ pub struct SubscribeReposIdentity {
 /// pds hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposAccount {
-    pub r#type: String, // 'account'
     pub seq: i64,
     pub did: String,
     pub time: DateTime<Utc>,
@@ -128,12 +135,12 @@ impl fmt::Display for AccountStatus {
 /// DEPRECATED -- Use #account event instead
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposTombstone {
-    pub r#type: String, // 'tombstone'
     pub did: String,
     pub seq: i64,
     pub time: DateTime<Utc>,
 }
 
+#[derive(Debug)]
 pub enum SubscribeRepos {
     Commit(SubscribeReposCommit),
     Identity(SubscribeReposIdentity),
@@ -155,4 +162,53 @@ pub struct RefRepo {
     // why the repository is no longer being hosted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<RepoStatus>,
+}
+
+pub fn deserialize_cid_v1<'de, D>(deserializer: D) -> Result<Cid, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let buf = Tagged::<serde_bytes::ByteBuf>::deserialize(deserializer)?;
+    match buf.tag {
+        Some(CBOR_TAG_CID) | None => {
+            let mut bz = buf.value.into_vec();
+
+            if bz.first() == Some(&MULTIBASE_IDENTITY) {
+                bz.remove(0);
+            }
+
+            Ok(Cid::try_from(bz).map_err(|e| {
+                serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
+            })?)
+        }
+        Some(_) => Err(serde::de::Error::custom("unexpected tag")),
+    }
+}
+
+pub fn deserialize_option_cid_v1<'de, D>(deserializer: D) -> Result<Option<Cid>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt_buf = Option::<Tagged<serde_bytes::ByteBuf>>::deserialize(deserializer)?;
+    match opt_buf {
+        None => Ok(None),
+        Some(buf) => match buf.tag {
+            Some(CBOR_TAG_CID) | None => {
+                let mut bz = buf.value.into_vec();
+
+                if bz.first() == Some(&MULTIBASE_IDENTITY) {
+                    bz.remove(0);
+                }
+
+                Ok(Some(Cid::try_from(bz).map_err(|e| {
+                    serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
+                })?))
+            }
+            Some(_) => Err(serde::de::Error::custom("unexpected tag")),
+        },
+    }
+}
+
+pub fn default_resource() -> Option<Cid> {
+    None
 }

@@ -3,8 +3,6 @@ use crate::com::atproto::repo::Blob;
 /// A representation of some externally linked content (eg, a URL and 'card'),
 /// embedded in a Bluesky record (eg, a post).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "$type")]
-#[serde(rename = "app.bsky.embed.external")]
 #[serde(rename_all = "camelCase")]
 pub struct External {
     pub external: ExternalObject,

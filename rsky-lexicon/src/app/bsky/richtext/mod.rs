@@ -7,11 +7,11 @@ pub struct Facet {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "$type")]
 pub enum Features {
-    #[serde(rename = "#mention")]
+    #[serde(rename = "app.bsky.richtext.facet#mention")]
     Mention(Mention),
-    #[serde(rename = "#link")]
+    #[serde(rename = "app.bsky.richtext.facet#link")]
     Link(Link),
-    #[serde(rename = "#tag")]
+    #[serde(rename = "app.bsky.richtext.facet#tag")]
     Tag(Tag),
 }
 

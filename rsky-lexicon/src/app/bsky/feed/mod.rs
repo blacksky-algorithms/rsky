@@ -1,4 +1,4 @@
-mod like;
+pub mod like;
 
 use super::actor::ProfileView;
 use crate::app::bsky::actor::{ProfileViewBasic, ViewerState};
@@ -73,7 +73,7 @@ pub struct ReasonRepost {
 #[serde(rename_all = "camelCase")]
 pub struct FeedViewPost {
     pub post: PostView,
-    pub reply: Option<ReplyRef>,
+    pub reply: Option<ReplyRefView>,
     pub reason: Option<ReasonRepost>,
     /// Context provided by feed generator that may be passed back alongside interactions.
     pub feed_context: Option<String>,
@@ -103,11 +103,17 @@ pub struct Repost {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReplyRef {
+pub struct ReplyRefView {
     pub root: ReplyRefUnion,
     pub parent: ReplyRefUnion,
     /// When parent is a reply to another post, this is the author of that post.
     pub grandparent_author: Option<ProfileViewBasic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ReplyRef {
+    pub root: StrongRef,
+    pub parent: StrongRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

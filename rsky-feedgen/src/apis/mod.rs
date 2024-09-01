@@ -7,7 +7,7 @@ use diesel::prelude::*;
 use diesel::sql_query;
 use lazy_static::lazy_static;
 use regex::Regex;
-use rsky_lexicon::app::bsky::feed::{Embeds, Media};
+use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
@@ -16,14 +16,17 @@ use std::time::SystemTime;
 pub async fn get_posts_by_membership(
     lang: Option<String>,
     limit: Option<i64>,
-    params_cursor: Option<String>,
+    params_cursor: Option<&str>,
     only_posts: bool,
     list: String,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
-
+    let params_cursor = match params_cursor {
+        None => None,
+        Some(params_cursor) => Some(params_cursor.to_string()),
+    };
     let result = connection
         .run(move |conn| {
             let mut query = PostSchema::post
@@ -122,12 +125,15 @@ pub async fn get_posts_by_membership(
 #[allow(deprecated)]
 pub async fn get_blacksky_nsfw(
     limit: Option<i64>,
-    params_cursor: Option<String>,
+    params_cursor: Option<&str>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::image::dsl as ImageSchema;
     use crate::schema::post::dsl as PostSchema;
-
+    let params_cursor = match params_cursor {
+        None => None,
+        Some(params_cursor) => Some(params_cursor.to_string()),
+    };
     let result = connection
         .run(move |conn| {
             let mut query = PostSchema::post
@@ -221,9 +227,13 @@ pub async fn get_blacksky_nsfw(
 #[allow(deprecated)]
 pub async fn get_blacksky_trending(
     limit: Option<i64>,
-    params_cursor: Option<String>,
+    params_cursor: Option<&str>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    let params_cursor = match params_cursor {
+        None => None,
+        Some(params_cursor) => Some(params_cursor.to_string()),
+    };
     let result = connection
         .run(move |conn| {
             let dt = Utc::now() - Duration::days(2);
@@ -333,11 +343,15 @@ pub async fn get_blacksky_trending(
 pub async fn get_all_posts(
     lang: Option<String>,
     limit: Option<i64>,
-    params_cursor: Option<String>,
+    params_cursor: Option<&str>,
     only_posts: bool,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl as PostSchema;
+    let params_cursor = match params_cursor {
+        None => None,
+        Some(params_cursor) => Some(params_cursor.to_string()),
+    };
 
     let result = connection
         .run(move |conn| {
@@ -492,15 +506,12 @@ pub async fn queue_creation(
             let mut new_members = Vec::new();
             let mut new_images = Vec::new();
             let mut members_to_rm = Vec::new();
-            let mut hellthread_roots = HashSet::new();
-            hellthread_roots.insert("bafyreigxvsmbhdenvzaklcfnovbsjc542cu5pjmpqyyc64mdtqwsyimlvi".to_string());
 
             body
                 .into_iter()
                 .map(|req| {
                     let system_time = SystemTime::now();
                     let dt: DateTime<UtcOffset> = system_time.into();
-                    let mut is_hellthread = false;
                     let mut root_author = String::new();
                     let is_member = is_included(vec![&req.author].into(), conn).unwrap_or(false);
                     let is_blocked = is_excluded(vec![&req.author].into(), conn).unwrap_or(false);
@@ -534,7 +545,6 @@ pub async fn queue_creation(
                             root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
                             new_post.reply_root = Some(reply.root.uri);
-                            is_hellthread = hellthread_roots.contains(&reply.root.cid);
                         }
                         if let Some(langs) = post_record.langs {
                             new_post.lang = Some(langs.join(","));
@@ -544,9 +554,9 @@ pub async fn queue_creation(
                                 Embeds::Images(e) => {
                                     for image in e.images {
                                         let labels: Vec<Option<String>> = vec![];
-                                        if let Some(image_cid) = image.image.r#ref {
+                                        if let Some(image_cid) = image.image.cid {
                                             let new_image = (
-                                                ImageSchema::cid.eq(image_cid.to_string()),
+                                                ImageSchema::cid.eq(image_cid),
                                                 ImageSchema::alt.eq(image.alt),
                                                 ImageSchema::postCid.eq(new_post.cid.clone()),
                                                 ImageSchema::postUri.eq(new_post.uri.clone()),
@@ -562,12 +572,12 @@ pub async fn queue_creation(
                                 },
                                 Embeds::RecordWithMedia(e) => {
                                     match e.media {
-                                        Media::Images(m) => {
+                                        MediaUnion::Images(m) => {
                                             for image in m.images {
                                                 let labels: Vec<Option<String>> = vec![];
-                                                if let Some(image_cid) = image.image.r#ref {
+                                                if let Some(image_cid) = image.image.cid {
                                                     let new_image = (
-                                                        ImageSchema::cid.eq(image_cid.to_string()),
+                                                        ImageSchema::cid.eq(image_cid),
                                                         ImageSchema::alt.eq(image.alt),
                                                         ImageSchema::postCid.eq(new_post.cid.clone()),
                                                         ImageSchema::postUri.eq(new_post.uri.clone()),
@@ -581,13 +591,13 @@ pub async fn queue_creation(
                                                 };
                                             }
                                         },
-                                        Media::External(e) => {
+                                        MediaUnion::External(e) => {
                                             new_post.external_uri = Some(e.external.uri);
                                             new_post.external_title = Some(e.external.title);
                                             new_post.external_description = Some(e.external.description);
                                             if let Some(thumb_blob) = e.external.thumb {
-                                                if let Some(thumb_cid) = thumb_blob.r#ref {
-                                                    new_post.external_thumb = Some(thumb_cid.to_string());
+                                                if let Some(thumb_cid) = thumb_blob.cid {
+                                                    new_post.external_thumb = Some(thumb_cid);
                                                 };
                                             };
                                         },
@@ -598,8 +608,8 @@ pub async fn queue_creation(
                                     new_post.external_title = Some(e.external.title);
                                     new_post.external_description = Some(e.external.description);
                                     if let Some(thumb_blob) = e.external.thumb {
-                                        if let Some(thumb_cid) = thumb_blob.r#ref {
-                                            new_post.external_thumb = Some(thumb_cid.to_string());
+                                        if let Some(thumb_cid) = thumb_blob.cid {
+                                            new_post.external_thumb = Some(thumb_cid);
                                         };
                                     };
                                 },
@@ -620,13 +630,12 @@ pub async fn queue_creation(
                         hashtags.contains("#nbablacksky") ||
                         hashtags.contains("#addtoblacksky")) && 
                         !is_blocked &&
-                        !is_hellthread &&
-                        !hashtags.contains("#private") && 
+                        !hashtags.contains("#private") &&
                         !hashtags.contains("#nofeed") && 
                         !hashtags.contains("#removefromblacksky") {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
-                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {is_member:?} | Hellthread: {is_hellthread:?} | Hashtags: {hashtags:?}");
+                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {is_member:?} | Hashtags: {hashtags:?}");
 
                         let new_post = (
                             PostSchema::uri.eq(new_post.uri),
@@ -674,8 +683,7 @@ pub async fn queue_creation(
                         }
                     }
                     if is_member &&
-                        hashtags.contains("#removefromblacksky") &&
-                        !is_hellthread {
+                        hashtags.contains("#removefromblacksky") {
                         println!("Removing member: {:?}", &req.author);
                         members_to_rm.push(req.author.clone());
                     }

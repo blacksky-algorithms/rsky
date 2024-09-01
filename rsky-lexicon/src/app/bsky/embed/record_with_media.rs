@@ -5,8 +5,6 @@ use crate::app::bsky::embed::{MediaUnion, MediaViewUnion};
 /// alongside other compatible embeds. For example, a quote post and image,
 /// or a quote post and external URL card.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "$type")]
-#[serde(rename = "app.bsky.embed.recordWithMedia")]
 #[serde(rename_all = "camelCase")]
 pub struct RecordWithMedia {
     pub record: Record,
