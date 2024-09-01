@@ -1,6 +1,6 @@
 use crate::auth_verifier::AccessPrivileged;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::pipethrough::{OverrideOpts, pipethrough, pipethrough_procedure, ProxyRequest};
+use crate::pipethrough::{pipethrough, pipethrough_procedure, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
 use anyhow::Result;
 use rocket::http::Status;
@@ -46,7 +46,16 @@ pub async fn export_account_data(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None}).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
@@ -103,7 +112,16 @@ pub async fn get_convo(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None}).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
@@ -129,7 +147,16 @@ pub async fn get_convo_for_members(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None}).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
@@ -155,7 +182,16 @@ pub async fn get_log(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None}).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
@@ -184,7 +220,16 @@ pub async fn get_messages(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None}).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             let internal_error = ErrorMessageResponse {
@@ -236,7 +281,16 @@ pub async fn list_convos(
         None => None,
         Some(credentials) => credentials.did,
     };
-    match pipethrough(&req, requester, OverrideOpts {aud: None, lxm: None} ).await {
+    match pipethrough(
+        &req,
+        requester,
+        OverrideOpts {
+            aud: None,
+            lxm: None,
+        },
+    )
+    .await
+    {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");

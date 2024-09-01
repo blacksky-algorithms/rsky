@@ -5,26 +5,27 @@ use crate::repo::types::Ids;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
+use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
 pub struct OverrideOpts {
     pub aud: Option<String>,
-    pub lxm: Option<String>
+    pub lxm: Option<String>,
 }
 
 pub struct UrlAndAud {
     pub url: Url,
     pub aud: String,
-    pub lxm: String
+    pub lxm: String,
 }
 
 pub struct ProxyHeader {
@@ -71,7 +72,16 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                 };
-                match pipethrough(&req, requester, OverrideOpts{aud: None, lxm: None}).await {
+                match pipethrough(
+                    &req,
+                    requester,
+                    OverrideOpts {
+                        aud: None,
+                        lxm: None,
+                    },
+                )
+                .await
+                {
                     Ok(res) => Outcome::Success(res),
                     Err(error) => Outcome::Error((Status::BadRequest, error)),
                 }
@@ -116,7 +126,11 @@ pub async fn pipethrough<'r>(
     requester: Option<String>,
     override_opts: OverrideOpts,
 ) -> Result<HandlerPipeThrough> {
-    let UrlAndAud { url, aud, lxm: nsid } = format_url_and_aud(req, override_opts.aud).await?;
+    let UrlAndAud {
+        url,
+        aud,
+        lxm: nsid,
+    } = format_url_and_aud(req, override_opts.aud).await?;
     let lxm = override_opts.lxm.unwrap_or(nsid);
     let headers = format_headers(req, aud, lxm, requester).await?;
     let req_init = format_req_init(req, url, headers, None)?;
@@ -129,7 +143,11 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
     requester: Option<String>,
     body: Option<T>,
 ) -> Result<HandlerPipeThrough> {
-    let UrlAndAud { url, aud, lxm: nsid } = format_url_and_aud(req, None).await?;
+    let UrlAndAud {
+        url,
+        aud,
+        lxm: nsid,
+    } = format_url_and_aud(req, None).await?;
     let headers = format_headers(req, aud, nsid, requester).await?;
     let encoded_body: Option<Vec<u8>> = match body {
         None => None,
@@ -159,9 +177,12 @@ pub async fn format_url_and_aud<'r>(
     let default_proxy = default_service(req, &nsid).await;
     let service_url = match proxy_to {
         Some(ref proxy_to) => {
-            println!("@LOG: format_url_and_aud() proxy_to: {:?}", proxy_to.service_url);
+            println!(
+                "@LOG: format_url_and_aud() proxy_to: {:?}",
+                proxy_to.service_url
+            );
             Some(proxy_to.service_url.clone())
-        },
+        }
         None => match default_proxy {
             Some(ref default_proxy) => Some(default_proxy.url.clone()),
             None => None,
@@ -186,7 +207,11 @@ pub async fn format_url_and_aud<'r>(
             if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
-            Ok(UrlAndAud { url, aud, lxm: nsid })
+            Ok(UrlAndAud {
+                url,
+                aud,
+                lxm: nsid,
+            })
         }
         _ => bail!(InvalidRequestError::NoServiceConfigured(req.path.clone())),
     }
@@ -291,12 +316,9 @@ pub fn parse_req_nsid(req: &ProxyRequest) -> String {
     let nsid = req.path.as_str().replace("/xrpc/", "");
     match nsid.ends_with("/") {
         false => nsid,
-        true => nsid.trim_end_matches(
-                |c| c == nsid
-                    .chars()
-                    .last()
-                    .unwrap()
-            ).to_string()
+        true => nsid
+            .trim_end_matches(|c| c == nsid.chars().last().unwrap())
+            .to_string(),
     }
 }
 
@@ -365,7 +387,56 @@ pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
 // Utils
 // -------------------
 
-pub async fn default_service<'r>(req: &'r ProxyRequest<'_>, nsid: &String) -> Option<ServiceConfig> {
+lazy_static! {
+    pub static ref PRIVILEGED_METHODS: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert(Ids::ChatBskyActorDeleteAccount.as_str());
+        s.insert(Ids::ChatBskyActorExportAccountData.as_str());
+        s.insert(Ids::ChatBskyConvoDeleteMessageForSelf.as_str());
+        s.insert(Ids::ChatBskyConvoGetConvo.as_str());
+        s.insert(Ids::ChatBskyConvoGetConvoForMembers.as_str());
+        s.insert(Ids::ChatBskyConvoGetLog.as_str());
+        s.insert(Ids::ChatBskyConvoGetMessages.as_str());
+        s.insert(Ids::ChatBskyConvoLeaveConvo.as_str());
+        s.insert(Ids::ChatBskyConvoListConvos.as_str());
+        s.insert(Ids::ChatBskyConvoMuteConvo.as_str());
+        s.insert(Ids::ChatBskyConvoSendMessage.as_str());
+        s.insert(Ids::ChatBskyConvoSendMessageBatch.as_str());
+        s.insert(Ids::ChatBskyConvoUnmuteConvo.as_str());
+        s.insert(Ids::ChatBskyConvoUpdateRead.as_str());
+        s.insert(Ids::ComAtprotoServerCreateAccount.as_str());
+        s
+    };
+
+    // These endpoints are related to account management and must be used directly,
+    // not proxied or service-authed. Service auth may be utilized between PDS and
+    // entryway for these methods.
+    pub static ref PROTECTED_METHODS: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert(Ids::ComAtprotoAdminSendEmail.as_str());
+        s.insert(Ids::ComAtprotoIdentityRequestPlcOperationSignature.as_str());
+        s.insert(Ids::ComAtprotoIdentitySignPlcOperation.as_str());
+        s.insert(Ids::ComAtprotoIdentityUpdateHandle.as_str());
+        s.insert(Ids::ComAtprotoServerActivateAccount.as_str());
+        s.insert(Ids::ComAtprotoServerConfirmEmail.as_str());
+        s.insert(Ids::ComAtprotoServerCreateAppPassword.as_str());
+        s.insert(Ids::ComAtprotoServerDeactivateAccount.as_str());
+        s.insert(Ids::ComAtprotoServerGetAccountInviteCodes.as_str());
+        s.insert(Ids::ComAtprotoServerListAppPasswords.as_str());
+        s.insert(Ids::ComAtprotoServerRequestAccountDelete.as_str());
+        s.insert(Ids::ComAtprotoServerRequestEmailConfirmation.as_str());
+        s.insert(Ids::ComAtprotoServerRequestEmailUpdate.as_str());
+        s.insert(Ids::ComAtprotoServerRevokeAppPassword.as_str());
+        s.insert(Ids::ComAtprotoServerUpdateEmail.as_str());
+        s
+    };
+
+}
+
+pub async fn default_service<'r>(
+    req: &'r ProxyRequest<'_>,
+    nsid: &String,
+) -> Option<ServiceConfig> {
     let cfg = req.cfg;
     match Ids::from_str(nsid) {
         Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),

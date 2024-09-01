@@ -141,7 +141,9 @@ impl ServerConfig {
     pub async fn appview_auth_headers(&self, did: &String, lxm: &String) -> Result<HeaderMap> {
         match &self.bsky_app_view {
             None => bail!("No appview configured."),
-            Some(bsky_app_view) => context::service_auth_headers(did, &bsky_app_view.did, lxm).await,
+            Some(bsky_app_view) => {
+                context::service_auth_headers(did, &bsky_app_view.did, lxm).await
+            }
         }
     }
 }

@@ -3,6 +3,7 @@ use crate::auth_verifier::AccessStandardSignupQueued;
 use crate::common::get_notif_endpoint;
 use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
+use crate::repo::types::Ids;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{anyhow, bail, Result};
 use atrium_api::app::bsky::notification::register_push::{
@@ -17,7 +18,6 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::notification::RegisterPushInput;
-use crate::repo::types::Ids;
 
 pub async fn inner_register_push(
     body: Json<RegisterPushInput>,

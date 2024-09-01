@@ -1,11 +1,11 @@
-use rocket::http::{Header, Status};
-use rocket::request::FromParam;
-use rocket::response::status;
-use rocket::serde::json::Json;
 use crate::auth_verifier::AccessStandard;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::pipethrough::{pipethrough_procedure, ProxyRequest};
 use anyhow::Result;
+use rocket::http::{Header, Status};
+use rocket::request::FromParam;
+use rocket::response::status;
+use rocket::serde::json::Json;
 use rocket::Responder;
 
 #[derive(Responder)]
@@ -20,8 +20,7 @@ impl<'a> FromParam<'a> for Nsid {
 
     fn from_param(param: &'a str) -> Result<Self, Self::Error> {
         // This is how we make sure we allowlist lexicons and what gets proxied
-        if param.starts_with("app.bsky.") ||
-            param.starts_with("chat.bsky") {
+        if param.starts_with("app.bsky.") || param.starts_with("chat.bsky") {
             Ok(Nsid(param.to_string()))
         } else {
             Err(param)
@@ -47,21 +46,14 @@ pub async fn app_bsky_forwarder(
             let headers = res.headers.expect("Upstream responded without headers.");
             let content_length = match headers.get("content-length") {
                 None => Header::new("content-length", res.buffer.len().to_string()),
-                Some(val) => Header::new("content-length", val.to_string())
+                Some(val) => Header::new("content-length", val.to_string()),
             };
             let content_type = match headers.get("content-type") {
-                None => Header::new(
-                    "content-type",
-                    "application/octet-stream".to_string(),
-                ),
-                Some(val) => Header::new("Content-Type", val.to_string())
+                None => Header::new("content-type", "application/octet-stream".to_string()),
+                Some(val) => Header::new("Content-Type", val.to_string()),
             };
-            Ok(ProxyResponder(
-                res.buffer,
-                content_length,
-                content_type
-            ))
-        },
+            Ok(ProxyResponder(res.buffer, content_length, content_type))
+        }
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
@@ -75,7 +67,6 @@ pub async fn app_bsky_forwarder(
         }
     }
 }
-
 
 pub mod actor;
 pub mod feed;

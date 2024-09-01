@@ -1,8 +1,9 @@
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::ServerConfig;
 use crate::models::ErrorMessageResponse;
-use crate::pipethrough::{OverrideOpts, pipethrough, ProxyRequest};
+use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
+use crate::repo::types::Ids;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError};
 use crate::{SharedATPAgent, SharedIdResolver};
 use anyhow::{anyhow, Result};
@@ -18,7 +19,6 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::AuthorFeed;
 use std::collections::BTreeMap;
-use crate::repo::types::Ids;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GetFeedPipeThrough {
@@ -108,11 +108,17 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                         .unwrap(),
                                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                                 };
-                                match pipethrough(&req, requester, OverrideOpts {
-                                    aud: Some(data.view.did.to_string()),
-                                    lxm: Some(Ids::AppBskyFeedGetFeedSkeleton.as_str().to_string())
-                                })
-                                    .await
+                                match pipethrough(
+                                    &req,
+                                    requester,
+                                    OverrideOpts {
+                                        aud: Some(data.view.did.to_string()),
+                                        lxm: Some(
+                                            Ids::AppBskyFeedGetFeedSkeleton.as_str().to_string(),
+                                        ),
+                                    },
+                                )
+                                .await
                                 {
                                     Ok(res) => Outcome::Success(Self {
                                         encoding: res.encoding,

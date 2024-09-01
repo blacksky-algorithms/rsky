@@ -68,6 +68,7 @@ pub struct Credentials {
     pub token_id: Option<String>,
     pub aud: Option<String>,
     pub iss: Option<String>,
+    pub is_privileged: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -186,6 +187,7 @@ impl<'r> FromRequest<'r> for Refresh {
                     token_id: payload.jti,
                     aud: None,
                     iss: None,
+                    is_privileged: None,
                 }),
                 artifacts: Some(token),
             },
@@ -431,6 +433,7 @@ impl<'r> FromRequest<'r> for UserDidAuth {
                         token_id: None,
                         aud: Some(payload.aud),
                         iss: Some(payload.iss),
+                        is_privileged: None,
                     }),
                     artifacts: None,
                 },
@@ -511,6 +514,7 @@ impl<'r> FromRequest<'r> for ModService {
                             token_id: None,
                             aud: Some(payload.aud),
                             iss: Some(payload.iss),
+                            is_privileged: None,
                         }),
                         artifacts: None,
                     },
@@ -591,6 +595,7 @@ impl<'r> FromRequest<'r> for AdminToken {
                                 token_id: None,
                                 aud: None,
                                 iss: None,
+                                is_privileged: None,
                             }),
                             artifacts: None,
                         },
@@ -631,6 +636,37 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
             Outcome::Success(OptionalAccessOrAdminToken { access: None })
         }
     }
+}
+
+pub async fn validate_bearer_access_token<'r>(
+    request: &'r Request<'_>,
+    scopes: Vec<AuthScope>,
+) -> Result<AccessOutput> {
+    let mut options = VerificationOptions::default();
+    options.allowed_audiences = Some(HashSet::from_strings(&[
+        env::var("PDS_SERVICE_DID").unwrap()
+    ]));
+    let ValidatedBearer {
+        did,
+        scope,
+        token,
+        audience,
+        ..
+    } = validate_bearer_token(request, scopes, Some(options)).await?;
+    let is_privileged = vec![AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope);
+    Ok(AccessOutput {
+        credentials: Some(Credentials {
+            r#type: "access".to_string(),
+            did: Some(did),
+            scope: Some(scope),
+            audience,
+            token_id: None,
+            aud: None,
+            iss: None,
+            is_privileged: Some(is_privileged),
+        }),
+        artifacts: Some(token),
+    })
 }
 
 pub async fn validate_bearer_token<'r>(
@@ -680,6 +716,7 @@ pub async fn validate_bearer_token<'r>(
     }
 }
 
+// @TODO: Implement DPop/OAuth
 pub async fn validate_access_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
@@ -742,6 +779,7 @@ pub async fn validate_access_token<'r>(
             token_id: None,
             aud: None,
             iss: None,
+            is_privileged: None,
         }),
         artifacts: Some(token),
     })

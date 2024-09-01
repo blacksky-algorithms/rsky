@@ -47,7 +47,6 @@ use rsky_syntax::aturi::AtUri;
 use secp256k1::SecretKey;
 use std::env;
 use std::str::FromStr;
-use atrium_api::agent::AtpAgent;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
@@ -111,7 +110,10 @@ impl LocalViewer {
                         Some(AtpServiceClient::new(client))
                     }
                 },
-                params.appview_agent,
+                match params.appview_agent {
+                    None => None,
+                    Some(ref bsky_app_view_url) => Some(bsky_app_view_url.clone()),
+                },
                 params.appview_did.clone(),
                 params.appview_cdn_url_pattern.clone(),
             )
@@ -377,7 +379,7 @@ impl LocalViewer {
             (Some(_), Some(_)) => {
                 let collection = AtUri::new(embed.record.uri.clone(), None)?.get_collection();
                 if collection == Ids::AppBskyFeedPost.as_str() {
-                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection).await?;
                     let res: AppBskyFeedGetPostsOutput = appview_agent
                         .service
                         .app
@@ -413,7 +415,7 @@ impl LocalViewer {
                         }
                     }
                 } else if collection == Ids::AppBskyFeedGenerator.as_str() {
-                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection).await?;
                     let res: AppBskyFeedGetFeedGeneratorOutput = appview_agent
                         .service
                         .app
@@ -430,7 +432,7 @@ impl LocalViewer {
                         serde_json::from_value(serde_json::to_value(&res.view)?)?;
                     Ok(Some(record::ViewUnion::GeneratorView(generator_view)))
                 } else if collection == Ids::AppBskyGraphList.as_str() {
-                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection)?;
+                    let appview_agent = self.get_authenticated_agent_for_nsid(&collection).await?;
                     let res: AppBskyGraphGetListOutput = appview_agent
                         .service
                         .app
@@ -599,10 +601,17 @@ impl LocalViewer {
             indexed_at,
         }
     }
-    
-    async fn get_authenticated_agent_for_nsid(&self, nsid: &String) -> Result<AtpServiceClient<ReqwestClient>> {
+
+    async fn get_authenticated_agent_for_nsid(
+        &self,
+        nsid: &String,
+    ) -> Result<AtpServiceClient<ReqwestClient>> {
         let auth_headers = self.service_auth_headers(&self.did, nsid).await?;
-        let client = ReqwestClientBuilder::new()
+        let base = match self.appview_agent_str {
+            None => bail!("no appview url configured"),
+            Some(ref appview_agent_str) => appview_agent_str,
+        };
+        let client = ReqwestClientBuilder::new(base)
             .client(
                 reqwest::ClientBuilder::new()
                     .user_agent(APP_USER_AGENT)

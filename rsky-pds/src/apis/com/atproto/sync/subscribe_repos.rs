@@ -1,14 +1,17 @@
 use crate::common::time::from_str_to_utc;
 use crate::common::RFC3339_VARIANT;
 use crate::config::ServerConfig;
+use crate::crawlers::Crawlers;
 use crate::sequencer::events::{
     AccountEvt, CommitEvt, HandleEvt, IdentityEvt, SeqEvt, TombstoneEvt, TypedAccountEvt,
     TypedCommitEvt, TypedHandleEvt, TypedIdentityEvt, TypedTombstoneEvt,
 };
 use crate::sequencer::outbox::{Outbox, OutboxOpts};
+use crate::sequencer::Sequencer;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration};
 use futures::{pin_mut, StreamExt};
+use rocket::tokio::select;
 use rocket::{Shutdown, State};
 use rsky_lexicon::com::atproto::sync::{
     SubscribeReposAccount, SubscribeReposCommit, SubscribeReposCommitOperation,
@@ -17,9 +20,6 @@ use rsky_lexicon::com::atproto::sync::{
 use serde_json::json;
 use std::time::SystemTime;
 use ws::Message;
-use rocket::tokio::select;
-use crate::crawlers::Crawlers;
-use crate::sequencer::Sequencer;
 
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();

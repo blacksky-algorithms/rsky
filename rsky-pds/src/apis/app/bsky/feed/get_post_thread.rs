@@ -8,6 +8,7 @@ use crate::read_after_write::util::{
 };
 use crate::read_after_write::viewer::LocalViewer;
 use crate::repo::aws::s3::S3BlobStore;
+use crate::repo::types::Ids;
 use crate::repo::ActorStore;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{SharedLocalViewer, APP_USER_AGENT};
@@ -33,7 +34,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
-use crate::repo::types::Ids;
 
 const METHOD_NSID: &'static str = "app.bsky.feed.getPostThread";
 
@@ -375,9 +375,12 @@ pub async fn read_after_write_not_found(
                                         match &cfg.bsky_app_view {
                                             None => (),
                                             Some(bsky_app_view) => {
-                                                let nsid = Ids::AppBskyFeedGetPostThread.as_str().to_string();
-                                                let headers =
-                                                    cfg.appview_auth_headers(&requester, &nsid).await?;
+                                                let nsid = Ids::AppBskyFeedGetPostThread
+                                                    .as_str()
+                                                    .to_string();
+                                                let headers = cfg
+                                                    .appview_auth_headers(&requester, &nsid)
+                                                    .await?;
                                                 let client = ReqwestClientBuilder::new(
                                                     bsky_app_view.url.clone(),
                                                 )

@@ -45,7 +45,7 @@ pub struct ServiceJwtPayload {
     pub aud: String,
     pub exp: Option<u64>,
     pub lxm: Option<String>,
-    pub jti: Option<String>
+    pub jti: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
