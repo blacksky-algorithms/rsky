@@ -83,21 +83,20 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                 .await
                 {
                     Ok(res) => Outcome::Success(res),
-                    Err(error) => {
-                        match error.downcast_ref() {
-                            Some(InvalidRequestError::XRPCError(xrpc)) => {
-                                if let XRPCError::FailedResponse {
-                                    status,
-                                    error, 
-                                    message, 
-                                    headers,
-                                } = xrpc {
-                                    eprintln!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
-                                }
-                                Outcome::Error((Status::BadRequest, error))
-                            },
-                            _ => Outcome::Error((Status::BadRequest, error))
+                    Err(error) => match error.downcast_ref() {
+                        Some(InvalidRequestError::XRPCError(xrpc)) => {
+                            if let XRPCError::FailedResponse {
+                                status,
+                                error,
+                                message,
+                                headers,
+                            } = xrpc
+                            {
+                                eprintln!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
+                            }
+                            Outcome::Error((Status::BadRequest, error))
                         }
+                        _ => Outcome::Error((Status::BadRequest, error)),
                     },
                 }
             }

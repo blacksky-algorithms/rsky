@@ -1,2 +1,2 @@
-mod types;
-mod frames;
+pub mod frames;
+pub mod types;

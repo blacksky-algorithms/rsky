@@ -26,6 +26,7 @@ rsky-syntax = { workspace = true }
 diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
 chrono = "0.4.26"
 serde = { version = "1.0.160", features = ["derive"] }
+serde_repr = "0.1"
 serde_derive = "^1.0"
 rand = "0.8.5"
 email_address = "0.2.4"

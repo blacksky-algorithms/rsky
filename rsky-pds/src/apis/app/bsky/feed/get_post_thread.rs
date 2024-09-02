@@ -461,9 +461,7 @@ pub fn get_highest_parent(thread: &ThreadViewPost) -> Option<String> {
             Err(_) => None,
             Ok(thread_post_record) => match thread_post_record.reply {
                 None => None,
-                Some(thread_post_record_reply) => {
-                    Some(thread_post_record_reply.parent.uri)
-                }
+                Some(thread_post_record_reply) => Some(thread_post_record_reply.parent.uri),
             },
         },
     }

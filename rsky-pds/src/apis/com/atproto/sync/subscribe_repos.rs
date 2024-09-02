@@ -8,6 +8,8 @@ use crate::sequencer::events::{
 };
 use crate::sequencer::outbox::{Outbox, OutboxOpts};
 use crate::sequencer::Sequencer;
+use crate::xrpc_server::stream::frames::{ErrorFrame, Frame, MessageFrame, MessageFrameOpts};
+use crate::xrpc_server::stream::types::ErrorFrameBody;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration};
 use futures::{pin_mut, StreamExt};
@@ -80,27 +82,29 @@ pub async fn subscribe_repos<'a>(
                 }
             };
             match cursor > curr.unwrap_or(0) {
-                true => yield Message::Text(json!({
-                    "$type": "#error",
-                    "name": "FutureCursor",
-                    "message": "Cursor in the future."
-                }).to_string()),
+                true => {
+                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                        error: "FutureCursor".to_string(),
+                        message: Some("Cursor in the future.".to_string()),
+                    });
+                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
+                },
                 false => match next {
                     Some(next) if next.sequenced_at < backfill_time => {
-                        yield Message::Text(json!({
-                            "$type": "#info",
-                            "name": "OutdatedCursor",
-                            "message": "Requested cursor exceeded limit. Possibly missing events"
-                        }).to_string());
+                        let error_frame = ErrorFrame::new(ErrorFrameBody {
+                            error: "OutdatedCursor".to_string(),
+                            message: Some("Requested cursor exceeded limit. Possibly missing events.".to_string()),
+                        });
+                        yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                         match sequencer_lock.earliest_after_time(backfill_time).await {
                             Ok(Some(start_evt)) if start_evt.seq.is_some() => outbox_cursor = Some(start_evt.seq.unwrap() - 1),
                             Ok(None) => outbox_cursor = None,
                             _ => {
-                                yield Message::Text(json!({
-                                    "$type": "#error",
-                                    "name": "EarliestAfterTimeError",
-                                    "message": "Failed to fetch earliest event after backfill time."
-                                }).to_string());
+                                let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                    error: "EarliestAfterTimeError".to_string(),
+                                    message: Some("Failed to fetch earliest event after backfill time.".to_string()),
+                                });
+                                yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                 return;
                             }
                         }
@@ -119,19 +123,19 @@ pub async fn subscribe_repos<'a>(
                     let evt = match evt {
                         Some(Ok(evt)) => evt,
                         Some(Err(err)) => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "EventStreamError",
-                                "message": err.to_string()
-                            }).to_string());
+                            let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                error: "EventStreamError".to_string(),
+                                message: Some(err.to_string()),
+                            });
+                            yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                             return;
                         },
                         None => {
-                            yield Message::Text(json!({
-                                "$type": "#error",
-                                "name": "EventStreamError",
-                                "message": "Failed to fetch event from stream."
-                            }).to_string());
+                            let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                error: "EventStreamError".to_string(),
+                                message: Some("Failed to fetch event from stream.".to_string()),
+                            });
+                            yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                             return;
                         }
                     };
@@ -161,18 +165,19 @@ pub async fn subscribe_repos<'a>(
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
                                 blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
                             };
-                            let json_string = match serde_json::to_string(&subscribe_commit_evt) {
-                                Ok(json_string) => json_string,
+                            let message_frame = MessageFrame::new(subscribe_commit_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let binary = match message_frame.to_bytes() {
+                                Ok(binary) => binary,
                                 Err(_) => {
-                                    yield Message::Text(json!({
-                                        "$type": "#error",
-                                        "name": "SerializationError",
-                                        "message": "Failed to serialize event to JSON."
-                                    }).to_string());
+                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                        error: "SerializationError".to_string(),
+                                        message: Some("Failed to serialize event to message frame.".to_string()),
+                                    });
+                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                     return;
                                 }
                             };
-                            yield Message::Text(json_string);
+                            yield Message::Binary(binary);
                         },
                         SeqEvt::TypedHandleEvt(handle) => {
                             let TypedHandleEvt { r#type, seq, time, evt } = handle;
@@ -183,18 +188,19 @@ pub async fn subscribe_repos<'a>(
                                 seq,
                                 time: from_str_to_utc(&time),
                             };
-                            let json_string = match serde_json::to_string(&subscribe_handle_evt) {
-                                Ok(json_string) => json_string,
+                            let message_frame = MessageFrame::new(subscribe_handle_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let binary = match message_frame.to_bytes() {
+                                Ok(binary) => binary,
                                 Err(_) => {
-                                    yield Message::Text(json!({
-                                        "$type": "#error",
-                                        "name": "SerializationError",
-                                        "message": "Failed to serialize event to JSON."
-                                    }).to_string());
+                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                        error: "SerializationError".to_string(),
+                                        message: Some("Failed to serialize event to message frame.".to_string()),
+                                    });
+                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                     return;
                                 }
                             };
-                            yield Message::Text(json_string);
+                            yield Message::Binary(binary);
                         },
                         SeqEvt::TypedIdentityEvt(identity) => {
                             let TypedIdentityEvt { r#type, seq, time, evt } = identity;
@@ -205,18 +211,19 @@ pub async fn subscribe_repos<'a>(
                                 handle,
                                 time: from_str_to_utc(&time),
                             };
-                            let json_string = match serde_json::to_string(&subscribe_identity_evt) {
-                                Ok(json_string) => json_string,
+                            let message_frame = MessageFrame::new(subscribe_identity_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let binary = match message_frame.to_bytes() {
+                                Ok(binary) => binary,
                                 Err(_) => {
-                                    yield Message::Text(json!({
-                                        "$type": "#error",
-                                        "name": "SerializationError",
-                                        "message": "Failed to serialize event to JSON."
-                                    }).to_string());
+                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                        error: "SerializationError".to_string(),
+                                        message: Some("Failed to serialize event to message frame.".to_string()),
+                                    });
+                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                     return;
                                 }
                             };
-                            yield Message::Text(json_string);
+                            yield Message::Binary(binary);
                         },
                         SeqEvt::TypedAccountEvt(account) => {
                             let TypedAccountEvt { r#type, seq, time, evt } = account;
@@ -228,18 +235,19 @@ pub async fn subscribe_repos<'a>(
                                 active,
                                 time: from_str_to_utc(&time),
                             };
-                            let json_string = match serde_json::to_string(&subscribe_account_evt) {
-                                Ok(json_string) => json_string,
+                            let message_frame = MessageFrame::new(subscribe_account_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let binary = match message_frame.to_bytes() {
+                                Ok(binary) => binary,
                                 Err(_) => {
-                                    yield Message::Text(json!({
-                                        "$type": "#error",
-                                        "name": "SerializationError",
-                                        "message": "Failed to serialize event to JSON."
-                                    }).to_string());
+                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                        error: "SerializationError".to_string(),
+                                        message: Some("Failed to serialize event to message frame.".to_string()),
+                                    });
+                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                     return;
                                 }
                             };
-                            yield Message::Text(json_string);
+                            yield Message::Binary(binary);
                         },
                         SeqEvt::TypedTombstoneEvt(tombstone) => {
                             let TypedTombstoneEvt { r#type, seq, time, evt } = tombstone;
@@ -249,18 +257,19 @@ pub async fn subscribe_repos<'a>(
                                 seq,
                                 time: from_str_to_utc(&time),
                             };
-                            let json_string = match serde_json::to_string(&subscribe_tombstone_evt) {
-                                Ok(json_string) => json_string,
+                            let message_frame = MessageFrame::new(subscribe_tombstone_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let binary = match message_frame.to_bytes() {
+                                Ok(binary) => binary,
                                 Err(_) => {
-                                    yield Message::Text(json!({
-                                        "$type": "#error",
-                                        "name": "SerializationError",
-                                        "message": "Failed to serialize event to JSON."
-                                    }).to_string());
+                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                        error: "SerializationError".to_string(),
+                                        message: Some("Failed to serialize event to message frame.".to_string()),
+                                    });
+                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
                                     return;
                                 }
                             };
-                            yield Message::Text(json_string);
+                            yield Message::Binary(binary);
                         }
                     }
                 }
