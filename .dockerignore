@@ -6,3 +6,6 @@
 Dockerfile
 .dockerignore
 .git
+*.pem
+Rocket.toml
+rustc-*.txt

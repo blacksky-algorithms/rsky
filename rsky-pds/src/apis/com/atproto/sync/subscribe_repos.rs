@@ -141,17 +141,13 @@ pub async fn subscribe_repos<'a>(
                             let TypedCommitEvt { r#type, seq, time, evt } = commit;
                             let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs } = evt;
                             let subscribe_commit_evt = SubscribeReposCommit {
-                                r#type,
                                 seq,
                                 time: from_str_to_utc(&time),
                                 rebase,
                                 too_big,
                                 repo,
-                                commit: commit.to_string(),
-                                prev: match prev {
-                                    None => None,
-                                    Some(prev) => Some(prev.to_string())
-                                },
+                                commit,
+                                prev,
                                 rev,
                                 since,
                                 blocks,
@@ -159,7 +155,7 @@ pub async fn subscribe_repos<'a>(
                                     path: op.path,
                                     cid: match op.cid {
                                         None => None,
-                                        Some(cid) => Some(cid.to_string())
+                                        Some(cid) => Some(cid)
                                     },
                                     action: op.action.to_string()
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
@@ -182,7 +178,6 @@ pub async fn subscribe_repos<'a>(
                             let TypedHandleEvt { r#type, seq, time, evt } = handle;
                             let HandleEvt { did, handle } = evt;
                             let subscribe_handle_evt = SubscribeReposHandle {
-                                r#type,
                                 did,
                                 handle,
                                 seq,
@@ -205,7 +200,6 @@ pub async fn subscribe_repos<'a>(
                             let TypedIdentityEvt { r#type, seq, time, evt } = identity;
                             let IdentityEvt { did, handle } = evt;
                             let subscribe_identity_evt = SubscribeReposIdentity {
-                                r#type,
                                 did,
                                 seq,
                                 handle,
@@ -228,7 +222,6 @@ pub async fn subscribe_repos<'a>(
                             let TypedAccountEvt { r#type, seq, time, evt } = account;
                             let AccountEvt { did, active, status } = evt;
                             let subscribe_account_evt = SubscribeReposAccount {
-                                r#type,
                                 did,
                                 seq,
                                 status,
@@ -252,7 +245,6 @@ pub async fn subscribe_repos<'a>(
                             let TypedTombstoneEvt { r#type, seq, time, evt } = tombstone;
                             let TombstoneEvt { did } = evt;
                             let subscribe_tombstone_evt = SubscribeReposTombstone {
-                                r#type,
                                 did,
                                 seq,
                                 time: from_str_to_utc(&time),

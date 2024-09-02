@@ -201,7 +201,7 @@ impl LocalViewer {
                         Some(record) => match record.avatar {
                             Some(avatar) => match avatar.r#ref {
                                 Some(r#ref) => {
-                                    Some(self.get_image_url("avatar".to_string(), r#ref.link))
+                                    Some(self.get_image_url("avatar".to_string(), r#ref.to_string()))
                                 }
                                 None => None,
                             },
@@ -321,11 +321,11 @@ impl LocalViewer {
                     .map(|img| ViewImage {
                         thumb: self.get_image_url(
                             "feed_thumbnail".to_string(),
-                            img.image.r#ref.clone().unwrap().link,
+                            img.image.r#ref.clone().unwrap().to_string(),
                         ),
                         fullsize: self.get_image_url(
                             "feed_fullsize".to_string(),
-                            img.image.r#ref.unwrap().link,
+                            img.image.r#ref.unwrap().to_string(),
                         ),
                         alt: img.alt,
                         aspect_ratio: img.aspect_ratio,
@@ -349,7 +349,7 @@ impl LocalViewer {
                             None => None,
                             Some(thumb) => Some(self.get_image_url(
                                 "feed_thumbnail".to_string(),
-                                thumb.r#ref.unwrap().link,
+                                thumb.r#ref.unwrap().to_string(),
                             )),
                         },
                     },
@@ -492,7 +492,7 @@ impl LocalViewer {
             avatar: match record.avatar {
                 None => None,
                 Some(avatar) => match avatar.r#ref {
-                    Some(r#ref) => Some(self.get_image_url("avatar".to_string(), r#ref.link)),
+                    Some(r#ref) => Some(self.get_image_url("avatar".to_string(), r#ref.to_string())),
                     None => None,
                 },
             },
@@ -590,7 +590,7 @@ impl LocalViewer {
             banner: match record.banner {
                 None => None,
                 Some(record_banner) => match record_banner.r#ref {
-                    Some(r#ref) => Some(self.get_image_url("banner".to_string(), r#ref.link)),
+                    Some(r#ref) => Some(self.get_image_url("banner".to_string(), r#ref.to_string())),
                     None => None,
                 },
             },

@@ -151,6 +151,10 @@ pub enum RefPreferences {
     MutedWordsPref(MutedWordsPref),
     #[serde(rename = "app.bsky.actor.defs#hiddenPostsPref")]
     HiddenPostsPref(HiddenPostsPref),
+    #[serde(rename = "app.bsky.actor.defs#bskyAppStatePref")]
+    BskyAppStatePref(BskyAppStatePref),
+    #[serde(rename = "app.bsky.actor.defs#labelersPref")]
+    LabelersPref(LabelersPref),
 }
 
 impl RefPreferences {
@@ -166,6 +170,8 @@ impl RefPreferences {
             RefPreferences::InterestsPref(_) => "app.bsky.actor.defs#interestsPref",
             RefPreferences::MutedWordsPref(_) => "app.bsky.actor.defs#mutedWordsPref",
             RefPreferences::HiddenPostsPref(_) => "app.bsky.actor.defs#hiddenPostsPref",
+            RefPreferences::BskyAppStatePref(_) => "app.bsky.actor.defs#bskyAppStatePref",
+            RefPreferences::LabelersPref(_) => "app.bsky.actor.defs#labelersPref",
         };
         r#type.to_string()
     }
@@ -298,4 +304,32 @@ pub struct HiddenPostsPref {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct AdultContentPref {
     pub enabled: bool,
+}
+
+/// A grab bag of state that's specific to the bsky.app program. 
+/// Third-party apps shouldn't use this.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BskyAppStatePref {
+    pub active_progress_guide: Option<BskyAppProgressGuide>,
+    // An array of tokens which identify nudges (modals, popups, tours, highlight dots) 
+    // that should be shown to the user.
+    pub queued_nudges: Option<Vec<String>>,
+}
+
+/// If set, an active progress guide. Once completed, can be set to undefined. 
+/// Should have unspecced fields tracking progress.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct BskyAppProgressGuide {
+    pub guide: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct LabelersPref {
+    pub labelers: Vec<LabelersPrefItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct LabelersPrefItem {
+    pub did: String,
 }

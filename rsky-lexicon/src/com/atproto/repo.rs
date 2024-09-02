@@ -196,9 +196,13 @@ pub struct DescribeRepoOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
 pub enum ApplyWritesInputRefWrite {
+    #[serde(rename = "com.atproto.repo.applyWrites#create")]
     Create(RefWriteCreate),
+    #[serde(rename = "com.atproto.repo.applyWrites#update")]
     Update(RefWriteUpdate),
+    #[serde(rename = "com.atproto.repo.applyWrites#delete")]
     Delete(RefWriteDelete),
 }
 

@@ -11,7 +11,7 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::repo::{Blob, BlobOutput, Link};
+use rsky_lexicon::com::atproto::repo::{Blob, BlobOutput};
 
 async fn inner_upload_blob(
     auth: AccessStandardIncludeChecks,
@@ -55,9 +55,7 @@ async fn inner_upload_blob(
     Ok(BlobOutput {
         blob: Blob {
             r#type: Some("blob".to_string()),
-            r#ref: Some(Link {
-                link: blobref.get_cid()?.to_string(),
-            }),
+            r#ref: Some(blobref.get_cid()?),
             cid: None,
             mime_type: blobref.get_mime_type().to_string(),
             size: blobref.get_size(),

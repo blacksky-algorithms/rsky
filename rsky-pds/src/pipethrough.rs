@@ -83,7 +83,22 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                 .await
                 {
                     Ok(res) => Outcome::Success(res),
-                    Err(error) => Outcome::Error((Status::BadRequest, error)),
+                    Err(error) => {
+                        match error.downcast_ref() {
+                            Some(InvalidRequestError::XRPCError(xrpc)) => {
+                                if let XRPCError::FailedResponse {
+                                    status,
+                                    error, 
+                                    message, 
+                                    headers,
+                                } = xrpc {
+                                    eprintln!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
+                                }
+                                Outcome::Error((Status::BadRequest, error))
+                            },
+                            _ => Outcome::Error((Status::BadRequest, error))
+                        }
+                    },
                 }
             }
             Outcome::Error(err) => Outcome::Error((
@@ -235,7 +250,7 @@ pub async fn format_headers<'r>(
         }
     }
     assert!(headers.contains_key(AUTHORIZATION));
-    println!("{headers:?}");
+    println!("@LOG: format_headers {headers:?}");
     Ok(headers)
 }
 

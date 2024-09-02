@@ -214,7 +214,7 @@ pub fn find_posts_in_thread(
         .filter(|post| match post.record.reply {
             None => false,
             Some(ref reply) => {
-                if reply.root.uri() == thread.post.uri {
+                if reply.root.uri == thread.post.uri {
                     return true;
                 }
                 match serde_json::from_value::<Post>(thread.post.record.clone()) {
@@ -222,7 +222,7 @@ pub fn find_posts_in_thread(
                     Ok(thread_post_record) => match thread_post_record.reply {
                         None => false,
                         Some(thread_post_record_reply) => {
-                            thread_post_record_reply.root.uri() == reply.root.uri()
+                            thread_post_record_reply.root.uri == reply.root.uri
                         }
                     },
                 }
@@ -238,7 +238,7 @@ pub fn insert_into_thread_replies<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<ThreadViewPost>> + Send + 'a>> {
     Box::pin(async move {
         if let Some(ref reply) = descript.record.reply {
-            if reply.parent.uri() == view.post.uri {
+            if reply.parent.uri == view.post.uri {
                 return match thread_post_view(local_viewer, descript).await? {
                     None => Ok(view),
                     Some(post_view) => {
@@ -462,7 +462,7 @@ pub fn get_highest_parent(thread: &ThreadViewPost) -> Option<String> {
             Ok(thread_post_record) => match thread_post_record.reply {
                 None => None,
                 Some(thread_post_record_reply) => {
-                    Some(thread_post_record_reply.parent.uri().to_string())
+                    Some(thread_post_record_reply.parent.uri)
                 }
             },
         },
