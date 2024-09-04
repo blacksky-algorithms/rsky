@@ -26,7 +26,7 @@ pub struct Label {
 /// Metadata tags on an atproto record, published by the author within the record
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SelfLabels {
-    pub items: Vec<SelfLabel>,
+    pub values: Vec<SelfLabel>,
 }
 
 /// Metadata tag on an atproto record, published by the author within the record.
