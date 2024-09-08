@@ -72,4 +72,5 @@ pub mod schema;
 pub mod sequencer;
 pub mod storage;
 mod vendored;
+pub mod well_known;
 pub mod xrpc_server;

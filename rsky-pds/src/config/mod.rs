@@ -1,5 +1,5 @@
 use crate::common::env::{env_bool, env_int, env_list, env_str};
-use crate::common::time::DAY;
+use crate::common::time::{DAY, HOUR, SECOND};
 use crate::context;
 use anyhow::{bail, Result};
 use reqwest::header::HeaderMap;
@@ -12,6 +12,7 @@ pub struct ServerConfig {
     pub bsky_app_view: Option<ServiceConfig>,
     pub subscription: SubscriptionConfig,
     pub invites: InvitesConfig,
+    pub identity: IdentityConfig,
     pub crawlers: Vec<String>,
 }
 
@@ -27,6 +28,18 @@ pub struct ServiceConfig {
 pub struct SubscriptionConfig {
     pub max_buffer: u64,
     pub repo_backfill_limit_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentityConfig {
+    pub plc_url: String,
+    pub resolver_timeout: u64,
+    pub cache_state_ttl: u64,
+    pub cache_max_ttl: u64,
+    pub recovery_did_key: Option<String>,
+    pub service_handle_domains: Vec<String>,
+    pub handle_backup_name_servers: Option<Vec<String>>,
+    pub enable_did_doc_with_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,7 +75,7 @@ pub fn env_to_cfg() -> ServerConfig {
     let did = env_str("PDS_SERVICE_DID").unwrap_or(format!("did:web:{hostname}"));
     let service_cfg = CoreConfig {
         port,
-        hostname,
+        hostname: hostname.clone(),
         public_url,
         did,
         version: env_str("PDS_VERSION"),
@@ -72,6 +85,27 @@ pub fn env_to_cfg() -> ServerConfig {
         blob_upload_limit: env_int("PDS_BLOB_UPLOAD_LIMIT").unwrap_or_else(|| 5 * 1024 * 1024), // 5mb
         contact_email_address: env_str("PDS_CONTACT_EMAIL_ADDRESS"),
         dev_mode: env_bool("PDS_DEV_MODE").unwrap_or(false),
+    };
+    let mut service_handle_domains: Vec<String> = vec![];
+    if env_list("PDS_SERVICE_HANDLE_DOMAINS").len() > 0 {
+        service_handle_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
+    } else {
+        if hostname == "localhost" {
+            service_handle_domains = vec![".test".to_string()];
+        } else {
+            service_handle_domains = vec![format!(".{hostname}")];
+        }
+    }
+    let identity_cfg: IdentityConfig = IdentityConfig {
+        plc_url: env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_string()),
+        resolver_timeout: env_int("PDS_ID_RESOLVER_TIMEOUT").unwrap_or_else(|| 3 * SECOND as usize)
+            as u64,
+        cache_state_ttl: env_int("PDS_DID_CACHE_STALE_TTL").unwrap_or_else(|| HOUR as usize) as u64,
+        cache_max_ttl: env_int("PDS_DID_CACHE_MAX_TTL").unwrap_or_else(|| DAY as usize) as u64,
+        recovery_did_key: env_str("PDS_RECOVERY_DID_KEY"),
+        service_handle_domains,
+        handle_backup_name_servers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
+        enable_did_doc_with_session: env_bool("PDS_ENABLE_DID_DOC_WITH_SESSION").unwrap_or(false),
     };
     let bsky_app_view_cfg: Option<ServiceConfig> = match env_str("PDS_BSKY_APP_VIEW_URL") {
         None => None,
@@ -134,6 +168,7 @@ pub fn env_to_cfg() -> ServerConfig {
         subscription: subscription_cfg,
         invites: invites_cfg,
         crawlers: crawlers_cfg,
+        identity: identity_cfg,
     }
 }
 

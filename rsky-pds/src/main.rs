@@ -26,6 +26,7 @@ use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::read_after_write::viewer::{LocalViewer, LocalViewerCreatorParams};
 use rsky_pds::sequencer::Sequencer;
+use rsky_pds::well_known::well_known;
 use rsky_pds::{
     DbConn, SharedATPAgent, SharedIdResolver, SharedLocalViewer, SharedSequencer, APP_USER_AGENT,
 };
@@ -289,6 +290,7 @@ async fn rocket() -> _ {
                 chat::unmute_convo,
                 chat::update_read,
                 bsky_api_forwarder,
+                well_known,
                 all_options
             ],
         )
