@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use integer_encoding::VarIntAsyncWriter;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::{error::Error, header::CarHeader};

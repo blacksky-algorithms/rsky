@@ -4,7 +4,7 @@ use crate::repo::types::RepoRecord;
 use crate::repo::util::cbor_to_lex_record;
 use crate::storage::ObjAndBytes;
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use serde_cbor::Value as CborValue;
 
 pub struct RecordAndBytes {

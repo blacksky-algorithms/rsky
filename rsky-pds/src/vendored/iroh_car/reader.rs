@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use futures::Stream;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use tokio::io::AsyncRead;
 
 use super::{

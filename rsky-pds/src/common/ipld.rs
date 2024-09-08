@@ -1,10 +1,11 @@
 use crate::common;
 use anyhow::Result;
+use lexicon_cid::Cid;
 use libipld::cbor::DagCborCodec;
 use libipld::codec::{Codec, Encode};
 use libipld::multihash::{Code, MultihashDigest};
 use libipld::raw::RawCodec;
-use libipld::{Block, Cid, DefaultParams};
+use libipld::{Block, DefaultParams};
 use serde::Serialize;
 
 pub fn cid_for_cbor<T: Serialize>(data: &T) -> Result<Cid> {

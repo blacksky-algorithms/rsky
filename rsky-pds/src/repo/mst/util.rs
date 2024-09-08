@@ -3,7 +3,7 @@ use crate::common::ipld;
 use crate::storage::SqlRepoReader;
 use anyhow::{anyhow, Result};
 use lazy_static::lazy_static;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::str;

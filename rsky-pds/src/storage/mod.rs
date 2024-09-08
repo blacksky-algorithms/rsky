@@ -15,10 +15,10 @@ use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
 use diesel::*;
 use futures::try_join;
+use lexicon_cid::Cid;
 use libipld::cbor::encode::write_null;
 use libipld::cbor::DagCborCodec;
 use libipld::codec::Encode;
-use libipld::Cid;
 use serde_cbor::Value as CborValue;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -30,18 +30,18 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Ipld {
-    /// Represents a Json Value
-    Json(JsonValue),
+    /// Represents a Cid.
+    Link(Cid),
     /// Represents a sequence of bytes.
     Bytes(Vec<u8>),
     /// Represents a list.
     List(Vec<Ipld>),
     /// Represents a map of strings to objects.
     Map(BTreeMap<String, Ipld>),
-    /// Represents a Cid.
-    Link(Cid),
     /// String
     String(String),
+    /// Represents a Json Value
+    Json(JsonValue),
 }
 
 impl Encode<DagCborCodec> for Ipld {
@@ -198,6 +198,7 @@ impl SqlRepoReader {
         let mut builder = RepoBlockSchema::repo_block
             .select(RepoBlock::as_select())
             .order((RepoBlockSchema::repoRev.desc(), RepoBlockSchema::cid.desc()))
+            .filter(RepoBlockSchema::did.eq(&self.did))
             .limit(500)
             .into_boxed();
 

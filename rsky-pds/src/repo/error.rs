@@ -1,4 +1,4 @@
-use libipld::Cid;
+use lexicon_cid::Cid;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

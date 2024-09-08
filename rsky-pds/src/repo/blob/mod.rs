@@ -15,7 +15,7 @@ use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use futures::try_join;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
 use rsky_lexicon::com::atproto::admin::StatusAttr;

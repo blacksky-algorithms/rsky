@@ -7,7 +7,7 @@ use crate::repo::types::{Commit, RecordPath};
 use crate::repo::util;
 use crate::storage::SqlRepoReader;
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use serde_cbor::Value as CborValue;
 
 pub async fn get_records(

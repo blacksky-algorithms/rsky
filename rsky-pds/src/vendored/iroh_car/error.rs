@@ -1,4 +1,3 @@
-use libipld::cid;
 use thiserror::Error;
 
 /// Car utility error
@@ -16,14 +15,14 @@ pub enum Error {
     LdReadTooLarge(usize),
 }
 
-impl From<cid::Error> for Error {
-    fn from(err: cid::Error) -> Error {
+impl From<lexicon_cid::Error> for Error {
+    fn from(err: lexicon_cid::Error) -> Error {
         Error::Parsing(err.to_string())
     }
 }
 
-impl From<cid::multihash::Error> for Error {
-    fn from(err: cid::multihash::Error) -> Error {
+impl From<lexicon_cid::multihash::Error> for Error {
+    fn from(err: lexicon_cid::multihash::Error) -> Error {
         Error::Parsing(err.to_string())
     }
 }

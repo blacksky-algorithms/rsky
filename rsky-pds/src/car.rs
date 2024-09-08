@@ -2,7 +2,7 @@ use crate::repo::block_map::BlockMap;
 use crate::repo::types::CidAndBytes;
 use crate::vendored::iroh_car::{CarHeader, CarWriter};
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 
 pub async fn read_car_bytes(root: Option<&Cid>, blocks: BlockMap) -> Result<Vec<u8>> {
     let roots = match root {

@@ -1,9 +1,8 @@
 #![allow(unused)]
 
-use libipld::cbor::DagCborCodec;
+use ipld_cbor::DagCborCodec;
+use lexicon_cid::Cid;
 use libipld::codec::Codec;
-use libipld::ipld;
-use libipld::Cid;
 
 use super::error::Error;
 
@@ -83,7 +82,7 @@ impl From<Vec<Cid>> for CarHeaderV1 {
 
 #[cfg(test)]
 mod tests {
-    use libipld::cbor::DagCborCodec;
+    use ipld_cbor::DagCborCodec;
     use libipld::codec::{Decode, Encode};
     use multihash::MultihashDigest;
 

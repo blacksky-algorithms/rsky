@@ -1,3 +1,6 @@
+use crate::repo::types::{Lex, RepoRecord};
+use crate::repo::util::{ipld_to_lex, lex_to_ipld};
+use crate::storage::Ipld;
 use anyhow::Result;
 use base64ct::{Base64, Encoding};
 use chrono::offset::Utc as UtcOffset;
@@ -83,22 +86,11 @@ pub fn get_random_str() -> String {
 }
 
 pub fn struct_to_cbor<T: Serialize>(obj: T) -> Result<Vec<u8>> {
-    // Encode object to json before dag-cbor because serde_ipld_dagcbor doesn't properly
-    // sort by keys
-    let json = serde_json::to_string(&obj)?;
-    // Deserialize to IndexMap with preserve key order enabled. serde_ipld_dagcbor does not sort nested
-    // objects properly by keys
-    let map: IndexMap<String, Value> = serde_json::from_str(&json)?;
-    let cbor_bytes = serde_ipld_dagcbor::to_vec(&map)?;
-
-    Ok(cbor_bytes)
+    Ok(serde_ipld_dagcbor::to_vec(&obj)?)
 }
 
 pub fn cbor_to_struct<T: DeserializeOwned>(bytes: Vec<u8>) -> Result<T> {
-    let map = serde_ipld_dagcbor::from_slice::<IndexMap<String, Value>>(bytes.as_slice())?;
-    let json = serde_json::to_string(&map)?;
-    let obj = serde_json::from_str::<T>(&json)?;
-    Ok(obj)
+    Ok(serde_ipld_dagcbor::from_slice::<T>(bytes.as_slice())?)
 }
 
 pub fn json_to_b64url<T: Serialize>(obj: &T) -> Result<String> {

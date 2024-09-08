@@ -7,7 +7,7 @@ use crate::storage::Ipld;
 use anyhow::{bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use serde_json::Value as JsonValue;
 use std::env;

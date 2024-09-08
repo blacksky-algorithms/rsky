@@ -1,4 +1,4 @@
-use libipld::Cid;
+use lexicon_cid::Cid;
 use std::collections::HashSet;
 use std::str::FromStr;
 

@@ -7,7 +7,7 @@ use crate::repo::parse;
 use crate::repo::types::{BlockWriter, CidAndBytes};
 use crate::storage::{ObjAndBytes, SqlRepoReader};
 use anyhow::{anyhow, bail, Result};
-use libipld::Cid;
+use lexicon_cid::Cid;
 use serde_cbor::Value as CborValue;
 use std::mem;
 

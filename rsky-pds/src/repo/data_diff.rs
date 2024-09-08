@@ -3,7 +3,7 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::mst::diff::mst_diff;
 use crate::repo::mst::{NodeEntry, MST};
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use std::collections::BTreeMap;
 
 #[derive(Debug)]

@@ -8,7 +8,7 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::util::format_data_key;
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};

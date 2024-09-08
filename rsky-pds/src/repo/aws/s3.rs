@@ -8,7 +8,7 @@ use aws_sdk_s3 as s3;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectCannedAcl, ObjectIdentifier};
-use libipld::Cid;
+use lexicon_cid::Cid;
 
 struct MoveObject {
     from: String,

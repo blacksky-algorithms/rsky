@@ -46,6 +46,7 @@ sha2 = "0.11.0-pre.3"
 indexmap = { version = "1.9.3",features = ["serde-1"] }
 hex = "0.4.3"
 libipld = "0.16.0"
+ipld-cbor = { package = "libipld-cbor", version = "0.16.0" }
 lazy_static = "1.4.0"
 regex = "1.10.3"
 thiserror = "1.0.40"
@@ -70,6 +71,8 @@ url = "2.5.2"
 async-event-emitter = "0.1.3"
 event-emitter-rs = "0.1.4"
 webpki-roots = { version = "0.26.0-alpha.1" }
+lexicon_cid = { package = "cid", version = "0.10.1", features = ["serde-codec"] }
+
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"

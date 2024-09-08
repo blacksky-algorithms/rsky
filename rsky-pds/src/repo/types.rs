@@ -3,7 +3,7 @@ use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
-use libipld::Cid;
+use lexicon_cid::Cid;
 use std::collections::BTreeMap;
 
 // Repo nodes
@@ -26,7 +26,7 @@ pub struct Commit {
     pub data: Cid,
     pub rev: String,
     pub prev: Option<Cid>,
-    pub sig: Vec<u8>,
+    pub sig: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -36,7 +36,7 @@ pub struct LegacyV2Commit {
     pub data: Cid,
     pub rev: Option<String>,
     pub prev: Option<Cid>,
-    pub sig: Vec<u8>,
+    pub sig: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

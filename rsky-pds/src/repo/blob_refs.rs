@@ -1,5 +1,5 @@
 use anyhow::Result;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

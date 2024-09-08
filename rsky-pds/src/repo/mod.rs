@@ -28,7 +28,7 @@ use diesel::*;
 use futures::stream::{self, StreamExt};
 use futures::try_join;
 use lazy_static::lazy_static;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::Serialize;
 use serde_cbor::Value as CborValue;
@@ -469,7 +469,7 @@ impl Repo {
             let data_key = util::format_data_key(record.collection, record.rkey);
             data = data.add(&data_key, cid, None)?;
         }
-        let data_cid = data.get_pointer()?;
+        let data_cid: Cid = data.get_pointer()?;
         let diff = DataDiff::of(&mut data, None)?;
         new_blocks.add_map(diff.new_mst_blocks)?;
 
