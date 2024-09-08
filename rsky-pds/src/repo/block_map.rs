@@ -1,13 +1,9 @@
-use crate::common;
-use crate::common::ipld;
 use crate::common::ipld::data_to_cbor_block;
 use crate::repo::types::{CidAndBytes, Lex, RepoRecord};
 use crate::repo::util::lex_to_ipld;
 use anyhow::Result;
-use indexmap::IndexMap;
 use lexicon_cid::Cid;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 

@@ -3,12 +3,12 @@ use crate::common::tid::Ticker;
 use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
-use lexicon_cid::Cid;
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::str::FromStr;
+use lexicon_cid::Cid;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
     let commit_sig = atproto_sign(&unsigned, &keypair.secret_key())?;
@@ -18,7 +18,7 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
         data: unsigned.data,
         rev: unsigned.rev,
         prev: unsigned.prev,
-        sig: base64_url::encode(&commit_sig).replace("=", ""),
+        sig: commit_sig.to_vec(),
     })
 }
 
@@ -44,11 +44,13 @@ pub fn lex_to_ipld(val: Lex) -> Ipld {
             Ipld::Json(serde_json::to_value(blob.original).expect("Issue serializing blob"))
         }
         Lex::Ipld(ipld) => match ipld {
-            Ipld::Json(json_val) => match serde_json::from_value::<Cid>(json_val.clone()) {
-                Ok(cid) => Ipld::Link(cid),
-                Err(_) => Ipld::Json(json_val),
-            },
-            _ => ipld,
+            Ipld::Json(json_val) => {
+                match serde_json::from_value::<Cid>(json_val.clone()) {
+                    Ok(cid) => Ipld::Link(cid),
+                    Err(_) => Ipld::Json(json_val)
+                }
+            }
+            _ => ipld
         },
     }
 }

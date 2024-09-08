@@ -13,30 +13,30 @@ use std::collections::BTreeMap;
 pub struct UnsignedCommit {
     pub did: String,
     pub version: u8, // Should be 3
-    pub data: Cid,
-    pub rev: String,
     // `prev` added for backwards compatibility with v2, no requirement of keeping around history
     pub prev: Option<Cid>,
+    pub data: Cid,
+    pub rev: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Commit {
     pub did: String,
     pub version: u8, // Should be 3
+    pub prev: Option<Cid>,
     pub data: Cid,
     pub rev: String,
-    pub prev: Option<Cid>,
-    pub sig: String,
+    pub sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct LegacyV2Commit {
     pub did: String,
     pub version: u8, // Should be 2
+    pub prev: Option<Cid>,
     pub data: Cid,
     pub rev: Option<String>,
-    pub prev: Option<Cid>,
-    pub sig: String,
+    pub sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
