@@ -472,7 +472,6 @@ impl Repo {
         let data_cid: Cid = data.get_pointer()?;
         let diff = DataDiff::of(&mut data, None)?;
         new_blocks.add_map(diff.new_mst_blocks)?;
-
         let rev = Ticker::new().next(None);
         let commit = util::sign_commit(
             UnsignedCommit {

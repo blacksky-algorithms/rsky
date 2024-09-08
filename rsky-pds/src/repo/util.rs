@@ -1,4 +1,4 @@
-use crate::common::sign::atproto_sign;
+use crate::common::sign::sign_without_indexmap;
 use crate::common::tid::Ticker;
 use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
 use crate::storage::Ipld;
@@ -11,7 +11,7 @@ use std::str::FromStr;
 use lexicon_cid::Cid;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
-    let commit_sig = atproto_sign(&unsigned, &keypair.secret_key())?;
+    let commit_sig = sign_without_indexmap(&unsigned, &keypair.secret_key())?;
     Ok(Commit {
         did: unsigned.did,
         version: unsigned.version,

@@ -9,33 +9,36 @@ use std::collections::BTreeMap;
 // Repo nodes
 // ---------------
 
+// IMPORTANT: Ordering of these fields must not be changed
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct UnsignedCommit {
     pub did: String,
-    pub version: u8, // Should be 3
+    pub rev: String,
+    pub data: Cid,
     // `prev` added for backwards compatibility with v2, no requirement of keeping around history
     pub prev: Option<Cid>,
-    pub data: Cid,
-    pub rev: String,
+    pub version: u8, // Should be 3
 }
 
+// IMPORTANT: Ordering of these fields must not be changed
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Commit {
     pub did: String,
-    pub version: u8, // Should be 3
-    pub prev: Option<Cid>,
-    pub data: Cid,
     pub rev: String,
+    pub data: Cid,
+    pub prev: Option<Cid>,
+    pub version: u8, // Should be 3
     pub sig: Vec<u8>,
 }
 
+// IMPORTANT: Ordering of these fields must not be changed
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct LegacyV2Commit {
     pub did: String,
-    pub version: u8, // Should be 2
-    pub prev: Option<Cid>,
-    pub data: Cid,
     pub rev: Option<String>,
+    pub data: Cid,
+    pub prev: Option<Cid>,
+    pub version: u8, // Should be 2
     pub sig: Vec<u8>,
 }
 

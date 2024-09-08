@@ -24,3 +24,17 @@ pub fn atproto_sign<T: Serialize>(obj: &T, key: &SecretKey) -> Result<[u8; 64]> 
     let normalized_compact_sig = sig.serialize_compact();
     Ok(normalized_compact_sig)
 }
+
+pub fn sign_without_indexmap<T: Serialize>(obj: &T, key: &SecretKey) -> Result<[u8; 64]> {
+    let unsigned_bytes = serde_ipld_dagcbor::to_vec(&obj)?;
+    // Hash dag_cbor to sha256
+    let hash = Sha256::digest(&*unsigned_bytes);
+    // Sign sha256 hash using private key
+    let message = Message::from_digest_slice(hash.as_ref())?;
+    let mut sig = key.sign_ecdsa(message);
+    // Convert to low-s
+    sig.normalize_s();
+    // ASN.1 encoded per decode_dss_signature
+    let normalized_compact_sig = sig.serialize_compact();
+    Ok(normalized_compact_sig)
+}
