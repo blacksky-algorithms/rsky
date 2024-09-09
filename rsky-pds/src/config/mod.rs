@@ -86,7 +86,7 @@ pub fn env_to_cfg() -> ServerConfig {
         contact_email_address: env_str("PDS_CONTACT_EMAIL_ADDRESS"),
         dev_mode: env_bool("PDS_DEV_MODE").unwrap_or(false),
     };
-    let mut service_handle_domains: Vec<String> = vec![];
+    let service_handle_domains: Vec<String>;;
     if env_list("PDS_SERVICE_HANDLE_DOMAINS").len() > 0 {
         service_handle_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
     } else {

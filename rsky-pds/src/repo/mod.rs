@@ -19,7 +19,7 @@ use crate::repo::record::RecordReader;
 use crate::repo::types::{
     write_to_op, BlobConstraint, CollectionContents, Commit, CommitData, Ids, Lex, PreparedBlobRef,
     PreparedCreateOrUpdate, PreparedDelete, PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum,
-    RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit, VersionedCommit, WriteOpAction,
+    RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit, WriteOpAction,
 };
 use crate::repo::util::{cbor_to_lex, lex_to_ipld};
 use crate::storage::{Ipld, SqlRepoReader};
