@@ -23,12 +23,15 @@ use crate::repo::types::{
 };
 use crate::repo::util::{cbor_to_lex, lex_to_ipld};
 use crate::storage::{Ipld, SqlRepoReader};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use futures::try_join;
 use lazy_static::lazy_static;
 use lexicon_cid::Cid;
+use libipld::cbor::DagCborCodec;
+use libipld::Ipld as VendorIpld;
+use libipld::{Block, DefaultParams};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::Serialize;
 use serde_cbor::Value as CborValue;
@@ -238,6 +241,7 @@ impl ActorStore {
             let repo_secret_key =
                 SecretKey::from_slice(&hex::decode(repo_private_key.as_bytes()).unwrap()).unwrap();
             let repo_signing_key = Keypair::from_secret_key(&secp, &repo_secret_key);
+
             let mut commit = repo
                 .format_commit(RecordWriteEnum::List(write_ops), repo_signing_key)
                 .await?;
@@ -372,21 +376,79 @@ impl Repo {
         };
         match commit_cid {
             Some(commit_cid) => {
-                let commit: CborValue = storage.read_obj(&commit_cid, |obj: &CborValue| {
-                    match serde_cbor::value::from_value(obj.clone()) {
-                        Ok(VersionedCommit::Commit(_)) => true,
-                        Ok(VersionedCommit::LegacyV2Commit(_)) => true,
-                        _ => false,
-                    }
-                })?;
-                let commit: VersionedCommit = serde_cbor::value::from_value(commit)?;
-                let data = MST::load(storage.clone(), commit.data(), None)?;
-                Ok(Repo::new(
-                    storage.clone(),
-                    data,
-                    util::ensure_v3_commit(commit),
-                    commit_cid,
-                ))
+                let commit_bytes: Vec<u8> = storage.get_bytes(&commit_cid)?;
+                let block = Block::<DefaultParams>::new(commit_cid, commit_bytes.clone())?;
+                let ipld = block.decode::<DagCborCodec, VendorIpld>()?;
+                // Convert Ipld to Commit
+                let commit: Commit = match ipld {
+                    VendorIpld::Map(m) => Commit {
+                        did: m
+                            .get("did")
+                            .and_then(|v| {
+                                if let VendorIpld::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow!("Missing or invalid 'did'"))?
+                            .clone(),
+                        rev: m
+                            .get("rev")
+                            .and_then(|v| {
+                                if let VendorIpld::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow!("Missing or invalid 'rev'"))?
+                            .clone(),
+                        data: m
+                            .get("data")
+                            .and_then(|v| {
+                                if let VendorIpld::Link(cid) = v {
+                                    Some(cid)
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow!("Missing or invalid 'data'"))?
+                            .clone(),
+                        prev: m.get("prev").and_then(|v| {
+                            if let VendorIpld::Link(cid) = v {
+                                Some(cid.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                        version: m
+                            .get("version")
+                            .and_then(|v| {
+                                if let VendorIpld::Integer(i) = v {
+                                    Some(*i)
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow!("Missing or invalid 'version'"))?
+                            as u8,
+                        sig: m
+                            .get("sig")
+                            .and_then(|v| {
+                                if let VendorIpld::Bytes(b) = v {
+                                    Some(b)
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow!("Missing or invalid 'sig'"))?
+                            .clone(),
+                    },
+                    _ => return Err(anyhow!("Invalid Ipld format for Commit")),
+                };
+                let data = MST::load(storage.clone(), commit.data, None)?;
+                Ok(Repo::new(storage.clone(), data, commit, commit_cid))
             }
             None => bail!("No cid provided and none in storage"),
         }
@@ -558,6 +620,7 @@ impl Repo {
         new_blocks.add_map(added_leaves.blocks)?;
 
         let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
+
         let commit = util::sign_commit(
             UnsignedCommit {
                 did: self.did(),
@@ -724,7 +787,7 @@ pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) ->
 
 pub fn assert_valid_record(record: &RepoRecord) -> Result<()> {
     match record.get("$type") {
-        Some(Lex::Ipld(Ipld::Json(JsonValue::String(_)))) => Ok(()),
+        Some(Lex::Ipld(Ipld::String(_))) => Ok(()),
         _ => bail!("No $type provided"),
     }
 }
@@ -767,7 +830,7 @@ pub async fn cid_for_safe_record(record: RepoRecord) -> Result<Cid> {
     let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;
     // Confirm whether Block properly transforms between lex and cbor
     let _ = cbor_to_lex(block.data().to_vec())?;
-    Ok(block.into_inner().0)
+    Ok(*block.cid())
 }
 
 pub async fn prepare_create(opts: PrepareCreateOpts) -> Result<PreparedCreateOrUpdate> {
