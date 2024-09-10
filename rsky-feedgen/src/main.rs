@@ -130,6 +130,7 @@ lazy_static! {
         s.insert("did:plc:rrygeg5e5sze75absmolbibm"); // Hate Campaign (soyjak)
         s.insert("did:plc:sysv2njdvrhv2i7j2jtmudnn"); // Hate Campaign (soyjak)
         s.insert("did:plc:lqkz7god5gbb53isjvxk7g5n"); // Hate Campaign (soyjak)
+        s.insert("did:plc:cco7fsmvzh4mwouwnixgrice"); // HS
         s
     };
 }
