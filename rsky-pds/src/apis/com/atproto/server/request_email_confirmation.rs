@@ -41,6 +41,7 @@ pub async fn request_email_confirmation(
     match inner_request_email_confirmation(auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

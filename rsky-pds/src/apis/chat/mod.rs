@@ -25,6 +25,7 @@ pub async fn delete_account(
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -58,6 +59,7 @@ pub async fn export_account_data(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -88,6 +90,7 @@ pub async fn delete_message_for_self(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -124,6 +127,7 @@ pub async fn get_convo(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -159,6 +163,7 @@ pub async fn get_convo_for_members(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -194,6 +199,7 @@ pub async fn get_log(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -232,6 +238,7 @@ pub async fn get_messages(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -257,6 +264,7 @@ pub async fn leave_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -319,6 +327,7 @@ pub async fn mute_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -344,6 +353,7 @@ pub async fn send_message(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -376,6 +386,7 @@ pub async fn send_message_batch(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -401,6 +412,7 @@ pub async fn unmute_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -426,6 +438,7 @@ pub async fn update_read(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

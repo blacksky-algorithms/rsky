@@ -49,6 +49,7 @@ pub async fn request_email_update(
     match inner_request_email_update(auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

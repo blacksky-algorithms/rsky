@@ -76,6 +76,7 @@ pub async fn delete_account(
     match inner_delete_account(body, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

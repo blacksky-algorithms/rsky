@@ -105,6 +105,7 @@ pub async fn delete_record(
     match inner_delete_record(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

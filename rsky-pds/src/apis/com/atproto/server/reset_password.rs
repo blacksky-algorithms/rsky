@@ -17,6 +17,7 @@ pub async fn reset_password(
     match AccountManager::reset_password(ResetPasswordOpts { token, password }).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

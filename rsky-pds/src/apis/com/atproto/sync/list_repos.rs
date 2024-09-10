@@ -273,6 +273,7 @@ pub async fn list_repos(
     match inner_list_repos(limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

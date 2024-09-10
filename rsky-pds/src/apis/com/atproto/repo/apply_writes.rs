@@ -127,6 +127,7 @@ pub async fn apply_writes(
     match inner_apply_writes(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

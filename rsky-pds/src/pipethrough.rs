@@ -248,8 +248,6 @@ pub async fn format_headers<'r>(
             headers.insert(header, HeaderValue::from_str(val)?);
         }
     }
-    assert!(headers.contains_key(AUTHORIZATION));
-    println!("@LOG: format_headers {headers:?}");
     Ok(headers)
 }
 

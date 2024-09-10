@@ -20,6 +20,7 @@ pub async fn disable_account_invites(
     match AccountManager::set_account_invites_disabled(&account, true).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

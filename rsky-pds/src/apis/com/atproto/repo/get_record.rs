@@ -1,5 +1,7 @@
 use crate::account_manager::AccountManager;
+use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
+use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::{make_aturi, ActorStore};
 use anyhow::{bail, Result};
@@ -16,12 +18,12 @@ async fn inner_get_record(
     rkey: String,
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
+    req: ProxyRequest<'_>,
 ) -> Result<GetRecordOutput> {
     let did = AccountManager::get_did_for_actor(&repo, None).await?;
 
     // fetch from pds if available, if not then fetch from appview
     if let Some(did) = did {
-        // @TODO: Use ATUri
         let uri = make_aturi(did.clone(), Some(collection), Some(rkey));
 
         let mut actor_store =
@@ -36,8 +38,28 @@ async fn inner_get_record(
             _ => bail!("Could not locate record: `{uri}`"),
         }
     } else {
-        // @TODO: Passthrough to Bsky AppView
-        bail!("Could not locate record")
+        match req.cfg.bsky_app_view {
+            None => bail!("Could not locate record"),
+            Some(_) => match pipethrough(
+                &req,
+                None,
+                OverrideOpts {
+                    aud: None,
+                    lxm: None,
+                },
+            )
+            .await
+            {
+                Err(error) => {
+                    eprintln!("@LOG: ERROR: {error}");
+                    bail!("Could not locate record")
+                }
+                Ok(res) => {
+                    let output: GetRecordOutput = serde_json::from_slice(res.buffer.as_slice())?;
+                    Ok(output)
+                }
+            },
+        }
     }
 }
 
@@ -48,17 +70,19 @@ pub async fn get_record(
     rkey: String,
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
+    req: ProxyRequest<'_>,
 ) -> Result<Json<GetRecordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
-    match inner_get_record(repo, collection, rkey, cid, s3_config).await {
+    match inner_get_record(repo, collection, rkey, cid, s3_config, req).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
+            eprintln!("@LOG: ERROR: {error}");
+            let not_found = ErrorMessageResponse {
+                code: Some(ErrorCode::NotFound),
                 message: Some(error.to_string()),
             };
             return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
+                Status::NotFound,
+                Json(not_found),
             ));
         }
     }

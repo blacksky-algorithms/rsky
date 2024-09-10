@@ -98,6 +98,7 @@ pub async fn get_subject_status(
     match inner_get_subject_status(did, uri, blob, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

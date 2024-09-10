@@ -12,6 +12,7 @@ pub async fn delete_session(
     match AccountManager::revoke_refresh_token(auth.id).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

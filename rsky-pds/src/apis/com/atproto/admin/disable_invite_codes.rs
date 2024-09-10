@@ -31,6 +31,7 @@ pub async fn disable_invite_codes(
     match inner_disable_invite_codes(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

@@ -38,6 +38,7 @@ pub async fn get_preferences(
     match inner_get_preferences(s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

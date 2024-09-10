@@ -85,6 +85,7 @@ pub async fn resolve_handle(
     match inner_resolve_handle(handle, id_resolver).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

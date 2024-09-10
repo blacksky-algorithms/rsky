@@ -21,6 +21,7 @@ pub async fn revoke_app_password(
     match AccountManager::revoke_app_password(requester, name).await {
         Ok(_) => Ok(()),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

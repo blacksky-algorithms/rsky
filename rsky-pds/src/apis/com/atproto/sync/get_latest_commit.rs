@@ -43,6 +43,7 @@ pub async fn get_latest_commit(
     match inner_get_latest_commit(did, s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
+            eprintln!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
