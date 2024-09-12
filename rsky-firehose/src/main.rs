@@ -282,7 +282,7 @@ async fn main() {
         match tokio_tungstenite::connect_async(
             Url::parse(
                 format!(
-                    "{}/xrpc/com.atproto.sync.subscribeRepos",
+                    "{}/xrpc/com.atproto.sync.subscribeRepos?cursor=1670190430",
                     default_subscriber_path
                 )
                 .as_str(),
@@ -298,6 +298,7 @@ async fn main() {
                     tokio::spawn(async move {
                         process(message, &client).await;
                     });
+                    thread::sleep(Duration::from_millis(8));
                 }
             }
             Err(error) => {

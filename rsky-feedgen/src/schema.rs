@@ -94,6 +94,18 @@ diesel::table! {
 }
 
 diesel::table! {
+    video (cid) {
+        cid -> Varchar,
+        alt -> Nullable<Varchar>,
+        postCid -> Varchar,
+        postUri -> Varchar,
+        createdAt -> Varchar,
+        indexedAt -> Varchar,
+        labels -> Nullable<Array<Nullable<Text>>>,
+    }
+}
+
+diesel::table! {
     visitor (id) {
         id -> Int4,
         did -> Varchar,
@@ -112,5 +124,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     membership,
     post,
     sub_state,
+    video,
     visitor,
 );

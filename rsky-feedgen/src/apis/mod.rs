@@ -496,6 +496,7 @@ pub async fn queue_creation(
 ) -> Result<(), String> {
     use crate::schema::follow::dsl as FollowSchema;
     use crate::schema::image::dsl as ImageSchema;
+    use crate::schema::video::dsl as VideoSchema;
     use crate::schema::like::dsl as LikeSchema;
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
@@ -505,6 +506,7 @@ pub async fn queue_creation(
             let mut new_posts = Vec::new();
             let mut new_members = Vec::new();
             let mut new_images = Vec::new();
+            let mut new_videos = Vec::new();
             let mut members_to_rm = Vec::new();
 
             body
@@ -518,6 +520,7 @@ pub async fn queue_creation(
                     let mut post_text = String::new();
                     let mut post_text_original = String::new();
                     let mut post_images = Vec::new();
+                    let mut post_videos = Vec::new();
                     let mut new_post = Post {
                         uri: req.uri,
                         cid: req.cid,
@@ -570,6 +573,36 @@ pub async fn queue_creation(
                                         };
                                     }
                                 },
+                                Embeds::Video(ref e) => {
+                                    let labels: Vec<Option<String>> = vec![];
+                                    match (&e.video.cid, e.video.r#ref) {
+                                        (Some(video_cid), _) => {
+                                            let new_video = (
+                                                VideoSchema::cid.eq(video_cid.clone()),
+                                                VideoSchema::alt.eq(e.alt.clone()),
+                                                VideoSchema::postCid.eq(new_post.cid.clone()),
+                                                VideoSchema::postUri.eq(new_post.uri.clone()),
+                                                VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                VideoSchema::labels.eq(labels),
+                                            );
+                                            post_videos.push(new_video);
+                                        },
+                                        (_, Some(video_ref)) => {
+                                            let new_video = (
+                                                VideoSchema::cid.eq(video_ref.to_string()),
+                                                VideoSchema::alt.eq(e.alt.clone()),
+                                                VideoSchema::postCid.eq(new_post.cid.clone()),
+                                                VideoSchema::postUri.eq(new_post.uri.clone()),
+                                                VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                VideoSchema::labels.eq(labels),
+                                            );
+                                            post_videos.push(new_video);
+                                        },
+                                        _ => eprintln!("Unknown video type: {e:?}")
+                                    };
+                                }
                                 Embeds::RecordWithMedia(e) => {
                                     match e.media {
                                         MediaUnion::Images(m) => {
@@ -591,6 +624,36 @@ pub async fn queue_creation(
                                                 };
                                             }
                                         },
+                                        MediaUnion::Video(ref v) => {
+                                            let labels: Vec<Option<String>> = vec![];
+                                            match (&v.video.cid, v.video.r#ref) {
+                                                (Some(video_cid), _) => {
+                                                    let new_video = (
+                                                        VideoSchema::cid.eq(video_cid.clone()),
+                                                        VideoSchema::alt.eq(v.alt.clone()),
+                                                        VideoSchema::postCid.eq(new_post.cid.clone()),
+                                                        VideoSchema::postUri.eq(new_post.uri.clone()),
+                                                        VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                        VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                        VideoSchema::labels.eq(labels),
+                                                    );
+                                                    post_videos.push(new_video);
+                                                },
+                                                (_, Some(video_ref)) => {
+                                                    let new_video = (
+                                                        VideoSchema::cid.eq(video_ref.to_string()),
+                                                        VideoSchema::alt.eq(v.alt.clone()),
+                                                        VideoSchema::postCid.eq(new_post.cid.clone()),
+                                                        VideoSchema::postUri.eq(new_post.uri.clone()),
+                                                        VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                        VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                        VideoSchema::labels.eq(labels),
+                                                    );
+                                                    post_videos.push(new_video);
+                                                },
+                                                _ => eprintln!("Unknown video type: {v:?}")
+                                            };
+                                        }
                                         MediaUnion::External(e) => {
                                             new_post.external_uri = Some(e.external.uri);
                                             new_post.external_title = Some(e.external.title);
@@ -657,6 +720,7 @@ pub async fn queue_creation(
                         );
                         new_posts.push(new_post);
                         new_images.extend(post_images);
+                        new_videos.extend(post_videos);
 
                         if hashtags.contains("#addtoblacksky") && !is_member {
                             println!("New member: {:?}", &req.author);
@@ -703,6 +767,13 @@ pub async fn queue_creation(
                 .do_nothing()
                 .execute(conn)
                 .expect("Error inserting image records");
+
+            diesel::insert_into(VideoSchema::video)
+                .values(&new_videos)
+                .on_conflict(VideoSchema::cid)
+                .do_nothing()
+                .execute(conn)
+                .expect("Error inserting video records");
 
             diesel::insert_into(MembershipSchema::membership)
                 .values(&new_members)
