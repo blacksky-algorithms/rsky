@@ -79,10 +79,7 @@ pub async fn get_record(
                 code: Some(ErrorCode::NotFound),
                 message: Some(error.to_string()),
             };
-            return Err(status::Custom(
-                Status::NotFound,
-                Json(not_found),
-            ));
+            return Err(status::Custom(Status::NotFound, Json(not_found)));
         }
     }
 }

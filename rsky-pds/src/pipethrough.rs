@@ -12,6 +12,7 @@ use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
 use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
@@ -346,12 +347,21 @@ pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
         }
         Ok(res) => match res.error_for_status_ref() {
             Ok(_) => Ok(res),
-            Err(err) => {
+            Err(_) => {
+                let status = res.status().to_string();
+                let headers = res.headers().clone();
+                let error_body = res.json::<JsonValue>().await?;
                 bail!(InvalidRequestError::XRPCError(XRPCError::FailedResponse {
-                    status: res.status().to_string(),
-                    error: Some(err.to_string()),
-                    message: Some(err.to_string()),
-                    headers: res.headers().clone()
+                    status,
+                    headers,
+                    error: match error_body["error"].as_str() {
+                        None => None,
+                        Some(error_body_error) => Some(error_body_error.to_string()),
+                    },
+                    message: match error_body["message"].as_str() {
+                        None => None,
+                        Some(error_body_message) => Some(error_body_message.to_string()),
+                    }
                 }))
             }
         },

@@ -80,26 +80,31 @@ pub async fn inner_get_post_thread(
                     headers,
                 } = xrpc
                 {
-                    let actor_store = ActorStore::new(
-                        requester.clone(),
-                        S3BlobStore::new(requester.clone(), s3_config),
-                    );
-                    let local_viewer_lock = state_local_viewer.local_viewer.read().await;
-                    let local_viewer = local_viewer_lock(actor_store);
-                    let local = read_after_write_not_found(
-                        local_viewer,
-                        uri,
-                        parentHeight,
-                        requester,
-                        Some(headers.clone()),
-                        cfg,
-                    )
-                    .await?;
-                    match local {
-                        None => Err(err),
-                        Some(local) => Ok(ReadAfterWriteResponse::HandlerResponse(
-                            format_munged_response(local.data, local.lag)?,
-                        )),
+                    match error {
+                        Some(error) if error == "NotFound" => {
+                            let actor_store = ActorStore::new(
+                                requester.clone(),
+                                S3BlobStore::new(requester.clone(), s3_config),
+                            );
+                            let local_viewer_lock = state_local_viewer.local_viewer.read().await;
+                            let local_viewer = local_viewer_lock(actor_store);
+                            let local = read_after_write_not_found(
+                                local_viewer,
+                                uri,
+                                parentHeight,
+                                requester,
+                                Some(headers.clone()),
+                                cfg,
+                            )
+                            .await?;
+                            match local {
+                                None => Err(err),
+                                Some(local) => Ok(ReadAfterWriteResponse::HandlerResponse(
+                                    format_munged_response(local.data, local.lag)?,
+                                )),
+                            }
+                        }
+                        _ => Err(err),
                     }
                 } else {
                     return Err(err);
@@ -156,15 +161,53 @@ pub async fn get_post_thread(
         .await
         {
             Ok(response) => Ok(response),
-            Err(error) => {
-                let internal_error = ErrorMessageResponse {
-                    code: Some(ErrorCode::InternalServerError),
-                    message: Some(error.to_string()),
-                };
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(internal_error),
-                ));
+            Err(err) => {
+                return match err.downcast_ref() {
+                    Some(InvalidRequestError::XRPCError(xrpc)) => {
+                        if let XRPCError::FailedResponse {
+                            status,
+                            error,
+                            message,
+                            headers,
+                        } = xrpc
+                        {
+                            let xrpc_error = ErrorMessageResponse {
+                                code: match error {
+                                    None => None,
+                                    Some(error) => Some(
+                                        ErrorCode::from_str(error)
+                                            .unwrap_or(ErrorCode::InternalServerError),
+                                    ),
+                                },
+                                message: match message {
+                                    None => None,
+                                    Some(message) => Some(message.to_string()),
+                                },
+                            };
+                            Err(status::Custom(Status::BadRequest, Json(xrpc_error)))
+                        } else {
+                            let internal_error = ErrorMessageResponse {
+                                code: Some(ErrorCode::InternalServerError),
+                                message: Some(err.to_string()),
+                            };
+                            Err(status::Custom(
+                                Status::InternalServerError,
+                                Json(internal_error),
+                            ))
+                        }
+                    }
+                    _ => {
+                        eprintln!("@LOG: ERROR: {err}");
+                        let internal_error = ErrorMessageResponse {
+                            code: Some(ErrorCode::InternalServerError),
+                            message: Some(err.to_string()),
+                        };
+                        Err(status::Custom(
+                            Status::InternalServerError,
+                            Json(internal_error),
+                        ))
+                    }
+                }
             }
         },
     }

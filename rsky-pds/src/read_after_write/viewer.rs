@@ -298,17 +298,19 @@ impl LocalViewer {
         match embed {
             None => Ok(None),
             Some(embed) => match embed {
-                Embeds::Images(embed) => Ok(Some(self.format_simple_embed(MediaUnion::Images(embed)).await)),
-                Embeds::External(embed) => {
-                    Ok(Some(self.format_simple_embed(MediaUnion::External(embed)).await))
-                }
-                Embeds::Record(embed) => {
-                    Ok(Some(EmbedViews::RecordView(self.format_record_embed(embed).await?)))
-                }
+                Embeds::Images(embed) => Ok(Some(
+                    self.format_simple_embed(MediaUnion::Images(embed)).await,
+                )),
+                Embeds::External(embed) => Ok(Some(
+                    self.format_simple_embed(MediaUnion::External(embed)).await,
+                )),
+                Embeds::Record(embed) => Ok(Some(EmbedViews::RecordView(
+                    self.format_record_embed(embed).await?,
+                ))),
                 Embeds::RecordWithMedia(embed) => Ok(Some(EmbedViews::RecordWithMediaView(
                     self.format_record_with_media_embed(embed).await?,
                 ))),
-                _ => Ok(None) // @TODO: Handle video
+                _ => Ok(None), // @TODO: Handle video
             },
         }
     }
@@ -355,8 +357,8 @@ impl LocalViewer {
                         },
                     },
                 })
-            },
-            _ => panic!("Can't handle video") // @TODO: Handle video
+            }
+            _ => panic!("Can't handle video"), // @TODO: Handle video
         }
     }
 
