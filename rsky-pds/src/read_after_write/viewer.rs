@@ -297,18 +297,19 @@ impl LocalViewer {
         let embed = post.embed;
         match embed {
             None => Ok(None),
-            Some(embed) => Ok(Some(match embed {
-                Embeds::Images(embed) => self.format_simple_embed(MediaUnion::Images(embed)).await,
+            Some(embed) => match embed {
+                Embeds::Images(embed) => Ok(Some(self.format_simple_embed(MediaUnion::Images(embed)).await)),
                 Embeds::External(embed) => {
-                    self.format_simple_embed(MediaUnion::External(embed)).await
+                    Ok(Some(self.format_simple_embed(MediaUnion::External(embed)).await))
                 }
                 Embeds::Record(embed) => {
-                    EmbedViews::RecordView(self.format_record_embed(embed).await?)
+                    Ok(Some(EmbedViews::RecordView(self.format_record_embed(embed).await?)))
                 }
-                Embeds::RecordWithMedia(embed) => EmbedViews::RecordWithMediaView(
+                Embeds::RecordWithMedia(embed) => Ok(Some(EmbedViews::RecordWithMediaView(
                     self.format_record_with_media_embed(embed).await?,
-                ),
-            })),
+                ))),
+                _ => Ok(None) // @TODO: Handle video
+            },
         }
     }
 
@@ -354,7 +355,8 @@ impl LocalViewer {
                         },
                     },
                 })
-            }
+            },
+            _ => panic!("Can't handle video") // @TODO: Handle video
         }
     }
 

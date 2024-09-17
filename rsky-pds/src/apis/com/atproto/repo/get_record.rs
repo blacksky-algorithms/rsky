@@ -1,5 +1,4 @@
 use crate::account_manager::AccountManager;
-use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::repo::aws::s3::S3BlobStore;

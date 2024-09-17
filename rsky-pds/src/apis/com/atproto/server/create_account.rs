@@ -19,6 +19,7 @@ use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 
+#[allow(unused_assignments)]
 async fn inner_server_create_account(
     mut body: CreateAccountInput,
     sequencer: &State<SharedSequencer>,
@@ -28,7 +29,7 @@ async fn inner_server_create_account(
     let CreateAccountInput {
         email,
         handle,
-        mut did,
+        mut did, // @TODO: Allow people to bring their own DID
         invite_code,
         password,
         ..

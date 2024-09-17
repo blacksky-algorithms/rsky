@@ -6,7 +6,7 @@ use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCErr
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use lazy_static::lazy_static;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
