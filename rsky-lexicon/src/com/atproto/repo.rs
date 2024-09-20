@@ -1,5 +1,6 @@
 use crate::com::atproto::sync::{default_resource, deserialize_option_cid_v1};
 use lexicon_cid::Cid;
+use serde::ser::{Serializer, SerializeMap};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -15,10 +16,18 @@ pub struct Record {
     pub value: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct Link {
-    #[serde(rename(deserialize = "$link", serialize = "$link"))]
-    pub link: String,
+fn serialize_option_cid_as_link<S>(cid_option: &Option<Cid>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match cid_option {
+        Some(cid) => {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry("$link", &cid.to_string())?;
+            map.end()
+        }
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -31,7 +40,8 @@ pub struct Blob {
     #[serde(
         skip_serializing_if = "Option::is_none",
         default = "default_resource",
-        deserialize_with = "deserialize_option_cid_v1"
+        deserialize_with = "deserialize_option_cid_v1",
+        serialize_with = "serialize_option_cid_as_link"
     )]
     pub r#ref: Option<Cid>,
     #[serde(skip_serializing_if = "Option::is_none")]
