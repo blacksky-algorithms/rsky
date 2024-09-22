@@ -196,7 +196,7 @@ pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
 pub fn update_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
     let uri_without_prefix = write.uri.replace("at://", "");
     let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-    RecordWriteOp::Create {
+    RecordWriteOp::Update {
         0: RecordCreateOrUpdateOp {
             action: WriteOpAction::Update,
             collection: parts[1].to_string(),
