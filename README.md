@@ -169,6 +169,25 @@ The Authenticated Transfer Protocol ("ATP" or "atproto") is a decentralized soci
 
 We welcome contributions from the community to help us improve and expand rsky. If you're interested in contributing, please feel free to submit issues or pull requests on the GitHub repository. We appreciate your support!
 
+**Rules:**
+
+- We'll try our best but may not respond to your issue or PR.
+- We may close an issue or PR without much feedback.
+- We may lock discussions or contributions if our attention is getting DDOSed.
+- We do not provide support for build issues.
+
+**Guidelines:**
+
+- Strict adherence to our [Code of Conduct](/.github/CODE_OF_CONDUCT.md)
+- Implementations should follow closely to the [canonical Typescript implementation](https://github.com/bluesky-social/atproto)
+- Check for existing issues before filing a new one, please.
+- Open an issue and give some time for discussion before submitting a PR.
+- Stay away from PRs that:
+    - Refactor large parts of the codebase
+    - Add entirely new features without prior discussion
+    - Change the tooling or frameworks used without prior discussion
+    - Introduce new unnecessary dependencies
+
 ## License
 
 rsky is released under the [Apache License 2.0](./LICENSE).
