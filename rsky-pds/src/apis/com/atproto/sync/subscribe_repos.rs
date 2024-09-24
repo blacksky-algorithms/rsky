@@ -22,6 +22,7 @@ use rsky_lexicon::com::atproto::sync::{
 use serde_json::json;
 use std::time::SystemTime;
 use ws::Message;
+use tokio::time::{interval, Duration as TokioDuration};
 
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
@@ -117,6 +118,10 @@ pub async fn subscribe_repos<'a>(
         let event_stream = outbox.events(outbox_cursor).await;
         pin_mut!(ws);
         pin_mut!(event_stream);
+        
+        // Initialize the ping interval
+        let mut ping_interval = interval(TokioDuration::from_secs(30));
+        
         loop {
             select! {
                 evt = event_stream.next() => {
@@ -286,6 +291,16 @@ pub async fn subscribe_repos<'a>(
                                     };
                                     break;
                                 },
+                                ws::Message::Ping(payload) => {
+                                    // Respond to Ping with Pong
+                                    println!("Received Ping message");
+                                    let pong_message = ws::Message::Pong(payload);
+                                    yield pong_message;
+                                },
+                                ws::Message::Pong(_) => {
+                                    // Received Pong, can log or ignore
+                                    println!("Received Pong message");
+                                },
                                 _ => {
                                     println!("Received other message: {:?}", message);
                                 }
@@ -300,6 +315,11 @@ pub async fn subscribe_repos<'a>(
                             break;
                         }
                     }
+                },
+                // Add the ping interval tick arm
+                _ = ping_interval.tick() => {
+                    // Send a Ping message to the client
+                    yield ws::Message::Ping(vec![]);
                 },
                 _ = &mut shutdown => break
             }
