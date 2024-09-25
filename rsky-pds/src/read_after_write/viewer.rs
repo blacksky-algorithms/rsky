@@ -563,8 +563,12 @@ impl LocalViewer {
             followers_count,
             follows_count,
             posts_count,
+            associated,
+            joined_via_starter_pack,
+            viewer,
             labels,
             indexed_at,
+            created_at,
             ..
         } = view;
         let ProfileView {
@@ -605,8 +609,12 @@ impl LocalViewer {
             followers_count,
             follows_count,
             posts_count,
+            associated,
+            joined_via_starter_pack,
+            viewer,
             labels,
             indexed_at,
+            created_at,
         }
     }
 

@@ -127,6 +127,7 @@ pub async fn create_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<CreateRecordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+    println!("@LOG: debug create_record {body:#?}");
     match inner_create_record(body, auth, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

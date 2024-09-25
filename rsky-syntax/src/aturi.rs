@@ -137,7 +137,7 @@ impl AtUri {
     }
 
     pub fn get_collection(&self) -> String {
-        match &self.pathname.split("/").collect::<Vec<&str>>().first() {
+        match &self.pathname.split("/").collect::<Vec<&str>>().get(1) {
             Some(collection) => collection.to_string(),
             None => "".to_string(),
         }
@@ -160,7 +160,7 @@ impl AtUri {
     }
 
     pub fn get_rkey(&self) -> String {
-        match &self.pathname.split("/").collect::<Vec<&str>>().get(1) {
+        match &self.pathname.split("/").collect::<Vec<&str>>().get(2) {
             Some(rkey) => rkey.to_string(),
             None => "".to_string(),
         }

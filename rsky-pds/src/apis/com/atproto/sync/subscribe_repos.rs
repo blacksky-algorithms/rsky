@@ -21,8 +21,8 @@ use rsky_lexicon::com::atproto::sync::{
 };
 use serde_json::json;
 use std::time::SystemTime;
-use ws::Message;
 use tokio::time::{interval, Duration as TokioDuration};
+use ws::Message;
 
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
@@ -118,10 +118,10 @@ pub async fn subscribe_repos<'a>(
         let event_stream = outbox.events(outbox_cursor).await;
         pin_mut!(ws);
         pin_mut!(event_stream);
-        
+
         // Initialize the ping interval
         let mut ping_interval = interval(TokioDuration::from_secs(30));
-        
+
         loop {
             select! {
                 evt = event_stream.next() => {

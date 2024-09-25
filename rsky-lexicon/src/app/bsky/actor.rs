@@ -1,4 +1,4 @@
-use crate::app::bsky::graph::ListViewBasic;
+use crate::app::bsky::graph::{ListViewBasic, StarterPackViewBasic};
 use crate::com::atproto::label::{Label, SelfLabels};
 use crate::com::atproto::repo::{Blob, StrongRef};
 use chrono::{DateTime, Utc};
@@ -73,8 +73,12 @@ pub struct ProfileViewDetailed {
     pub followers_count: Option<usize>,
     pub follows_count: Option<usize>,
     pub posts_count: Option<usize>,
+    pub associated: Option<RefProfileAssociated>,
+    pub joined_via_starter_pack: Option<StarterPackViewBasic>,
+    pub viewer: Option<ViewerState>,
     pub labels: Vec<Label>,
     pub indexed_at: Option<String>,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

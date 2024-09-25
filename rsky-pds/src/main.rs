@@ -150,10 +150,7 @@ async fn rocket() -> _ {
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
             timeout: None,
-            plc_url: Some(format!(
-                "https://{}",
-                env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned())
-            )),
+            plc_url: Some(env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned())),
             did_cache: Some(DidCache::new(None, None)),
             backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
         })),

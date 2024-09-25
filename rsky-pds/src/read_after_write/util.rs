@@ -144,7 +144,8 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
 ) -> Result<ReadAfterWriteResponse<T>> {
-    let rev = get_repo_rev(&res.headers.clone().unwrap_or_else(|| BTreeMap::new()));
+    let headers = &res.headers.clone().unwrap_or_else(|| BTreeMap::new());
+    let rev = get_repo_rev(headers);
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(rev) => {

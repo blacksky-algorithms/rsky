@@ -124,6 +124,7 @@ pub async fn apply_writes(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+    println!("@LOG: debug apply_writes {body:#?}");
     match inner_apply_writes(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {

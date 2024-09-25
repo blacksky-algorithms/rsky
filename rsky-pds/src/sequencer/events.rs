@@ -12,6 +12,7 @@ use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};
+use rsky_syntax::aturi::AtUri;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum CommitEvtOpAction {
@@ -227,10 +228,8 @@ pub async fn format_seq_commit(
     } else {
         too_big = false;
         for w in writes {
-            let parts = w.uri().split("/").collect::<Vec<&str>>();
-            let collection = *parts.get(0).unwrap_or(&"");
-            let rkey = *parts.get(1).unwrap_or(&"");
-            let path = format_data_key(collection.to_string(), rkey.to_string());
+            let uri = AtUri::new(w.uri().clone(), None)?;
+            let path = format_data_key(uri.get_collection(), uri.get_rkey());
             let cid: Option<Cid>;
             let action: CommitEvtOpAction;
             match w {
