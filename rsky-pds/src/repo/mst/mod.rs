@@ -163,6 +163,7 @@ impl Iterator for NodeIterReachable {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct TreeEntry {
     pub p: u8,          // count of characters shared with previous path/key in tree
+    #[serde(with = "serde_bytes")]
     pub k: Vec<u8>,     // remaining part of path/key (appended to "previous key")
     pub v: Cid,         // CID pointer at this path/key
     pub t: Option<Cid>, // [optional] pointer to lower-level subtree to the "right" of this path/key entry
@@ -1154,3 +1155,205 @@ impl MST {
 pub mod diff;
 pub mod util;
 pub mod walker;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use super::util::*;
+
+    fn string_to_vec_u8(input: &str) -> Vec<u8> {
+        input.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn test_leading_zeros() -> Result<()> {
+        let msg = "MST 'depth' computation (SHA-256 leading zeros)";
+
+        // Helper macro to handle the Result in the test assertions
+        macro_rules! assert_leading_zeros {
+            ($input:expr, $expected:expr) => {
+                assert_eq!(
+                    leading_zeros_on_hash(&string_to_vec_u8($input))?,
+                    $expected,
+                    "{}",
+                    msg
+                );
+            };
+        }
+
+        // Test cases
+        assert_leading_zeros!("", 0);
+        assert_leading_zeros!("asdf", 0);
+        assert_leading_zeros!("blue", 1);
+        assert_leading_zeros!("2653ae71", 0);
+        assert_leading_zeros!("88bfafc7", 2);
+        assert_leading_zeros!("2a92d355", 4);
+        assert_leading_zeros!("884976f5", 6);
+        assert_leading_zeros!("app.bsky.feed.post/454397e440ec", 4);
+        assert_leading_zeros!("app.bsky.feed.post/9adeb165882c", 8);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefix_len() -> Result<()> {
+        let msg = "length of common prefix between strings";
+
+        // Helper macro to handle assertions
+        macro_rules! assert_prefix_len {
+            ($a:expr, $b:expr, $expected:expr) => {
+                assert_eq!(count_prefix_len($a.to_string(), $b.to_string())?, $expected, "{}", msg);
+            };
+        }
+
+        // Test cases
+        assert_prefix_len!("abc", "abc", 3);
+        assert_prefix_len!("", "abc", 0);
+        assert_prefix_len!("abc", "", 0);
+        assert_prefix_len!("ab", "abc", 2);
+        assert_prefix_len!("abc", "ab", 2);
+        assert_prefix_len!("abcde", "abc", 3);
+        assert_prefix_len!("abc", "abcde", 3);
+        assert_prefix_len!("abcde", "abc1", 3);
+        assert_prefix_len!("abcde", "abb", 2);
+        assert_prefix_len!("abcde", "qbb", 0);
+        assert_prefix_len!("abc", "abc\x00", 3);
+        assert_prefix_len!("abc\x00", "abc", 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefix_len_wide() -> Result<()> {
+        let msg = "length of common prefix between strings (wide chars)";
+
+        // Testing string lengths (Note: length in bytes, not characters)
+        assert_eq!("jalapeño".len(), 9, "{}", msg); // 9 bytes in Rust, same as Go
+        assert_eq!("💩".len(), 4, "{}", msg);        // 4 bytes in Rust, same as Go
+        assert_eq!("👩‍👧‍👧".len(), 18, "{}", msg);   // 18 bytes in Rust, same as Go
+
+        // Helper macro to handle assertions for count_prefix_len
+        macro_rules! assert_prefix_len {
+            ($a:expr, $b:expr, $expected:expr) => {
+                assert_eq!(count_prefix_len($a.to_string(), $b.to_string())?, $expected, "{}", msg);
+            };
+        }
+
+        // many of the below are different in Go because we count chars not bytes
+        assert_prefix_len!("jalapeño", "jalapeno", 6);
+        assert_prefix_len!("jalapeñoA", "jalapeñoB", 8);
+        assert_prefix_len!("coöperative", "coüperative", 2);
+        assert_prefix_len!("abc💩abc", "abcabc", 3);
+        assert_prefix_len!("💩abc", "💩ab", 3);
+        assert_prefix_len!("abc👩‍👦‍👦de", "abc👩‍👧‍👧de", 5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_allowed_keys() -> Result<()> {
+        let cid1str = "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454";
+        let cid1 = Cid::try_from(cid1str)?;
+
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+        // Rejects empty key
+        let result = mst.add(&"".to_string(), cid1, None);
+        assert!(result.is_err());
+
+        // Rejects a key with no collection
+        let result = mst.add(&"asdf".to_string(), cid1, None);
+        assert!(result.is_err());
+
+        // Rejects a key with a nested collection
+        let result = mst.add(&"nested/collection/asdf".to_string(), cid1, None);
+        assert!(result.is_err());
+
+        // Rejects on empty coll or rkey
+        let result = mst.add(&"coll/".to_string(), cid1, None);
+        assert!(result.is_err());
+        let result = mst.add(&"/rkey".to_string(), cid1, None);
+        assert!(result.is_err());
+
+        // Rejects non-ascii chars
+        let result = mst.add(&"coll/jalapeñoA".to_string(), cid1, None);
+        assert!(result.is_err());
+        let result = mst.add(&"coll/coöperative".to_string(), cid1, None);
+        assert!(result.is_err());
+        let result = mst.add(&"coll/abc💩".to_string(), cid1, None);
+        assert!(result.is_err());
+
+        // Rejects ascii that we don't support
+        let invalid_chars = vec!["$", "%", "(", ")", "+", "="];
+        for ch in invalid_chars {
+            let key = format!("coll/key{}", ch);
+            let result = mst.add(&key, cid1, None);
+            assert!(result.is_err(), "Key '{}' should be invalid", key);
+        }
+
+        // Rejects keys over 256 chars
+        let long_key: String = "a".repeat(253);
+        let key = format!("coll/{}", long_key);
+        let result = mst.add(&key, cid1, None);
+        assert!(result.is_err());
+
+        // Allows long key under 256 chars
+        let long_key: String = "a".repeat(250);
+        let key = format!("coll/{}", long_key);
+        let result = mst.add(&key, cid1, None);
+        assert!(result.is_ok());
+
+        // Allows URL-safe chars
+        let valid_keys = vec!["coll/key0", "coll/key_", "coll/key:", "coll/key.", "coll/key-"];
+        for key in valid_keys {
+            let result = mst.add(&key.to_string(), cid1, None);
+            assert!(result.is_ok(), "Key '{}' should be valid", key);
+        }
+
+        Ok(())
+    }
+
+    // MST Interop Known Maps
+
+    /// computes "empty" tree root CID
+    #[test]
+    fn empty_tree_root() -> Result<()> {
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        assert_eq!(mst.clone().leaf_count()?, 0);
+        assert_eq!(mst.get_pointer()?.to_string(), "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm");
+
+        Ok(())
+    }
+
+    /// computes "trivial" tree root CID
+    #[test]
+    fn trivial_tree() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?;
+        assert_eq!(mst.clone().leaf_count()?, 1);
+        assert_eq!(mst.get_pointer()?.to_string(), "bafyreibj4lsc3aqnrvphp5xmrnfoorvru4wynt6lwidqbm2623a6tatzdu");
+
+        Ok(())
+    }
+
+    /// computes "singlelayer2" tree root CID
+    #[test]
+    fn singlelayer2_tree() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?;
+        assert_eq!(mst.clone().leaf_count()?, 1);
+        assert_eq!(mst.clone().layer, Some(2));
+        assert_eq!(mst.get_pointer()?.to_string(), "bafyreih7wfei65pxzhauoibu3ls7jgmkju4bspy4t2ha2qdjnzqvoy33ai");
+
+        Ok(())
+    }
+}

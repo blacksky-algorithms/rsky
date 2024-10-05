@@ -66,7 +66,7 @@ mod tests {
     use futures::TryStreamExt;
     use libipld::cbor::DagCborCodec;
     use libipld::Cid;
-    use multihash::MultihashDigest;
+    use libipld::multihash::{Code, MultihashDigest};
 
     use super::super::{header::CarHeaderV1, writer::CarWriter};
 
@@ -74,10 +74,10 @@ mod tests {
 
     #[tokio::test]
     async fn car_write_read() {
-        let digest_test = multihash::Code::Blake2b256.digest(b"test");
+        let digest_test = Code::Blake2b256.digest(b"test");
         let cid_test = Cid::new_v1(DagCborCodec.into(), digest_test);
 
-        let digest_foo = multihash::Code::Blake2b256.digest(b"foo");
+        let digest_foo = Code::Blake2b256.digest(b"foo");
         let cid_foo = Cid::new_v1(DagCborCodec.into(), digest_foo);
 
         let header = CarHeader::V1(CarHeaderV1::from(vec![cid_foo]));

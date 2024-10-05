@@ -84,13 +84,13 @@ impl From<Vec<Cid>> for CarHeaderV1 {
 mod tests {
     use ipld_cbor::DagCborCodec;
     use libipld::codec::{Decode, Encode};
-    use multihash::MultihashDigest;
+    use libipld::multihash::{Code, MultihashDigest};
 
     use super::*;
 
     #[test]
     fn symmetric_header_v1() {
-        let digest = multihash::Code::Blake2b256.digest(b"test");
+        let digest = Code::Blake2b256.digest(b"test");
         let cid = Cid::new_v1(DagCborCodec.into(), digest);
 
         let header = CarHeaderV1::from(vec![cid]);

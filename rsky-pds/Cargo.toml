@@ -13,7 +13,6 @@ documentation = "https://docs.rs/rsky-pds"
 [dependencies]
 # for vendored iroh-car
 integer-encoding = { version = "3", features = ["tokio_async"] }
-multihash = "0.16"
 tokio = { version = "1.28.2",features = ["full"] }
 
 # for everything else
@@ -39,6 +38,7 @@ data-encoding = "2.5.0"
 reqwest = { version = "0.12.3",features = ["json","blocking"] }
 serde_json = { version = "1.0.96",features = ["preserve_order"] }
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
+serde_bytes = "0.11.15"
 base64-url = "2.0.2"
 secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes"] }
 rand_core = "0.6.4"
