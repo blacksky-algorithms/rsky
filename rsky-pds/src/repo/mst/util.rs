@@ -73,19 +73,16 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
     while i < entries.len() {
         let leaf = &entries[i];
         let next = entries.get(i + 1);
-        if !leaf.is_leaf() {
-            return Err(anyhow!("Not a valid node: two subtrees next to each other"));
-        };
-        i += 1;
-        let mut subtree: Option<Cid> = None;
-        match next {
-            Some(NodeEntry::MST(tree)) => {
-                subtree = Some(tree.pointer);
-                i += 1;
-            }
-            _ => (),
-        };
         if let NodeEntry::Leaf(l) = leaf {
+            i += 1;
+            let mut subtree: Option<Cid> = None;
+            match next {
+                Some(NodeEntry::MST(tree)) => {
+                    subtree = Some(tree.clone().get_pointer()?);
+                    i += 1;
+                }
+                _ => (),
+            };
             ensure_valid_mst_key(&l.key)?;
             let prefix_len = count_prefix_len(last_key.to_owned(), l.key.to_owned())?;
             data.e.push(TreeEntry {
@@ -95,6 +92,8 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
                 t: subtree,
             });
             last_key = &l.key;
+        } else {
+            return Err(anyhow!("Not a valid node: two subtrees next to each other"));
         }
     }
     Ok(data)

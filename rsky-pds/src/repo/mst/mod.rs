@@ -315,7 +315,7 @@ impl MST {
     pub fn new_tree(&mut self, entries: Vec<NodeEntry>) -> Result<MST> {
         let mut mst = MST::new(
             self.storage.clone(),
-            self.pointer,
+            self.get_pointer()?,
             Some(entries),
             self.layer,
         );
@@ -366,7 +366,8 @@ impl MST {
         if !self.outdated_pointer {
             return Ok(self.pointer);
         }
-        let CidAndBytes { cid, .. } = self.serialize()?;
+        let CidAndBytes { cid, bytes } = self.serialize()?;
+        println!("@LOG: debut MST::get_pointer bytes {bytes:?}");
         self.pointer = cid;
         self.outdated_pointer = false;
         Ok(self.pointer)
@@ -490,21 +491,21 @@ impl MST {
             if let Some(p) = prev_node {
                 match p {
                     // if entry before is a leaf we can just splice in
-                    NodeEntry::Leaf(_) => Ok(self.splice_in(NodeEntry::Leaf(new_leaf), index)?),
+                    NodeEntry::Leaf(_) => self.splice_in(NodeEntry::Leaf(new_leaf), index),
                     // else we try to split the subtree around the key
                     NodeEntry::MST(mut m) => {
                         let split_sub_tree = m.split_around(key)?;
-                        Ok(self.replace_with_split(
+                        self.replace_with_split(
                             index - 1,
                             split_sub_tree.0,
                             new_leaf,
                             split_sub_tree.1,
-                        )?)
+                        )
                     }
                 }
             } else {
                 // If we're on far left we can just splice in
-                Ok(self.splice_in(NodeEntry::Leaf(new_leaf), index)?)
+                self.splice_in(NodeEntry::Leaf(new_leaf), index)
             }
         } else if key_zeros < layer {
             // it belongs on a lower layer
@@ -513,11 +514,11 @@ impl MST {
             if let Some(NodeEntry::MST(mut p)) = prev_node {
                 // if entry before is a tree, we add it to that tree
                 let new_subtree = p.add(key, value, Some(key_zeros))?;
-                Ok(self.update_entry(index - 1, NodeEntry::MST(new_subtree.clone()))?)
+                self.update_entry(index - 1, NodeEntry::MST(new_subtree))
             } else {
                 let mut sub_tree = self.create_child()?;
-                let new_sub_tree = sub_tree.add(key, value, Some(key_zeros))?;
-                Ok(self.splice_in(NodeEntry::MST(new_sub_tree.clone()), index)?)
+                let new_subtree = sub_tree.add(key, value, Some(key_zeros))?;
+                self.splice_in(NodeEntry::MST(new_subtree), index)
             }
         } else {
             let layer = self.get_layer()?;
@@ -527,12 +528,12 @@ impl MST {
             let split = self.split_around(key)?;
             // if the newly added key has >=2 more leading zeros than the current highest layer
             // then we need to add in structural nodes in between as well
-            let left: Option<MST> = split.0;
+            let mut left: Option<MST> = split.0;
             let mut right: Option<MST> = split.1;
             // intentionally starting at 1, since first layer is taken care of by split
             for _ in 1..extra_layers_to_add {
                 if let Some(l) = left.clone() {
-                    right = Some(l.create_parent()?);
+                    left = Some(l.create_parent()?);
                 }
                 if let Some(r) = right.clone() {
                     right = Some(r.create_parent()?);
@@ -755,14 +756,13 @@ impl MST {
     pub fn splice_in(&mut self, entry: NodeEntry, index: isize) -> Result<MST> {
         let mut update = Vec::new();
         for e in self.slice(Some(0), Some(index))? {
-            update.push(e.clone());
+            update.push(e);
         }
         update.push(entry);
         for e in self.slice(Some(index), None)? {
-            update.push(e.clone());
+            update.push(e);
         }
-
-        Ok(self.new_tree(update)?)
+        self.new_tree(update)
     }
 
     /// replaces an entry with [ Some(tree), Leaf, Some(tree) ]
@@ -785,7 +785,7 @@ impl MST {
         let remainder = self.slice(Some(index + 1), None)?;
         let remainder = &mut remainder.to_vec();
         update.append(remainder);
-        Ok(self.new_tree(update)?)
+        self.new_tree(update)
     }
 
     /// if the topmost node in the tree only points to another tree, trim the top and return the subtree
@@ -865,12 +865,12 @@ impl MST {
                 new_tree_entries.append(&mut self_entries[0..self_entries.len() - 1].to_vec());
                 new_tree_entries.push(NodeEntry::MST(merged));
                 new_tree_entries.append(&mut to_merge_entries[0..1].to_vec());
-                Ok(self.new_tree(new_tree_entries)?)
+                self.new_tree(new_tree_entries)
             }
             (_, _) => {
                 new_tree_entries.append(&mut self_entries);
                 new_tree_entries.append(&mut to_merge_entries);
-                Ok(self.new_tree(new_tree_entries)?)
+                self.new_tree(new_tree_entries)
             }
         };
     }
@@ -880,11 +880,11 @@ impl MST {
 
     pub fn create_child(&mut self) -> Result<MST> {
         let layer = self.get_layer()?;
-        Ok(MST::create(
+        MST::create(
             self.storage.clone(),
             Some(Vec::new()),
             Some(layer - 1),
-        )?)
+        )
     }
 
     pub fn create_parent(mut self) -> Result<Self> {
@@ -1353,6 +1353,24 @@ mod tests {
         assert_eq!(mst.clone().leaf_count()?, 1);
         assert_eq!(mst.clone().layer, Some(2));
         assert_eq!(mst.get_pointer()?.to_string(), "bafyreih7wfei65pxzhauoibu3ls7jgmkju4bspy4t2ha2qdjnzqvoy33ai");
+
+        Ok(())
+    }
+
+    /// computes "simple" tree root CID
+    #[test]
+    fn simple_tree() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1 <-- breaks
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
+        assert_eq!(mst.clone().leaf_count()?, 5);
+        assert_eq!(mst.get_pointer()?.to_string(), "bafyreicmahysq4n6wfuxo522m6dpiy7z7qzym3dzs756t5n7nfdgccwq7m");
 
         Ok(())
     }
