@@ -1,3 +1,18 @@
+/**
+ * This is an implementation of a Merkle Search Tree (MST)
+ * The data structure is described here: https://hal.inria.fr/hal-02303490/document
+ * The MST is an ordered, insert-order-independent, deterministic tree.
+ * Keys are laid out in alphabetic order.
+ * The key insight of an MST is that each key is hashed and starting 0s are counted
+ * to determine which layer it falls on (5 zeros for ~32 fanout).
+ * This is a merkle tree, so each subtree is referred to by its hash (CID).
+ * When a leaf is changed, every tree on the path to that leaf is changed as well,
+ * thereby updating the root hash.
+ *
+ * For atproto, we use SHA-256 as the key hashing algorithm, and ~4 fanout
+ * (2-bits of zero per layer).
+ */
+
 use crate::common;
 use crate::common::ipld;
 use crate::repo::block_map::BlockMap;
@@ -159,6 +174,24 @@ impl Iterator for NodeIterReachable {
     }
 }
 
+/**
+ * A couple notes on CBOR encoding:
+ *
+ * There are never two neighboring subtrees.
+ * Therefore, we can represent a node as an array of
+ * leaves & pointers to their right neighbor (possibly null),
+ * along with a pointer to the left-most subtree (also possibly null).
+ *
+ * Most keys in a subtree will have overlap.
+ * We do compression on prefixes by describing keys as:
+ * - the length of the prefix that it shares in common with the preceding key
+ * - the rest of the string
+ *
+ * For example:
+ * If the first leaf in a tree is `bsky/posts/abcdefg` and the second is `bsky/posts/abcdehi`
+ * Then the first will be described as `prefix: 0, key: 'bsky/posts/abcdefg'`,
+ * and the second will be described as `prefix: 16, key: 'hi'.`
+ */
 /// treeEntry are elements of nodeData's Entries.
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct TreeEntry {
@@ -366,8 +399,7 @@ impl MST {
         if !self.outdated_pointer {
             return Ok(self.pointer);
         }
-        let CidAndBytes { cid, bytes } = self.serialize()?;
-        println!("@LOG: debut MST::get_pointer bytes {bytes:?}");
+        let CidAndBytes { cid, .. } = self.serialize()?;
         self.pointer = cid;
         self.outdated_pointer = false;
         Ok(self.pointer)
@@ -384,10 +416,10 @@ impl MST {
             .collect::<Vec<_>>();
 
         if outdated.len() > 0 {
-            let _outdated = outdated
+            let _ = outdated
                 .iter_mut()
                 .map(|e| e.get_pointer())
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<Cid>>>()?;
             entries = self.get_entries()?;
         }
         let data = util::serialize_node_data(entries)?;
@@ -616,12 +648,12 @@ impl MST {
                         let merged = p.append_merge(n)?;
                         let mut new_tree_entries: Vec<NodeEntry> = Vec::new();
                         new_tree_entries
-                            .append(&mut self.slice(Some(0), Some(index - 1))?.to_vec());
+                            .append(&mut self.slice(Some(0), Some(index - 1))?);
                         new_tree_entries.push(NodeEntry::MST(merged));
-                        new_tree_entries.append(&mut self.slice(Some(index + 2), None)?.to_vec());
-                        Ok(self.new_tree(new_tree_entries)?)
+                        new_tree_entries.append(&mut self.slice(Some(index + 2), None)?);
+                        self.new_tree(new_tree_entries)
                     }
-                    (_, _) => Ok(self.remove_entry(index)?),
+                    (_, _) => self.remove_entry(index),
                 };
             }
         }
@@ -631,9 +663,9 @@ impl MST {
             let subtree = &mut p.delete_recurse(key)?;
             let subtree_entries = subtree.get_entries()?;
             if subtree_entries.len() == 0 {
-                Ok(self.remove_entry(index - 1)?)
+                self.remove_entry(index - 1)
             } else {
-                Ok(self.update_entry(index - 1, NodeEntry::MST(subtree.clone()))?)
+                self.update_entry(index - 1, NodeEntry::MST(subtree.clone()))
             }
         } else {
             Err(anyhow!("Could not find a record with key: {}", key))
@@ -864,7 +896,7 @@ impl MST {
                 let merged = new_l.append_merge(r.clone())?;
                 new_tree_entries.append(&mut self_entries[0..self_entries.len() - 1].to_vec());
                 new_tree_entries.push(NodeEntry::MST(merged));
-                new_tree_entries.append(&mut to_merge_entries[0..1].to_vec());
+                new_tree_entries.append(&mut to_merge_entries[1..].to_vec());
                 self.new_tree(new_tree_entries)
             }
             (_, _) => {
@@ -1398,6 +1430,62 @@ mod tests {
         assert_eq!(mst.clone().leaf_count()?, 5);
         assert_eq!(mst.get_layer()?, 0);
         assert_eq!(mst.get_pointer()?.to_string(), l0root);
+
+        Ok(())
+    }
+
+    /**
+     *
+     *                *                                  *
+     *       _________|________                      ____|_____
+     *       |   |    |    |   |                    |    |     |
+     *       *   d    *    i   *       ->           *    f     *
+     *     __|__    __|__    __|__                __|__      __|___
+     *    |  |  |  |  |  |  |  |  |              |  |  |    |  |   |
+     *    a  b  c  e  g  h  j  k  l              *  d  *    *  i   *
+     *                                         __|__   |   _|_   __|__
+     *                                        |  |  |  |  |   | |  |  |
+     *                                        a  b  c  e  g   h j  k  l
+     *
+     */
+
+    #[test]
+    fn handle_insertion_that_splits_two_layers_down() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        let l1root = "bafyreiettyludka6fpgp33stwxfuwhkzlur6chs4d2v4nkmq2j3ogpdjem";
+        let l2root = "bafyreid2x5eqs4w4qxvc5jiwda4cien3gw2q6cshofxwnvv7iucrmfohpm";
+
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?; // A; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // B; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // C; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // D; level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // E; level 0
+        // GAP for F
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)?; // G; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // H; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)?; // I; level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4ff2j".to_string(), cid1, None)?; // J; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fg2j".to_string(), cid1, None)?; // K; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fh2j".to_string(), cid1, None)?; // L; level 0
+
+        assert_eq!(mst.clone().leaf_count()?, 11);
+        assert_eq!(mst.get_layer()?, 1);
+        assert_eq!(mst.get_pointer()?.to_string(), l1root);
+
+        // insert F, which will push E out of the node with G+H to a new node under D
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // F; level 2
+        assert_eq!(mst.clone().leaf_count()?, 12);
+        assert_eq!(mst.get_layer()?, 2);
+        assert_eq!(mst.get_pointer()?.to_string(), l2root); // @TODO this is failing
+
+        // remove F, which should push E back over with G+H
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fx2j".to_string())?; // F; level 2
+        assert_eq!(mst.clone().leaf_count()?, 11);
+        assert_eq!(mst.get_layer()?, 1);
+        assert_eq!(mst.get_pointer()?.to_string(), l1root);
 
         Ok(())
     }

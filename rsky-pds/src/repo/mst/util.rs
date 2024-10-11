@@ -65,9 +65,9 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
         e: Vec::new(),
     };
     let mut i = 0;
-    if let Some(NodeEntry::MST(e)) = &entries.get(0) {
+    if let Some(NodeEntry::MST(e)) = entries.get(0) {
         i += 1;
-        data.l = Some(e.pointer);
+        data.l = Some(e.clone().get_pointer()?);
     }
     let mut last_key = "";
     while i < entries.len() {
