@@ -905,16 +905,13 @@ impl MST {
     pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<isize> {
         let entries = self.get_entries()?;
         let maybe_index = entries
-            .clone()
-            .into_iter()
-            .filter_map(|entry| {
-                if let NodeEntry::Leaf(l) = entry {
-                    Some(l)
-                } else {
-                    None
+            .iter()
+            .position(|entry| {
+                match entry {
+                    NodeEntry::MST(_) => false,
+                    NodeEntry::Leaf(entry) => entry.key >= *key
                 }
-            })
-            .position(|entry| entry.key >= *key);
+            });
         // if we can't find, we're on the end
         if let Some(i) = maybe_index {
             Ok(i as isize)
@@ -1360,17 +1357,47 @@ mod tests {
     /// computes "simple" tree root CID
     #[test]
     fn simple_tree() -> Result<()> {
-        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
         let mut mst = MST::create(storage, None, None)?;
 
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // level 0
-        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1 <-- breaks
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
         assert_eq!(mst.clone().leaf_count()?, 5);
         assert_eq!(mst.get_pointer()?.to_string(), "bafyreicmahysq4n6wfuxo522m6dpiy7z7qzym3dzs756t5n7nfdgccwq7m");
+
+        Ok(())
+    }
+
+    // MST Interop Edge Cases
+
+    /// trims top of tree on delete
+    #[test]
+    fn trim_on_delete() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        let l1root = "bafyreifnqrwbk6ffmyaz5qtujqrzf5qmxf7cbxvgzktl4e3gabuxbtatv4";
+        let l0root = "bafyreie4kjuxbwkhzg2i5dljaswcroeih4dgiqq6pazcmunwt2byd725vi";
+
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fn2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fu2j".to_string(), cid1, None)?; // level 0
+        assert_eq!(mst.clone().leaf_count()?, 6);
+        assert_eq!(mst.get_layer()?, 1);
+        assert_eq!(mst.get_pointer()?.to_string(), l1root);
+
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fs2j".to_string())?; // level 1
+        assert_eq!(mst.clone().leaf_count()?, 5);
+        assert_eq!(mst.get_layer()?, 0);
+        assert_eq!(mst.get_pointer()?.to_string(), l0root);
 
         Ok(())
     }
