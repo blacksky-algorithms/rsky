@@ -1448,7 +1448,6 @@ mod tests {
      *                                        a  b  c  e  g   h j  k  l
      *
      */
-
     #[test]
     fn handle_insertion_that_splits_two_layers_down() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
@@ -1486,6 +1485,62 @@ mod tests {
         assert_eq!(mst.clone().leaf_count()?, 11);
         assert_eq!(mst.get_layer()?, 1);
         assert_eq!(mst.get_pointer()?.to_string(), l1root);
+
+        Ok(())
+    }
+
+    /**
+     *
+     *          *        ->            *
+     *        __|__                  __|__
+     *       |     |                |  |  |
+     *       a     c                *  b  *
+     *                              |     |
+     *                              *     *
+     *                              |     |
+     *                              a     c
+     *
+     */
+    #[test]
+    fn handle_new_layers_that_are_two_higher_than_existing() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        let l0root = "bafyreidfcktqnfmykz2ps3dbul35pepleq7kvv526g47xahuz3rqtptmky";
+        let l2root = "bafyreiavxaxdz7o7rbvr3zg2liox2yww46t7g6hkehx4i4h3lwudly7dhy";
+        let l2root2 = "bafyreig4jv3vuajbsybhyvb7gggvpwh2zszwfyttjrj6qwvcsp24h6popu";
+
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // A; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)?; // C; level 0
+        assert_eq!(mst.clone().leaf_count()?, 2);
+        assert_eq!(mst.get_layer()?, 0);
+        assert_eq!(mst.get_pointer()?.to_string(), l0root);
+
+        // insert B, which is two levels above
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // B; level 2
+        assert_eq!(mst.clone().leaf_count()?, 3);
+        assert_eq!(mst.get_layer()?, 2);
+        assert_eq!(mst.get_pointer()?.to_string(), l2root);
+
+        // remove B
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fx2j".to_string())?; // B; level 2
+        assert_eq!(mst.clone().leaf_count()?, 2);
+        assert_eq!(mst.get_layer()?, 0);
+        assert_eq!(mst.get_pointer()?.to_string(), l0root);
+
+        // insert B (level=2) and D (level=1)
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // B; level 2
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)?; // D; level 1
+        assert_eq!(mst.clone().leaf_count()?, 4);
+        assert_eq!(mst.get_layer()?, 2);
+        assert_eq!(mst.get_pointer()?.to_string(), l2root2);
+
+        // remove D
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm4fd2j".to_string())?; // D; level 1
+        assert_eq!(mst.clone().leaf_count()?, 3);
+        assert_eq!(mst.get_layer()?, 2);
+        assert_eq!(mst.get_pointer()?.to_string(), l2root);
 
         Ok(())
     }
