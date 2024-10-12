@@ -11,7 +11,6 @@ pub struct Video {
     pub aspect_ratio: Option<AspectRatio>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Caption {
     pub lang: String,
@@ -27,5 +26,5 @@ pub struct View {
     pub playlist: String,
     pub thumbnail: Option<String>,
     pub alt: Option<String>,
-    pub aspect_ratio: Option<AspectRatio>
+    pub aspect_ratio: Option<AspectRatio>,
 }

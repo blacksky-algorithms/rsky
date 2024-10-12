@@ -37,10 +37,10 @@ pub enum MediaViewUnion {
 pub enum Embeds {
     #[serde(rename = "app.bsky.embed.images")]
     Images(Images),
-    
+
     #[serde(rename = "app.bsky.embed.video")]
     Video(Video),
-    
+
     #[serde(
         alias = "app.bsky.embed.external",
         alias = "app.bsky.embed.external#main"

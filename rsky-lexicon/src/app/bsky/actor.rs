@@ -310,18 +310,18 @@ pub struct AdultContentPref {
     pub enabled: bool,
 }
 
-/// A grab bag of state that's specific to the bsky.app program. 
+/// A grab bag of state that's specific to the bsky.app program.
 /// Third-party apps shouldn't use this.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BskyAppStatePref {
     pub active_progress_guide: Option<BskyAppProgressGuide>,
-    // An array of tokens which identify nudges (modals, popups, tours, highlight dots) 
+    // An array of tokens which identify nudges (modals, popups, tours, highlight dots)
     // that should be shown to the user.
     pub queued_nudges: Option<Vec<String>>,
 }
 
-/// If set, an active progress guide. Once completed, can be set to undefined. 
+/// If set, an active progress guide. Once completed, can be set to undefined.
 /// Should have unspecced fields tracking progress.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BskyAppProgressGuide {

@@ -1,6 +1,6 @@
 use crate::com::atproto::sync::{default_resource, deserialize_option_cid_v1};
 use lexicon_cid::Cid;
-use serde::ser::{Serializer, SerializeMap};
+use serde::ser::{SerializeMap, Serializer};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -16,7 +16,10 @@ pub struct Record {
     pub value: Value,
 }
 
-fn serialize_option_cid_as_link<S>(cid_option: &Option<Cid>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_option_cid_as_link<S>(
+    cid_option: &Option<Cid>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
