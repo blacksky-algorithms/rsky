@@ -1,11 +1,17 @@
 use super::{Leaf, NodeData, NodeEntry, TreeEntry, MST};
+use crate::common;
 use crate::common::ipld;
+use crate::common::ipld::cid_for_cbor;
+use crate::common::tid::Ticker;
 use crate::storage::SqlRepoReader;
 use anyhow::{anyhow, Result};
 use lazy_static::lazy_static;
 use lexicon_cid::Cid;
+use rand::{thread_rng, Rng};
 use regex::Regex;
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::str;
 
 fn is_valid_chars(input: &str) -> bool {
@@ -175,4 +181,45 @@ pub fn leading_zeros_on_hash(key: &Vec<u8>) -> Result<u32> {
         }
     }
     Ok(leading_zeros)
+}
+
+pub type IdMapping = BTreeMap<String, Cid>;
+
+pub fn random_cid(storage: &mut Option<&mut SqlRepoReader>) -> Result<Cid> {
+    let record = json!({ "test": random_str(50) });
+    let cid = cid_for_cbor(&record)?;
+    let bytes = common::struct_to_cbor(record)?;
+    if let Some(ref mut storage) = storage {
+        storage.blocks.set(cid, bytes);
+    }
+    Ok(cid)
+}
+
+pub fn generate_bulk_data_keys(
+    count: usize,
+    mut blockstore: Option<&mut SqlRepoReader>,
+) -> Result<IdMapping> {
+    let mut obj: IdMapping = BTreeMap::new();
+    for _ in 0..count {
+        let key = format!(
+            "com.example.record/{}",
+            Ticker::new().next(None).to_string()
+        );
+        obj.insert(key, random_cid(&mut blockstore)?);
+    }
+    Ok(obj)
+}
+
+pub fn random_str(len: usize) -> String {
+    const CHARSET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let charset_len = CHARSET.len();
+    let mut rng = thread_rng();
+
+    let result: String = (0..len)
+        .map(|_| {
+            let idx = rng.gen_range(0..charset_len);
+            CHARSET[idx] as char
+        })
+        .collect();
+    result
 }

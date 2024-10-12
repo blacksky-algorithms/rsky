@@ -65,8 +65,8 @@ mod tests {
 
     use futures::TryStreamExt;
     use libipld::cbor::DagCborCodec;
-    use libipld::Cid;
     use libipld::multihash::{Code, MultihashDigest};
+    use libipld::Cid;
 
     use super::super::{header::CarHeaderV1, writer::CarWriter};
 

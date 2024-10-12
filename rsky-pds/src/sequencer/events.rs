@@ -10,9 +10,9 @@ use crate::repo::util::format_data_key;
 use anyhow::Result;
 use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
+use rsky_syntax::aturi::AtUri;
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};
-use rsky_syntax::aturi::AtUri;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum CommitEvtOpAction {

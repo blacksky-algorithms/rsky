@@ -12,7 +12,6 @@
  * For atproto, we use SHA-256 as the key hashing algorithm, and ~4 fanout
  * (2-bits of zero per layer).
  */
-
 use crate::common;
 use crate::common::ipld;
 use crate::repo::block_map::BlockMap;
@@ -195,10 +194,10 @@ impl Iterator for NodeIterReachable {
 /// treeEntry are elements of nodeData's Entries.
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct TreeEntry {
-    pub p: u8,          // count of characters shared with previous path/key in tree
+    pub p: u8, // count of characters shared with previous path/key in tree
     #[serde(with = "serde_bytes")]
-    pub k: Vec<u8>,     // remaining part of path/key (appended to "previous key")
-    pub v: Cid,         // CID pointer at this path/key
+    pub k: Vec<u8>, // remaining part of path/key (appended to "previous key")
+    pub v: Cid, // CID pointer at this path/key
     pub t: Option<Cid>, // [optional] pointer to lower-level subtree to the "right" of this path/key entry
 }
 
@@ -647,8 +646,7 @@ impl MST {
                     (Some(NodeEntry::MST(mut p)), Some(NodeEntry::MST(n))) => {
                         let merged = p.append_merge(n)?;
                         let mut new_tree_entries: Vec<NodeEntry> = Vec::new();
-                        new_tree_entries
-                            .append(&mut self.slice(Some(0), Some(index - 1))?);
+                        new_tree_entries.append(&mut self.slice(Some(0), Some(index - 1))?);
                         new_tree_entries.push(NodeEntry::MST(merged));
                         new_tree_entries.append(&mut self.slice(Some(index + 2), None)?);
                         self.new_tree(new_tree_entries)
@@ -912,11 +910,7 @@ impl MST {
 
     pub fn create_child(&mut self) -> Result<MST> {
         let layer = self.get_layer()?;
-        MST::create(
-            self.storage.clone(),
-            Some(Vec::new()),
-            Some(layer - 1),
-        )
+        MST::create(self.storage.clone(), Some(Vec::new()), Some(layer - 1))
     }
 
     pub fn create_parent(mut self) -> Result<Self> {
@@ -936,14 +930,10 @@ impl MST {
     /// finds index of first leaf node that is greater than or equal to the value
     pub fn find_gt_or_equal_leaf_index(&mut self, key: &String) -> Result<isize> {
         let entries = self.get_entries()?;
-        let maybe_index = entries
-            .iter()
-            .position(|entry| {
-                match entry {
-                    NodeEntry::MST(_) => false,
-                    NodeEntry::Leaf(entry) => entry.key >= *key
-                }
-            });
+        let maybe_index = entries.iter().position(|entry| match entry {
+            NodeEntry::MST(_) => false,
+            NodeEntry::Leaf(entry) => entry.key >= *key,
+        });
         // if we can't find, we're on the end
         if let Some(i) = maybe_index {
             Ok(i as isize)
@@ -1187,12 +1177,44 @@ pub mod walker;
 
 #[cfg(test)]
 mod tests {
+    use super::util::*;
     use super::*;
     use anyhow::Result;
-    use super::util::*;
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
 
     fn string_to_vec_u8(input: &str) -> Vec<u8> {
         input.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn adds_records() -> Result<()> {
+        let mut storage =
+            SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mapping = generate_bulk_data_keys(254, Some(&mut storage))?;
+        let mut mst = MST::create(storage, None, None)?;
+        let mut rng = thread_rng();
+
+        let mut entries = mapping
+            .iter()
+            .map(|e| (e.0.clone(), e.1.clone()))
+            .collect::<Vec<(String, Cid)>>();
+        entries.shuffle(&mut rng);
+
+        for entry in &entries {
+            let start = std::time::Instant::now();
+            mst = mst.add(&entry.0, entry.1, None)?;
+            let duration = start.elapsed();
+            println!("Time:{:?}, Key:{}, Cid:{:?}", duration, &entry.0, entry.1);
+        }
+        for entry in entries {
+            let got = mst.get(&entry.0)?;
+            assert_eq!(Some(entry.1), got);
+        }
+        let total_size = mst.leaf_count()?;
+        assert_eq!(total_size, 254);
+
+        Ok(())
     }
 
     #[test]
@@ -1232,7 +1254,12 @@ mod tests {
         // Helper macro to handle assertions
         macro_rules! assert_prefix_len {
             ($a:expr, $b:expr, $expected:expr) => {
-                assert_eq!(count_prefix_len($a.to_string(), $b.to_string())?, $expected, "{}", msg);
+                assert_eq!(
+                    count_prefix_len($a.to_string(), $b.to_string())?,
+                    $expected,
+                    "{}",
+                    msg
+                );
             };
         }
 
@@ -1259,13 +1286,18 @@ mod tests {
 
         // Testing string lengths (Note: length in bytes, not characters)
         assert_eq!("jalapeño".len(), 9, "{}", msg); // 9 bytes in Rust, same as Go
-        assert_eq!("💩".len(), 4, "{}", msg);        // 4 bytes in Rust, same as Go
-        assert_eq!("👩‍👧‍👧".len(), 18, "{}", msg);   // 18 bytes in Rust, same as Go
+        assert_eq!("💩".len(), 4, "{}", msg); // 4 bytes in Rust, same as Go
+        assert_eq!("👩‍👧‍👧".len(), 18, "{}", msg); // 18 bytes in Rust, same as Go
 
         // Helper macro to handle assertions for count_prefix_len
         macro_rules! assert_prefix_len {
             ($a:expr, $b:expr, $expected:expr) => {
-                assert_eq!(count_prefix_len($a.to_string(), $b.to_string())?, $expected, "{}", msg);
+                assert_eq!(
+                    count_prefix_len($a.to_string(), $b.to_string())?,
+                    $expected,
+                    "{}",
+                    msg
+                );
             };
         }
 
@@ -1334,7 +1366,13 @@ mod tests {
         assert!(result.is_ok());
 
         // Allows URL-safe chars
-        let valid_keys = vec!["coll/key0", "coll/key_", "coll/key:", "coll/key.", "coll/key-"];
+        let valid_keys = vec![
+            "coll/key0",
+            "coll/key_",
+            "coll/key:",
+            "coll/key.",
+            "coll/key-",
+        ];
         for key in valid_keys {
             let result = mst.add(&key.to_string(), cid1, None);
             assert!(result.is_ok(), "Key '{}' should be valid", key);
@@ -1352,7 +1390,10 @@ mod tests {
         let mut mst = MST::create(storage, None, None)?;
 
         assert_eq!(mst.clone().leaf_count()?, 0);
-        assert_eq!(mst.get_pointer()?.to_string(), "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm");
+        assert_eq!(
+            mst.get_pointer()?.to_string(),
+            "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm"
+        );
 
         Ok(())
     }
@@ -1366,7 +1407,10 @@ mod tests {
 
         mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?;
         assert_eq!(mst.clone().leaf_count()?, 1);
-        assert_eq!(mst.get_pointer()?.to_string(), "bafyreibj4lsc3aqnrvphp5xmrnfoorvru4wynt6lwidqbm2623a6tatzdu");
+        assert_eq!(
+            mst.get_pointer()?.to_string(),
+            "bafyreibj4lsc3aqnrvphp5xmrnfoorvru4wynt6lwidqbm2623a6tatzdu"
+        );
 
         Ok(())
     }
@@ -1381,7 +1425,10 @@ mod tests {
         mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?;
         assert_eq!(mst.clone().leaf_count()?, 1);
         assert_eq!(mst.clone().layer, Some(2));
-        assert_eq!(mst.get_pointer()?.to_string(), "bafyreih7wfei65pxzhauoibu3ls7jgmkju4bspy4t2ha2qdjnzqvoy33ai");
+        assert_eq!(
+            mst.get_pointer()?.to_string(),
+            "bafyreih7wfei65pxzhauoibu3ls7jgmkju4bspy4t2ha2qdjnzqvoy33ai"
+        );
 
         Ok(())
     }
@@ -1399,7 +1446,10 @@ mod tests {
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
         assert_eq!(mst.clone().leaf_count()?, 5);
-        assert_eq!(mst.get_pointer()?.to_string(), "bafyreicmahysq4n6wfuxo522m6dpiy7z7qzym3dzs756t5n7nfdgccwq7m");
+        assert_eq!(
+            mst.get_pointer()?.to_string(),
+            "bafyreicmahysq4n6wfuxo522m6dpiy7z7qzym3dzs756t5n7nfdgccwq7m"
+        );
 
         Ok(())
     }
@@ -1462,7 +1512,7 @@ mod tests {
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // C; level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // D; level 1
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // E; level 0
-        // GAP for F
+                                                                                             // GAP for F
         let mut mst = mst.add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)?; // G; level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // H; level 0
         let mut mst = mst.add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)?; // I; level 1
