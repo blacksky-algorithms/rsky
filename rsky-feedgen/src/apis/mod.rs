@@ -496,10 +496,10 @@ pub async fn queue_creation(
 ) -> Result<(), String> {
     use crate::schema::follow::dsl as FollowSchema;
     use crate::schema::image::dsl as ImageSchema;
-    use crate::schema::video::dsl as VideoSchema;
     use crate::schema::like::dsl as LikeSchema;
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
+    use crate::schema::video::dsl as VideoSchema;
 
     let result = connection.run( move |conn| {
         if lex == "posts" {
