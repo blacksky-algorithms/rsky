@@ -1251,6 +1251,47 @@ mod tests {
     }
 
     #[test]
+    fn deletes_records() -> Result<()> {
+        let mut storage =
+            SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mapping = generate_bulk_data_keys(254, Some(&mut storage))?;
+        let mut mst = MST::create(storage, None, None)?;
+        let mut rng = thread_rng();
+
+        let mut entries = mapping
+            .iter()
+            .map(|e| (e.0.clone(), e.1.clone()))
+            .collect::<Vec<(String, Cid)>>();
+        entries.shuffle(&mut rng);
+
+        for entry in &entries {
+            mst = mst.add(&entry.0, entry.1, None)?;
+        }
+
+        let to_delete = &entries[0..100];
+        let the_rest = &entries[100..entries.len()];
+
+        for entry in to_delete {
+            mst = mst.delete(&entry.0)?;
+        }
+
+        let total_size = mst.clone().leaf_count()?;
+        assert_eq!(total_size, 154);
+
+        for entry in to_delete {
+            let got = mst.get(&entry.0)?;
+            assert_eq!(None, got);
+        }
+
+        for entry in the_rest {
+            let got = mst.get(&entry.0)?;
+            assert_eq!(Some(entry.1), got);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_leading_zeros() -> Result<()> {
         let msg = "MST 'depth' computation (SHA-256 leading zeros)";
 
