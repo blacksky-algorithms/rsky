@@ -63,8 +63,8 @@ infer = "0.15.0"
 urlencoding = "2.1.3"
 toml = "0.8.12"
 ws = { package = "rocket_ws", version = "0.1.1" }
-atrium-api = "0.23.2"
-atrium-xrpc-client = "0.5.5"
+atrium-api = "0.24.6"
+atrium-xrpc-client = "0.5.8"
 atrium-ipld = {package = "ipld-core", version = "0.4.1"}
 time = "^0.3.36"
 url = "2.5.2"
