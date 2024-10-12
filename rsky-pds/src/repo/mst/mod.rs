@@ -611,19 +611,19 @@ impl MST {
         let found = self.at_index(index)?;
         if let Some(NodeEntry::Leaf(f)) = found {
             if f.key == *key {
-                return Ok(self.update_entry(
+                return self.update_entry(
                     index,
                     NodeEntry::Leaf(Leaf {
                         key: key.clone(),
                         value,
                     }),
-                )?);
+                );
             }
         }
         let prev = self.at_index(index - 1)?;
         if let Some(NodeEntry::MST(mut p)) = prev {
             let updated_tree = p.update(key, value)?;
-            return Ok(self.update_entry(index - 1, NodeEntry::MST(updated_tree.clone()))?);
+            return self.update_entry(index - 1, NodeEntry::MST(updated_tree.clone()));
         }
         Err(anyhow!("Could not find a record with key: {}", key))
     }
@@ -683,7 +683,6 @@ impl MST {
         for e in self.slice(Some(index + 1), None)? {
             update.push(e.clone());
         }
-
         Ok(self.new_tree(update)?)
     }
 
@@ -1202,10 +1201,10 @@ mod tests {
         entries.shuffle(&mut rng);
 
         for entry in &entries {
-            let start = std::time::Instant::now();
+            //let start = std::time::Instant::now();
             mst = mst.add(&entry.0, entry.1, None)?;
-            let duration = start.elapsed();
-            println!("Time:{:?}, Key:{}, Cid:{:?}", duration, &entry.0, entry.1);
+            //let duration = start.elapsed();
+            //println!("Time:{:?}, Key:{}, Cid:{:?}", duration, &entry.0, entry.1);
         }
         for entry in entries {
             let got = mst.get(&entry.0)?;
@@ -1213,6 +1212,40 @@ mod tests {
         }
         let total_size = mst.leaf_count()?;
         assert_eq!(total_size, 254);
+
+        Ok(())
+    }
+
+    #[test]
+    fn edits_records() -> Result<()> {
+        let mut storage =
+            SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mapping = generate_bulk_data_keys(100, Some(&mut storage))?;
+        let mut mst = MST::create(storage, None, None)?;
+        let mut rng = thread_rng();
+
+        let mut entries = mapping
+            .iter()
+            .map(|e| (e.0.clone(), e.1.clone()))
+            .collect::<Vec<(String, Cid)>>();
+        entries.shuffle(&mut rng);
+
+        for entry in &entries {
+            mst = mst.add(&entry.0, entry.1, None)?;
+        }
+
+        let mut edited: Vec<(String, Cid)> = Vec::new();
+        for entry in &entries {
+            let new_cid = random_cid(&mut None)?;
+            mst = mst.update(&entry.0, new_cid)?;
+            edited.push((entry.0.clone(), new_cid));
+        }
+        for entry in edited {
+            let got = mst.get(&entry.0)?;
+            assert_eq!(Some(entry.1), got);
+        }
+        let total_size = mst.leaf_count()?;
+        assert_eq!(total_size, 100);
 
         Ok(())
     }
