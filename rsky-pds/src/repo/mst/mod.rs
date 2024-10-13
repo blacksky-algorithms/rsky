@@ -215,6 +215,27 @@ pub struct Leaf {
     pub value: Cid,
 }
 
+impl PartialEq for Leaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.value == other.value
+    }
+}
+
+impl PartialEq<MST> for Leaf {
+    fn eq(&self, _other: &MST) -> bool {
+        false
+    }
+}
+
+impl PartialEq<NodeEntry> for Leaf {
+    fn eq(&self, other: &NodeEntry) -> bool {
+        match other {
+            NodeEntry::Leaf(other) => self.key == other.key && self.value == other.value,
+            NodeEntry::MST(_) => false,
+        }
+    }
+}
+
 /// nodeEntry is a node in the MST.
 ///
 /// Following the Typescript implementation, this is basically a flexible
@@ -268,6 +289,45 @@ impl NodeEntry {
                 parent: None,
                 this: None,
             },
+        }
+    }
+}
+
+impl PartialEq for NodeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (NodeEntry::Leaf(this), NodeEntry::Leaf(other)) => {
+                this.key == other.key && this.value == other.value
+            }
+            (NodeEntry::Leaf(_), NodeEntry::MST(_)) => false,
+            (NodeEntry::MST(_), NodeEntry::Leaf(_)) => false,
+            (NodeEntry::MST(this), NodeEntry::MST(other)) => {
+                let this_pointer = this.clone().get_pointer().unwrap();
+                let other_pointer = other.clone().get_pointer().unwrap();
+                this_pointer == other_pointer
+            }
+        }
+    }
+}
+
+impl PartialEq<MST> for NodeEntry {
+    fn eq(&self, other: &MST) -> bool {
+        match self {
+            NodeEntry::Leaf(_) => false,
+            NodeEntry::MST(this) => {
+                let this_pointer = this.clone().get_pointer().unwrap();
+                let other_pointer = other.clone().get_pointer().unwrap();
+                this_pointer == other_pointer
+            }
+        }
+    }
+}
+
+impl PartialEq<Leaf> for NodeEntry {
+    fn eq(&self, other: &Leaf) -> bool {
+        match self {
+            NodeEntry::Leaf(this) => this.key == other.key && this.value == other.value,
+            NodeEntry::MST(_) => false,
         }
     }
 }
@@ -1041,8 +1101,16 @@ impl MST {
     /// Walks tree & returns all nodes
     pub fn all_nodes(self) -> Result<Vec<NodeEntry>> {
         let mut nodes: Vec<NodeEntry> = Vec::new();
-        for entry in self.walk() {
-            nodes.push(entry);
+        for mut entry in self.walk() {
+            match entry {
+                NodeEntry::Leaf(_) => nodes.push(entry),
+                NodeEntry::MST(mut m) => {
+                    if m.outdated_pointer {
+                        m.pointer = m.get_pointer()?;
+                    }
+                    nodes.push(NodeEntry::MST(m))
+                }
+            }
         }
         Ok(nodes)
     }
@@ -1170,6 +1238,33 @@ impl MST {
     }
 }
 
+impl PartialEq for MST {
+    fn eq(&self, other: &Self) -> bool {
+        let this_pointer = self.clone().get_pointer().unwrap();
+        let other_pointer = other.clone().get_pointer().unwrap();
+        this_pointer == other_pointer
+    }
+}
+
+impl PartialEq<Leaf> for MST {
+    fn eq(&self, _other: &Leaf) -> bool {
+        false
+    }
+}
+
+impl PartialEq<NodeEntry> for MST {
+    fn eq(&self, other: &NodeEntry) -> bool {
+        match other {
+            NodeEntry::Leaf(_) => false,
+            NodeEntry::MST(other) => {
+                let this_pointer = self.clone().get_pointer().unwrap();
+                let other_pointer = other.clone().get_pointer().unwrap();
+                this_pointer == other_pointer
+            }
+        }
+    }
+}
+
 pub mod diff;
 pub mod util;
 pub mod walker;
@@ -1287,6 +1382,43 @@ mod tests {
             let got = mst.get(&entry.0)?;
             assert_eq!(Some(entry.1), got);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_order_independent() -> Result<()> {
+        let mut storage =
+            SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mapping = generate_bulk_data_keys(254, Some(&mut storage))?;
+        let mut mst = MST::create(storage, None, None)?;
+        let mut rng = thread_rng();
+
+        let mut entries = mapping
+            .iter()
+            .map(|e| (e.0.clone(), e.1.clone()))
+            .collect::<Vec<(String, Cid)>>();
+        entries.shuffle(&mut rng);
+
+        for entry in &entries {
+            mst = mst.add(&entry.0, entry.1, None)?;
+        }
+
+        let mut recreated = MST::create(mst.storage.clone(), None, None)?;
+        let all_nodes = mst.all_nodes()?;
+
+        let mut reshuffled = mapping
+            .iter()
+            .map(|e| (e.0.clone(), e.1.clone()))
+            .collect::<Vec<(String, Cid)>>();
+        reshuffled.shuffle(&mut rng);
+
+        for entry in &reshuffled {
+            recreated = recreated.add(&entry.0, entry.1, None)?;
+        }
+        let all_reshuffled = recreated.all_nodes()?;
+        assert_eq!(all_nodes.len(), all_reshuffled.len());
+        assert_eq!(all_nodes, all_reshuffled);
 
         Ok(())
     }
