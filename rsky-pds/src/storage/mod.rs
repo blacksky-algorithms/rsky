@@ -253,8 +253,11 @@ impl SqlRepoReader {
     }
 
     pub fn has(&mut self, cid: Cid) -> Result<bool> {
-        let got = self.get_bytes(&cid)?;
-        Ok(!got.is_empty())
+        let got = self.get_bytes(&cid);
+        match got {
+            Ok(got) => Ok(!got.is_empty()),
+            Err(_) => Ok(false),
+        }
     }
 
     pub fn attempt_read(

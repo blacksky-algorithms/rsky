@@ -223,3 +223,11 @@ pub fn random_str(len: usize) -> String {
         .collect();
     result
 }
+
+pub async fn save_mst(storage: &SqlRepoReader, mst: &mut MST) -> Result<Cid> {
+    let diff = mst.get_unstored_blocks()?;
+    storage
+        .put_many(diff.blocks, Ticker::new().next(None).to_string())
+        .await?;
+    Ok(diff.root)
+}

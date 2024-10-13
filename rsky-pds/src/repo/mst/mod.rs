@@ -90,7 +90,7 @@ impl Iterator for NodeIter {
 
                 // start iterating the child trees
                 *self = NodeIter {
-                    entries: subtree.get_entries().unwrap(),
+                    entries: subtree.get_entries().unwrap_or(vec![]),
                     parent: Some(Box::new(mem::take(self))),
                     this: Some(this),
                 };
@@ -342,6 +342,7 @@ impl PartialEq<Leaf> for NodeEntry {
     }
 }*/
 
+#[derive(Debug)]
 pub struct UnstoredBlocks {
     root: Cid,
     blocks: BlockMap,
@@ -538,7 +539,7 @@ impl MST {
         }
         let entries = self.get_entries()?;
         let data = util::serialize_node_data(entries.clone())?;
-        blocks.add(data)?;
+        let _ = blocks.add(data)?;
         for entry in entries {
             if let NodeEntry::MST(mut e) = entry {
                 let subtree = e.get_unstored_blocks()?;
@@ -1101,7 +1102,7 @@ impl MST {
     /// Walks tree & returns all nodes
     pub fn all_nodes(self) -> Result<Vec<NodeEntry>> {
         let mut nodes: Vec<NodeEntry> = Vec::new();
-        for mut entry in self.walk() {
+        for entry in self.walk() {
             match entry {
                 NodeEntry::Leaf(_) => nodes.push(entry),
                 NodeEntry::MST(mut m) => {
@@ -1419,6 +1420,25 @@ mod tests {
         let all_reshuffled = recreated.all_nodes()?;
         assert_eq!(all_nodes.len(), all_reshuffled.len());
         assert_eq!(all_nodes, all_reshuffled);
+
+        Ok(())
+    }
+
+    #[test]
+    fn saves_and_loads_from_blockstore() -> Result<()> {
+        let mut storage =
+            SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mapping = generate_bulk_data_keys(50, Some(&mut storage))?;
+        let mut mst = MST::create(storage, None, None)?;
+
+        let mst_storage = mst.storage.clone();
+        let root = futures::executor::block_on(save_mst(&mst_storage, &mut mst))?;
+        let loaded = MST::load(mst_storage, root, None)?;
+        let original_nodes = mst.all_nodes()?;
+        let loaded_nodes = loaded.all_nodes()?;
+
+        assert_eq!(original_nodes.len(), loaded_nodes.len());
+        assert_eq!(original_nodes, loaded_nodes);
 
         Ok(())
     }
