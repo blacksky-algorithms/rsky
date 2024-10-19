@@ -4,7 +4,6 @@ extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
 
-extern crate lazy_static;
 extern crate rsky_lexicon;
 
 use diesel::pg::PgConnection;
@@ -16,8 +15,16 @@ pub struct WriteDbConn(PgConnection);
 #[database("pg_read_replica")]
 pub struct ReadReplicaConn(PgConnection);
 
+#[derive(Clone)]
+pub struct FeedGenConfig {
+    pub show_sponsored_post: bool,
+    pub sponsored_post_uri: String,
+    pub sponsored_post_probability: f64,
+}
+
 pub mod apis;
 pub mod auth;
 pub mod db;
 pub mod models;
+pub mod routes;
 pub mod schema;

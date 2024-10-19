@@ -1,12 +1,14 @@
 use crate::db::*;
 use crate::models::*;
-use crate::{ReadReplicaConn, WriteDbConn};
+use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use rand::Rng;
 use regex::Regex;
+use rocket::State;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -346,8 +348,17 @@ pub async fn get_all_posts(
     params_cursor: Option<&str>,
     only_posts: bool,
     connection: ReadReplicaConn,
+    config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl as PostSchema;
+    let show_sponsored_post = config.show_sponsored_post.clone();
+    let sponsored_post_uri = config.sponsored_post_uri.clone();
+    let sponsored_post_probability = config.sponsored_post_probability.clone();
+
+    println!(
+        "@TEST: Getting posts and sponsored posts is: {}",
+        show_sponsored_post
+    );
     let params_cursor = match params_cursor {
         None => None,
         Some(params_cursor) => Some(params_cursor.to_string()),
@@ -411,7 +422,7 @@ pub async fn get_all_posts(
             let mut post_results = Vec::new();
             let mut cursor: Option<String> = None;
 
-            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
+            // Set the cursor
             if let Some(last_post) = results.last() {
                 if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
                 {
@@ -431,8 +442,26 @@ pub async fn get_all_posts(
                 })
                 .for_each(drop);
 
+            // Insert the sponsored post if the conditions are met
+            if show_sponsored_post && post_results.len() >= 3 && !sponsored_post_uri.is_empty() {
+                // Generate a random chance to include the sponsored post based on probability
+                let mut rng = rand::thread_rng();
+                let random_chance: f64 = rng.gen();
+
+                // Only include the sponsored post if random chance is below the specified probability
+                if random_chance < sponsored_post_probability {
+                    // Generate a random index to insert the sponsored post (ensure it's not the last position)
+                    let replace_index = rng.gen_range(0..(post_results.len() - 1));
+
+                    // Replace a random post with the sponsored post
+                    post_results[replace_index] = PostResult {
+                        post: sponsored_post_uri.clone(),
+                    };
+                }
+            }
+
             let new_response = AlgoResponse {
-                cursor: cursor,
+                cursor,
                 feed: post_results,
             };
             Ok(new_response)
@@ -483,9 +512,10 @@ pub fn is_excluded(
 }
 
 fn extract_hashtags(input: &str) -> HashSet<&str> {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"\#[a-zA-Z][0-9a-zA-Z_]*").unwrap();
-    }
+    // Define the regex as a Lazy static variable
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\#[a-zA-Z][0-9a-zA-Z_]*").unwrap());
+
+    // Use the regex to find hashtags in the input
     RE.find_iter(input).map(|mat| mat.as_str()).collect()
 }
 
@@ -982,4 +1012,337 @@ pub async fn get_cursor(
         .await;
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::{index, BLACKSKY};
+    use rocket::figment::map;
+    use rocket::figment::value::{Map, Value};
+    use rocket::http::Status;
+    use rocket::local::asynchronous::Client;
+    use rocket::{routes, Build, Rocket};
+    use std::env;
+    use temp_env::async_with_vars;
+
+    fn before(config: FeedGenConfig) -> Rocket<Build> {
+        // Initialize Rocket with ReadReplicaConn and other necessary fairings/routes
+        let write_database_url = env::var("DATABASE_URL").unwrap();
+        let read_database_url = env::var("READ_REPLICA_URL").unwrap();
+
+        let write_db: Map<_, Value> = map! {
+            "url" => write_database_url.into(),
+            "pool_size" => 20.into(),
+            "timeout" => 30.into(),
+        };
+
+        let read_db: Map<_, Value> = map! {
+            "url" => read_database_url.into(),
+            "pool_size" => 20.into(),
+            "timeout" => 30.into(),
+        };
+
+        let figment = rocket::Config::figment().merge((
+            "databases",
+            map!["pg_read_replica" => read_db, "pg_db" => write_db],
+        ));
+
+        rocket::custom(figment)
+            .attach(WriteDbConn::fairing())
+            .attach(ReadReplicaConn::fairing())
+            .mount("/", routes![index])
+            .manage(config)
+    }
+
+    #[rocket::async_test]
+    async fn test_no_sponsored_post_when_show_sponsored_post_is_false() {
+        // Set environment variables temporarily using temp_env for this test
+        async_with_vars(
+            vec![
+                (
+                    "DATABASE_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+                (
+                    "READ_REPLICA_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+            ],
+            async {
+                let config = FeedGenConfig {
+                    show_sponsored_post: false,
+                    sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    sponsored_post_probability: 1.0
+                };
+                let rocket = before(config.clone());
+
+                // Create a client for testing
+                let client = Client::tracked(rocket)
+                    .await
+                    .expect("valid rocket instance");
+
+                // Make a request to the `get_all_posts` endpoint (adjust the route as necessary)
+                let response = client
+                    .get(format!(
+                        "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}",
+                        BLACKSKY
+                    ))
+                    .dispatch()
+                    .await;
+
+                // Ensure the request succeeded
+                assert_eq!(
+                    response.status(),
+                    Status::Ok,
+                    "{}",
+                    format!("{:?}", response.into_string().await)
+                );
+
+                // Extract the response body and check that the sponsored post is not present
+                let body = response.into_json::<AlgoResponse>().await.unwrap();
+                assert!(
+                    !body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    "Sponsored post should not be returned"
+                );
+            },
+        )
+        .await;
+    }
+
+    #[rocket::async_test]
+    async fn test_sponsored_post_always_returned_when_probability_is_1() {
+        async_with_vars(
+            vec![
+                (
+                    "DATABASE_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+                (
+                    "READ_REPLICA_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+            ],
+            async {
+                let config = FeedGenConfig {
+                    show_sponsored_post: true,
+                    sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    sponsored_post_probability: 1.0
+                };
+                let rocket = before(config.clone());
+
+                // Create a client for testing
+                let client = Client::tracked(rocket)
+                    .await
+                    .expect("valid rocket instance");
+
+                // Make a request to the `get_all_posts` endpoint (adjust the route as necessary)
+                let response = client
+                    .get(format!(
+                        "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}",
+                        BLACKSKY
+                    ))
+                    .dispatch()
+                    .await;
+
+                // Ensure the request succeeded
+                assert_eq!(
+                    response.status(),
+                    Status::Ok,
+                    "{}",
+                    format!("{:?}", response.into_string().await)
+                );
+
+                // Extract the response body and check that the sponsored post is not present
+                let body = response.into_json::<AlgoResponse>().await.unwrap();
+                assert!(
+                    body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    "Sponsored post should be returned"
+                );
+            },
+        )
+        .await;
+    }
+
+    #[rocket::async_test]
+    async fn test_sponsored_post_never_returned_when_limit_is_2() {
+        async_with_vars(
+            vec![
+                (
+                    "DATABASE_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+                (
+                    "READ_REPLICA_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+            ],
+            async {
+                let config = FeedGenConfig {
+                    show_sponsored_post: true,
+                    sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    sponsored_post_probability: 1.0
+                };
+                let rocket = before(config.clone());
+
+                // Create a client for testing
+                let client = Client::tracked(rocket)
+                    .await
+                    .expect("valid rocket instance");
+
+                // Make a request to the `get_all_posts` endpoint (adjust the route as necessary)
+                let response = client
+                    .get(format!(
+                        "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}&limit=2",
+                        BLACKSKY
+                    ))
+                    .dispatch()
+                    .await;
+
+                // Ensure the request succeeded
+                assert_eq!(
+                    response.status(),
+                    Status::Ok,
+                    "{}",
+                    format!("{:?}", response.into_string().await)
+                );
+
+                // Extract the response body and check that the sponsored post is not present
+                let body = response.into_json::<AlgoResponse>().await.unwrap();
+                assert!(
+                    !body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    "Sponsored post should not be returned when limit is 2"
+                );
+            },
+        )
+        .await;
+    }
+
+    #[rocket::async_test]
+    async fn test_sponsored_post_returned_50_percent_of_the_time() {
+        async_with_vars(
+            vec![
+                (
+                    "DATABASE_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+                (
+                    "READ_REPLICA_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+            ],
+            async {
+                let config = FeedGenConfig {
+                    show_sponsored_post: true,
+                    sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    sponsored_post_probability: 0.5
+                };
+                let rocket = before(config.clone());
+
+                // Create a client for testing
+                let client = Client::tracked(rocket)
+                    .await
+                    .expect("valid rocket instance");
+
+                let mut sponsored_count = 0;
+                let iterations = 100;
+                let mut cursor: Option<String> = None;
+
+                for _ in 0..iterations {
+                    let path = match cursor {
+                        None => format!(
+                            "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}&limit=5",
+                            BLACKSKY
+                        ),
+                        Some(cursor) => format!(
+                            "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}&limit=5&cursor={}",
+                            BLACKSKY, cursor
+                        ),
+                    };
+                    let response = client.get(path).dispatch().await;
+                    let body = response.into_json::<AlgoResponse>().await.unwrap();
+
+                    if body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri) {
+                        sponsored_count += 1;
+                    }
+                    if let Some(c) = body.cursor {
+                        cursor = Some(c);
+                    } else {
+                        cursor = None;
+                    }
+                }
+
+                let proportion = sponsored_count as f64 / iterations as f64;
+                assert!(
+                    (0.45..=0.55).contains(&proportion),
+                    "Sponsored post should be returned ~50% of the time, actual: {}",
+                    proportion
+                );
+            },
+        )
+        .await;
+    }
+
+    #[rocket::async_test]
+    async fn test_sponsored_post_never_last() {
+        async_with_vars(
+            vec![
+                (
+                    "DATABASE_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+                (
+                    "READ_REPLICA_URL",
+                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                ),
+            ],
+            async {
+                let config = FeedGenConfig {
+                    show_sponsored_post: true,
+                    sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    sponsored_post_probability: 1.0
+                };
+                let rocket = before(config.clone());
+
+                // Create a client for testing
+                let client = Client::tracked(rocket)
+                    .await
+                    .expect("valid rocket instance");
+
+                let mut times_last = 0;
+                let iterations = 100;
+                let mut cursor: Option<String> = None;
+
+                for _ in 0..iterations {
+                    let path = match cursor {
+                        None => format!(
+                            "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}&limit=5",
+                            BLACKSKY
+                        ),
+                        Some(cursor) => format!(
+                            "/xrpc/app.bsky.feed.getFeedSkeleton?feed={}&limit=5&cursor={}",
+                            BLACKSKY, cursor
+                        ),
+                    };
+                    let response = client.get(path).dispatch().await;
+                    let body = response.into_json::<AlgoResponse>().await.unwrap();
+
+                    if let Some(last_post) = body.feed.iter().last() {
+                        if &last_post.post == &config.sponsored_post_uri {
+                            times_last += 1;
+                        }
+                    }
+
+                    if let Some(c) = body.cursor {
+                        cursor = Some(c);
+                    } else {
+                        cursor = None;
+                    }
+                }
+
+                assert_eq!(times_last, 0);
+            },
+        )
+        .await;
+    }
 }
