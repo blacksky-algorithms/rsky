@@ -1062,11 +1062,11 @@ mod tests {
             vec![
                 (
                     "DATABASE_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
                 (
                     "READ_REPLICA_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
             ],
             async {
@@ -1116,11 +1116,11 @@ mod tests {
             vec![
                 (
                     "DATABASE_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
                 (
                     "READ_REPLICA_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
             ],
             async {
@@ -1170,11 +1170,11 @@ mod tests {
             vec![
                 (
                     "DATABASE_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
                 (
                     "READ_REPLICA_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
             ],
             async {
@@ -1224,11 +1224,11 @@ mod tests {
             vec![
                 (
                     "DATABASE_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
                 (
                     "READ_REPLICA_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
             ],
             async {
@@ -1289,11 +1289,11 @@ mod tests {
             vec![
                 (
                     "DATABASE_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
                 (
                     "READ_REPLICA_URL",
-                    Some("postgresql://rudyfraser@localhost:5432/rsky_local"),
+                    Some("postgresql://postgres@localhost:5432/local"),
                 ),
             ],
             async {
