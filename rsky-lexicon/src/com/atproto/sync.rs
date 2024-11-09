@@ -3,6 +3,7 @@ use lexicon_cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_cbor::tags::Tagged;
 use std::fmt;
+use serde_json::Value;
 
 const CBOR_TAG_CID: u64 = 42;
 const MULTIBASE_IDENTITY: u8 = 0;
@@ -189,23 +190,24 @@ pub fn deserialize_option_cid_v1<'de, D>(deserializer: D) -> Result<Option<Cid>,
 where
     D: Deserializer<'de>,
 {
-    let opt_buf = Option::<Tagged<serde_bytes::ByteBuf>>::deserialize(deserializer)?;
-    match opt_buf {
+    // Deserialize into an optional map, expecting an object like {"$link": "cid_string"}
+    let opt_map = Option::<serde_json::Map<String, Value>>::deserialize(deserializer)?;
+
+    match opt_map {
+        // If there's no object, return None
         None => Ok(None),
-        Some(buf) => match buf.tag {
-            Some(CBOR_TAG_CID) | None => {
-                let mut bz = buf.value.into_vec();
-
-                if bz.first() == Some(&MULTIBASE_IDENTITY) {
-                    bz.remove(0);
-                }
-
-                Ok(Some(Cid::try_from(bz).map_err(|e| {
-                    serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
-                })?))
+        Some(map) => {
+            // Check if the map contains the "$link" key
+            if let Some(Value::String(link)) = map.get("$link") {
+                // Attempt to parse the CID from the string value
+                Cid::try_from(link.as_str())
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            } else {
+                // Return error if "$link" is missing or not a string
+                Err(serde::de::Error::custom("expected \"$link\" field with CID string"))
             }
-            Some(_) => Err(serde::de::Error::custom("unexpected tag")),
-        },
+        }
     }
 }
 
