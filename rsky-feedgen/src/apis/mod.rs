@@ -255,7 +255,8 @@ pub async fn get_blacksky_trending(
                 hydrated.\"externalDescription\",
                 hydrated.\"externalThumb\",
                 hydrated.\"quoteCid\",
-                hydrated.\"quoteUri\"
+                hydrated.\"quoteUri\",
+                hydrated.\"createdAt\"
             FROM(
                 SELECT
                     post.*,
