@@ -40,7 +40,7 @@ pub async fn get_posts_by_membership(
                 )
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
-                .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
+                .order((PostSchema::createdAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
             if let Some(lang) = lang {
@@ -54,8 +54,8 @@ pub async fn get_posts_by_membership(
                     .take(2)
                     .map(String::from)
                     .collect::<Vec<_>>();
-                if let [indexed_at_c, cid_c] = &v[..] {
-                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                if let [created_at_c, cid_c] = &v[..] {
+                    if let Ok(timestamp) = created_at_c.parse::<i64>() {
                         let nanoseconds = 230 * 1000000;
                         let datetime = DateTime::<Utc>::from_utc(
                             NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
@@ -65,8 +65,8 @@ pub async fn get_posts_by_membership(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query.filter(
-                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
-                                        PostSchema::indexedAt
+                                    PostSchema::createdAt.lt(timestr.to_owned()).or(
+                                        PostSchema::createdAt
                                             .eq(timestr.to_owned())
                                             .and(PostSchema::cid.lt(cid_c.to_owned())),
                                     ),
@@ -95,7 +95,7 @@ pub async fn get_posts_by_membership(
 
             // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.created_at, "%+")
                 {
                     cursor = Some(format!(
                         "{}::{}",
@@ -114,7 +114,7 @@ pub async fn get_posts_by_membership(
                 .for_each(drop);
 
             let new_response = AlgoResponse {
-                cursor: cursor,
+                cursor,
                 feed: post_results,
             };
             Ok(new_response)
@@ -141,7 +141,7 @@ pub async fn get_blacksky_nsfw(
             let mut query = PostSchema::post
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
-                .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
+                .order((PostSchema::createdAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
             query = query.filter(
@@ -160,8 +160,8 @@ pub async fn get_blacksky_nsfw(
                     .take(2)
                     .map(String::from)
                     .collect::<Vec<_>>();
-                if let [indexed_at_c, cid_c] = &v[..] {
-                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                if let [created_at_c, cid_c] = &v[..] {
+                    if let Ok(timestamp) = created_at_c.parse::<i64>() {
                         let nanoseconds = 230 * 1000000;
                         let datetime = DateTime::<Utc>::from_utc(
                             NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
@@ -171,8 +171,8 @@ pub async fn get_blacksky_nsfw(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query.filter(
-                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
-                                        PostSchema::indexedAt
+                                    PostSchema::createdAt.lt(timestr.to_owned()).or(
+                                        PostSchema::createdAt
                                             .eq(timestr.to_owned())
                                             .and(PostSchema::cid.lt(cid_c.to_owned())),
                                     ),
@@ -197,7 +197,7 @@ pub async fn get_blacksky_nsfw(
 
             // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.created_at, "%+")
                 {
                     cursor = Some(format!(
                         "{}::{}",
@@ -216,7 +216,7 @@ pub async fn get_blacksky_nsfw(
                 .for_each(drop);
 
             let new_response = AlgoResponse {
-                cursor: cursor,
+                cursor,
                 feed: post_results,
             };
             Ok(new_response)
@@ -304,7 +304,7 @@ pub async fn get_blacksky_trending(
             let query_str = format!("{}{};", &query_str, &order_str);
 
             let results = sql_query(query_str)
-                .load::<crate::models::Post>(conn)
+                .load::<Post>(conn)
                 .expect("Error loading post records");
 
             let mut post_results = Vec::new();
@@ -331,7 +331,7 @@ pub async fn get_blacksky_trending(
                 .for_each(drop);
 
             let new_response = AlgoResponse {
-                cursor: cursor,
+                cursor,
                 feed: post_results,
             };
             Ok(new_response)
@@ -355,10 +355,6 @@ pub async fn get_all_posts(
     let sponsored_post_uri = config.sponsored_post_uri.clone();
     let sponsored_post_probability = config.sponsored_post_probability.clone();
 
-    println!(
-        "@TEST: Getting posts and sponsored posts is: {}",
-        show_sponsored_post
-    );
     let params_cursor = match params_cursor {
         None => None,
         Some(params_cursor) => Some(params_cursor.to_string()),
@@ -369,7 +365,7 @@ pub async fn get_all_posts(
             let mut query = PostSchema::post
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
-                .order((PostSchema::indexedAt.desc(), PostSchema::cid.desc()))
+                .order((PostSchema::createdAt.desc(), PostSchema::cid.desc()))
                 .into_boxed();
 
             if let Some(lang) = lang {
@@ -383,8 +379,8 @@ pub async fn get_all_posts(
                     .take(2)
                     .map(String::from)
                     .collect::<Vec<_>>();
-                if let [indexed_at_c, cid_c] = &v[..] {
-                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
+                if let [created_at_c, cid_c] = &v[..] {
+                    if let Ok(timestamp) = created_at_c.parse::<i64>() {
                         let nanoseconds = 230 * 1000000;
                         let datetime = DateTime::<Utc>::from_utc(
                             NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
@@ -394,8 +390,8 @@ pub async fn get_all_posts(
                         match write!(timestr, "{}", datetime.format("%+")) {
                             Ok(_) => {
                                 query = query.filter(
-                                    PostSchema::indexedAt.lt(timestr.to_owned()).or(
-                                        PostSchema::indexedAt
+                                    PostSchema::createdAt.lt(timestr.to_owned()).or(
+                                        PostSchema::createdAt
                                             .eq(timestr.to_owned())
                                             .and(PostSchema::cid.lt(cid_c.to_owned())),
                                     ),
@@ -424,7 +420,7 @@ pub async fn get_all_posts(
 
             // Set the cursor
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
+                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.created_at, "%+")
                 {
                     cursor = Some(format!(
                         "{}::{}",
@@ -567,13 +563,15 @@ pub async fn queue_creation(
                         external_description: None,
                         external_thumb: None,
                         quote_cid: None,
-                        quote_uri: None
+                        quote_uri: None,
+                        created_at: format!("{}", dt.format("%+")), // use now() as a default
                     };
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
                         post_text_original = post_record.text.clone();
                         post_text = post_record.text.to_lowercase();
                         let post_created_at = format!("{}", post_record.created_at.format("%+"));
+                        new_post.created_at = post_created_at.clone();
                         if let Some(reply) = post_record.reply {
                             root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
@@ -716,7 +714,6 @@ pub async fn queue_creation(
 
                     let hashtags = extract_hashtags(&post_text);
                     new_post.text = Some(post_text_original);
-
                     if (is_member ||
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blacktechsky") ||
@@ -747,6 +744,7 @@ pub async fn queue_creation(
                             PostSchema::externalThumb.eq(new_post.external_thumb),
                             PostSchema::quoteCid.eq(new_post.quote_cid),
                             PostSchema::quoteUri.eq(new_post.quote_uri),
+                            PostSchema::createdAt.eq(new_post.created_at),
                         );
                         new_posts.push(new_post);
                         new_images.extend(post_images);
@@ -1073,7 +1071,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: false,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
-                    sponsored_post_probability: 1.0
+                    sponsored_post_probability: 1.0,
                 };
                 let rocket = before(config.clone());
 
@@ -1102,7 +1100,10 @@ mod tests {
                 // Extract the response body and check that the sponsored post is not present
                 let body = response.into_json::<AlgoResponse>().await.unwrap();
                 assert!(
-                    !body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    !body
+                        .feed
+                        .iter()
+                        .any(|post| &post.post == &config.sponsored_post_uri),
                     "Sponsored post should not be returned"
                 );
             },
@@ -1127,7 +1128,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
-                    sponsored_post_probability: 1.0
+                    sponsored_post_probability: 1.0,
                 };
                 let rocket = before(config.clone());
 
@@ -1156,7 +1157,9 @@ mod tests {
                 // Extract the response body and check that the sponsored post is not present
                 let body = response.into_json::<AlgoResponse>().await.unwrap();
                 assert!(
-                    body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    body.feed
+                        .iter()
+                        .any(|post| &post.post == &config.sponsored_post_uri),
                     "Sponsored post should be returned"
                 );
             },
@@ -1181,7 +1184,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
-                    sponsored_post_probability: 1.0
+                    sponsored_post_probability: 1.0,
                 };
                 let rocket = before(config.clone());
 
@@ -1210,7 +1213,10 @@ mod tests {
                 // Extract the response body and check that the sponsored post is not present
                 let body = response.into_json::<AlgoResponse>().await.unwrap();
                 assert!(
-                    !body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri),
+                    !body
+                        .feed
+                        .iter()
+                        .any(|post| &post.post == &config.sponsored_post_uri),
                     "Sponsored post should not be returned when limit is 2"
                 );
             },
@@ -1235,7 +1241,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
-                    sponsored_post_probability: 0.5
+                    sponsored_post_probability: 0.5,
                 };
                 let rocket = before(config.clone());
 
@@ -1262,7 +1268,11 @@ mod tests {
                     let response = client.get(path).dispatch().await;
                     let body = response.into_json::<AlgoResponse>().await.unwrap();
 
-                    if body.feed.iter().any(|post| &post.post == &config.sponsored_post_uri) {
+                    if body
+                        .feed
+                        .iter()
+                        .any(|post| &post.post == &config.sponsored_post_uri)
+                    {
                         sponsored_count += 1;
                     }
                     if let Some(c) = body.cursor {
@@ -1300,7 +1310,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
-                    sponsored_post_probability: 1.0
+                    sponsored_post_probability: 1.0,
                 };
                 let rocket = before(config.clone());
 

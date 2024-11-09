@@ -44,6 +44,8 @@ pub struct Post {
     pub quote_cid: Option<String>,
     #[serde(rename = "quoteUri", skip_serializing_if = "Option::is_none")]
     pub quote_uri: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 impl Queryable<post::SqlType, DB> for Post {
@@ -64,6 +66,7 @@ impl Queryable<post::SqlType, DB> for Post {
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     );
 
     fn build(row: Self::Row) -> deserialize::Result<Self> {
@@ -84,6 +87,7 @@ impl Queryable<post::SqlType, DB> for Post {
             external_thumb: row.13,
             quote_cid: row.14,
             quote_uri: row.15,
+            created_at: row.16,
         })
     }
 }
@@ -109,6 +113,7 @@ where
         post::externalThumb,
         post::quoteCid,
         post::quoteUri,
+        post::createdAt,
     );
 
     fn construct_selection() -> Self::SelectExpression {
@@ -129,6 +134,7 @@ where
             post::externalThumb,
             post::quoteCid,
             post::quoteUri,
+            post::createdAt,
         )
     }
 }
@@ -169,6 +175,8 @@ where
             NamedRow::get::<diesel::dsl::SqlTypeOf<post::quoteCid>, _>(row, "quoteCid")?;
         let quote_uri =
             NamedRow::get::<diesel::dsl::SqlTypeOf<post::quoteUri>, _>(row, "quoteUri")?;
+        let created_at =
+            NamedRow::get::<diesel::dsl::SqlTypeOf<post::createdAt>, _>(row, "createdAt")?;
         Ok(Self {
             uri,
             cid,
@@ -186,6 +194,7 @@ where
             external_thumb,
             quote_cid,
             quote_uri,
+            created_at,
         })
     }
 }

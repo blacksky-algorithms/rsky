@@ -83,6 +83,7 @@ diesel::table! {
         externalThumb -> Nullable<Varchar>,
         quoteCid -> Nullable<Varchar>,
         quoteUri -> Nullable<Varchar>,
+        createdAt -> Varchar,
     }
 }
 
