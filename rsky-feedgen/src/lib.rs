@@ -25,6 +25,7 @@ pub struct FeedGenConfig {
 pub mod apis;
 pub mod auth;
 pub mod db;
+pub mod explicit_slurs;
 pub mod models;
 pub mod routes;
 pub mod schema;

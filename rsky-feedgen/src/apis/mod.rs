@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::explicit_slurs::contains_explicit_slurs;
 use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
@@ -549,7 +550,7 @@ pub async fn queue_creation(
                     let mut post_images = Vec::new();
                     let mut post_videos = Vec::new();
                     let mut new_post = Post {
-                        uri: req.uri,
+                        uri: req.uri.clone(),
                         cid: req.cid,
                         reply_parent: None,
                         reply_root: None,
@@ -714,7 +715,7 @@ pub async fn queue_creation(
                     }
 
                     let hashtags = extract_hashtags(&post_text);
-                    new_post.text = Some(post_text_original);
+                    new_post.text = Some(post_text_original.clone());
                     if (is_member ||
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blacktechsky") ||
@@ -723,7 +724,8 @@ pub async fn queue_creation(
                         !is_blocked &&
                         !hashtags.contains("#private") &&
                         !hashtags.contains("#nofeed") && 
-                        !hashtags.contains("#removefromblacksky") {
+                        !hashtags.contains("#removefromblacksky") &&
+                        !contains_explicit_slurs(post_text_original.as_str()) {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
                         println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {is_member:?} | Hashtags: {hashtags:?}");
@@ -779,6 +781,14 @@ pub async fn queue_creation(
                         hashtags.contains("#removefromblacksky") {
                         println!("Removing member: {:?}", &req.author);
                         members_to_rm.push(req.author.clone());
+                    }
+                    // @TODO: Report to Ozone
+                    if contains_explicit_slurs(post_text_original.as_str()) {
+                        println!(
+                            "@LOG: EXPLICIT SLUR DETECTED: text:`{}`; uri:`{}`;",
+                            post_text_original,
+                            req.uri
+                        );
                     }
                 })
                 .for_each(drop);
