@@ -112,6 +112,9 @@ static BANNED_FROM_TV: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     s.insert("did:plc:s455uh5xrwiicgd4wauoyq25"); // Troll
     s.insert("did:plc:3fbca6a3yrydvs43rlnmjseu"); // Troll
     s.insert("did:plc:wdbjnc3safjqexedt47wew5z"); // Troll
+    s.insert("did:plc:ndthbydalxvn6im3xbepv2o3"); // Troll
+    s.insert("did:plc:xjvhjq7yba3ru66tg5d4fjmx"); // Troll
+    s.insert("did:plc:chsy6zkcy2dz3fh7wm73jlhg"); // Troll
     s
 });
 
