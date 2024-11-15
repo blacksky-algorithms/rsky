@@ -568,6 +568,11 @@ pub async fn queue_creation(
                         quote_uri: None,
                         created_at: format!("{}", dt.format("%+")), // use now() as a default
                     };
+                    // If posts are received out of order, use indexed_at
+                    // mainly capturing created_at for back_dated posts
+                    if new_post.created_at > new_post.indexed_at {
+                        new_post.created_at = new_post.indexed_at.clone();
+                    }
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
                         post_text_original = post_record.text.clone();
