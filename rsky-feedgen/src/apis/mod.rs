@@ -568,17 +568,17 @@ pub async fn queue_creation(
                         quote_uri: None,
                         created_at: format!("{}", dt.format("%+")), // use now() as a default
                     };
-                    // If posts are received out of order, use indexed_at
-                    // mainly capturing created_at for back_dated posts
-                    if new_post.created_at > new_post.indexed_at {
-                        new_post.created_at = new_post.indexed_at.clone();
-                    }
 
                     if let Lexicon::AppBskyFeedPost(post_record) = req.record {
                         post_text_original = post_record.text.clone();
                         post_text = post_record.text.to_lowercase();
                         let post_created_at = format!("{}", post_record.created_at.format("%+"));
                         new_post.created_at = post_created_at.clone();
+                        // If posts are received out of order, use indexed_at
+                        // mainly capturing created_at for back_dated posts
+                        if new_post.created_at > new_post.indexed_at {
+                            new_post.created_at = new_post.indexed_at.clone();
+                        }
                         if let Some(reply) = post_record.reply {
                             root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
