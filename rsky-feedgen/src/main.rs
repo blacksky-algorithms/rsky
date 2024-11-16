@@ -10,7 +10,7 @@ use rocket::http::Header;
 use rocket::serde::json::Json;
 use rocket::{Request, Response};
 use rsky_feedgen::routes::*;
-use rsky_feedgen::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
+use rsky_feedgen::{FeedGenConfig, ReadReplicaConn1, ReadReplicaConn2, WriteDbConn};
 use std::env;
 
 pub struct CORS;
@@ -94,7 +94,8 @@ fn rocket() -> _ {
     dotenv().ok();
 
     let write_database_url = env::var("DATABASE_URL").unwrap_or("".into());
-    let read_database_url = env::var("READ_REPLICA_URL").unwrap_or("".into());
+    let read_database_url_1 = env::var("READ_REPLICA_URL_1").unwrap_or("".into());
+    let read_database_url_2 = env::var("READ_REPLICA_URL_2").unwrap_or("".into());
 
     let write_db: Map<_, Value> = map! {
         "url" => write_database_url.into(),
@@ -102,15 +103,25 @@ fn rocket() -> _ {
         "timeout" => 30.into(),
     };
 
-    let read_db: Map<_, Value> = map! {
-        "url" => read_database_url.into(),
+    let read_db_1: Map<_, Value> = map! {
+        "url" => read_database_url_1.into(),
+        "pool_size" => 20.into(),
+        "timeout" => 30.into(),
+    };
+
+    let read_db_2: Map<_, Value> = map! {
+        "url" => read_database_url_2.into(),
         "pool_size" => 20.into(),
         "timeout" => 30.into(),
     };
 
     let figment = rocket::Config::figment().merge((
         "databases",
-        map!["pg_read_replica" => read_db, "pg_db" => write_db],
+        map![
+            "pg_read_replica_1" => read_db_1,
+            "pg_read_replica_2" => read_db_2,
+            "pg_db" => write_db
+        ],
     ));
 
     let feedgen_config = FeedGenConfig {
@@ -150,6 +161,7 @@ fn rocket() -> _ {
         )
         .attach(CORS)
         .attach(WriteDbConn::fairing())
-        .attach(ReadReplicaConn::fairing())
+        .attach(ReadReplicaConn1::fairing())
+        .attach(ReadReplicaConn2::fairing())
         .manage(feedgen_config)
 }
