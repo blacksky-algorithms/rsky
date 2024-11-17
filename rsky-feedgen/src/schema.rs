@@ -1,6 +1,15 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    banned_from_tv (did) {
+        did -> Varchar,
+        reason -> Nullable<Varchar>,
+        createdAt -> Nullable<Varchar>,
+        tags -> Nullable<Array<Nullable<Text>>>,
+    }
+}
+
+diesel::table! {
     follow (uri) {
         uri -> Varchar,
         cid -> Varchar,
@@ -117,6 +126,7 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
+    banned_from_tv,
     follow,
     image,
     kysely_migration,

@@ -997,6 +997,21 @@ pub fn add_visitor(
     Ok(())
 }
 
+pub fn is_banned_from_tv(subject: &String) -> Result<bool, Box<dyn std::error::Error>> {
+    use crate::schema::banned_from_tv::dsl::*;
+
+    let connection = &mut establish_connection()?;
+
+    let subject_to_check = subject.clone();
+    let count = banned_from_tv
+        .filter(did.eq(subject_to_check))
+        .count()
+        .get_result(connection)
+        .unwrap_or(0);
+
+    return if count > 0 { Ok(true) } else { Ok(false) };
+}
+
 pub async fn get_cursor(
     service_: String,
     connection: ReadReplicaConn,

@@ -1,12 +1,10 @@
 use crate::models::JwtParts;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
-use once_cell::sync::Lazy;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{Request, State};
-use std::collections::HashSet;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -80,47 +78,6 @@ impl<'r> FromRequest<'r> for AccessToken {
     }
 }
 
-static BANNED_FROM_TV: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    let mut s = HashSet::new();
-    s.insert("did:plc:bqlobp4ngysw3a52gdfnxbne"); // HS
-    s.insert("did:plc:gdvllvjfpamphmnzn2yl4q2w"); // HS/IM
-    s.insert("did:plc:aiycw7ixy2quoweotm3bloml"); // HS
-    s.insert("did:plc:4nkcdcu6mltxmootrsvg43q7"); // HS
-    s.insert("did:plc:xcltkjpurlj2m7zzs6sh74db"); // Hate Campaign
-    s.insert("did:plc:xfuejssf6ox7rqafjsm3azqk"); // Hate Campaign
-    s.insert("did:plc:qeoub4zavdlnwoufa4ketosn"); // Hate Campaign
-    s.insert("did:plc:tquk7ybcb2tvxv6acgqe4q2e"); // HS
-    s.insert("did:plc:gyk5exv532seawdowdfwsn2m"); // Anti-Black
-    s.insert("did:plc:smmuzxhbumgqptziqeujv2su"); // Anti-Black
-    s.insert("did:plc:vpkthocm76u4rcvw4k2e2l5c"); // Hate Campaign (soyjak)
-    s.insert("did:plc:vyxwktjvl4nhybxuirza3l3j"); // Hate Campaign (soyjak)
-    s.insert("did:plc:nynnin6sxmfwgbypwqajyfnk"); // Hate Campaign (soyjak)
-    s.insert("did:plc:dd3seyd2vwpj5a6e7hgactwx"); // Hate Campaign (soyjak)
-    s.insert("did:plc:puovasjyg24e3rxfmze7ag3z"); // Hate Campaign (soyjak)
-    s.insert("did:plc:waiym5islzntck2whytzitbo"); // Hate Campaign (soyjak)
-    s.insert("did:plc:lswpfsk34m45vxh3gs3tz6p4"); // Hate Campaign (soyjak)
-    s.insert("did:plc:a2mosbbxq4i3avulobujxkko"); // Hate Campaign (soyjak)
-    s.insert("did:plc:rrygeg5e5sze75absmolbibm"); // Hate Campaign (soyjak)
-    s.insert("did:plc:sysv2njdvrhv2i7j2jtmudnn"); // Hate Campaign (soyjak)
-    s.insert("did:plc:lqkz7god5gbb53isjvxk7g5n"); // Hate Campaign (soyjak)
-    s.insert("did:plc:cco7fsmvzh4mwouwnixgrice"); // HS
-    s.insert("did:plc:hsavkkfqhby3ystqwh5jjb4l"); // HS
-    s.insert("did:plc:4ncualnqj4asxtsnwvkgrinl"); // Hate Campaign
-    s.insert("did:plc:zlrad5ksg7eoqg667poajj6w"); // Troll
-    s.insert("did:plc:7ywf4tokx3r3h5s6y4pychyz"); // Troll
-    s.insert("did:plc:6xjvvvwtj3ukiqctgxapp5ms"); // Troll
-    s.insert("did:plc:s455uh5xrwiicgd4wauoyq25"); // Troll
-    s.insert("did:plc:3fbca6a3yrydvs43rlnmjseu"); // Troll
-    s.insert("did:plc:wdbjnc3safjqexedt47wew5z"); // Troll
-    s.insert("did:plc:ndthbydalxvn6im3xbepv2o3"); // Troll
-    s.insert("did:plc:xjvhjq7yba3ru66tg5d4fjmx"); // Troll
-    s.insert("did:plc:chsy6zkcy2dz3fh7wm73jlhg"); // Troll
-    s.insert("did:plc:jddsovvxzwgvoc2sftrim3o4"); // Troll
-    s.insert("did:plc:p3j35p2csk2xjrjmtumak6ud"); // Troll
-    s.insert("did:plc:345gprdgkr5otlcmbgswv5fs"); // Troll
-    s
-});
-
 pub(crate) const BLACKSKY: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky";
 pub(crate) const BLACKSKY_OG: &str =
@@ -178,9 +135,7 @@ pub async fn index(
                 let did = jwt_obj.iss;
                 match crate::apis::add_visitor(did.clone(), jwt_obj.aud, feed.to_string()) {
                     Ok(_) => {
-                        if BANNED_FROM_TV.contains(&did.as_str()) {
-                            is_banned = true;
-                        }
+                        is_banned = crate::apis::is_banned_from_tv(&did).unwrap_or(false);
                         ()
                     }
                     Err(_) => eprintln!("Failed to write visitor."),
