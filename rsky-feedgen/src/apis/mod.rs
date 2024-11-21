@@ -723,6 +723,9 @@ pub async fn queue_creation(
                     new_post.text = Some(post_text_original.clone());
                     if (is_member ||
                         hashtags.contains("#blacksky") ||
+                        hashtags.contains("#blackhairsky") ||
+                        hashtags.contains("#locsky") ||
+                        hashtags.contains("#blackbluesky") ||
                         hashtags.contains("#blacktechsky") ||
                         hashtags.contains("#nbablacksky") ||
                         hashtags.contains("#addtoblacksky")) && 
