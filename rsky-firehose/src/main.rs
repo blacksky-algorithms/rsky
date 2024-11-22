@@ -300,7 +300,7 @@ async fn main() {
     loop {
         // Construct the WebSocket URL
         let url = format!(
-            "{}/xrpc/com.atproto.sync.subscribeRepos?cursor=284197892",
+            "{}/xrpc/com.atproto.sync.subscribeRepos",
             default_subscriber_path
         );
         let ws_url = Url::parse(&url).expect("Invalid WebSocket URL");
