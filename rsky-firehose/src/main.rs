@@ -11,8 +11,11 @@ use serde::Deserialize;
 use std::env;
 use std::io::Cursor;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{thread, time::Duration};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -105,6 +108,9 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                 SubscribeRepos::Commit(commit) => {
                     if commit.ops.is_empty() {
                         println!("Operations empty.");
+                    }
+                    if commit.too_big {
+                        println!("Too big.");
                     }
                     // update stored cursor every 20 events or so
                     if (&commit.seq).rem_euclid(20) == 0 {
@@ -271,40 +277,89 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
 
 #[tokio::main]
 async fn main() {
-    match dotenvy::dotenv() {
-        _ => (),
-    };
+    // Load environment variables from .env file
+    dotenv().ok();
 
-    let default_subscriber_path =
-        env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT").unwrap_or("wss://bsky.social".into());
-    let client = reqwest::Client::new();
+    // Retrieve the subscription endpoint from environment variables or use default
+    let default_subscriber_path = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
+        .unwrap_or_else(|_| "wss://bsky.social".to_string());
+
+    // Configure the reqwest client with connection pooling settings
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(10) // Max idle connections per host
+            .pool_idle_timeout(Duration::from_secs(30)) // Idle timeout
+            .timeout(Duration::from_secs(10)) // Request timeout
+            .build()
+            .expect("Failed to build reqwest client"),
+    );
+
+    // Create a semaphore to limit the number of concurrent processing tasks
+    let semaphore = Arc::new(Semaphore::new(100)); // Adjust the limit as needed
+
     loop {
-        match tokio_tungstenite::connect_async(
-            Url::parse(
-                format!(
-                    "{}/xrpc/com.atproto.sync.subscribeRepos",
-                    default_subscriber_path
-                )
-                .as_str(),
-            )
-            .unwrap(),
-        )
-        .await
-        {
+        // Construct the WebSocket URL
+        let url = format!(
+            "{}/xrpc/com.atproto.sync.subscribeRepos?cursor=284197892",
+            default_subscriber_path
+        );
+        let ws_url = Url::parse(&url).expect("Invalid WebSocket URL");
+
+        // Attempt to establish a WebSocket connection
+        match connect_async(ws_url).await {
             Ok((mut socket, _response)) => {
-                println!("Connected to {default_subscriber_path:?}.");
-                while let Some(Ok(Message::Binary(message))) = socket.next().await {
-                    let client = client.clone();
-                    tokio::spawn(async move {
-                        process(message, &client).await;
-                    });
+                println!("Connected to {}", default_subscriber_path);
+
+                // Listen for incoming messages
+                while let Some(msg_result) = socket.next().await {
+                    match msg_result {
+                        Ok(Message::Binary(message)) => {
+                            let client = Arc::clone(&client);
+                            let semaphore = Arc::clone(&semaphore);
+
+                            // Acquire a permit before spawning a new task
+                            let permit = match semaphore.clone().acquire_owned().await {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    eprintln!("Semaphore closed");
+                                    break;
+                                }
+                            };
+
+                            // Spawn a new asynchronous task to process the message
+                            tokio::spawn(async move {
+                                // The permit is held for the duration of the task
+                                process(message, &client).await;
+                                // Permit is automatically released when it goes out of scope
+                                drop(permit);
+                            });
+                        }
+                        Ok(Message::Close(_)) => {
+                            println!("WebSocket connection closed by server.");
+                            break;
+                        }
+                        Ok(_) => {
+                            // Handle other message types if necessary
+                        }
+                        Err(e) => {
+                            eprintln!("WebSocket error: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
             Err(error) => {
-                eprintln!("Error connecting to {default_subscriber_path:?}. Waiting to reconnect: {error:?}");
-                thread::sleep(Duration::from_millis(500));
+                eprintln!(
+                    "Error connecting to {}. Waiting to reconnect: {:?}",
+                    default_subscriber_path, error
+                );
+                // Use asynchronous sleep to avoid blocking the thread
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
         }
+
+        // Optionally, wait before attempting to reconnect
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
