@@ -3,7 +3,7 @@ use crate::explicit_slurs::contains_explicit_slurs;
 use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use once_cell::sync::Lazy;
@@ -233,13 +233,16 @@ pub async fn get_blacksky_trending(
     params_cursor: Option<&str>,
     connection: ReadReplicaConn,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    use std::env;
+
     let params_cursor = match params_cursor {
         None => None,
         Some(params_cursor) => Some(params_cursor.to_string()),
     };
     let result = connection
         .run(move |conn| {
-            let mut query_str = "WITH recent_posts AS (
+            let mut query_str = format!(
+                "WITH recent_posts AS (
                 SELECT
                     *
                 FROM post
@@ -282,8 +285,9 @@ pub async fn get_blacksky_trending(
                 \"quoteUri\",
                 \"createdAt\"
             FROM ranked_posts
-            WHERE percentile_rank >= 0.9"
-                .to_string();
+            WHERE percentile_rank >= {0}",
+                env::var("TRENDING_PERCENTILE").unwrap_or("0.9".to_string())
+            );
 
             if params_cursor.is_some() {
                 let cursor_str = params_cursor.unwrap();
