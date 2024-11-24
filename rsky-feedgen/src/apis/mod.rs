@@ -570,7 +570,7 @@ pub async fn queue_creation(
                 .map(|req| {
                     let system_time = SystemTime::now();
                     let dt: DateTime<UtcOffset> = system_time.into();
-                    let mut root_author = String::new();
+                    // let mut root_author = String::new();
                     let is_member = is_included(vec![&req.author].into(), conn).unwrap_or(false);
                     let is_blocked = is_excluded(vec![&req.author].into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
@@ -607,11 +607,12 @@ pub async fn queue_creation(
                         if new_post.created_at > new_post.indexed_at {
                             new_post.created_at = new_post.indexed_at.clone();
                         }
+                        /* TEMP REMOVING THIS FEATURE AS IT'S CREATING SPAM
                         if let Some(reply) = post_record.reply {
                             root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
                             new_post.reply_root = Some(reply.root.uri);
-                        }
+                        } */
                         if let Some(langs) = post_record.langs {
                             new_post.lang = Some(langs.join(","));
                         }
@@ -799,7 +800,7 @@ pub async fn queue_creation(
                             );
                             new_members.push(new_member);
                         }
-
+                        /* TEMP REMOVING THIS FEATURE AS IT'S CREATING SPAM
                         if hashtags.contains("#addtoblacksky") && 
                             is_member &&
                             !root_author.is_empty() {
@@ -811,7 +812,7 @@ pub async fn queue_creation(
                                 MembershipSchema::list.eq("blacksky")
                             );
                             new_members.push(new_member);
-                        }
+                        }*/
                     }
                     if is_member &&
                         hashtags.contains("#removefromblacksky") {
