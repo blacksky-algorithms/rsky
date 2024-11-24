@@ -607,12 +607,11 @@ pub async fn queue_creation(
                         if new_post.created_at > new_post.indexed_at {
                             new_post.created_at = new_post.indexed_at.clone();
                         }
-                        /* TEMP REMOVING THIS FEATURE AS IT'S CREATING SPAM
                         if let Some(reply) = post_record.reply {
-                            root_author = reply.root.uri[5..37].into();
+                            //root_author = reply.root.uri[5..37].into();
                             new_post.reply_parent = Some(reply.parent.uri);
                             new_post.reply_root = Some(reply.root.uri);
-                        } */
+                        }
                         if let Some(langs) = post_record.langs {
                             new_post.lang = Some(langs.join(","));
                         }
