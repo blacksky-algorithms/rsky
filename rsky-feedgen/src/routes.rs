@@ -84,12 +84,6 @@ pub(crate) const BLACKSKY_OG: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 pub(crate) const BLACKSKY_TREND: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
-pub(crate) const BLACKSKY_FR: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-fr";
-pub(crate) const BLACKSKY_PT: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-pt";
-pub(crate) const BLACKSKY_NSFW: &str =
-    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-nsfw";
 pub(crate) const BLACKSKY_EDU: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-edu";
 pub(crate) const BLACKSKY_TRAVEL: &str =
@@ -208,7 +202,9 @@ pub async fn index(
                 cursor,
                 true,
                 "blacksky-edu".into(),
+                vec!["#blackademics".into()],
                 connection,
+                config,
             )
             .await
             {
@@ -233,76 +229,12 @@ pub async fn index(
                 cursor,
                 true,
                 "blacksky-travel".into(),
-                connection,
-            )
-                .await
-            {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = crate::models::InternalErrorMessageResponse {
-                        code: Some(crate::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_fr if _blacksky_fr == BLACKSKY_FR && !is_banned => {
-            match crate::apis::get_all_posts(
-                Some("fr".into()),
-                limit,
-                cursor,
-                true,
+                vec!["blackskytravel".into()],
                 connection,
                 config,
             )
             .await
             {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = crate::models::InternalErrorMessageResponse {
-                        code: Some(crate::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_pt if _blacksky_pt == BLACKSKY_PT && !is_banned => {
-            match crate::apis::get_all_posts(
-                Some("pt".into()),
-                limit,
-                cursor,
-                true,
-                connection,
-                config,
-            )
-            .await
-            {
-                Ok(response) => Ok(Json(response)),
-                Err(error) => {
-                    eprintln!("Internal Error: {error}");
-                    let internal_error = crate::models::InternalErrorMessageResponse {
-                        code: Some(crate::models::InternalErrorCode::InternalError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
-                }
-            }
-        }
-        _blacksky_nsfw if _blacksky_nsfw == BLACKSKY_NSFW && !is_banned => {
-            match crate::apis::get_blacksky_nsfw(limit, cursor, connection).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -326,18 +258,6 @@ pub async fn index(
             Ok(Json(banned_response))
         }
         _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_fr if _blacksky_fr == BLACKSKY_FR && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_pt if _blacksky_pt == BLACKSKY_PT && is_banned => {
-            let banned_response = get_banned_response();
-            Ok(Json(banned_response))
-        }
-        _blacksky_nsfw if _blacksky_nsfw == BLACKSKY_NSFW && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }
