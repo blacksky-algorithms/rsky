@@ -756,10 +756,13 @@ pub async fn queue_creation(
                         hashtags.contains("#blackbluesky") ||
                         hashtags.contains("#blacktechsky") ||
                         hashtags.contains("#nbablacksky") ||
-                        hashtags.contains("#addtoblacksky")) && 
+                        hashtags.contains("#addtoblacksky") ||
+                        hashtags.contains("#addtoblackskytravel") ||
+                        hashtags.contains("#skytravel") ||
+                        hashtags.contains("#blackskytravel")) &&
                         !is_blocked &&
                         !hashtags.contains("#private") &&
-                        !hashtags.contains("#nofeed") && 
+                        !hashtags.contains("#nofeed") &&
                         !hashtags.contains("#removefromblacksky") &&
                         !contains_explicit_slurs(post_text_original.as_str()) {
                         let uri_ = &new_post.uri;
@@ -790,7 +793,7 @@ pub async fn queue_creation(
                         new_videos.extend(post_videos);
 
                         if hashtags.contains("#addtoblacksky") && !is_member {
-                            println!("New member: {:?}", &req.author);
+                            println!("New Blacksky member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
                                 MembershipSchema::included.eq(true),
@@ -799,8 +802,18 @@ pub async fn queue_creation(
                             );
                             new_members.push(new_member);
                         }
+                        if hashtags.contains("#addtoblackskytravel") && !is_member {
+                            println!("New BlackskyTravel member: {:?}", &req.author);
+                            let new_member = (
+                                MembershipSchema::did.eq(req.author.clone()),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky-travel")
+                            );
+                            new_members.push(new_member);
+                        }
                         /* TEMP REMOVING THIS FEATURE AS IT'S CREATING SPAM
-                        if hashtags.contains("#addtoblacksky") && 
+                        if hashtags.contains("#addtoblacksky") &&
                             is_member &&
                             !root_author.is_empty() {
                             println!("New member: {:?}", &root_author);
