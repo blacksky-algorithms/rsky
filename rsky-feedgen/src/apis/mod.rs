@@ -699,7 +699,9 @@ pub async fn queue_creation(
                         hashtags.contains("#addtoblacksky") ||
                         hashtags.contains("#blackademics") ||
                         hashtags.contains("#addtoblackskytravel") ||
-                        hashtags.contains("#blackskytravel")) &&
+                        hashtags.contains("#blackskytravel") ||
+                        hashtags.contains("#addtoblackmedsky") ||
+                        hashtags.contains("#blackmedsky")) &&
                         !is_blocked &&
                         !hashtags.contains("#private") &&
                         !hashtags.contains("#nofeed") &&
@@ -749,6 +751,16 @@ pub async fn queue_creation(
                                 MembershipSchema::included.eq(true),
                                 MembershipSchema::excluded.eq(false),
                                 MembershipSchema::list.eq("blacksky-travel")
+                            );
+                            new_members.push(new_member);
+                        }
+                        if hashtags.contains("#addtoblackmedsky") && !is_member {
+                            println!("New BlackMedSky member: {:?}", &req.author);
+                            let new_member = (
+                                MembershipSchema::did.eq(req.author.clone()),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky-med")
                             );
                             new_members.push(new_member);
                         }
