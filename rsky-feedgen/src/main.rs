@@ -134,6 +134,13 @@ fn rocket() -> _ {
                 Ok(probability) => probability,
             },
         },
+        trending_percentile_min: match env::var("TRENDING_PERCENTILE") {
+            Err(_) => 0.9,
+            Ok(percentile) => match percentile.parse::<f64>() {
+                Err(_) => 0.9,
+                Ok(percentile) => percentile,
+            },
+        },
     };
 
     rocket::custom(figment)

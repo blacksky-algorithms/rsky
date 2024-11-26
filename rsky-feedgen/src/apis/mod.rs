@@ -172,8 +172,10 @@ pub async fn get_blacksky_trending(
     limit: Option<i64>,
     params_cursor: Option<&str>,
     connection: ReadReplicaConn,
+    config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use std::env;
+    let trending_percentile_min = config.trending_percentile_min.clone();
 
     let params_cursor = match params_cursor {
         None => None,
@@ -181,6 +183,7 @@ pub async fn get_blacksky_trending(
     };
     let result = connection
         .run(move |conn| {
+            let random_percentile = rand::thread_rng().gen_range(trending_percentile_min..=1.0);
             let mut query_str = format!(
                 "WITH recent_posts AS (
                 SELECT
@@ -225,8 +228,8 @@ pub async fn get_blacksky_trending(
                 \"quoteUri\",
                 \"createdAt\"
             FROM ranked_posts
-            WHERE percentile_rank >= {0}",
-                env::var("TRENDING_PERCENTILE").unwrap_or("0.9".to_string())
+            WHERE percentile_rank >= {:.4}",
+                random_percentile
             );
 
             if params_cursor.is_some() {

@@ -184,7 +184,7 @@ pub async fn index(
             }
         }
         _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && !is_banned => {
-            match crate::apis::get_blacksky_trending(limit, cursor, connection).await {
+            match crate::apis::get_blacksky_trending(limit, cursor, connection, config).await {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -264,7 +264,7 @@ pub async fn index(
                 connection,
                 config,
             )
-                .await
+            .await
             {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -291,7 +291,7 @@ pub async fn index(
                 connection,
                 config,
             )
-                .await
+            .await
             {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
