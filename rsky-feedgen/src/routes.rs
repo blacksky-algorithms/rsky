@@ -90,6 +90,8 @@ pub(crate) const BLACKSKY_TRAVEL: &str =
     "at://did:plc:piuwt2p3v6mzsals7to7nedb/app.bsky.feed.generator/blacksky-travel";
 pub(crate) const BLACKSKY_MED: &str =
     "at://did:plc:bgkszqcx4pf27av2tfxeljlr/app.bsky.feed.generator/blacksky-med";
+pub(crate) const BLACKSKY_SCHOLASTIC: &str =
+    "at://did:plc:kfaq2rodqsx4dycpg5xbnugb/app.bsky.feed.generator/blacksky-scholastic";
 
 fn get_banned_response() -> crate::models::AlgoResponse {
     let banned_notice_uri = env::var("BANNED_NOTICE_POST_URI").unwrap_or("".into());
@@ -278,6 +280,33 @@ pub async fn index(
                 }
             }
         }
+        _blacksky_scholastic if _blacksky_scholastic == BLACKSKY_SCHOLASTIC && !is_banned => {
+            match crate::apis::get_posts_by_membership(
+                None,
+                limit,
+                cursor,
+                true,
+                "blacksky-scholastic".into(),
+                vec!["blackedusky".into()],
+                connection,
+                config,
+            )
+                .await
+            {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = crate::models::InternalErrorMessageResponse {
+                        code: Some(crate::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
         _blacksky if _blacksky == BLACKSKY && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
@@ -299,6 +328,10 @@ pub async fn index(
             Ok(Json(banned_response))
         }
         _blacksky_med if _blacksky_med == BLACKSKY_MED && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_scholastic if _blacksky_scholastic == BLACKSKY_SCHOLASTIC && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }

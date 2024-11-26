@@ -104,7 +104,7 @@ pub async fn get_posts_by_membership(
             } else {
                 let hashtag_patterns: Vec<String> = hashtags
                     .iter()
-                    .map(|hashtag| format!("%{}%", hashtag))
+                    .map(|hashtag| format!("%#{}%", hashtag))
                     .collect();
                 query = query.filter(
                     MembershipSchema::did
@@ -701,7 +701,9 @@ pub async fn queue_creation(
                         hashtags.contains("#addtoblackskytravel") ||
                         hashtags.contains("#blackskytravel") ||
                         hashtags.contains("#addtoblackmedsky") ||
-                        hashtags.contains("#blackmedsky")) &&
+                        hashtags.contains("#blackmedsky") ||
+                        hashtags.contains("#addtoblackedusky") ||
+                        hashtags.contains("#blackedusky")) &&
                         !is_blocked &&
                         !hashtags.contains("#private") &&
                         !hashtags.contains("#nofeed") &&
@@ -761,6 +763,16 @@ pub async fn queue_creation(
                                 MembershipSchema::included.eq(true),
                                 MembershipSchema::excluded.eq(false),
                                 MembershipSchema::list.eq("blacksky-med")
+                            );
+                            new_members.push(new_member);
+                        }
+                        if hashtags.contains("#addtoblackedusky") && !is_member {
+                            println!("New BlackEduSky member: {:?}", &req.author);
+                            let new_member = (
+                                MembershipSchema::did.eq(req.author.clone()),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky-scholastic")
                             );
                             new_members.push(new_member);
                         }
