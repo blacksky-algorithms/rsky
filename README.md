@@ -16,7 +16,7 @@
 [![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/blacksky-algorithms/rsky?logo=github)](https://github.com/blacksky-algorithms/rsky)
 [![GitHub Repo stars](https://img.shields.io/github/stars/blacksky-algorithms/rsky?style=flat&logo=github)](https://github.com/blacksky-algorithms/rsky)
 [![Backers on Open Collective](https://opencollective.com/blacksky/backers/badge.svg)](#backers)
-[![Sponsors on Open Collective](https://opencollective.com/blacksky/sponsors/badge.svg)](#sponsors)
+[![Join Our Discord](https://img.shields.io/badge/Join%20Us%20on-Discord-7289DA.svg?style=for-the-badge&logo=discord)](https://discord.gg/AFuuPvM7zZ)
 
 </div>
 
