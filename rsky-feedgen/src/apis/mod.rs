@@ -174,7 +174,6 @@ pub async fn get_blacksky_trending(
     connection: ReadReplicaConn,
     config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    use std::env;
     let trending_percentile_min = config.trending_percentile_min.clone();
 
     let params_cursor = match params_cursor {
@@ -610,6 +609,8 @@ pub async fn queue_creation(
                                     };
                                 }
                                 Embeds::RecordWithMedia(e) => {
+                                    new_post.quote_cid = Some(e.record.record.cid);
+                                    new_post.quote_uri = Some(e.record.record.uri);
                                     match e.media {
                                         MediaUnion::Images(m) => {
                                             for image in m.images {
