@@ -442,21 +442,16 @@ pub async fn get_all_posts(
 pub fn is_included(
     dids: Vec<&String>,
     conn: &mut PgConnection,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use crate::schema::membership::dsl::*;
 
     let result = membership
         .filter(did.eq_any(dids))
         .filter(included.eq(true))
-        .limit(1)
         .select(Membership::as_select())
         .load(conn)?;
 
-    if result.len() > 0 {
-        Ok(result[0].included)
-    } else {
-        Ok(false)
-    }
+    Ok(result.into_iter().map(|m| m.list).collect::<Vec<String>>())
 }
 
 pub fn is_excluded(
@@ -513,7 +508,7 @@ pub async fn queue_creation(
                     let system_time = SystemTime::now();
                     let dt: DateTime<UtcOffset> = system_time.into();
                     // let mut root_author = String::new();
-                    let is_member = is_included(vec![&req.author].into(), conn).unwrap_or(false);
+                    let member_of = is_included(vec![&req.author].into(), conn).unwrap_or_else(|_| vec![]);
                     let is_blocked = is_excluded(vec![&req.author].into(), conn).unwrap_or(false);
                     let mut post_text = String::new();
                     let mut post_text_original = String::new();
@@ -693,7 +688,7 @@ pub async fn queue_creation(
 
                     let hashtags = extract_hashtags(&post_text);
                     new_post.text = Some(post_text_original.clone());
-                    if (is_member ||
+                    if (!member_of.is_empty() ||
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blackhairsky") ||
                         hashtags.contains("#locsky") ||
@@ -715,7 +710,7 @@ pub async fn queue_creation(
                         !contains_explicit_slurs(post_text_original.as_str()) {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
-                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {is_member:?} | Hashtags: {hashtags:?}");
+                        println!("Sequence: {seq_:?} | Uri: {uri_:?} | Member: {member_of:?} | Hashtags: {hashtags:?}");
 
                         let new_post = (
                             PostSchema::uri.eq(new_post.uri),
@@ -740,7 +735,7 @@ pub async fn queue_creation(
                         new_images.extend(post_images);
                         new_videos.extend(post_videos);
 
-                        if hashtags.contains("#addtoblacksky") && !is_member {
+                        if hashtags.contains("#addtoblacksky") && !member_of.contains(&"blacksky".to_string()) {
                             println!("New Blacksky member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
@@ -750,7 +745,7 @@ pub async fn queue_creation(
                             );
                             new_members.push(new_member);
                         }
-                        if hashtags.contains("#addtoblackskytravel") && !is_member {
+                        if hashtags.contains("#addtoblackskytravel") && !member_of.contains(&"blacksky-travel".to_string()) {
                             println!("New BlackskyTravel member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
@@ -760,7 +755,7 @@ pub async fn queue_creation(
                             );
                             new_members.push(new_member);
                         }
-                        if hashtags.contains("#addtoblackmedsky") && !is_member {
+                        if hashtags.contains("#addtoblackmedsky") && !member_of.contains(&"blacksky-med".to_string()) {
                             println!("New BlackMedSky member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
@@ -770,7 +765,7 @@ pub async fn queue_creation(
                             );
                             new_members.push(new_member);
                         }
-                        if hashtags.contains("#addtoblackedusky") && !is_member {
+                        if hashtags.contains("#addtoblackedusky") && !member_of.contains(&"blacksky-scholastic".to_string()) {
                             println!("New BlackEduSky member: {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
@@ -782,7 +777,7 @@ pub async fn queue_creation(
                         }
                         /* TEMP REMOVING THIS FEATURE AS IT'S CREATING SPAM
                         if hashtags.contains("#addtoblacksky") &&
-                            is_member &&
+                            !member_of.is_empty() &&
                             !root_author.is_empty() {
                             println!("New member: {:?}", &root_author);
                             let new_member = (
@@ -794,7 +789,7 @@ pub async fn queue_creation(
                             new_members.push(new_member);
                         }*/
                     }
-                    if is_member &&
+                    if !member_of.is_empty() &&
                         hashtags.contains("#removefromblacksky") {
                         println!("Removing member: {:?}", &req.author);
                         members_to_rm.push(req.author.clone());
@@ -810,38 +805,44 @@ pub async fn queue_creation(
                 })
                 .for_each(drop);
 
-            diesel::insert_into(PostSchema::post)
-                .values(&new_posts)
-                .on_conflict(PostSchema::uri)
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting post records");
-
-            diesel::insert_into(ImageSchema::image)
-                .values(&new_images)
-                .on_conflict(ImageSchema::cid)
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting image records");
-
-            diesel::insert_into(VideoSchema::video)
-                .values(&new_videos)
-                .on_conflict(VideoSchema::cid)
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting video records");
-
-            diesel::insert_into(MembershipSchema::membership)
-                .values(&new_members)
-                .on_conflict((MembershipSchema::did,MembershipSchema::list))
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting member records");
-
-            diesel::delete(MembershipSchema::membership
-                .filter(MembershipSchema::did.eq_any(&members_to_rm)))
-                .execute(conn)
-                .expect("Error deleting member records");
+            if !new_posts.is_empty() {
+                diesel::insert_into(PostSchema::post)
+                    .values(&new_posts)
+                    .on_conflict(PostSchema::uri)
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting post records");
+            }
+            if !new_images.is_empty() {
+                diesel::insert_into(ImageSchema::image)
+                    .values(&new_images)
+                    .on_conflict(ImageSchema::cid)
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting image records");
+            }
+            if !new_videos.is_empty() {
+                diesel::insert_into(VideoSchema::video)
+                    .values(&new_videos)
+                    .on_conflict(VideoSchema::cid)
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting video records");
+            }
+            if !new_members.is_empty() {
+                diesel::insert_into(MembershipSchema::membership)
+                    .values(&new_members)
+                    .on_conflict((MembershipSchema::did,MembershipSchema::list))
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting member records");
+            }
+            if !members_to_rm.is_empty() {
+                diesel::delete(MembershipSchema::membership
+                    .filter(MembershipSchema::did.eq_any(&members_to_rm)))
+                    .execute(conn)
+                    .expect("Error deleting member records");
+            }
             Ok(())
         } else if lex == "likes" {
             let mut new_likes = Vec::new();
@@ -851,8 +852,8 @@ pub async fn queue_creation(
                 .map(|req| {
                     if let Lexicon::AppBskyFeedLike(like_record) = req.record {
                         let subject_author: &String = &like_record.subject.uri[5..37].into(); // parse DID:PLC from URI
-                        let is_member = is_included(vec![&req.author, subject_author].into(), conn).unwrap_or(false);
-                        if is_member {
+                        let member_of = is_included(vec![&req.author, subject_author].into(), conn).unwrap_or_else(|_| vec![]);
+                        if !member_of.is_empty() {
                             let system_time = SystemTime::now();
                             let dt: DateTime<UtcOffset> = system_time.into();
                             let new_like = (
@@ -871,14 +872,14 @@ pub async fn queue_creation(
                     }
                 })
                 .for_each(drop);
-
-            diesel::insert_into(LikeSchema::like)
-                .values(&new_likes)
-                .on_conflict(LikeSchema::uri)
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting like records");
-
+            if !new_likes.is_empty() {
+                diesel::insert_into(LikeSchema::like)
+                    .values(&new_likes)
+                    .on_conflict(LikeSchema::uri)
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting like records");
+            }
             Ok(())
         } else if lex == "follows" {
             let mut new_follows = Vec::new();
@@ -887,8 +888,8 @@ pub async fn queue_creation(
                 .into_iter()
                 .map(|req| {
                     if let Lexicon::AppBskyFeedFollow(follow_record) = req.record {
-                        let is_member = is_included(vec![&req.author, &follow_record.subject].into(), conn).unwrap_or(false);
-                        if is_member {
+                        let member_of = is_included(vec![&req.author, &follow_record.subject].into(), conn).unwrap_or_else(|_| vec![]);
+                        if !member_of.is_empty() {
                             let system_time = SystemTime::now();
                             let dt: DateTime<UtcOffset> = system_time.into();
                             let new_follow = (
@@ -906,14 +907,14 @@ pub async fn queue_creation(
                     }
                 })
                 .for_each(drop);
-
-            diesel::insert_into(FollowSchema::follow)
-                .values(&new_follows)
-                .on_conflict(FollowSchema::uri)
-                .do_nothing()
-                .execute(conn)
-                .expect("Error inserting like records");
-
+            if !new_follows.is_empty() {
+                diesel::insert_into(FollowSchema::follow)
+                    .values(&new_follows)
+                    .on_conflict(FollowSchema::uri)
+                    .do_nothing()
+                    .execute(conn)
+                    .expect("Error inserting like records");
+            }
             Ok(())
         } else {
             Err(format!("Unknown lexicon received {lex:?}"))
