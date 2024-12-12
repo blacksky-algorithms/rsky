@@ -1,9 +1,10 @@
+use crate::common::env::env_int;
 use crate::db::*;
 use crate::explicit_slurs::contains_explicit_slurs;
 use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use once_cell::sync::Lazy;
@@ -323,6 +324,7 @@ pub async fn get_all_posts(
     config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl as PostSchema;
+
     let show_sponsored_post = config.show_sponsored_post.clone();
     let sponsored_post_uri = config.sponsored_post_uri.clone();
     let sponsored_post_probability = config.sponsored_post_probability.clone();
@@ -379,6 +381,14 @@ pub async fn get_all_posts(
                     };
                     return Err(validation_error);
                 }
+            } else {
+                // Add a buffer for posts to be deleted; Current time and n minutes ago
+                let buffer_num = env_int("QUERY_BUFFER_MINS").unwrap_or(2) as i64;
+                let now = Utc::now();
+                let n_mins_ago = now - Duration::minutes(buffer_num);
+                // Format `buffer_num` as a string to compare with `character varying`
+                let n_mins_ago_str = n_mins_ago.to_rfc3339(); // Example: "2024-12-12T11:03:27.660+00:00"
+                query = query.filter(PostSchema::createdAt.le(n_mins_ago_str));
             }
             if only_posts {
                 query = query
