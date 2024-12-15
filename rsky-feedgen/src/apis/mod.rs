@@ -194,6 +194,7 @@ pub async fn get_blacksky_trending(
                     *
                 FROM post
                 WHERE post.\"indexedAt\" >= (CURRENT_TIMESTAMP - INTERVAL '2 days')::text
+                    AND (array_length(post.labels, 1) IS NULL OR array_length(post.labels, 1) = 0)
             ), recent_likes AS (
                 SELECT
                     \"subjectUri\",

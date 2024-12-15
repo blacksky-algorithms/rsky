@@ -59,7 +59,7 @@ diesel::table! {
         subjectCid -> Varchar,
         subjectUri -> Varchar,
         createdAt -> Varchar,
-        indexedAt -> Text,
+        indexedAt -> Varchar,
         prev -> Nullable<Varchar>,
         sequence -> Nullable<Int8>,
     }
@@ -80,7 +80,7 @@ diesel::table! {
         cid -> Varchar,
         replyParent -> Nullable<Varchar>,
         replyRoot -> Nullable<Varchar>,
-        indexedAt -> Text,
+        indexedAt -> Varchar,
         prev -> Nullable<Varchar>,
         sequence -> Nullable<Int8>,
         text -> Nullable<Varchar>,
