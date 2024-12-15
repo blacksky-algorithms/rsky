@@ -1,12 +1,15 @@
 use crate::common::env::env_int;
 use crate::db::*;
 use crate::explicit_slurs::contains_explicit_slurs;
+use crate::models::create_request::CreateRecord;
+use crate::models::Lexicon::{AppBskyFeedFollow, AppBskyFeedLike, AppBskyFeedPost};
 use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
+use diesel::sql_types::{Array, Bool, Nullable, Text};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
@@ -15,6 +18,7 @@ use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
+use diesel::dsl::sql;
 
 #[allow(deprecated)]
 pub async fn get_posts_by_membership(
@@ -226,7 +230,8 @@ pub async fn get_blacksky_trending(
                 \"externalThumb\",
                 \"quoteCid\",
                 \"quoteUri\",
-                \"createdAt\"
+                \"createdAt\",
+                labels
             FROM ranked_posts
             WHERE percentile_rank >= {:.4}",
                 random_percentile
@@ -340,6 +345,7 @@ pub async fn get_all_posts(
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
                 .order((PostSchema::createdAt.desc(), PostSchema::cid.desc()))
+                .filter(sql::<Bool>("array_length(labels, 1) IS NULL OR array_length(labels, 1) = 0"))
                 .into_boxed();
 
             if let Some(lang) = lang {
@@ -542,9 +548,10 @@ pub async fn queue_creation(
                         quote_cid: None,
                         quote_uri: None,
                         created_at: format!("{}", dt.format("%+")), // use now() as a default
+                        labels: vec![]
                     };
 
-                    if let Lexicon::AppBskyFeedPost(post_record) = req.record {
+                    if let CreateRecord::Lexicon(AppBskyFeedPost(post_record)) = req.record {
                         post_text_original = post_record.text.clone();
                         post_text = post_record.text.to_lowercase();
                         let post_created_at = format!("{}", post_record.created_at.format("%+"));
@@ -740,6 +747,7 @@ pub async fn queue_creation(
                             PostSchema::quoteCid.eq(new_post.quote_cid),
                             PostSchema::quoteUri.eq(new_post.quote_uri),
                             PostSchema::createdAt.eq(new_post.created_at),
+                            PostSchema::labels.eq(new_post.labels),
                         );
                         new_posts.push(new_post);
                         new_images.extend(post_images);
@@ -860,7 +868,7 @@ pub async fn queue_creation(
             body
                 .into_iter()
                 .map(|req| {
-                    if let Lexicon::AppBskyFeedLike(like_record) = req.record {
+                    if let CreateRecord::Lexicon(AppBskyFeedLike(like_record)) = req.record {
                         let subject_author: &String = &like_record.subject.uri[5..37].into(); // parse DID:PLC from URI
                         let member_of = is_included(vec![&req.author, subject_author].into(), conn).unwrap_or_else(|_| vec![]);
                         if !member_of.is_empty() {
@@ -897,7 +905,7 @@ pub async fn queue_creation(
             body
                 .into_iter()
                 .map(|req| {
-                    if let Lexicon::AppBskyFeedFollow(follow_record) = req.record {
+                    if let CreateRecord::Lexicon(AppBskyFeedFollow(follow_record)) = req.record {
                         let member_of = is_included(vec![&req.author, &follow_record.subject].into(), conn).unwrap_or_else(|_| vec![]);
                         if !member_of.is_empty() {
                             let system_time = SystemTime::now();
@@ -925,6 +933,31 @@ pub async fn queue_creation(
                     .execute(conn)
                     .expect("Error inserting like records");
             }
+            Ok(())
+        } else if lex == "labels" {
+            body
+                .into_iter()
+                .map(|req| {
+                    if let CreateRecord::Label(label) = req.record {
+                        // @TODO: Handle account-level labels; Maybe put label on membership
+                        if req.uri.starts_with("did:plc:") {
+                            ()
+                        } else {
+                            // Raw SQL query
+                            let updated_rows = sql_query(
+                                "UPDATE post SET labels = labels || $1 WHERE uri = $2"
+                            )
+                                .bind::<Array<Nullable<Text>>, _>(vec![Some(&label.val)])
+                                .bind::<Text, _>(&req.uri)
+                                .execute(conn)
+                                .expect("Error updating labels");
+                            if updated_rows > 0 {
+                                println!("@LOG: applied {} to {}", label.val, req.uri);
+                            }
+                        }
+                    }
+                })
+                .for_each(drop);
             Ok(())
         } else {
             Err(format!("Unknown lexicon received {lex:?}"))

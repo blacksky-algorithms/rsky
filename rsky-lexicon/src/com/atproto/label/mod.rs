@@ -1,5 +1,13 @@
 use chrono::{DateTime, Utc};
 
+/// Subscribe to stream of labels (and negations). Public endpoint implemented by mod services.
+/// Uses same sequencing scheme as repo event stream.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeLabels {
+    pub seq: i64,
+    pub labels: Vec<Label>
+}
+
 /// Metadata tag on an atproto resource (eg, repo or record).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Label {
@@ -20,6 +28,7 @@ pub struct Label {
     /// Timestamp at which this label expires (no longer applies).
     pub exp: Option<DateTime<Utc>>,
     /// Signature of dag-cbor encoded label.
+    #[serde(with = "serde_bytes")]
     pub sig: Option<Vec<u8>>,
 }
 

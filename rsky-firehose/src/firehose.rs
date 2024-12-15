@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use rsky_lexicon::com::atproto::label::SubscribeLabels;
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use serde::Deserialize;
 use std::io::Cursor;
@@ -39,6 +40,24 @@ pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
         "#tombstone" => SubscribeRepos::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#account" => SubscribeRepos::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#identity" => SubscribeRepos::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        _ => {
+            eprintln!("Received unknown header {:?}", header.type_.as_str());
+            bail!(format!(
+                "Received unknown header {:?}",
+                header.type_.as_str()
+            ))
+        }
+    };
+
+    Ok((header, body))
+}
+
+pub fn read_labels(data: &[u8]) -> Result<(Header, SubscribeLabels)> {
+    let mut reader = Cursor::new(data);
+
+    let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
+    let body = match header.type_.as_str() {
+        "#labels" => serde_ipld_dagcbor::from_reader(&mut reader)?,
         _ => {
             eprintln!("Received unknown header {:?}", header.type_.as_str());
             bail!(format!(

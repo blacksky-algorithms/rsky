@@ -1,3 +1,5 @@
+use rsky_lexicon::com::atproto::label::Label;
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "$type")]
 pub enum Lexicon {
@@ -10,6 +12,13 @@ pub enum Lexicon {
         serialize = "app.bsky.graph.follow"
     ))]
     AppBskyFeedFollow(rsky_lexicon::app::bsky::graph::follow::Follow),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CreateRecord {
+    Lexicon(Lexicon),
+    Label(Label),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,5 +34,5 @@ pub struct CreateRequest {
     #[serde(rename = "author")]
     pub author: String,
     #[serde(rename = "record")]
-    pub record: Lexicon,
+    pub record: CreateRecord,
 }

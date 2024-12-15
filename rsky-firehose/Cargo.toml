@@ -1,6 +1,6 @@
 [package]
 name = "rsky-firehose"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "A framework for subscribing to the AT Protocol firehose, in Rust."
 license = "Apache-2.0"

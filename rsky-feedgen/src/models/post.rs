@@ -46,6 +46,7 @@ pub struct Post {
     pub quote_uri: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    pub labels: Vec<Option<String>>,
 }
 
 impl Queryable<post::SqlType, DB> for Post {
@@ -67,6 +68,7 @@ impl Queryable<post::SqlType, DB> for Post {
         Option<String>,
         Option<String>,
         String,
+        Vec<Option<String>>,
     );
 
     fn build(row: Self::Row) -> deserialize::Result<Self> {
@@ -88,6 +90,7 @@ impl Queryable<post::SqlType, DB> for Post {
             quote_cid: row.14,
             quote_uri: row.15,
             created_at: row.16,
+            labels: row.17,
         })
     }
 }
@@ -114,6 +117,7 @@ where
         post::quoteCid,
         post::quoteUri,
         post::createdAt,
+        post::labels,
     );
 
     fn construct_selection() -> Self::SelectExpression {
@@ -135,6 +139,7 @@ where
             post::quoteCid,
             post::quoteUri,
             post::createdAt,
+            post::labels,
         )
     }
 }
@@ -145,6 +150,8 @@ where
     String: FromSql<diesel::dsl::SqlTypeOf<post::uri>, DB>,
     Option<String>: FromSql<diesel::dsl::SqlTypeOf<post::replyParent>, DB>,
     Option<i64>: FromSql<diesel::dsl::SqlTypeOf<post::sequence>, DB>,
+    Vec<Option<String>>:
+        FromSql<diesel::sql_types::Array<diesel::sql_types::Nullable<diesel::sql_types::Text>>, DB>,
 {
     fn build<'a>(row: &impl NamedRow<'a, DB>) -> deserialize::Result<Self> {
         let uri = NamedRow::get::<diesel::dsl::SqlTypeOf<post::uri>, _>(row, "uri")?;
@@ -177,6 +184,7 @@ where
             NamedRow::get::<diesel::dsl::SqlTypeOf<post::quoteUri>, _>(row, "quoteUri")?;
         let created_at =
             NamedRow::get::<diesel::dsl::SqlTypeOf<post::createdAt>, _>(row, "createdAt")?;
+        let labels = NamedRow::get::<diesel::dsl::SqlTypeOf<post::labels>, _>(row, "labels")?;
         Ok(Self {
             uri,
             cid,
@@ -195,6 +203,7 @@ where
             quote_cid,
             quote_uri,
             created_at,
+            labels,
         })
     }
 }
