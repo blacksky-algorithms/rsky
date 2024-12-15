@@ -194,6 +194,7 @@ pub async fn get_blacksky_trending(
                     *
                 FROM post
                 WHERE post.\"indexedAt\" >= (CURRENT_TIMESTAMP - INTERVAL '2 days')::text
+                    AND COALESCE(array_length(labels, 1), 0) = 0
             ), recent_likes AS (
                 SELECT
                     \"subjectUri\",
@@ -345,6 +346,7 @@ pub async fn get_all_posts(
                 .limit(limit.unwrap_or(30))
                 .select(Post::as_select())
                 .order((PostSchema::createdAt.desc(), PostSchema::cid.desc()))
+                .filter(sql::<Bool>("COALESCE(array_length(labels, 1), 0) = 0"))
                 .into_boxed();
 
             if let Some(lang) = lang {
