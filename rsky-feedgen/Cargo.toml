@@ -1,6 +1,6 @@
 [package]
 name = "rsky-feedgen"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "A framework for building AT Protocol feed generators, in Rust."
 license = "Apache-2.0"

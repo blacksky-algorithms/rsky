@@ -7,6 +7,7 @@ use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Array, Bool, Nullable, Text};
@@ -15,10 +16,10 @@ use rand::Rng;
 use regex::Regex;
 use rocket::State;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
+use rsky_lexicon::app::bsky::feed::PostLabels;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::SystemTime;
-use diesel::dsl::sql;
 
 #[allow(deprecated)]
 pub async fn get_posts_by_membership(
@@ -569,6 +570,9 @@ pub async fn queue_creation(
                         }
                         if let Some(langs) = post_record.langs {
                             new_post.lang = Some(langs.join(","));
+                        }
+                        if let Some(PostLabels::SelfLabels(self_labels)) = post_record.labels {
+                            new_post.labels = self_labels.values.into_iter().map(|self_label| Some(self_label.val)).collect::<Vec<Option<String>>>();
                         }
                         if let Some(embed) = post_record.embed {
                             match embed {
