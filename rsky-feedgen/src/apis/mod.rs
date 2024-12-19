@@ -729,6 +729,7 @@ pub async fn queue_creation(
                         !hashtags.contains("#private") &&
                         !hashtags.contains("#nofeed") &&
                         !hashtags.contains("#removefromblacksky") &&
+                        hashtags.len() < env_int("FEEDGEN_HASHTAG_LIMIT").unwrap_or(4) &&
                         !contains_explicit_slurs(post_text_original.as_str()) {
                         let uri_ = &new_post.uri;
                         let seq_ = &new_post.sequence;
