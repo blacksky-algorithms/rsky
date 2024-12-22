@@ -1,6 +1,35 @@
+use atrium_api::agent::store::MemorySessionStore;
+use atrium_api::agent::AtpAgent;
+use atrium_api::com::atproto::admin::defs::{RepoRef, RepoRefData};
+use atrium_api::com::atproto::moderation::create_report::{
+    Input as ComAtprotoModerationCreateReportInput,
+    InputData as ComAtprotoModerationCreateReportData,
+    InputSubjectRefs as CreateReportInputSubjectRefs,
+};
+use atrium_api::com::atproto::repo::strong_ref::{Main as StrongRef, MainData as StrongRefData};
+use atrium_api::tools::ozone::moderation::defs::{
+    ModEventLabel, ModEventLabelData, ModEventTag, ModEventTagData,
+};
+use atrium_api::tools::ozone::moderation::emit_event::InputEventRefs::ToolsOzoneModerationDefsModEventTag;
+use atrium_api::tools::ozone::moderation::emit_event::{
+    Input as ToolsOzoneModerationEmitEventInput, InputData as ToolsOzoneModerationEmitEventData,
+    InputSubjectRefs,
+};
+use atrium_api::tools::ozone::moderation::emit_event::{
+    InputEventRefs::ToolsOzoneModerationDefsModEventLabel,
+    InputSubjectRefs as EmitEventInputSubjectRefs,
+};
+use atrium_api::tools::ozone::moderation::get_record::{Parameters, ParametersData};
+use atrium_api::types::string::Did;
+use atrium_api::types::Union;
+use atrium_api::xrpc::http::HeaderMap;
+use atrium_ipld::ipld::Ipld as AtriumIpld;
+use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use dotenvy::dotenv;
 use futures::StreamExt as _;
+use rsky_common::env::env_list;
 use rsky_common::explicit_slurs::contains_explicit_slurs;
+use rsky_labeler::APP_USER_AGENT;
 use rsky_lexicon::app::bsky::actor::Profile;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
@@ -23,12 +52,184 @@ enum Lexicon {
     AppBskyActorProfile(Profile),
 }
 
-async fn process(message: Vec<u8>) {
+#[derive(Debug, Clone)]
+struct AutoReport {
+    subject_ref: EmitEventInputSubjectRefs,
+    reason: Option<String>,
+}
+
+fn get_agent(
+) -> Result<Arc<AtpAgent<MemorySessionStore, ReqwestClient>>, Box<dyn std::error::Error>> {
+    let agent_url =
+        env::var("BSKY_AGENT_URL").unwrap_or_else(|_| "https://bsky.social".to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "atproto-proxy",
+        format!(
+            "{}#atproto_labeler",
+            env::var("MOD_SERVICE_DID").expect("Mod service DID should be set.")
+        )
+        .parse()?,
+    );
+    let client = ReqwestClientBuilder::new(agent_url)
+        .client(
+            reqwest::ClientBuilder::new()
+                .user_agent(APP_USER_AGENT)
+                .timeout(Duration::from_millis(1000))
+                .default_headers(headers)
+                .build()?,
+        )
+        .build();
+    let agent = Arc::new(AtpAgent::new(client, MemorySessionStore::default()));
+    Ok(agent)
+}
+
+async fn get_labels(
+    agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
+    subject_ref: &EmitEventInputSubjectRefs,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let cid = match subject_ref {
+        InputSubjectRefs::ComAtprotoAdminDefsRepoRef(_) => None,
+        InputSubjectRefs::ComAtprotoRepoStrongRefMain(ref strong_ref) => {
+            Some(strong_ref.cid.clone())
+        }
+    };
+    let uri = match subject_ref {
+        InputSubjectRefs::ComAtprotoAdminDefsRepoRef(ref repo_ref) => {
+            repo_ref.did.clone().to_string()
+        }
+        InputSubjectRefs::ComAtprotoRepoStrongRefMain(ref strong_ref) => strong_ref.uri.clone(),
+    };
+    match agent
+        .api
+        .tools
+        .ozone
+        .moderation
+        .get_record(Parameters {
+            data: ParametersData { cid, uri },
+            extra_data: AtriumIpld::Null,
+        })
+        .await
+    {
+        Ok(result) => match result.labels {
+            None => Ok(vec![]),
+            Some(ref labels) => Ok(labels.iter().map(|l| l.val.clone()).collect()),
+        },
+        Err(error) => {
+            eprintln!("@LOG: Failed to fetch mod record: {error:?}");
+            Ok(vec![])
+        }
+    }
+}
+
+async fn label_subject(
+    agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
+    subject_ref: EmitEventInputSubjectRefs,
+    comment: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let label_result = agent
+        .api
+        .tools
+        .ozone
+        .moderation
+        .emit_event(ToolsOzoneModerationEmitEventInput {
+            data: ToolsOzoneModerationEmitEventData {
+                created_by: Did::new(
+                    env::var("MOD_SERVICE_DID").expect("Mod service DID should be set."),
+                )?,
+                event: Union::Refs(ToolsOzoneModerationDefsModEventLabel(Box::new(
+                    ModEventLabel {
+                        data: ModEventLabelData {
+                            comment,
+                            create_label_vals: vec![env::var("MOD_SERVICE_LABEL")
+                                .unwrap_or("antiblack-harassment".to_string())],
+                            negate_label_vals: vec![],
+                        },
+                        extra_data: AtriumIpld::Null,
+                    },
+                ))),
+                subject: Union::Refs(subject_ref),
+                subject_blob_cids: None,
+            },
+            extra_data: AtriumIpld::Null,
+        })
+        .await?;
+    println!("@LOG: Label result {label_result:?}");
+    Ok(())
+}
+
+async fn tag_subject(
+    agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
+    subject_ref: EmitEventInputSubjectRefs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = agent
+        .api
+        .tools
+        .ozone
+        .moderation
+        .emit_event(ToolsOzoneModerationEmitEventInput {
+            data: ToolsOzoneModerationEmitEventData {
+                created_by: Did::new(
+                    env::var("MOD_SERVICE_DID").expect("Mod service DID should be set."),
+                )?,
+                event: Union::Refs(ToolsOzoneModerationDefsModEventTag(Box::new(ModEventTag {
+                    data: ModEventTagData {
+                        add: env_list("MOD_SERVICE_AUTOLABEL_TAGS"),
+                        comment: None,
+                        remove: vec![],
+                    },
+                    extra_data: AtriumIpld::Null,
+                }))),
+                subject: Union::Refs(subject_ref),
+                subject_blob_cids: None,
+            },
+            extra_data: AtriumIpld::Null,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn create_report(
+    agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
+    subject_ref: EmitEventInputSubjectRefs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report_result = agent
+        .api
+        .com
+        .atproto
+        .moderation
+        .create_report(ComAtprotoModerationCreateReportInput {
+            data: ComAtprotoModerationCreateReportData {
+                reason: Some(
+                    env::var("MOD_SERVICE_COMMENT").unwrap_or("Explicit slur filter".to_string()),
+                ),
+                reason_type: env::var("MOD_SERVICE_REASON")
+                    .unwrap_or("com.atproto.moderation.defs#reasonRude".to_string()),
+                subject: match subject_ref {
+                    EmitEventInputSubjectRefs::ComAtprotoAdminDefsRepoRef(repo_ref) => Union::Refs(
+                        CreateReportInputSubjectRefs::ComAtprotoAdminDefsRepoRef(repo_ref),
+                    ),
+                    EmitEventInputSubjectRefs::ComAtprotoRepoStrongRefMain(strong_ref) => {
+                        Union::Refs(CreateReportInputSubjectRefs::ComAtprotoRepoStrongRefMain(
+                            strong_ref,
+                        ))
+                    }
+                },
+            },
+            extra_data: AtriumIpld::Null,
+        })
+        .await?;
+    println!("@LOG: Report result {report_result:?}");
+    Ok(())
+}
+
+async fn process(
+    message: Vec<u8>,
+    agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match rsky_labeler::firehose::read(&message) {
         Ok((_header, body)) => {
-            let mut posts_to_label = Vec::new();
-            let mut profiles_to_label = Vec::new();
-            let mut handles_to_label = Vec::new();
+            let mut auto_reports: Vec<AutoReport> = Vec::new();
 
             match body {
                 SubscribeRepos::Commit(commit) => {
@@ -43,7 +244,7 @@ async fn process(message: Vec<u8>) {
                         .map(|operation| {
                             let uri = format!("at://{}/{}",commit.repo,operation.path);
                             match operation.action.as_str() {
-                                "create" | "update" => {
+                                "create" | "update" => { // @TODO: For profile updates, only want to action if changed(?)
                                     if let Some(cid) = operation.cid {
                                         let mut car_reader = Cursor::new(&commit.blocks);
                                         let _car_header = rsky_labeler::car::read_header(&mut car_reader).unwrap();
@@ -54,24 +255,57 @@ async fn process(message: Vec<u8>) {
                                             Ok(Lexicon::AppBskyFeedPost(r)) => {
                                                 let post: Post = r;
                                                 if contains_explicit_slurs(post.text.as_str()) {
-                                                    posts_to_label.push(post);
+                                                    auto_reports.push(
+                                                        AutoReport {
+                                                            subject_ref: EmitEventInputSubjectRefs::ComAtprotoRepoStrongRefMain(Box::new(StrongRef {
+                                                                data: StrongRefData {
+                                                                    cid: cid.to_string().parse().unwrap(),
+                                                                    uri,
+                                                                },
+                                                                extra_data: AtriumIpld::Null,
+                                                            })),
+                                                            reason: Some(format!(
+                                                                "{}: user made bluesky post `{}`",
+                                                                env::var("MOD_SERVICE_COMMENT").unwrap_or("Explicit slur filter".to_string()),
+                                                                post.text.as_str()
+                                                            ))
+                                                        });
                                                 }
                                             },
                                             Ok(Lexicon::AppBskyActorProfile(r)) => {
                                                 let profile: Profile = r;
-                                                let mut profile_should_be_labeled = false;
+                                                let mut reason: Option<String> = None;
                                                 if let Some(ref display_name) = profile.display_name {
                                                     if contains_explicit_slurs(display_name.as_str()) {
-                                                        profile_should_be_labeled = true;
+                                                        reason = Some(format!(
+                                                            "{}: user's bluesky display name is `{}`",
+                                                            env::var("MOD_SERVICE_COMMENT").unwrap_or("Explicit slur filter".to_string()),
+                                                            display_name.as_str()
+                                                        ))
                                                     }
                                                 }
                                                 if let Some(ref description) = profile.description {
                                                     if contains_explicit_slurs(description.as_str()) {
-                                                        profile_should_be_labeled = true;
+                                                        reason = Some(format!(
+                                                            "{}: user's bluesky profile description is `{}`",
+                                                            env::var("MOD_SERVICE_COMMENT").unwrap_or("Explicit slur filter".to_string()),
+                                                            description.as_str()
+                                                        ))
                                                     }
                                                 }
-                                                if profile_should_be_labeled {
-                                                    profiles_to_label.push(profile);
+                                                if let Some(reason) = reason {
+                                                    auto_reports.push(
+                                                        AutoReport {
+                                                            subject_ref: EmitEventInputSubjectRefs::ComAtprotoRepoStrongRefMain(Box::new(StrongRef {
+                                                                data: StrongRefData {
+                                                                    cid: cid.to_string().parse().unwrap(),
+                                                                    uri,
+                                                                },
+                                                                extra_data: AtriumIpld::Null,
+                                                            })),
+                                                            reason: Some(reason)
+                                                        }
+                                                    );
                                                 }
                                             },
                                             Err(_) => ()
@@ -85,32 +319,66 @@ async fn process(message: Vec<u8>) {
                 }
                 SubscribeRepos::Identity(identity) => {
                     if let Some(ref handle) = identity.handle {
-                        if contains_explicit_slurs(handle.as_str()) {
-                            handles_to_label.push(identity);
+                        if contains_explicit_slurs(handle.as_str())
+                            || contains_explicit_slurs(
+                                handle
+                                    .replace(".", "")
+                                    .replace("-", "")
+                                    .replace("_", "")
+                                    .as_str(),
+                            )
+                        {
+                            auto_reports.push(AutoReport {
+                                subject_ref: EmitEventInputSubjectRefs::ComAtprotoAdminDefsRepoRef(
+                                    Box::new(RepoRef {
+                                        data: RepoRefData {
+                                            did: Did::new(identity.did)?,
+                                        },
+                                        extra_data: AtriumIpld::Null,
+                                    }),
+                                ),
+                                reason: Some(format!(
+                                    "{}: account's handle is `{}`",
+                                    env::var("MOD_SERVICE_COMMENT")
+                                        .unwrap_or("Explicit slur filter".to_string()),
+                                    handle.as_str()
+                                )),
+                            });
                         }
                     }
                 }
                 _ => (),
             }
-            if posts_to_label.len() > 0 {
-                println!("Count posts to label {}", posts_to_label.len());
-                let text = posts_to_label
-                    .iter()
-                    .map(|p| &p.text)
-                    .collect::<Vec<&String>>();
-                println!("Posts to label {text:?}");
-            }
-            if profiles_to_label.len() > 0 {
-                println!("Count profiles to label {}", profiles_to_label.len());
-                println!("Profiles to label {profiles_to_label:#?}");
-            }
-            if handles_to_label.len() > 0 {
-                println!("Count handles to label {}", handles_to_label.len());
-                let handles = handles_to_label
-                    .into_iter()
-                    .filter_map(|h| h.handle)
-                    .collect::<Vec<String>>();
-                println!("Posts to label {handles:?}");
+            if auto_reports.len() > 0 {
+                for auto_report in auto_reports {
+                    let label =
+                        env::var("MOD_SERVICE_LABEL").unwrap_or("antiblack-harassment".to_string());
+                    let existing_labels = get_labels(agent, &auto_report.subject_ref).await?; // Known issue with atrium making this call fail.
+                    if existing_labels.contains(&label) {
+                        println!(
+                            "@LOG: Subject already labeled as {label} {:?}",
+                            auto_report.subject_ref
+                        );
+                        continue;
+                    }
+
+                    match create_report(agent, auto_report.subject_ref.clone()).await {
+                        Ok(()) => (),
+                        Err(error) => {
+                            eprintln!("@LOG: Failed to create report for record: {error:?}")
+                        }
+                    }
+                    match label_subject(agent, auto_report.subject_ref.clone(), auto_report.reason)
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(error) => eprintln!("@LOG: Failed to label record: {error:?}"),
+                    }
+                    match tag_subject(agent, auto_report.subject_ref).await {
+                        Ok(()) => (),
+                        Err(error) => eprintln!("@LOG: Failed to tag record: {error:?}"),
+                    }
+                }
             }
         }
         Err(error) => eprintln!(
@@ -118,10 +386,11 @@ async fn process(message: Vec<u8>) {
             error.to_string()
         ),
     }
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env file
     dotenv().ok();
 
@@ -131,14 +400,21 @@ async fn main() {
     let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
         .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
 
+    let agent = get_agent()?;
+    agent
+        .login(
+            env::var("MOD_SERVICE_EMAIL").expect("Mod service email should be set."),
+            env::var("MOD_SERVICE_PASSWORD").expect("Mod service password should be set."),
+        )
+        .await?;
+
     // Create a semaphore to limit the number of concurrent processing tasks
     let semaphore = Arc::new(Semaphore::new(100)); // Adjust the limit as needed
 
     loop {
         // Construct the WebSocket URL
         let ws_url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint)
-            .into_client_request()
-            .expect("Invalid WebSocket URL");
+            .into_client_request()?;
 
         // Attempt to establish a WebSocket connection
         match connect_async(ws_url).await {
@@ -149,6 +425,7 @@ async fn main() {
                 while let Some(msg_result) = socket.next().await {
                     match msg_result {
                         Ok(Message::Binary(message)) => {
+                            let agent = Arc::clone(&agent);
                             let semaphore = Arc::clone(&semaphore);
 
                             // Acquire a permit before spawning a new task
@@ -170,7 +447,9 @@ async fn main() {
 
                                 match subscriber_endpoint.as_str() {
                                     "com.atproto.sync.subscribeRepos" => {
-                                        process(message.to_vec()).await
+                                        process(message.to_vec(), &agent)
+                                            .await
+                                            .expect("Should have failed gracefully")
                                     }
                                     _ => panic!(
                                         "Unexpected subscription endpoint: {subscriber_endpoint}"

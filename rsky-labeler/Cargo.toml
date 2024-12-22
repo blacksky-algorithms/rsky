@@ -33,5 +33,6 @@ dotenvy = "0.15.7"
 retry = "2.0.0"
 anyhow = "1.0.81"
 libipld = { version = "0.16.0", features = ["serde-codec"] }
-atrium-api = "0.24.6"
+atrium-api = { version = "0.24.6", features = ["namespace-toolsozone"] }
 atrium-xrpc-client = "0.5.8"
+atrium-ipld = {package = "ipld-core", version = "0.4.1"}
