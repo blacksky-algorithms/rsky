@@ -1,6 +1,6 @@
-use crate::common::env::env_int;
+use rsky_common::env::env_int;
 use crate::db::*;
-use crate::explicit_slurs::contains_explicit_slurs;
+use rsky_common::explicit_slurs::contains_explicit_slurs;
 use crate::models::create_request::CreateRecord;
 use crate::models::Lexicon::{AppBskyFeedFollow, AppBskyFeedLike, AppBskyFeedPost};
 use crate::models::*;
