@@ -1,0 +1,18 @@
+[package]
+name = "rsky-common"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Shared code for rsky"
+license = "Apache-2.0"
+edition = "2021"
+publish = true
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-common"
+documentation = "https://docs.rs/rsky-common"
+
+
+[dependencies]
+regex = "1.8.4"
+
+[dev-dependencies]
+temp-env = { version = "0.3.6"}

@@ -7,8 +7,8 @@ Cargo.lock
 .cargo
 NOTE.md
 .graveyard/
-/labeler/*.json
-/labeler/*.tsv
+/classifier/*.json
+/classifier/*.tsv
 Rocket.toml
 *.pem
 
