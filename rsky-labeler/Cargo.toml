@@ -1,6 +1,6 @@
 [package]
 name = "rsky-labeler"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "AT Protocol firehose subscriber that labels content for a moderation service."
 license = "Apache-2.0"

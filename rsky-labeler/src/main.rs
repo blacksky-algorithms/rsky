@@ -27,7 +27,7 @@ use atrium_ipld::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use dotenvy::dotenv;
 use futures::StreamExt as _;
-use rsky_common::env::env_list;
+use rsky_common::env::{env_bool, env_list};
 use rsky_common::explicit_slurs::contains_explicit_slurs;
 use rsky_labeler::APP_USER_AGENT;
 use rsky_lexicon::app::bsky::actor::Profile;
@@ -361,22 +361,27 @@ async fn process(
                         );
                         continue;
                     }
-
-                    match create_report(agent, auto_report.subject_ref.clone()).await {
-                        Ok(()) => (),
-                        Err(error) => {
-                            eprintln!("@LOG: Failed to create report for record: {error:?}")
+                    if env_bool("ENABLE_CREATE_REPORT").unwrap_or(true) {
+                        match create_report(agent, auto_report.subject_ref.clone()).await {
+                            Ok(()) => (),
+                            Err(error) => {
+                                eprintln!("@LOG: Failed to create report for record: {error:?}")
+                            }
                         }
                     }
-                    match label_subject(agent, auto_report.subject_ref.clone(), auto_report.reason)
-                        .await
-                    {
-                        Ok(()) => (),
-                        Err(error) => eprintln!("@LOG: Failed to label record: {error:?}"),
+                    if env_bool("ENABLE_CREATE_LABEL").unwrap_or(true) {
+                        match label_subject(agent, auto_report.subject_ref.clone(), auto_report.reason)
+                            .await
+                        {
+                            Ok(()) => (),
+                            Err(error) => eprintln!("@LOG: Failed to label record: {error:?}"),
+                        }
                     }
-                    match tag_subject(agent, auto_report.subject_ref).await {
-                        Ok(()) => (),
-                        Err(error) => eprintln!("@LOG: Failed to tag record: {error:?}"),
+                    if env_bool("ENABLE_CREATE_TAG").unwrap_or(true) {
+                        match tag_subject(agent, auto_report.subject_ref).await {
+                            Ok(()) => (),
+                            Err(error) => eprintln!("@LOG: Failed to tag record: {error:?}"),
+                        }
                     }
                 }
             }
