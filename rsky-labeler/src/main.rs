@@ -124,8 +124,7 @@ async fn get_labels(
 
 async fn label_subject(
     agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
-    subject_ref: EmitEventInputSubjectRefs,
-    comment: Option<String>,
+    subject_ref: EmitEventInputSubjectRefs
 ) -> Result<(), Box<dyn std::error::Error>> {
     let label_result = agent
         .api
@@ -140,7 +139,9 @@ async fn label_subject(
                 event: Union::Refs(ToolsOzoneModerationDefsModEventLabel(Box::new(
                     ModEventLabel {
                         data: ModEventLabelData {
-                            comment,
+                            comment: Some(
+                                env::var("MOD_SERVICE_LABEL_REASON").unwrap_or("Explicit slur filter".to_string()),
+                            ),
                             create_label_vals: vec![env::var("MOD_SERVICE_LABEL")
                                 .unwrap_or("antiblack-harassment".to_string())],
                             negate_label_vals: vec![],
@@ -192,6 +193,7 @@ async fn tag_subject(
 async fn create_report(
     agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
     subject_ref: EmitEventInputSubjectRefs,
+    reason: Option<String>
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report_result = agent
         .api
@@ -200,9 +202,7 @@ async fn create_report(
         .moderation
         .create_report(ComAtprotoModerationCreateReportInput {
             data: ComAtprotoModerationCreateReportData {
-                reason: Some(
-                    env::var("MOD_SERVICE_COMMENT").unwrap_or("Explicit slur filter".to_string()),
-                ),
+                reason,
                 reason_type: env::var("MOD_SERVICE_REASON")
                     .unwrap_or("com.atproto.moderation.defs#reasonRude".to_string()),
                 subject: match subject_ref {
@@ -362,7 +362,7 @@ async fn process(
                         continue;
                     }
                     if env_bool("ENABLE_CREATE_REPORT").unwrap_or(true) {
-                        match create_report(agent, auto_report.subject_ref.clone()).await {
+                        match create_report(agent, auto_report.subject_ref.clone(), auto_report.reason).await {
                             Ok(()) => (),
                             Err(error) => {
                                 eprintln!("@LOG: Failed to create report for record: {error:?}")
@@ -370,7 +370,7 @@ async fn process(
                         }
                     }
                     if env_bool("ENABLE_CREATE_LABEL").unwrap_or(true) {
-                        match label_subject(agent, auto_report.subject_ref.clone(), auto_report.reason)
+                        match label_subject(agent, auto_report.subject_ref.clone())
                             .await
                         {
                             Ok(()) => (),
