@@ -6,26 +6,26 @@ use anyhow::Result;
 use lexicon_cid::Cid;
 use std::collections::BTreeMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataAdd {
-    key: String,
-    cid: Cid,
+    pub(crate) key: String,
+    pub(crate) cid: Cid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataUpdate {
-    key: String,
-    prev: Cid,
-    cid: Cid,
+    pub(crate) key: String,
+    pub(crate) prev: Cid,
+    pub(crate) cid: Cid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataDelete {
-    key: String,
-    cid: Cid,
+    pub(crate) key: String,
+    pub(crate) cid: Cid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataDiff {
     pub adds: BTreeMap<String, DataAdd>,
     pub updates: BTreeMap<String, DataUpdate>,
@@ -148,5 +148,17 @@ impl DataDiff {
             self.removed_cids.add(cid);
         }
         Ok(())
+    }
+
+    pub fn add_list(&self) -> Vec<DataAdd> {
+        self.adds.values().cloned().collect()
+    }
+
+    pub fn update_list(&self) -> Vec<DataUpdate> {
+        self.updates.values().cloned().collect()
+    }
+
+    pub fn delete_list(&self) -> Vec<DataDelete> {
+        self.deletes.values().cloned().collect()
     }
 }

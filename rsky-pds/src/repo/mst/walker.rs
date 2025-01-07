@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct WalkerStatusDone(bool);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WalkerStatusProgress {
     pub done: bool,
     pub curr: NodeEntry,
@@ -12,13 +12,13 @@ pub struct WalkerStatusProgress {
     pub index: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum WalkerStatus {
     WalkerStatusDone(WalkerStatusDone),
     WalkerStatusProgress(WalkerStatusProgress),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MstWalker {
     pub stack: Vec<WalkerStatus>,
     pub status: WalkerStatus,
@@ -90,10 +90,10 @@ impl MstWalker {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
                 if let Some(_) = p.walking {
-                    if let NodeEntry::MST(ref mut mst) = p.curr {
-                        let next = mst.at_index(0)?;
+                    if let NodeEntry::MST(ref mut curr) = p.curr {
+                        let next = curr.at_index(0)?;
                         if let Some(next) = next {
-                            p.walking = Some(mst.clone());
+                            p.walking = Some(curr.clone());
                             self.stack
                                 .push(WalkerStatus::WalkerStatusProgress(p.clone()));
                             p.curr = next.clone();
@@ -112,7 +112,7 @@ impl MstWalker {
                                 WalkerStatus::WalkerStatusProgress(WalkerStatusProgress {
                                     done: false,
                                     walking: Some(mst.clone()),
-                                    curr: next.clone(),
+                                    curr: next,
                                     index: 0,
                                 });
                         } else {

@@ -43,8 +43,8 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                     WalkerStatus::WalkerStatusProgress(ref l),
                     WalkerStatus::WalkerStatusProgress(ref r),
                 ) => {
-                    let left = l.curr.clone();
-                    let right = r.curr.clone();
+                    let mut left = l.curr.clone();
+                    let mut right = r.curr.clone();
 
                     // if both pointers are leaves, record an update & advance both or record
                     // the lowest key and advance that pointer
@@ -96,9 +96,10 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                     // if we're on the same level, and both pointers are trees, do a comparison
                     // if they're the same, step over. if they're different, step in to
                     // find the subdiff
-                    if let (NodeEntry::MST(left_tree), NodeEntry::MST(right_tree)) = (&left, &right)
+                    if let (NodeEntry::MST(left_tree), NodeEntry::MST(right_tree)) =
+                        (&mut left, &mut right)
                     {
-                        if left_tree.pointer.eq(&right_tree.pointer) {
+                        if left_tree.get_pointer()?.eq(&right_tree.get_pointer()?) {
                             left_walker.step_over()?;
                             right_walker.step_over()?;
                         } else {

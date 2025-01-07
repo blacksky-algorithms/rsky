@@ -25,7 +25,7 @@ fn is_valid_chars(input: &str) -> bool {
 // alphanumeric (A-Za-z0-9), period, dash, underscore, colon, or tilde (.-_:~)
 // * Must have at least 1 and at most 512 characters
 // * The specific record key values . and .. are not allowed
-pub fn is_valid_repo_mst_path(key: &String) -> Result<bool> {
+pub fn is_valid_repo_mst_path(key: &str) -> Result<bool> {
     let split: Vec<&str> = key.split("/").collect();
 
     return if key.len() <= 256
@@ -41,7 +41,7 @@ pub fn is_valid_repo_mst_path(key: &String) -> Result<bool> {
     };
 }
 
-pub fn ensure_valid_mst_key(key: &String) -> Result<()> {
+pub fn ensure_valid_mst_key(key: &str) -> Result<()> {
     let result = is_valid_repo_mst_path(key)?;
     match result {
         true => Ok(()),
@@ -49,7 +49,7 @@ pub fn ensure_valid_mst_key(key: &String) -> Result<()> {
     }
 }
 
-pub fn cid_for_entries(entries: Vec<NodeEntry>) -> Result<Cid> {
+pub fn cid_for_entries(entries: &[NodeEntry]) -> Result<Cid> {
     let data = serialize_node_data(entries)?;
     ipld::cid_for_cbor(&data)
 }
@@ -65,7 +65,7 @@ pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
     Ok(x)
 }
 
-pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
+pub fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
     let mut data = NodeData {
         l: None,
         e: Vec::new(),
@@ -107,7 +107,7 @@ pub fn serialize_node_data(entries: Vec<NodeEntry>) -> Result<NodeData> {
 
 pub fn deserialize_node_data(
     storage: &SqlRepoReader,
-    data: NodeData,
+    data: &NodeData,
     layer: Option<u32>,
 ) -> Result<Vec<NodeEntry>> {
     let mut entries: Vec<NodeEntry> = Vec::new();
@@ -123,7 +123,7 @@ pub fn deserialize_node_data(
         entries.push(mst)
     }
     let mut last_key: String = "".to_owned();
-    for entry in data.e {
+    for entry in &data.e {
         let key_str = str::from_utf8(entry.k.as_ref())?;
         let p = usize::try_from(entry.p)?;
         let key = format!("{}{}", &last_key[0..p], key_str);
@@ -148,7 +148,7 @@ pub fn deserialize_node_data(
     Ok(entries)
 }
 
-pub fn layer_for_entries(entries: Vec<NodeEntry>) -> Result<Option<u32>> {
+pub fn layer_for_entries(entries: &[NodeEntry]) -> Result<Option<u32>> {
     let first_leaf = entries.into_iter().find(|entry| entry.is_leaf());
     if let Some(f) = first_leaf {
         match f {
@@ -160,7 +160,7 @@ pub fn layer_for_entries(entries: Vec<NodeEntry>) -> Result<Option<u32>> {
     }
 }
 
-pub fn leading_zeros_on_hash(key: &Vec<u8>) -> Result<u32> {
+pub fn leading_zeros_on_hash(key: &[u8]) -> Result<u32> {
     let digest = Sha256::digest(&*key);
     let hash: &[u8] = digest.as_ref();
     let mut leading_zeros = 0;
