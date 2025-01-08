@@ -452,7 +452,7 @@ impl MST {
     pub fn new_tree(&mut self, entries: Vec<NodeEntry>) -> Result<MST> {
         let mut mst = MST::new(
             self.storage.clone(),
-            self.get_pointer()?,
+            self.pointer,
             Some(entries),
             self.layer,
         );
@@ -1211,10 +1211,7 @@ impl MST {
         for entry in self.walk() {
             match entry {
                 NodeEntry::Leaf(_) => nodes.push(entry),
-                NodeEntry::MST(mut m) => {
-                    if m.outdated_pointer {
-                        m.pointer = m.get_pointer()?;
-                    }
+                NodeEntry::MST(m) => {
                     nodes.push(NodeEntry::MST(m))
                 }
             }
