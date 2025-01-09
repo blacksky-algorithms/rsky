@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::fmt::Display;
 use url::Url;
 
 pub fn atp_uri_regex(input: &str) -> Option<Vec<&str>> {
@@ -188,28 +189,6 @@ impl AtUri {
     pub fn get_href(&self) -> String {
         self.to_string()
     }
-
-    pub fn to_string(&self) -> String {
-        let mut path = match self.pathname == "" {
-            true => "/".to_string(),
-            false => self.pathname.clone(),
-        };
-        if !path.starts_with("/") {
-            path = format!("/{path}");
-        }
-        let qs = match self.get_search() {
-            Ok(Some(search_params)) if !search_params.starts_with("?") && search_params != "" => {
-                format!("?{search_params}")
-            }
-            Ok(Some(search_params)) => search_params,
-            _ => "".to_string(),
-        };
-        let hash = match self.hash == "" {
-            true => self.hash.clone(),
-            false => format!("#{}", self.hash),
-        };
-        format!("at://{}{}{}{}", self.host, path, qs, hash)
-    }
 }
 
 pub fn parse(str: &String) -> Result<Option<ParsedOutput>> {
@@ -257,6 +236,221 @@ pub fn parse_relative(str: &String) -> Result<Option<ParsedRelativeOutput>> {
                 pathname: matches[0].to_string(),
                 search_params: query_pairs,
             }))
+        }
+    }
+}
+
+impl Display for AtUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut path = match self.pathname == "" {
+            true => "/".to_string(),
+            false => self.pathname.clone(),
+        };
+        if !path.starts_with("/") {
+            path = format!("/{path}");
+        }
+        let qs = match self.get_search() {
+            Ok(Some(search_params)) if !search_params.starts_with("?") && search_params != "" => {
+                format!("?{search_params}")
+            }
+            Ok(Some(search_params)) => search_params,
+            _ => "".to_string(),
+        };
+        let hash = match self.hash == "" {
+            true => self.hash.clone(),
+            false => format!("#{}", self.hash),
+        };
+        write!(f, "at://{}{}{}{}", self.host, path, qs, hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper function that constructs AtUri using the new() method and returns a Result
+    fn create_at_uri(
+        host: &str,
+        pathname: &str,
+        search_params: Vec<(String, String)>,
+        hash: &str,
+    ) -> Result<AtUri> {
+        let mut uri = AtUri::new(host.to_string(), None)?;
+        uri.pathname = pathname.to_string();
+        uri.search_params = search_params;
+        uri.hash = hash.to_string();
+        Ok(uri)
+    }
+
+    #[test]
+    fn test_display_basic_uri() {
+        // Test a basic AT URI with just host and pathname
+        let uri = create_at_uri("example.com", "app.bsky.feed.post/123", vec![], "")
+            .expect("Should create valid basic URI");
+        assert_eq!(uri.to_string(), "at://example.com/app.bsky.feed.post/123");
+    }
+
+    #[test]
+    fn test_display_empty_pathname() {
+        // Empty pathname should result in a single slash
+        let uri = create_at_uri("example.com", "", vec![], "")
+            .expect("Should create valid URI with empty pathname");
+        assert_eq!(uri.to_string(), "at://example.com/");
+    }
+
+    #[test]
+    fn test_display_with_did() {
+        // Test URI with DID in host
+        let uri = create_at_uri(
+            "did:plc:44ybard66vv44zksje25o7dz",
+            "app.bsky.feed.post/123",
+            vec![],
+            "",
+        )
+        .expect("Should create valid URI with DID");
+        assert_eq!(
+            uri.to_string(),
+            "at://did:plc:44ybard66vv44zksje25o7dz/app.bsky.feed.post/123"
+        );
+    }
+
+    #[test]
+    fn test_display_with_search_params() {
+        // Test URI with query parameters
+        let uri = create_at_uri(
+            "example.com",
+            "app.bsky.feed.post/123",
+            vec![
+                ("key1".to_string(), "value1".to_string()),
+                ("key2".to_string(), "value2".to_string()),
+            ],
+            "",
+        )
+        .expect("Should create valid URI with search parameters");
+        assert_eq!(
+            uri.to_string(),
+            "at://example.com/app.bsky.feed.post/123?key1=value1&key2=value2"
+        );
+    }
+
+    #[test]
+    fn test_display_with_hash() {
+        // Test URI with hash fragment
+        let uri = create_at_uri("example.com", "app.bsky.feed.post/123", vec![], "fragment")
+            .expect("Should create valid URI with hash fragment");
+        assert_eq!(
+            uri.to_string(),
+            "at://example.com/app.bsky.feed.post/123#fragment"
+        );
+    }
+
+    #[test]
+    fn test_display_complete_uri() {
+        // Test URI with all components
+        let uri = create_at_uri(
+            "example.com",
+            "app.bsky.feed.post/123",
+            vec![("key".to_string(), "value".to_string())],
+            "fragment",
+        )
+        .expect("Should create valid complete URI");
+        assert_eq!(
+            uri.to_string(),
+            "at://example.com/app.bsky.feed.post/123?key=value#fragment"
+        );
+    }
+
+    #[test]
+    fn test_display_pathname_formatting() {
+        // Test pathname without leading slash gets one added
+        let uri = create_at_uri("example.com", "app.bsky.feed.post/123", vec![], "")
+            .expect("Should create valid URI with pathname");
+        assert!(uri.to_string().contains("/app.bsky.feed.post/123"));
+    }
+
+    #[test]
+    fn test_display_search_params_formatting() {
+        // Test search params formatting without leading question mark
+        let uri = create_at_uri(
+            "example.com",
+            "path",
+            vec![("key".to_string(), "value".to_string())],
+            "",
+        )
+        .expect("Should create valid URI with search params");
+        let result = uri.to_string();
+        assert!(result.contains("?key=value"));
+        assert!(
+            !result.contains("??"),
+            "Should not contain double question marks"
+        );
+    }
+
+    #[test]
+    fn test_display_hash_formatting() {
+        // Test hash formatting without leading hash symbol
+        let uri = create_at_uri("example.com", "path", vec![], "fragment")
+            .expect("Should create valid URI with hash");
+        let result = uri.to_string();
+        assert!(result.contains("#fragment"));
+        assert!(
+            !result.contains("##"),
+            "Should not contain double hash symbols"
+        );
+    }
+
+    #[test]
+    fn test_display_spec_compliance() {
+        // Test various cases from the AT URI spec examples
+        let cases = vec![
+            (
+                "foo.com",
+                "com.example.foo/123",
+                "at://foo.com/com.example.foo/123",
+            ),
+            (
+                "did:plc:44ybard66vv44zksje25o7dz",
+                "app.bsky.feed.post/3jwdwj2ctlk26",
+                "at://did:plc:44ybard66vv44zksje25o7dz/app.bsky.feed.post/3jwdwj2ctlk26",
+            ),
+            (
+                "bnewbold.bsky.team",
+                "app.bsky.feed.post/3jwdwj2ctlk26",
+                "at://bnewbold.bsky.team/app.bsky.feed.post/3jwdwj2ctlk26",
+            ),
+        ];
+
+        for (host, pathname, expected) in cases {
+            let uri = create_at_uri(host, pathname, vec![], "")
+                .expect("Should create valid URI for spec compliance test");
+            assert_eq!(uri.to_string(), expected);
+        }
+    }
+
+    // one negative test
+    #[test]
+    fn test_invalid_query_parameters() {
+        let invalid_cases = vec![
+            // Empty key
+            vec![("".to_string(), "value".to_string())],
+            // Multiple question marks
+            vec![("??key".to_string(), "value".to_string())],
+            // Invalid characters in query params
+            vec![("key#invalid".to_string(), "value".to_string())],
+        ];
+
+        for search_params in invalid_cases {
+            let result = create_at_uri("example.com", "path", search_params.clone(), "");
+
+            // If construction succeeds (query param validation might not be in new())
+            if let Ok(uri) = result {
+                let display_result = uri.to_string();
+                assert!(
+                    display_result.matches('?').count() <= 1,
+                    "Query string should contain at most one question mark: {}",
+                    display_result
+                );
+            }
         }
     }
 }
