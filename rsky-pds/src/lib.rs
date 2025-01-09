@@ -24,8 +24,6 @@ pub static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
 );
 
-const INVALID_HANDLE: &'static str = "handle.invalid";
-
 #[database("pg_db")]
 pub struct DbConn(PgConnection);
 
