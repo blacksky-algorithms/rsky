@@ -50,6 +50,25 @@ pub fn is_valid_tld(handle: &str) -> bool {
         .any(|domain| handle_lower.ends_with(domain))
 }
 
+// Handle constraints, in English:
+//  - must be a possible domain name
+//    - RFC-1035 is commonly referenced, but has been updated. eg, RFC-3696,
+//      section 2. and RFC-3986, section 3. can now have leading numbers (eg,
+//      4chan.org)
+//    - "labels" (sub-names) are made of ASCII letters, digits, hyphens
+//    - can not start or end with a hyphen
+//    - TLD (last component) should not start with a digit
+//    - can't end with a hyphen (can end with digit)
+//    - each segment must be between 1 and 63 characters (not including any periods)
+//    - overall length can't be more than 253 characters
+//    - separated by (ASCII) periods; does not start or end with period
+//    - case insensitive
+//    - domains (handles) are equal if they are the same lower-case
+//    - punycode allowed for internationalization
+//  - no whitespace, null bytes, joining chars, etc
+//  - does not validate whether domain or TLD exists, or is a reserved or
+//    special TLD (eg, .onion or .local)
+//  - does not validate punycode
 pub fn ensure_valid_handle(handle: &str) -> Result<(), HandleError> {
     // Check that all chars are boring ASCII
     if !ASCII_CHARS_REGEX.is_match(handle) {
