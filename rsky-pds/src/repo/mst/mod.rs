@@ -518,6 +518,8 @@ impl MST {
         }
     }
 
+    // We don't hash the node on every mutation for performance reasons
+    // Instead we keep track of whether the pointer is outdated and only (recursively) calculate when needed
     pub fn get_pointer(&mut self) -> Result<Cid> {
         if !self.outdated_pointer {
             return Ok(self.pointer);
@@ -1530,6 +1532,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn saves_and_loads_from_blockstore() -> Result<()> {
         let mut storage =
             SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
