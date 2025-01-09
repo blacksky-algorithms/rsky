@@ -1070,7 +1070,6 @@ pub fn is_reserved_handle(handle: &str) -> bool {
     RESERVED_SUBDOMAINS.contains(handle)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,15 +1077,7 @@ mod tests {
     #[test]
     fn test_common_reserved_handles() {
         let reserved_cases = vec![
-            "admin",
-            "about",
-            "account",
-            "api",
-            "help",
-            "support",
-            "privacy",
-            "terms",
-            "login",
+            "admin", "about", "account", "api", "help", "support", "privacy", "terms", "login",
             "signin",
         ];
 
@@ -1101,15 +1092,7 @@ mod tests {
 
     #[test]
     fn test_protocol_reserved_handles() {
-        let protocol_cases = vec![
-            "atp",
-            "bsky",
-            "plc",
-            "did",
-            "handle",
-            "repo",
-            "xrpc",
-        ];
+        let protocol_cases = vec!["atp", "bsky", "plc", "did", "handle", "repo", "xrpc"];
 
         for handle in protocol_cases {
             assert!(
@@ -1166,12 +1149,12 @@ mod tests {
     fn test_case_sensitivity() {
         // Reserved handles should be case-sensitive
         let case_pairs = vec![
-            ("Admin", false),    // Only lowercase "admin" is reserved
-            ("API", false),      // Only lowercase "api" is reserved
-            ("Help", false),     // Only lowercase "help" is reserved
-            ("admin", true),     // Lowercase is reserved
-            ("api", true),       // Lowercase is reserved
-            ("help", true),      // Lowercase is reserved
+            ("Admin", false), // Only lowercase "admin" is reserved
+            ("API", false),   // Only lowercase "api" is reserved
+            ("Help", false),  // Only lowercase "help" is reserved
+            ("admin", true),  // Lowercase is reserved
+            ("api", true),    // Lowercase is reserved
+            ("help", true),   // Lowercase is reserved
         ];
 
         for (handle, expected) in case_pairs {
