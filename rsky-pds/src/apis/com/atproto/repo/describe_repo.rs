@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use crate::INVALID_HANDLE;
+use rsky_syntax::handle::INVALID_HANDLE;
 use crate::{common, SharedIdResolver};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;

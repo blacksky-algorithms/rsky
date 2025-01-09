@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::{Credentials, Refresh};
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::INVALID_HANDLE;
+use rsky_syntax::handle::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;

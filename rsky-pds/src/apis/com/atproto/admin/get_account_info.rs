@@ -3,7 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::auth_verifier::Moderator;
 use crate::common::env::env_str;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::INVALID_HANDLE;
+use rsky_syntax::handle::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use futures::try_join;
 use rocket::http::Status;
