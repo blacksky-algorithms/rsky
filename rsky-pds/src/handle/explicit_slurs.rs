@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use regex::Regex;
-use rsky_common::contains_explicit_slurs;
+use rsky_common::explicit_slurs::contains_explicit_slurs;
 
 lazy_static! {
     static ref EXPLICIT_SLUR_REGEXES: Vec<Regex> = vec![
