@@ -1,7 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AccessStandard;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::INVALID_HANDLE;
+use rsky_syntax::handle::INVALID_HANDLE;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;

@@ -21,6 +21,7 @@ dotenvy = "0.15"
 rsky-lexicon = { workspace = true }
 rsky-identity = { workspace = true }
 rsky-crypto = { workspace = true }
+rsky-common = {workspace = true }
 rsky-syntax = { workspace = true }
 diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
 chrono = "0.4.26"
