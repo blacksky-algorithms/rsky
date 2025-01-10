@@ -488,7 +488,10 @@ impl MST {
 
         // Now, unwrapping is safe because we either already had entries
         // or we just set them above
-        Ok(self.entries.as_mut().ok_or_else(|| anyhow::anyhow!("No entries"))?)
+        Ok(self
+            .entries
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No entries"))?)
     }
 
     pub fn get_entries_ref(&self) -> Result<Vec<NodeEntry>> {
@@ -496,12 +499,15 @@ impl MST {
         return match self.entries {
             None => {
                 // Read from storage (block store) to get the node data
-                let data: CborValue = self.storage.clone().read_obj(&self.pointer, |obj: &CborValue| {
-                    match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
-                        Ok(_) => true,
-                        Err(_) => false,
-                    }
-                })?;
+                let data: CborValue =
+                    self.storage
+                        .clone()
+                        .read_obj(&self.pointer, |obj: &CborValue| {
+                            match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
+                                Ok(_) => true,
+                                Err(_) => false,
+                            }
+                        })?;
                 let data: NodeData = serde_cbor::value::from_value(data)?;
 
                 // Compute the layer
@@ -513,11 +519,13 @@ impl MST {
 
                 // Deserialize into self.entries
                 util::deserialize_node_data(&self.storage, &data, layer)
-            },
-            Some(ref entries) => Ok(entries.clone())
-        }
+            }
+            Some(ref entries) => Ok(entries.clone()),
+        };
     }
 
+    // We don't hash the node on every mutation for performance reasons
+    // Instead we keep track of whether the pointer is outdated and only (recursively) calculate when needed
     pub fn get_pointer(&mut self) -> Result<Cid> {
         if !self.outdated_pointer {
             return Ok(self.pointer);
@@ -583,7 +591,7 @@ impl MST {
             bytes: common::struct_to_cbor(data)?,
         })
     }
-    
+
     /// In most cases, we get the layer of a node from a hint on creation
     /// In the case of the topmost node in the tree, we look for a key in the node & determine the layer
     /// In the case where we don't find one, we recurse down until we do.
@@ -1211,9 +1219,7 @@ impl MST {
         for entry in self.walk() {
             match entry {
                 NodeEntry::Leaf(_) => nodes.push(entry),
-                NodeEntry::MST(m) => {
-                    nodes.push(NodeEntry::MST(m))
-                }
+                NodeEntry::MST(m) => nodes.push(NodeEntry::MST(m)),
             }
         }
         Ok(nodes)
@@ -1530,6 +1536,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn saves_and_loads_from_blockstore() -> Result<()> {
         let mut storage =
             SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);

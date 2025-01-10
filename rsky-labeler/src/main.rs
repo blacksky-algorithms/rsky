@@ -124,7 +124,7 @@ async fn get_labels(
 
 async fn label_subject(
     agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
-    subject_ref: EmitEventInputSubjectRefs
+    subject_ref: EmitEventInputSubjectRefs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let label_result = agent
         .api
@@ -140,7 +140,8 @@ async fn label_subject(
                     ModEventLabel {
                         data: ModEventLabelData {
                             comment: Some(
-                                env::var("MOD_SERVICE_LABEL_REASON").unwrap_or("Explicit slur filter".to_string()),
+                                env::var("MOD_SERVICE_LABEL_REASON")
+                                    .unwrap_or("Explicit slur filter".to_string()),
                             ),
                             create_label_vals: vec![env::var("MOD_SERVICE_LABEL")
                                 .unwrap_or("antiblack-harassment".to_string())],
@@ -193,7 +194,7 @@ async fn tag_subject(
 async fn create_report(
     agent: &AtpAgent<MemorySessionStore, ReqwestClient>,
     subject_ref: EmitEventInputSubjectRefs,
-    reason: Option<String>
+    reason: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report_result = agent
         .api
@@ -362,7 +363,13 @@ async fn process(
                         continue;
                     }
                     if env_bool("ENABLE_CREATE_REPORT").unwrap_or(true) {
-                        match create_report(agent, auto_report.subject_ref.clone(), auto_report.reason).await {
+                        match create_report(
+                            agent,
+                            auto_report.subject_ref.clone(),
+                            auto_report.reason,
+                        )
+                        .await
+                        {
                             Ok(()) => (),
                             Err(error) => {
                                 eprintln!("@LOG: Failed to create report for record: {error:?}")
@@ -370,9 +377,7 @@ async fn process(
                         }
                     }
                     if env_bool("ENABLE_CREATE_LABEL").unwrap_or(true) {
-                        match label_subject(agent, auto_report.subject_ref.clone())
-                            .await
-                        {
+                        match label_subject(agent, auto_report.subject_ref.clone()).await {
                             Ok(()) => (),
                             Err(error) => eprintln!("@LOG: Failed to label record: {error:?}"),
                         }
