@@ -9,7 +9,6 @@ use crate::repo::types::Ids;
 use crate::repo::ActorStore;
 use crate::xrpc_server::auth::create_service_auth_headers;
 use crate::APP_USER_AGENT;
-use rsky_syntax::handle::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use atrium_api::app::bsky::feed::get_feed_generator::{
     Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
@@ -45,6 +44,7 @@ use rsky_lexicon::app::bsky::embed::{record, EmbedViews, Embeds, MediaUnion, Med
 use rsky_lexicon::app::bsky::feed::{FeedViewPost, GeneratorView, Post, PostView};
 use rsky_lexicon::app::bsky::graph::ListView;
 use rsky_syntax::aturi::AtUri;
+use rsky_syntax::handle::INVALID_HANDLE;
 use secp256k1::SecretKey;
 use std::env;
 use std::str::FromStr;

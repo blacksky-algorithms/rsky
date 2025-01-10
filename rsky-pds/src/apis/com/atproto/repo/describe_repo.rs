@@ -2,7 +2,6 @@ use crate::account_manager::AccountManager;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use rsky_syntax::handle::INVALID_HANDLE;
 use crate::{common, SharedIdResolver};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -12,6 +11,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_identity::types::DidDocument;
 use rsky_lexicon::com::atproto::repo::DescribeRepoOutput;
+use rsky_syntax::handle::INVALID_HANDLE;
 
 async fn inner_describe_repo(
     repo: String,

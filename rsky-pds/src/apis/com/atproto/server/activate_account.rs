@@ -8,13 +8,13 @@ use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
 use crate::SharedSequencer;
-use rsky_syntax::handle::INVALID_HANDLE;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
+use rsky_syntax::handle::INVALID_HANDLE;
 
 async fn inner_activate_account(
     auth: AccessFull,

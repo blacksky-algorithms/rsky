@@ -1,11 +1,11 @@
 use crate::account_manager::AccountManager;
 use crate::auth_verifier::AccessStandard;
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use rsky_syntax::handle::INVALID_HANDLE;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetSessionOutput;
+use rsky_syntax::handle::INVALID_HANDLE;
 
 #[rocket::get("/xrpc/com.atproto.server.getSession")]
 pub async fn get_session(
