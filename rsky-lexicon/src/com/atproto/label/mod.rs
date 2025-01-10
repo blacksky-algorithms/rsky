@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeLabels {
     pub seq: i64,
-    pub labels: Vec<Label>
+    pub labels: Vec<Label>,
 }
 
 /// Metadata tag on an atproto resource (eg, repo or record).

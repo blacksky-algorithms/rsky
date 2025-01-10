@@ -1,6 +1,4 @@
-use rsky_common::env::env_int;
 use crate::db::*;
-use rsky_common::explicit_slurs::contains_explicit_slurs;
 use crate::models::create_request::CreateRecord;
 use crate::models::Lexicon::{AppBskyFeedFollow, AppBskyFeedLike, AppBskyFeedPost};
 use crate::models::*;
@@ -15,6 +13,8 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
 use rocket::State;
+use rsky_common::env::env_int;
+use rsky_common::explicit_slurs::contains_explicit_slurs;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::PostLabels;
 use std::collections::HashSet;
@@ -1179,7 +1179,7 @@ mod tests {
                     show_sponsored_post: false,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
-                    trending_percentile_min: 0.9
+                    trending_percentile_min: 0.9,
                 };
                 let rocket = before(config.clone());
 
@@ -1238,7 +1238,7 @@ mod tests {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
-                    trending_percentile_min: 0.9
+                    trending_percentile_min: 0.9,
                 };
                 let rocket = before(config.clone());
 
@@ -1296,7 +1296,7 @@ mod tests {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
-                    trending_percentile_min: 0.9
+                    trending_percentile_min: 0.9,
                 };
                 let rocket = before(config.clone());
 
@@ -1355,7 +1355,7 @@ mod tests {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 0.5,
-                    trending_percentile_min: 0.9
+                    trending_percentile_min: 0.9,
                 };
                 let rocket = before(config.clone());
 
@@ -1426,7 +1426,7 @@ mod tests {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
-                    trending_percentile_min: 0.9
+                    trending_percentile_min: 0.9,
                 };
                 let rocket = before(config.clone());
 
