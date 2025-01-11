@@ -29,7 +29,6 @@ pub struct CreateOpV1 {
     pub recovery_key: String,
     pub handle: String,
     pub service: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
@@ -47,7 +46,6 @@ pub struct Operation {
     pub also_known_as: Vec<String>,
     pub services: BTreeMap<String, Service>,
     // Omit<t.UnsignedOperation, 'prev'>
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
@@ -89,6 +87,7 @@ impl CompatibleOpOrTombstone {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)] // will be posted to API so needs to not be tagged
 pub enum CompatibleOp {
     CreateOpV1(CreateOpV1),
     Operation(Operation),

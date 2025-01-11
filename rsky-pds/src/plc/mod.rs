@@ -20,6 +20,7 @@ impl Client {
         format!("{0}/{1}", self.url, encode_uri_component(did))
     }
 
+    // @TODO: Add better failure mode here
     async fn make_get_req<T: DeserializeOwned>(
         &self,
         url: String,
@@ -52,8 +53,8 @@ impl Client {
             .await?;
         let res = &response;
         match res.error_for_status_ref() {
-            Ok(_res) => Ok(()),
-            Err(error) => bail!(error.to_string()),
+            Ok(_) => Ok(()),
+            Err(_) => bail!(response.text().await?),
         }
     }
 
