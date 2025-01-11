@@ -2,8 +2,10 @@ use crate::common::ipld::cid_for_cbor;
 use crate::common::sign::atproto_sign;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service, Tombstone};
 use anyhow::Result;
+use indexmap::IndexMap;
 use libipld::Cid;
 use secp256k1::SecretKey;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -145,7 +147,9 @@ pub async fn create_update_op<G>(
 where
     G: Fn(Operation) -> Operation,
 {
-    let prev = cid_for_cbor(&last_op)?;
+    let last_op_json = serde_json::to_string(&last_op)?;
+    let last_op_index_map: IndexMap<String, JsonValue> = serde_json::from_str(&last_op_json)?;
+    let prev = cid_for_cbor(&last_op_index_map)?;
     // omit sig so it doesn't accidentally make its way into the next operation
     let mut normalized = normalize_op(last_op);
     normalized.sig = None;

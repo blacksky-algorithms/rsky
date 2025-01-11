@@ -225,7 +225,7 @@ pub async fn create_did_and_plc_op(
     // @TODO: Use plc::Client instead
     let plc_url = format!(
         "{0}/{1}",
-        env::var("PLC_SERVER").unwrap_or("plc.directory".to_owned()),
+        env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
         did_plc
     );
     println!("Publishing to {plc_url}");
