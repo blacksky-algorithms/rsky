@@ -86,6 +86,7 @@ impl MstWalker {
 
     /// step into a subtree, throws if currently pointed at a leaf
     pub fn step_into(&mut self) -> Result<()> {
+        let clone_of_current_status = self.status.clone();
         match self.status {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
@@ -93,10 +94,9 @@ impl MstWalker {
                     if let NodeEntry::MST(ref mut curr) = p.curr {
                         let next = curr.at_index(0)?;
                         if let Some(next) = next {
-                            p.walking = Some(curr.clone());
-                            self.stack
-                                .push(WalkerStatus::WalkerStatusProgress(p.clone()));
-                            p.curr = next.clone();
+                            self.stack.push(clone_of_current_status);
+                            p.walking = Some(curr.clone()); // Changes walking to be parent tree
+                            p.curr = next.clone(); // Changes current to be this node
                             p.index = 0;
                         } else {
                             bail!("Tried to step into a node with 0 entries which is invalid");

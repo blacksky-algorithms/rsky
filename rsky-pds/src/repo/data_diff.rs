@@ -4,7 +4,7 @@ use crate::repo::mst::diff::mst_diff;
 use crate::repo::mst::{NodeEntry, MST};
 use anyhow::Result;
 use lexicon_cid::Cid;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataAdd {
@@ -27,9 +27,9 @@ pub struct DataDelete {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataDiff {
-    pub adds: BTreeMap<String, DataAdd>,
-    pub updates: BTreeMap<String, DataUpdate>,
-    pub deletes: BTreeMap<String, DataDelete>,
+    pub adds: HashMap<String, DataAdd>,
+    pub updates: HashMap<String, DataUpdate>,
+    pub deletes: HashMap<String, DataDelete>,
 
     pub new_mst_blocks: BlockMap,
     pub new_leaf_cids: CidSet,
@@ -39,9 +39,9 @@ pub struct DataDiff {
 impl DataDiff {
     pub fn new() -> Self {
         DataDiff {
-            adds: BTreeMap::new(),
-            updates: BTreeMap::new(),
-            deletes: BTreeMap::new(),
+            adds: HashMap::new(),
+            updates: HashMap::new(),
+            deletes: HashMap::new(),
             new_mst_blocks: BlockMap::new(),
             new_leaf_cids: CidSet::new(None),
             removed_cids: CidSet::new(None),
