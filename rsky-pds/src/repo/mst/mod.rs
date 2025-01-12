@@ -1387,7 +1387,7 @@ mod tests {
     use anyhow::Result;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
 
     fn string_to_vec_u8(input: &str) -> Vec<u8> {
         input.as_bytes().to_vec()
@@ -1555,17 +1555,13 @@ mod tests {
         Ok(())
     }
 
-    /*
-    @TODO: Get this working. Currently inconsistent and canonical test is failing as well
-
+    // @TODO: Increase record sizes
     #[test]
     fn diffs() -> Result<()> {
         let mut storage =
             SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
-        let mapping = generate_bulk_data_keys(10, Some(&mut storage))?;
+        let mapping = generate_bulk_data_keys(4, Some(&mut storage))?;
         let mut mst = MST::create(storage.clone(), None, None)?;
-        let mut to_diff = mst.clone();
-
         let entries = mapping
             .iter()
             .map(|e| (e.0.clone(), e.1.clone()))
@@ -1573,8 +1569,9 @@ mod tests {
 
         for entry in &entries {
             mst = mst.add(&entry.0, entry.1, None)?;
-            to_diff = to_diff.add(&entry.0, entry.1, None)?;
         }
+
+        let mut to_diff = mst.clone();
 
         let to_add = generate_bulk_data_keys(2, Some(&mut storage))?
             .into_iter()
@@ -1591,9 +1588,9 @@ mod tests {
         let to_edit = entries[2..3].to_vec();
         let to_del = entries[3..4].to_vec();
 
-        let mut expected_adds: BTreeMap<String, DataAdd> = BTreeMap::new();
-        let mut expected_updates: BTreeMap<String, DataUpdate> = BTreeMap::new();
-        let mut expected_dels: BTreeMap<String, DataDelete> = BTreeMap::new();
+        let mut expected_adds: HashMap<String, DataAdd> = HashMap::new();
+        let mut expected_updates: HashMap<String, DataUpdate> = HashMap::new();
+        let mut expected_dels: HashMap<String, DataDelete> = HashMap::new();
 
         for entry in &to_add {
             to_diff = to_diff.add(&entry.0, entry.1, None)?;
@@ -1639,6 +1636,81 @@ mod tests {
         assert_eq!(diff.deletes, expected_dels);
 
         // ensure we correctly report all added CIDs
+        for mut entry in to_diff.walk() {
+            let cid: Cid = match entry {
+                NodeEntry::MST(ref mut entry) => entry.get_pointer()?,
+                NodeEntry::Leaf(ref entry) => entry.value.clone(),
+            };
+            let found = mst.storage.blocks.has(cid)
+                || diff.new_mst_blocks.has(cid)
+                || diff.new_leaf_cids.has(cid);
+            assert!(found)
+        }
+
+        Ok(())
+    }
+
+    /// computes "simple" tree root CID
+    #[test]
+    fn simple_tree_diffs() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
+        let storage = SqlRepoReader::new(None, "did:example:123456789abcdefghi".to_string(), None);
+        let mut mst = MST::create(storage, None, None)?;
+
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
+        let mut to_diff = mst.clone();
+        let mut expected_adds: HashMap<String, DataAdd> = HashMap::new();
+        let mut expected_updates: HashMap<String, DataUpdate> = HashMap::new();
+        let mut expected_dels: HashMap<String, DataDelete> = HashMap::new();
+
+        to_diff = to_diff.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
+        expected_adds.insert(
+            "com.example.record/3jqfcqzm3ft2j".to_string(),
+            DataAdd {
+                key: "com.example.record/3jqfcqzm3ft2j".to_string(),
+                cid: cid1,
+            },
+        );
+        to_diff = to_diff.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
+        expected_adds.insert(
+            "com.example.record/3jqfcqzm4fc2j".to_string(),
+            DataAdd {
+                key: "com.example.record/3jqfcqzm4fc2j".to_string(),
+                cid: cid1,
+            },
+        );
+        let updated = random_cid(&mut None)?;
+        to_diff = to_diff.update(&"com.example.record/3jqfcqzm3fs2j", updated)?;
+        expected_updates.insert(
+            "com.example.record/3jqfcqzm3fs2j".to_string(),
+            DataUpdate {
+                key: "com.example.record/3jqfcqzm3fs2j".to_string(),
+                prev: cid1,
+                cid: updated,
+            },
+        );
+
+        to_diff = to_diff.delete(&"com.example.record/3jqfcqzm3fr2j".to_string())?;
+        expected_dels.insert(
+            "com.example.record/3jqfcqzm3fr2j".to_string(),
+            DataDelete {
+                key: "com.example.record/3jqfcqzm3fr2j".to_string(),
+                cid: cid1,
+            },
+        );
+
+        let diff = DataDiff::of(&mut to_diff, Some(&mut mst))?;
+        assert_eq!(diff.add_list().len(), 2);
+        assert_eq!(diff.update_list().len(), 1);
+        assert_eq!(diff.delete_list().len(), 1);
+
+        assert_eq!(diff.adds, expected_adds);
+        assert_eq!(diff.updates, expected_updates);
+        assert_eq!(diff.deletes, expected_dels);
+
+        // ensure we correctly report all added CIDs
         let mut blockstore = mst.storage.clone();
         for mut entry in to_diff.walk() {
             let cid: Cid = match entry {
@@ -1651,7 +1723,7 @@ mod tests {
         }
 
         Ok(())
-    } */
+    }
 
     #[test]
     fn test_leading_zeros() -> Result<()> {
