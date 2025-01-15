@@ -25,20 +25,16 @@ async fn inner_update_handle(
     let UpdateHandleInput { handle } = body.into_inner();
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
-    // Use the new normalize and validate function
+    let opts = HandleValidationOpts {
+        handle,
+        did: Some(requester.clone()),
+        allow_reserved: None,
+    };
     let validation_ctx = HandleValidationContext {
         server_config,
         id_resolver,
     };
-    let handle = normalize_and_validate_handle(
-        HandleValidationOpts {
-            handle,
-            did: Some(requester.clone()),
-            allow_reserved: None,
-        },
-        validation_ctx,
-    )
-    .await?;
+    let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
 
     let account = AccountManager::get_account(
         &handle,

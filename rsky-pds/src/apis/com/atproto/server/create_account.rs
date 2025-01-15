@@ -3,6 +3,7 @@ use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
+use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
@@ -116,17 +117,19 @@ pub async fn server_create_account(
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
         _ => None,
     };
-    let input = match validate_inputs_for_local_pds(cfg, body.clone().into_inner(), requester).await
-    {
-        Ok(res) => res,
-        Err(e) => {
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::BadRequest),
-                message: Some(e.to_string()),
-            };
-            return Err(status::Custom(Status::BadRequest, Json(internal_error)));
-        }
-    };
+    let input =
+        match validate_inputs_for_local_pds(cfg, id_resolver, body.clone().into_inner(), requester)
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                let internal_error = ErrorMessageResponse {
+                    code: Some(ErrorCode::BadRequest),
+                    message: Some(e.to_string()),
+                };
+                return Err(status::Custom(Status::BadRequest, Json(internal_error)));
+            }
+        };
 
     match inner_server_create_account(input, sequencer, s3_config, id_resolver).await {
         Ok(response) => Ok(Json(response)),
@@ -146,8 +149,9 @@ pub async fn server_create_account(
 
 pub async fn validate_inputs_for_local_pds(
     cfg: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
-    _requester: Option<String>,
+    requester: Option<String>,
 ) -> Result<CreateAccountInput> {
     let CreateAccountInput {
         email,
@@ -183,7 +187,16 @@ pub async fn validate_inputs_for_local_pds(
             if did.is_some() {
                 bail!("Not yet allowing people to bring their own DID");
             };
-            // @TODO: Normalize handle as well
+            let opts = HandleValidationOpts {
+                handle: handle.clone(),
+                did: requester.clone(),
+                allow_reserved: None,
+            };
+            let validation_ctx = HandleValidationContext {
+                server_config: cfg,
+                id_resolver,
+            };
+            let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
             if !super::validate_handle(&handle) {
                 bail!("Invalid handle");
             };

@@ -3,8 +3,10 @@ use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::get_keys_from_private_key_str;
 use crate::auth_verifier::AdminToken;
 use crate::common::env::env_str;
+use crate::config::ServerConfig;
+use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::models::{ErrorCode, ErrorMessageResponse};
-use crate::{plc, SharedSequencer};
+use crate::{plc, SharedIdResolver, SharedSequencer};
 use anyhow::{bail, Result};
 use rocket::http::Status;
 use rocket::response::status;
@@ -16,9 +18,22 @@ use std::env;
 async fn inner_update_account_handle(
     body: Json<UpdateAccountHandleInput>,
     sequencer: &State<SharedSequencer>,
+    server_config: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
 ) -> Result<()> {
     let UpdateAccountHandleInput { did, handle } = body.into_inner();
-    // @TODO: Implement normalizeAndValidateHandle()
+
+    let opts = HandleValidationOpts {
+        handle,
+        did: Some(did.clone()),
+        allow_reserved: None,
+    };
+    let validation_ctx = HandleValidationContext {
+        server_config,
+        id_resolver,
+    };
+    let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
+
     let account = AccountManager::get_account(
         &handle,
         Some(AvailabilityFlags {
@@ -58,9 +73,11 @@ async fn inner_update_account_handle(
 pub async fn update_account_handle(
     body: Json<UpdateAccountHandleInput>,
     sequencer: &State<SharedSequencer>,
+    server_config: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
     _auth: AdminToken,
 ) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
-    match inner_update_account_handle(body, sequencer).await {
+    match inner_update_account_handle(body, sequencer, server_config, id_resolver).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
