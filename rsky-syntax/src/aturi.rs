@@ -469,4 +469,109 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_valid_str_conversion() {
+        let valid_cases = vec![
+            "did:plc:44ybard66vv44zksje25o7dz/app.bsky.feed.post/3jwdwj2ctlk26",
+            "at://foo.com/com.example.foo/123",
+            "bnewbold.bsky.team/app.bsky.feed.post/3jwdwj2ctlk26",
+        ];
+
+        for case in valid_cases {
+            let result: Result<AtUri, _> = case.try_into();
+            assert!(result.is_ok(), "Failed to parse valid URI: {}", case);
+            
+            let uri = result.unwrap();
+            assert_eq!(uri.to_string(), format!("at://{}", case.trim_start_matches("at://")));
+        }
+    }
+
+    #[test]
+    fn test_valid_string_conversion() {
+        let valid_cases = vec![
+            String::from("did:plc:44ybard66vv44zksje25o7dz/app.bsky.feed.post/3jwdwj2ctlk26"),
+            String::from("at://foo.com/com.example.foo/123"),
+            String::from("bnewbold.bsky.team/app.bsky.feed.post/3jwdwj2ctlk26"),
+        ];
+
+        for case in valid_cases {
+            let result: Result<AtUri, _> = case.clone().try_into();
+            assert!(result.is_ok(), "Failed to parse valid URI: {}", case);
+            
+            let uri = result.unwrap();
+            assert_eq!(uri.to_string(), format!("at://{}", case.trim_start_matches("at://")));
+        }
+    }
+
+    #[test]
+    fn test_invalid_str_conversion() {
+        let invalid_cases = vec![
+            "",                          // Empty string
+            "invalid/uri/format",        // Missing host
+            "http://not-at-protocol",    // Wrong protocol
+            "at://",                     // Missing everything after protocol
+            "at://@invalid-chars@",      // Invalid characters
+            "at://host/collection/rkey/extra", // Too many path segments
+        ];
+
+        for case in invalid_cases {
+            let result: Result<AtUri, _> = case.try_into();
+            assert!(result.is_err(), "Unexpectedly parsed invalid URI: {}", case);
+        }
+    }
+
+    #[test]
+    fn test_invalid_string_conversion() {
+        let invalid_cases = vec![
+            String::from(""),
+            String::from("invalid/uri/format"),
+            String::from("http://not-at-protocol"),
+            String::from("at://"),
+            String::from("at://@invalid-chars@"),
+            String::from("at://host/collection/rkey/extra"),
+        ];
+
+        for case in invalid_cases {
+            let result: Result<AtUri, _> = case.clone().try_into();
+            assert!(result.is_err(), "Unexpectedly parsed invalid URI: {}", case);
+        }
+    }
+
+    #[test]
+    fn test_conversion_with_query_params() {
+        let uri_str = "at://host.com/collection/123?key=value";
+        let result: Result<AtUri, _> = uri_str.try_into();
+        assert!(result.is_ok());
+        let uri = result.unwrap();
+        assert_eq!(uri.host, "host.com");
+        assert_eq!(uri.get_collection(), "collection");
+        assert_eq!(uri.get_rkey(), "123");
+        assert_eq!(uri.search_params, vec![("key".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn test_conversion_with_hash() {
+        let uri_str = "at://host.com/collection/123#fragment";
+        let result: Result<AtUri, _> = uri_str.try_into();
+        assert!(result.is_ok());
+        let uri = result.unwrap();
+        assert_eq!(uri.host, "host.com");
+        assert_eq!(uri.get_collection(), "collection");
+        assert_eq!(uri.get_rkey(), "123");
+        assert_eq!(uri.hash, "fragment");
+    }
+
+    #[test]
+    fn test_conversion_full_uri() {
+        let uri_str = "at://host.com/collection/123?key=value#fragment";
+        let result: Result<AtUri, _> = uri_str.try_into();
+        assert!(result.is_ok());
+        let uri = result.unwrap();
+        assert_eq!(uri.host, "host.com");
+        assert_eq!(uri.get_collection(), "collection");
+        assert_eq!(uri.get_rkey(), "123");
+        assert_eq!(uri.search_params, vec![("key".to_string(), "value".to_string())]);
+        assert_eq!(uri.hash, "fragment");
+    }
 }
