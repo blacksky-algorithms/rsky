@@ -264,6 +264,22 @@ impl Display for AtUri {
     }
 }
 
+impl TryFrom<&str> for AtUri {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        AtUri::new(value.to_string(), None)
+    }
+}
+
+impl TryFrom<String> for AtUri {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        AtUri::new(value, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
