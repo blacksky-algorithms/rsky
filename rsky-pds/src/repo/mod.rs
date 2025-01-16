@@ -32,6 +32,7 @@ use lexicon_cid::Cid;
 use libipld::cbor::DagCborCodec;
 use libipld::Ipld as VendorIpld;
 use libipld::{Block, DefaultParams};
+use rsky_syntax::aturi::AtUri;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::Serialize;
 use serde_cbor::Value as CborValue;
@@ -110,7 +111,6 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    // @TODO: Update to use AtUri
     pub async fn create_repo(
         &mut self,
         keypair: Keypair,
@@ -120,19 +120,15 @@ impl ActorStore {
             .clone()
             .into_iter()
             .map(|prepare| {
-                let uri_without_prefix = prepare.uri.replace("at://", "");
-                let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-                let collection = *parts.get(0).unwrap_or(&"");
-                let rkey = *parts.get(1).unwrap_or(&"");
-
-                RecordCreateOrUpdateOp {
+                let at_uri: AtUri = prepare.uri.try_into()?;
+                Ok(RecordCreateOrUpdateOp {
                     action: WriteOpAction::Create,
-                    collection: collection.to_owned(),
-                    rkey: rkey.to_owned(),
+                    collection: at_uri.get_collection(),
+                    rkey: at_uri.get_rkey(),
                     record: prepare.record,
-                }
+                })
             })
-            .collect::<Vec<RecordCreateOrUpdateOp>>();
+            .collect::<Result<Vec<RecordCreateOrUpdateOp>>>()?;
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
@@ -184,22 +180,27 @@ impl ActorStore {
             }
             self.storage.cache_rev(current_root.rev).await?;
             let mut new_record_cids: Vec<Cid> = vec![];
-            let mut delete_and_update_uris: Vec<String> = vec![];
+            let mut delete_and_update_uris= vec![];
             for write in &writes {
                 match write.clone() {
                     PreparedWrite::Create(c) => new_record_cids.push(c.cid),
                     PreparedWrite::Update(u) => {
                         new_record_cids.push(u.cid);
-                        delete_and_update_uris.push(u.uri);
+                        let u_at_uri: AtUri = u.uri.try_into()?;
+                        delete_and_update_uris.push(u_at_uri);
                     }
-                    PreparedWrite::Delete(d) => delete_and_update_uris.push(d.uri),
+                    PreparedWrite::Delete(d) => {
+                        let d_at_uri: AtUri = d.uri.try_into()?;
+                        delete_and_update_uris.push(d_at_uri)
+                    },
                 }
                 if write.swap_cid().is_none() {
                     continue;
                 }
+                let write_at_uri: &AtUri = &write.uri().try_into()?;
                 let record = self
                     .record
-                    .get_record(write.uri(), None, Some(true))
+                    .get_record(write_at_uri, None, Some(true))
                     .await?;
                 let current_record = match record {
                     Some(record) => Some(Cid::from_str(&record.cid)?),
@@ -233,8 +234,8 @@ impl ActorStore {
             let mut repo = Repo::load(&mut self.storage, Some(current_root.cid)).await?;
             let write_ops: Vec<RecordWriteOp> = writes
                 .into_iter()
-                .map(|write| write_to_op(write))
-                .collect::<Vec<RecordWriteOp>>();
+                .map(write_to_op)
+                .collect::<Result<Vec<RecordWriteOp>>>()?;
             // @TODO: Use repo signing key global config
             let secp = Secp256k1::new();
             let repo_private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
@@ -274,9 +275,10 @@ impl ActorStore {
             .then(|write| async move {
                 Ok::<(), anyhow::Error>(match write {
                     PreparedWrite::Create(write) => {
+                        let write_at_uri: AtUri = write.uri.try_into()?;
                         self.record
                             .index_record(
-                                write.uri,
+                                write_at_uri.clone(),
                                 write.cid,
                                 Some(write.record),
                                 Some(write.action),
@@ -286,9 +288,10 @@ impl ActorStore {
                             .await?
                     }
                     PreparedWrite::Update(write) => {
+                        let write_at_uri: AtUri = write.uri.try_into()?;
                         self.record
                             .index_record(
-                                write.uri,
+                                write_at_uri.clone(),
                                 write.cid,
                                 Some(write.record),
                                 Some(write.action),
@@ -297,7 +300,10 @@ impl ActorStore {
                             )
                             .await?
                     }
-                    PreparedWrite::Delete(write) => self.record.delete_record(write.uri).await?,
+                    PreparedWrite::Delete(write) => {
+                        let write_at_uri: AtUri = write.uri.try_into()?;
+                        self.record.delete_record(&write_at_uri).await?
+                    },
                 })
             })
             .collect::<Vec<_>>()
@@ -330,11 +336,10 @@ impl ActorStore {
         Ok(())
     }
 
-    // @TODO: Use AtUri
     pub async fn get_duplicate_record_cids(
         &self,
         cids: Vec<Cid>,
-        touched_uris: Vec<String>,
+        touched_uris: Vec<AtUri>,
     ) -> Result<Vec<Cid>> {
         if touched_uris.len() == 0 || cids.len() == 0 {
             return Ok(vec![]);
@@ -343,10 +348,11 @@ impl ActorStore {
         let conn = &mut establish_connection()?;
 
         let cid_strs: Vec<String> = cids.into_iter().map(|c| c.to_string()).collect();
+        let touched_uri_strs: Vec<String> = touched_uris.iter().map(|t| t.to_string()).collect();
         let res: Vec<String> = RecordSchema::record
             .filter(RecordSchema::did.eq(&self.did))
             .filter(RecordSchema::cid.eq_any(cid_strs))
-            .filter(RecordSchema::uri.ne_all(touched_uris))
+            .filter(RecordSchema::uri.ne_all(touched_uri_strs))
             .select(RecordSchema::cid)
             .get_results(conn)?;
         Ok(res
@@ -811,21 +817,6 @@ pub fn set_collection_name(
     Ok(record)
 }
 
-pub fn make_aturi(
-    handle_or_did: String,
-    collection: Option<String>,
-    rkey: Option<String>,
-) -> String {
-    let mut str = format!("at://{handle_or_did}");
-    if let Some(collection) = collection {
-        str = format!("{str}/{collection}");
-    }
-    if let Some(rkey) = rkey {
-        str = format!("{str}/{rkey}");
-    }
-    str
-}
-
 pub async fn cid_for_safe_record(record: RepoRecord) -> Result<Cid> {
     let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;
     // Confirm whether Block properly transforms between lex and cbor
@@ -852,9 +843,10 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> Result<PreparedCreateOrU
     // assert_no_explicit_slurs(rkey, record).await?;
     let next_rkey = Ticker::new().next(None);
     let rkey = rkey.unwrap_or(next_rkey.to_string());
+    let uri = AtUri::make(did, Some(collection), Some(rkey))?;
     Ok(PreparedCreateOrUpdate {
         action: WriteOpAction::Create,
-        uri: make_aturi(did, Some(collection), Some(rkey)),
+        uri: uri.to_string(),
         cid: cid_for_safe_record(record.clone()).await?,
         swap_cid,
         record: record.clone(),
@@ -878,9 +870,10 @@ pub async fn prepare_update(opts: PrepareUpdateOpts) -> Result<PreparedCreateOrU
         assert_valid_record(&record)?;
     }
     // assert_no_explicit_slurs(rkey, record).await?;
+    let uri = AtUri::make(did, Some(collection), Some(rkey))?;
     Ok(PreparedCreateOrUpdate {
         action: WriteOpAction::Update,
-        uri: make_aturi(did, Some(collection), Some(rkey)),
+        uri: uri.to_string(),
         cid: cid_for_safe_record(record.clone()).await?,
         swap_cid,
         record: record.clone(),
@@ -888,18 +881,19 @@ pub async fn prepare_update(opts: PrepareUpdateOpts) -> Result<PreparedCreateOrU
     })
 }
 
-pub fn prepare_delete(opts: PrepareDeleteOpts) -> PreparedDelete {
+pub fn prepare_delete(opts: PrepareDeleteOpts) -> Result<PreparedDelete> {
     let PrepareDeleteOpts {
         did,
         collection,
         rkey,
         swap_cid,
     } = opts;
-    PreparedDelete {
+    let uri = AtUri::make(did, Some(collection), Some(rkey))?;
+    Ok(PreparedDelete {
         action: WriteOpAction::Delete,
-        uri: make_aturi(did, Some(collection), Some(rkey)),
+        uri: uri.to_string(),
         swap_cid,
-    }
+    })
 }
 
 lazy_static! {

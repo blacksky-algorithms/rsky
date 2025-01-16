@@ -9,6 +9,7 @@ use diesel::*;
 use futures::stream::{self, StreamExt};
 use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
+use rsky_syntax::aturi::AtUri;
 use serde_json::Value as JsonValue;
 use std::env;
 use std::str::FromStr;
@@ -33,7 +34,7 @@ pub struct RecordsForCollection {
 
 // @NOTE in the future this can be replaced with a more generic routine that pulls backlinks based on lex docs.
 // For now, we just want to ensure we're tracking links from follows, blocks, likes, and reposts.
-pub fn get_backlinks(uri: &String, record: &RepoRecord) -> Result<Vec<models::Backlink>> {
+pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<models::Backlink>> {
     if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(record_type)))) = record.get("$type") {
         if record_type == Ids::AppBskyGraphFollow.as_str()
             || record_type == Ids::AppBskyGraphBlock.as_str()
@@ -41,7 +42,7 @@ pub fn get_backlinks(uri: &String, record: &RepoRecord) -> Result<Vec<models::Ba
             if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject)))) = record.get("subject") {
                 // @TODO: Ensure valid DID https://github.com/bluesky-social/atproto/blob/main/packages/syntax/src/did.ts
                 return Ok(vec![models::Backlink {
-                    uri: uri.clone(),
+                    uri: uri.to_string(),
                     path: "subject".to_owned(),
                     link_to: subject.clone(),
                 }]);
@@ -55,7 +56,7 @@ pub fn get_backlinks(uri: &String, record: &RepoRecord) -> Result<Vec<models::Ba
                 {
                     // TO DO: Ensure valid AT URI
                     return Ok(vec![models::Backlink {
-                        uri: uri.clone(),
+                        uri: uri.to_string(),
                         path: "subject.uri".to_owned(),
                         link_to: subject_uri.clone(),
                     }]);
@@ -162,7 +163,7 @@ impl RecordReader {
 
     pub async fn get_record(
         &mut self,
-        uri: &String,
+        uri: &AtUri,
         cid: Option<String>,
         include_soft_deleted: Option<bool>,
     ) -> Result<Option<GetRecord>> {
@@ -178,7 +179,7 @@ impl RecordReader {
         let mut builder = RecordSchema::record
             .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
             .select((models::Record::as_select(), models::RepoBlock::as_select()))
-            .filter(RecordSchema::uri.eq(uri))
+            .filter(RecordSchema::uri.eq(uri.to_string()))
             .into_boxed();
         if !include_soft_deleted {
             builder = builder.filter(RecordSchema::takedownRef.is_null());
@@ -290,24 +291,17 @@ impl RecordReader {
         Ok(res)
     }
 
-    // @TODO: Update to use AtUri
     pub async fn get_backlink_conflicts(
         &self,
-        uri: &String,
+        uri: &AtUri,
         record: &RepoRecord,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<AtUri>> {
         let record_backlinks = get_backlinks(uri, record)?;
-        let collection = uri
-            .split("/")
-            .collect::<Vec<&str>>()
-            .into_iter()
-            .nth(0)
-            .unwrap_or("");
         let conflicts: Vec<Vec<Record>> = stream::iter(record_backlinks)
             .then(|backlink| async move {
                 Ok::<Vec<Record>, anyhow::Error>(
                     self.get_record_backlinks(
-                        collection.to_owned(),
+                        uri.get_collection(),
                         backlink.path,
                         backlink.link_to,
                     )
@@ -321,15 +315,13 @@ impl RecordReader {
         Ok(conflicts
             .into_iter()
             .flatten()
-            .map(|record| {
-                format!(
-                    "at://{0}/{1}/{2}",
-                    env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
-                    collection,
-                    record.rkey
-                )
+            .flat_map(|record| {
+                let at_uri = AtUri::make(env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
+                Some(String::from(uri.get_collection())),
+                Some(record.rkey)).ok()?;
+                Some(at_uri)
             })
-            .collect())
+            .collect::<Vec<AtUri>>())
     }
 
     // Transactors
@@ -337,7 +329,7 @@ impl RecordReader {
 
     pub async fn index_record(
         &self,
-        uri: String, // @TODO: Use AtUri
+        uri: AtUri,
         cid: Cid,
         record: Option<RepoRecord>,
         action: Option<WriteOpAction>, // Create or update with a default of create
@@ -345,86 +337,83 @@ impl RecordReader {
         timestamp: Option<String>,
     ) -> Result<()> {
         println!("@LOG DEBUG RecordReader::index_record, indexing record {uri}");
+        let collection = uri.get_collection();
+        let rkey = uri.get_rkey();
+        let hostname = uri.get_hostname().to_string();
         let action = action.unwrap_or(WriteOpAction::Create);
-        let uri_without_prefix = uri.replace("at://", "");
-        let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-        match (parts.get(0), parts.get(1), parts.get(2)) {
-            (Some(hostname), Some(collection), Some(rkey)) => {
-                let indexed_at = timestamp.unwrap_or_else(|| common::now());
-                let row = Record {
-                    did: self.did.clone(),
-                    uri: uri.clone(),
-                    cid: cid.to_string(),
-                    collection: collection.to_string(),
-                    rkey: rkey.to_string(),
-                    repo_rev: Some(repo_rev.clone()),
-                    indexed_at: indexed_at.clone(),
-                    takedown_ref: None,
-                };
+        let indexed_at = timestamp.unwrap_or_else(|| common::now());
+        let row = Record {
+            did: self.did.clone(),
+            uri: uri.to_string(),
+            cid: cid.to_string(),
+            collection: collection.clone(),
+            rkey: rkey.to_string(),
+            repo_rev: Some(repo_rev.clone()),
+            indexed_at: indexed_at.clone(),
+            takedown_ref: None,
+        };
 
-                if !hostname.starts_with("did:") {
-                    bail!("Expected indexed URI to contain DID")
-                } else if collection.len() < 1 {
-                    bail!("Expected indexed URI to contain a collection")
-                } else if rkey.len() < 1 {
-                    bail!("Expected indexed URI to contain a record key")
-                }
-
-                use crate::schema::pds::record::dsl as RecordSchema;
-                let conn = &mut establish_connection()?;
-
-                // Track current version of record
-                insert_into(RecordSchema::record)
-                    .values(row)
-                    .on_conflict(RecordSchema::uri)
-                    .do_update()
-                    .set((
-                        RecordSchema::cid.eq(cid.to_string()),
-                        RecordSchema::repoRev.eq(&repo_rev),
-                        RecordSchema::indexedAt.eq(&indexed_at),
-                    ))
-                    .execute(conn)?;
-
-                if let Some(record) = record {
-                    // Maintain backlinks
-                    let backlinks = get_backlinks(&uri, &record)?;
-                    if let WriteOpAction::Update = action {
-                        // On update just recreate backlinks from scratch for the record, so we can clear out
-                        // the old ones. E.g. for weird cases like updating a follow to be for a different did.
-                        self.remove_backlinks_by_uri(&uri).await?;
-                    }
-                    self.add_backlinks(backlinks).await?;
-                }
-                println!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
-                Ok(())
-            }
-            _ => bail!("Issue parsing uri: {uri}"),
+        if !hostname.starts_with("did:") {
+            bail!("Expected indexed URI to contain DID")
+        } else if collection.len() < 1 {
+            bail!("Expected indexed URI to contain a collection")
+        } else if rkey.len() < 1 {
+            bail!("Expected indexed URI to contain a record key")
         }
+
+        use crate::schema::pds::record::dsl as RecordSchema;
+        let conn = &mut establish_connection()?;
+
+        // Track current version of record
+        insert_into(RecordSchema::record)
+            .values(row)
+            .on_conflict(RecordSchema::uri)
+            .do_update()
+            .set((
+                RecordSchema::cid.eq(cid.to_string()),
+                RecordSchema::repoRev.eq(&repo_rev),
+                RecordSchema::indexedAt.eq(&indexed_at),
+            ))
+            .execute(conn)?;
+
+        if let Some(record) = record {
+            // Maintain backlinks
+            let backlinks = get_backlinks(&uri, &record)?;
+            if let WriteOpAction::Update = action {
+                // On update just recreate backlinks from scratch for the record, so we can clear out
+                // the old ones. E.g. for weird cases like updating a follow to be for a different did.
+                self.remove_backlinks_by_uri(&uri).await?;
+            }
+            self.add_backlinks(backlinks).await?;
+        }
+        println!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
+        Ok(())
+
     }
 
     pub async fn delete_record(
         &self,
-        uri: String, // @TODO: Use AtUri
+        uri: &AtUri,
     ) -> Result<()> {
         println!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;
         let conn = &mut establish_connection()?;
         delete(RecordSchema::record)
-            .filter(RecordSchema::uri.eq(&uri))
+            .filter(RecordSchema::uri.eq(uri.to_string()))
             .execute(conn)?;
         delete(BacklinkSchema::backlink)
-            .filter(BacklinkSchema::uri.eq(&uri))
+            .filter(BacklinkSchema::uri.eq(uri.to_string()))
             .execute(conn)?;
         println!("@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}");
         Ok(())
     }
 
-    pub async fn remove_backlinks_by_uri(&self, uri: &String) -> Result<()> {
+    pub async fn remove_backlinks_by_uri(&self, uri: &AtUri) -> Result<()> {
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         let conn = &mut establish_connection()?;
         delete(BacklinkSchema::backlink)
-            .filter(BacklinkSchema::uri.eq(uri))
+            .filter(BacklinkSchema::uri.eq(uri.to_string()))
             .execute(conn)?;
         Ok(())
     }
@@ -445,7 +434,7 @@ impl RecordReader {
 
     pub async fn update_record_takedown_status(
         &self,
-        uri: &String, // @TODO: Use AtUri
+        uri: &AtUri,
         takedown: StatusAttr,
     ) -> Result<()> {
         use crate::schema::pds::record::dsl as RecordSchema;
@@ -458,9 +447,9 @@ impl RecordReader {
             },
             false => None,
         };
-
+        let uri_string = uri.to_string();
         update(RecordSchema::record)
-            .filter(RecordSchema::uri.eq(uri))
+            .filter(RecordSchema::uri.eq(uri_string))
             .set(RecordSchema::takedownRef.eq(takedown_ref))
             .execute(conn)?;
 
