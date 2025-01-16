@@ -12,6 +12,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::{Subject, SubjectStatus, UpdateSubjectStatusOutput};
+use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
 async fn inner_update_subject_status(
@@ -31,20 +32,16 @@ async fn inner_update_subject_status(
                 AccountManager::takedown_account(&subject.did, takedown.clone()).await?;
             }
             Subject::StrongRef(subject) => {
-                let uri_without_prefix = subject.uri.replace("at://", "");
-                let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-                if let (Some(uri_hostname), Some(_), Some(_)) =
-                    (parts.get(0), parts.get(1), parts.get(2))
-                {
-                    let actor_store = ActorStore::new(
-                        uri_hostname.to_string(),
-                        S3BlobStore::new(uri_hostname.to_string(), s3_config),
-                    );
-                    actor_store
-                        .record
-                        .update_record_takedown_status(&subject.uri, takedown.clone())
-                        .await?;
-                }
+                let subject_at_uri: AtUri = subject.uri.clone().try_into()?;
+                let actor_store = ActorStore::new(
+                    subject_at_uri.get_hostname().to_string(),
+                    S3BlobStore::new(subject_at_uri.get_hostname().to_string(), s3_config),
+                );
+                actor_store
+                    .record
+                    .update_record_takedown_status(&subject_at_uri, takedown.clone())
+                    .await?;
+
             }
             Subject::RepoBlobRef(subject) => {
                 let actor_store = ActorStore::new(
