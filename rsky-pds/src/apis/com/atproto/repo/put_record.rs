@@ -5,7 +5,7 @@ use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::{
-    make_aturi, prepare_create, prepare_update, ActorStore, PrepareCreateOpts, PrepareUpdateOpts,
+    prepare_create, prepare_update, ActorStore, PrepareCreateOpts, PrepareUpdateOpts,
 };
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -16,6 +16,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{PutRecordInput, PutRecordOutput};
+use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
 async fn inner_put_record(
@@ -49,8 +50,7 @@ async fn inner_put_record(
         if did != auth.access.credentials.unwrap().did.unwrap() {
             bail!("AuthRequiredError")
         }
-        // @TODO: Use ATUri
-        let uri = make_aturi(did.clone(), Some(collection.clone()), Some(rkey.clone()));
+        let uri = AtUri::make(did.clone(), Some(collection.clone()), Some(rkey.clone()))?;
         let swap_commit_cid = match swap_commit {
             Some(swap_commit) => Some(Cid::from_str(&swap_commit)?),
             None => None,

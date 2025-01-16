@@ -9,6 +9,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ListRecordsOutput, Record};
+use rsky_syntax::aturi::AtUri;
 
 #[allow(non_snake_case)]
 async fn inner_list_records(
@@ -58,17 +59,10 @@ async fn inner_list_records(
             .collect::<Result<Vec<Record>>>()?;
 
         let last_record = records.last();
-        // @TODO: Use ATUri
         let cursor: Option<String>;
         if let Some(last_record) = last_record {
-            let last_uri = last_record.clone().uri;
-            let last_uri_without_prefix = last_uri.replace("at://", "");
-            let parts = last_uri_without_prefix.split("/").collect::<Vec<&str>>();
-            if let (Some(_), Some(_), Some(uri_rkey)) = (parts.get(0), parts.get(1), parts.get(2)) {
-                cursor = Some(uri_rkey.to_string());
-            } else {
-                cursor = None;
-            }
+            let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
+            cursor = Some(last_at_uri.get_rkey());
         } else {
             cursor = None;
         }

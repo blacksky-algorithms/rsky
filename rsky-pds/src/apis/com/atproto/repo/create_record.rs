@@ -16,6 +16,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{CreateRecordInput, CreateRecordOutput};
+use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
 async fn inner_create_record(
@@ -64,34 +65,26 @@ async fn inner_create_record(
 
         let mut actor_store =
             ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-        let backlink_conflicts: Vec<String> = match validate {
+        let backlink_conflicts: Vec<AtUri> = match validate {
             Some(true) => {
+                let write_at_uri: AtUri = write.uri.clone().try_into()?;
                 actor_store
                     .record
-                    .get_backlink_conflicts(&write.uri, &write.record)
+                    .get_backlink_conflicts(&write_at_uri, &write.record)
                     .await?
             }
             _ => Vec::new(),
         };
 
-        // @TODO: Use ATUri
         let backlink_deletions: Vec<PreparedDelete> = backlink_conflicts
-            .into_iter()
-            .map(|uri| {
-                let uri_without_prefix = uri.replace("at://", "");
-                let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-                if let (Some(uri_hostname), Some(uri_collection), Some(uri_rkey)) =
-                    (parts.get(0), parts.get(1), parts.get(2))
-                {
-                    Ok(prepare_delete(PrepareDeleteOpts {
-                        did: uri_hostname.to_string(),
-                        collection: uri_collection.to_string(),
-                        rkey: uri_rkey.to_string(),
-                        swap_cid: None,
-                    }))
-                } else {
-                    bail!("Issue parsing backlink `{uri}`")
-                }
+            .iter()
+            .map(|at_uri| {
+                prepare_delete(PrepareDeleteOpts {
+                    did: at_uri.get_hostname().to_string(),
+                    collection: at_uri.get_collection(),
+                    rkey: at_uri.get_rkey(),
+                    swap_cid: None,
+                })
             })
             .collect::<Result<Vec<PreparedDelete>>>()?;
         let mut writes: Vec<PreparedWrite> = vec![PreparedWrite::Create(write.clone())];
@@ -108,7 +101,7 @@ async fn inner_create_record(
         AccountManager::update_repo_root(did, commit.cid, commit.rev)?;
 
         Ok(CreateRecordOutput {
-            uri: write.uri,
+            uri: write.uri.clone(),
             cid: write.cid.to_string(),
         })
     } else {

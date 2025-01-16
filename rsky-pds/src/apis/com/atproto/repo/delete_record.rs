@@ -14,6 +14,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::DeleteRecordInput;
+use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
 async fn inner_delete_record(
@@ -60,13 +61,13 @@ async fn inner_delete_record(
                 collection,
                 rkey,
                 swap_cid: swap_record_cid,
-            });
+            })?;
             let mut actor_store =
                 ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-
+            let write_at_uri: AtUri = write.uri.clone().try_into()?;
             let record = actor_store
                 .record
-                .get_record(&write.uri, None, Some(true))
+                .get_record(&write_at_uri, None, Some(true))
                 .await?;
             let commit = match record {
                 None => return Ok(()), // No-op if record already doesn't exist
