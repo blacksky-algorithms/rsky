@@ -313,15 +313,17 @@ impl RecordReader {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         Ok(conflicts
-            .into_iter()
-            .flatten()
-            .flat_map(|record| {
-                let at_uri = AtUri::make(env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
+        .into_iter()
+        .flatten()
+        .filter_map(|record| {
+            AtUri::make(
+                env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
                 Some(String::from(uri.get_collection())),
-                Some(record.rkey)).ok()?;
-                Some(at_uri)
-            })
-            .collect::<Vec<AtUri>>())
+                Some(record.rkey),
+            )
+            .ok()
+        })
+        .collect::<Vec<AtUri>>())
     }
 
     // Transactors
