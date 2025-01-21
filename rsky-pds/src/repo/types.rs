@@ -4,6 +4,7 @@ use crate::repo::cid_set::CidSet;
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
 use lexicon_cid::Cid;
+use rsky_syntax::aturi::AtUri;
 use std::collections::BTreeMap;
 
 // Repo nodes
@@ -178,48 +179,42 @@ pub enum RecordWriteOp {
     Delete(RecordDeleteOp),
 }
 
-// @TODO: Use AtUri
-pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
-    let uri_without_prefix = write.uri.replace("at://", "");
-    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-    RecordWriteOp::Create {
+pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> Result<RecordWriteOp> {
+    let write_at_uri: AtUri = write.uri.try_into()?;
+    Ok(RecordWriteOp::Create {
         0: RecordCreateOrUpdateOp {
             action: WriteOpAction::Create,
-            collection: parts[1].to_string(),
-            rkey: parts[2].to_string(),
+            collection: write_at_uri.get_collection(),
+            rkey: write_at_uri.get_rkey(),
             record: write.record,
         },
-    }
+    })
 }
 
-// @TODO: Use AtUri
-pub fn update_write_to_op(write: PreparedCreateOrUpdate) -> RecordWriteOp {
-    let uri_without_prefix = write.uri.replace("at://", "");
-    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-    RecordWriteOp::Update {
+pub fn update_write_to_op(write: PreparedCreateOrUpdate) -> Result<RecordWriteOp> {
+    let write_at_uri: AtUri = write.uri.try_into()?;
+    Ok(RecordWriteOp::Update {
         0: RecordCreateOrUpdateOp {
             action: WriteOpAction::Update,
-            collection: parts[1].to_string(),
-            rkey: parts[2].to_string(),
+            collection: write_at_uri.get_collection(),
+            rkey: write_at_uri.get_rkey(),
             record: write.record,
         },
-    }
+    })
 }
 
-// @TODO: Use AtUri
-pub fn delete_write_to_op(write: PreparedDelete) -> RecordWriteOp {
-    let uri_without_prefix = write.uri.replace("at://", "");
-    let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-    RecordWriteOp::Delete {
+pub fn delete_write_to_op(write: PreparedDelete) -> Result<RecordWriteOp> {
+    let write_at_uri: AtUri = write.uri.try_into()?;
+    Ok(RecordWriteOp::Delete {
         0: RecordDeleteOp {
             action: WriteOpAction::Delete,
-            collection: parts[1].to_string(),
-            rkey: parts[2].to_string(),
+            collection: write_at_uri.get_collection(),
+            rkey: write_at_uri.get_rkey(),
         },
-    }
+    })
 }
 
-pub fn write_to_op(write: PreparedWrite) -> RecordWriteOp {
+pub fn write_to_op(write: PreparedWrite) -> Result<RecordWriteOp> {
     match write {
         PreparedWrite::Create(c) => create_write_to_op(c),
         PreparedWrite::Update(u) => update_write_to_op(u),

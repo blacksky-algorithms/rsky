@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::{make_aturi, ActorStore};
+use crate::repo::ActorStore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use rocket::http::Status;
@@ -10,6 +10,7 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
+use rsky_syntax::aturi::AtUri;
 
 async fn inner_get_record(
     repo: String,
@@ -23,14 +24,14 @@ async fn inner_get_record(
 
     // fetch from pds if available, if not then fetch from appview
     if let Some(did) = did {
-        let uri = make_aturi(did.clone(), Some(collection), Some(rkey));
+        let uri = AtUri::make(did.clone(), Some(collection), Some(rkey))?;
 
         let mut actor_store =
             ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
 
         match actor_store.record.get_record(&uri, cid, None).await {
             Ok(Some(record)) if record.takedown_ref.is_none() => Ok(GetRecordOutput {
-                uri,
+                uri: uri.to_string(),
                 cid: Some(record.cid),
                 value: serde_json::to_value(record.value)?,
             }),

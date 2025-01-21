@@ -86,7 +86,7 @@ async fn inner_apply_writes(
                             collection: write.collection,
                             rkey: write.rkey,
                             swap_cid: None,
-                        }))
+                        })?)
                     }
                 })
             })
