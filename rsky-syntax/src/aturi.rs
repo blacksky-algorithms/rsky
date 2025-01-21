@@ -191,8 +191,8 @@ impl AtUri {
     }
 }
 
-pub fn parse(str: &String) -> Result<Option<ParsedOutput>> {
-    match atp_uri_regex(str) {
+pub fn parse(str: &str) -> Result<Option<ParsedOutput>> {
+    match atp_uri_regex(&str) {
         None => Ok(None),
         Some(matches) => {
             // The query string we want to parse
@@ -216,7 +216,7 @@ pub fn parse(str: &String) -> Result<Option<ParsedOutput>> {
     }
 }
 
-pub fn parse_relative(str: &String) -> Result<Option<ParsedRelativeOutput>> {
+pub fn parse_relative(str: &str) -> Result<Option<ParsedRelativeOutput>> {
     match relative_regex(str) {
         None => Ok(None),
         Some(matches) => {
@@ -535,6 +535,15 @@ mod tests {
         let invalid_cases = vec![
             "",                          // Empty string
             // @TODO implement AtUri Validation
+            // Note: At this point in time, (commit bd39665) the reference typescript
+            // packages/syntax/src/aturi.ts
+            // does not use ensureValidAtUri or ensureValidAtUriRegex
+            // from packages/syntax/src/aturi_validation.ts
+            // although does "export * from './aturi_validation'"
+            // idk if this is an ommission or not so i won't implment
+            // validation in AtUri at this time.
+            //
+            //
             // "invalid/uri/format",        // Missing host
             // "http://not-at-protocol",    // Wrong protocol
             // "at://",                     // Missing everything after protocol
