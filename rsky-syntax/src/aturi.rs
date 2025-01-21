@@ -288,6 +288,24 @@ impl TryFrom<&String> for AtUri {
     }
 }
 
+impl From<AtUri> for String {
+    fn from(value: AtUri) -> Self {
+        value.to_string()
+    }
+}
+
+impl From<&AtUri> for String {
+    fn from(value: &AtUri) -> Self {
+        value.to_string()
+    }
+}
+
+impl From<&&AtUri> for String {
+    fn from(value: &&AtUri) -> Self {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
