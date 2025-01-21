@@ -43,7 +43,8 @@ pub enum HandleError {
     DisallowedDomain(String),
 }
 
-pub fn is_valid_tld(handle: &str) -> bool {
+pub fn is_valid_tld<S: Into<String>>(handle: S) -> bool {
+    let handle: String = handle.into();
     let handle_lower = handle.to_lowercase();
     !DISALLOWED_TLDS
         .iter()
