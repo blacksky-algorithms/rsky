@@ -8,34 +8,22 @@ pub fn atp_uri_regex(input: &str) -> Option<Vec<&str>> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"(?i)^(at://)?((?:did:[a-z0-9:%-]+)|(?:[a-z0-9][a-z0-9.:-]*))(/[^?#\s]*)?(\?[^#\s]+)?(#[^\s]+)?$").unwrap();
     }
-    if let Some(captures) = RE.captures(input) {
-        Some(
-            captures
+    RE.captures(input).map(|captures| captures
                 .iter()
                 .skip(1) // Skip the first capture which is the entire match
                 .map(|c| c.map_or("", |m| m.as_str()))
-                .collect(),
-        )
-    } else {
-        None
-    }
+                .collect())
 }
 
 pub fn relative_regex(input: &str) -> Option<Vec<&str>> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"(?i)^(/[^?#\s]*)?(\?[^#\s]+)?(#[^\s]+)?$").unwrap();
     }
-    if let Some(captures) = RE.captures(input) {
-        Some(
-            captures
+    RE.captures(input).map(|captures| captures
                 .iter()
                 .skip(1) // Skip the first capture which is the entire match
                 .map(|c| c.map_or("", |m| m.as_str()))
-                .collect(),
-        )
-    } else {
-        None
-    }
+                .collect())
 }
 
 pub struct ParsedOutput {
@@ -114,7 +102,7 @@ impl AtUri {
         &self.host
     }
 
-    pub fn set_hostname(&mut self, v: String) -> () {
+    pub fn set_hostname(&mut self, v: String) {
         self.host = v;
     }
 
@@ -144,7 +132,7 @@ impl AtUri {
         }
     }
 
-    pub fn set_collection(&mut self, v: String) -> () {
+    pub fn set_collection(&mut self, v: String) {
         let mut parts: Vec<String> = self
             .pathname
             .split("/")
@@ -152,7 +140,7 @@ impl AtUri {
             .into_iter()
             .map(|p| p.to_string())
             .collect::<Vec<String>>();
-        if parts.len() > 0 {
+        if !parts.is_empty() {
             parts[0] = v;
         } else {
             parts.push(v);
@@ -167,7 +155,7 @@ impl AtUri {
         }
     }
 
-    pub fn set_rkey(&mut self, v: String) -> () {
+    pub fn set_rkey(&mut self, v: String) {
         let mut parts: Vec<String> = self
             .pathname
             .split("/")
@@ -177,7 +165,7 @@ impl AtUri {
             .collect::<Vec<String>>();
         if parts.len() > 1 {
             parts[1] = v;
-        } else if parts.len() > 0 {
+        } else if !parts.is_empty() {
             parts.push(v);
         } else {
             parts.push("undefined".to_string());
@@ -192,7 +180,7 @@ impl AtUri {
 }
 
 pub fn parse(str: &str) -> Result<Option<ParsedOutput>> {
-    match atp_uri_regex(&str) {
+    match atp_uri_regex(str) {
         None => Ok(None),
         Some(matches) => {
             // The query string we want to parse
@@ -242,7 +230,7 @@ pub fn parse_relative(str: &str) -> Result<Option<ParsedRelativeOutput>> {
 
 impl Display for AtUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut path = match self.pathname == "" {
+        let mut path = match self.pathname.is_empty() {
             true => "/".to_string(),
             false => self.pathname.clone(),
         };
@@ -250,17 +238,17 @@ impl Display for AtUri {
             path = format!("/{path}");
         }
         let qs = match self.get_search() {
-            Ok(Some(search_params)) if !search_params.starts_with("?") && search_params != "" => {
+            Ok(Some(search_params)) if !search_params.starts_with("?") && !search_params.is_empty() => {
                 format!("?{search_params}")
             }
             Ok(Some(search_params)) => search_params,
             _ => "".to_string(),
         };
-        let hash = match self.hash == "" {
+        let hash = match self.hash.is_empty() {
             true => self.hash.clone(),
             false => {
                 if self.hash.starts_with("#") {
-                    format!("{}", self.hash)
+                    self.hash.to_string()
                 } else {
                     format!("#{}", self.hash)
                 }
