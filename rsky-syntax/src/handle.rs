@@ -146,7 +146,9 @@ pub fn normalize_handle<S: Into<String>>(handle: S) -> String {
     handle.to_lowercase()
 }
 
-pub fn normalize_and_ensure_valid_handle<S: Into<String>>(handle: S) -> Result<String, HandleError> {
+pub fn normalize_and_ensure_valid_handle<S: Into<String>>(
+    handle: S,
+) -> Result<String, HandleError> {
     let normalized = normalize_handle(handle);
     ensure_valid_handle(&normalized)?;
     Ok(normalized)

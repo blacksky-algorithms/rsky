@@ -3,7 +3,8 @@ use regex::Regex;
 use thiserror::Error;
 
 use crate::{
-    aturi::AtUri, did::ensure_valid_did_regex, handle::ensure_valid_handle_regex, nsid::ensure_valid_nsid_regex
+    aturi::AtUri, did::ensure_valid_did_regex, handle::ensure_valid_handle_regex,
+    nsid::ensure_valid_nsid_regex,
 };
 
 // Human-readable constraints on ATURI:
@@ -123,10 +124,11 @@ pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValida
             // If there's a record key, validate it
             let rkey_idx = collection_idx + 1;
             if segments.len() > rkey_idx && segments[rkey_idx].is_empty() {
-                    return Err(AtUriValidationError(
-                        "ATURI can not have a slash after collection, unless record key is provided".into()
-                    ));
-                }
+                return Err(AtUriValidationError(
+                    "ATURI can not have a slash after collection, unless record key is provided"
+                        .into(),
+                ));
+            }
 
             // Validate max path segments for NSID paths
             if segments.len() > (collection_idx + 2) {

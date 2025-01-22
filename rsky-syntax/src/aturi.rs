@@ -258,7 +258,13 @@ impl Display for AtUri {
         };
         let hash = match self.hash == "" {
             true => self.hash.clone(),
-            false => format!("#{}", self.hash),
+            false => {
+                if self.hash.starts_with("#") {
+                    format!("{}", self.hash)
+                } else {
+                    format!("#{}", self.hash)
+                }
+            }
         };
         write!(f, "at://{}{}{}{}", self.host, path, qs, hash)
     }
@@ -507,9 +513,12 @@ mod tests {
         for case in valid_cases {
             let result: Result<AtUri, _> = case.try_into();
             assert!(result.is_ok(), "Failed to parse valid URI: {}", case);
-            
+
             let uri = result.unwrap();
-            assert_eq!(uri.to_string(), format!("at://{}", case.trim_start_matches("at://")));
+            assert_eq!(
+                uri.to_string(),
+                format!("at://{}", case.trim_start_matches("at://"))
+            );
         }
     }
 
@@ -524,31 +533,34 @@ mod tests {
         for case in valid_cases {
             let result: Result<AtUri, _> = case.clone().try_into();
             assert!(result.is_ok(), "Failed to parse valid URI: {}", case);
-            
+
             let uri = result.unwrap();
-            assert_eq!(uri.to_string(), format!("at://{}", case.trim_start_matches("at://")));
+            assert_eq!(
+                uri.to_string(),
+                format!("at://{}", case.trim_start_matches("at://"))
+            );
         }
     }
 
     #[test]
     fn test_invalid_str_conversion() {
         let invalid_cases = vec![
-            "",                          // Empty string
-            // @TODO implement AtUri Validation
-            // Note: At this point in time, (commit bd39665) the reference typescript
-            // packages/syntax/src/aturi.ts
-            // does not use ensureValidAtUri or ensureValidAtUriRegex
-            // from packages/syntax/src/aturi_validation.ts
-            // although does "export * from './aturi_validation'"
-            // idk if this is an ommission or not so i won't implment
-            // validation in AtUri at this time.
-            //
-            //
-            // "invalid/uri/format",        // Missing host
-            // "http://not-at-protocol",    // Wrong protocol
-            // "at://",                     // Missing everything after protocol
-            // "at://@invalid-chars@",      // Invalid characters
-            // "at://host/collection/rkey/extra", // Too many path segments
+            "", // Empty string
+               // @TODO implement AtUri Validation
+               // Note: At this point in time, (commit bd39665) the reference typescript
+               // packages/syntax/src/aturi.ts
+               // does not use ensureValidAtUri or ensureValidAtUriRegex
+               // from packages/syntax/src/aturi_validation.ts
+               // although does "export * from './aturi_validation'"
+               // idk if this is an ommission or not so i won't implment
+               // validation in AtUri at this time.
+               //
+               //
+               // "invalid/uri/format",        // Missing host
+               // "http://not-at-protocol",    // Wrong protocol
+               // "at://",                     // Missing everything after protocol
+               // "at://@invalid-chars@",      // Invalid characters
+               // "at://host/collection/rkey/extra", // Too many path segments
         ];
 
         for case in invalid_cases {
@@ -584,7 +596,10 @@ mod tests {
         assert_eq!(uri.host, "host.com");
         assert_eq!(uri.get_collection(), "collection");
         assert_eq!(uri.get_rkey(), "123");
-        assert_eq!(uri.search_params, vec![("key".to_string(), "value".to_string())]);
+        assert_eq!(
+            uri.search_params,
+            vec![("key".to_string(), "value".to_string())]
+        );
     }
 
     #[test]
@@ -603,123 +618,130 @@ mod tests {
     fn test_conversion_full_uri() {
         let uri_str = "at://host.com/collection/123?key=value#fragment";
         let result: Result<AtUri, _> = uri_str.try_into();
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "test_conversion_full_uri error: Validation error {:?}",
+            result
+        );
         let uri = result.unwrap();
         assert_eq!(uri.host, "host.com");
         assert_eq!(uri.get_collection(), "collection");
         assert_eq!(uri.get_rkey(), "123");
-        assert_eq!(uri.search_params, vec![("key".to_string(), "value".to_string())]);
+        assert_eq!(
+            uri.search_params,
+            vec![("key".to_string(), "value".to_string())]
+        );
         assert_eq!(uri.hash, "#fragment");
     }
 
     #[test]
-fn test_uri_modifications() -> Result<()> {
-    // Start with basic URI
-    let mut uri = AtUri::new("at://foo.com".to_string(), None)?;
-    assert_eq!(uri.to_string(), "at://foo.com/");
+    fn test_uri_modifications() -> Result<()> {
+        // Start with basic URI
+        let mut uri = AtUri::new("at://foo.com".to_string(), None)?;
+        assert_eq!(uri.to_string(), "at://foo.com/");
 
-    // Test host modifications
-    uri.set_hostname("bar.com".to_string());
-    assert_eq!(uri.to_string(), "at://bar.com/");
-    uri.set_hostname("did:web:localhost%3A1234".to_string());
-    assert_eq!(uri.to_string(), "at://did:web:localhost%3A1234/");
-    uri.set_hostname("foo.com".to_string());
-    assert_eq!(uri.to_string(), "at://foo.com/");
+        // Test host modifications
+        uri.set_hostname("bar.com".to_string());
+        assert_eq!(uri.to_string(), "at://bar.com/");
+        uri.set_hostname("did:web:localhost%3A1234".to_string());
+        assert_eq!(uri.to_string(), "at://did:web:localhost%3A1234/");
+        uri.set_hostname("foo.com".to_string());
+        assert_eq!(uri.to_string(), "at://foo.com/");
 
-    // Test pathname modifications
-    uri.pathname = "/".to_string();
-    assert_eq!(uri.to_string(), "at://foo.com/");
-    uri.pathname = "/foo".to_string();
-    assert_eq!(uri.to_string(), "at://foo.com/foo");
-    uri.pathname = "foo".to_string();
-    assert_eq!(uri.to_string(), "at://foo.com/foo");
+        // Test pathname modifications
+        uri.pathname = "/".to_string();
+        assert_eq!(uri.to_string(), "at://foo.com/");
+        uri.pathname = "/foo".to_string();
+        assert_eq!(uri.to_string(), "at://foo.com/foo");
+        uri.pathname = "foo".to_string();
+        assert_eq!(uri.to_string(), "at://foo.com/foo");
 
-    // Test collection and rkey modifications
-    uri.set_collection("com.example.foo".to_string());
-    uri.set_rkey("123".to_string());
-    assert_eq!(uri.to_string(), "at://foo.com/com.example.foo/123");
-    uri.set_rkey("124".to_string());
-    assert_eq!(uri.to_string(), "at://foo.com/com.example.foo/124");
-    uri.set_collection("com.other.foo".to_string());
-    assert_eq!(uri.to_string(), "at://foo.com/com.other.foo/124");
-    uri.pathname = "".to_string();
-    uri.set_rkey("123".to_string());
-    assert_eq!(uri.to_string(), "at://foo.com/123");
-    uri.pathname = "foo".to_string();
-    
-    // Test search parameter modifications
-    uri.set_search("?foo=bar".to_string())?;
-    assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar");
-    uri.search_params = vec![
-        ("foo".to_string(), "bar".to_string()),
-        ("baz".to_string(), "buux".to_string())
-    ];
-    assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux");
+        // Test collection and rkey modifications
+        uri.set_collection("com.example.foo".to_string());
+        uri.set_rkey("123".to_string());
+        assert_eq!(uri.to_string(), "at://foo.com/com.example.foo/123");
+        uri.set_rkey("124".to_string());
+        assert_eq!(uri.to_string(), "at://foo.com/com.example.foo/124");
+        uri.set_collection("com.other.foo".to_string());
+        assert_eq!(uri.to_string(), "at://foo.com/com.other.foo/124");
+        uri.pathname = "".to_string();
+        uri.set_rkey("123".to_string());
+        assert_eq!(uri.to_string(), "at://foo.com/123");
+        uri.pathname = "foo".to_string();
 
-    // Test hash modifications 
-    // @TODO should set # automatically if not set to conform with typescript
-    // see https://github.com/bluesky-social/atproto/blob/688ff0/packages/syntax/tests/aturi.test.ts#L314
-    // uri.hash = "#hash".to_string();
-    // assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux#hash");
-    // uri.hash = "hash".to_string();  // Should automatically add # when missing
-    // assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux#hash");
+        // Test search parameter modifications
+        uri.set_search("?foo=bar".to_string())?;
+        assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar");
+        uri.search_params = vec![
+            ("foo".to_string(), "bar".to_string()),
+            ("baz".to_string(), "buux".to_string()),
+        ];
+        assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux");
 
-    Ok(())
-}
+        // Test hash modifications
+        // @TODO should set # automatically if not set to conform with typescript
+        // see https://github.com/bluesky-social/atproto/blob/688ff0/packages/syntax/tests/aturi.test.ts#L314
+        // uri.hash = "#hash".to_string();
+        // assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux#hash");
+        // uri.hash = "hash".to_string();  // Should automatically add # when missing
+        // assert_eq!(uri.to_string(), "at://foo.com/foo?foo=bar&baz=buux#hash");
 
-#[test]
-fn test_relative_uris() -> Result<()> {
-    // Define test cases as tuples of (input, expected_pathname, expected_search, expected_hash)
-    let test_cases = vec![
-        ("", "", "", ""),
-        ("/", "/", "", ""),
-        ("/foo", "/foo", "", ""),
-        ("/foo/", "/foo/", "", ""),
-        ("/foo/bar", "/foo/bar", "", ""),
-        ("?foo=bar", "", "foo=bar", ""),
-        ("?foo=bar&baz=buux", "", "foo=bar&baz=buux", ""),
-        ("/?foo=bar", "/", "foo=bar", ""),
-        ("/foo?foo=bar", "/foo", "foo=bar", ""),
-        ("/foo/?foo=bar", "/foo/", "foo=bar", ""),
-        ("#hash", "", "", "#hash"),
-        ("/#hash", "/", "", "#hash"),
-        ("/foo#hash", "/foo", "", "#hash"),
-        ("/foo/#hash", "/foo/", "", "#hash"),
-        ("?foo=bar#hash", "", "foo=bar", "#hash"),
-    ];
-
-    // Define base URIs to test against
-    let base_uris = vec![
-        "did:web:localhost%3A1234",
-        "at://did:web:localhost%3A1234",
-        "at://did:web:localhost%3A1234/foo/bar?foo=bar&baz=buux#hash",
-    ];
-
-    for base in base_uris {
-        let base_uri = AtUri::new(base.to_string(), None)?;
-        
-        for (relative, exp_path, exp_search, exp_hash) in test_cases.iter() {
-            let uri = AtUri::new(relative.to_string(), Some(base.to_string()))?;
-            
-            // Verify the components match expectations
-            assert_eq!(uri.get_protocol(), "at:".to_string());
-            assert_eq!(uri.host, base_uri.host);
-            assert_eq!(uri.get_hostname(), base_uri.get_hostname());
-            assert_eq!(uri.get_origin(), base_uri.get_origin());
-            assert_eq!(uri.pathname, exp_path.to_string());
-            
-            // Compare search params
-            if exp_search.is_empty() {
-                assert!(uri.get_search()?.is_none() || uri.get_search()?.unwrap().is_empty());
-            } else {
-                assert_eq!(uri.get_search()?.unwrap(), exp_search.to_string());
-            }
-            
-            // Compare hash
-            assert_eq!(uri.hash, exp_hash.to_string());
-        }
+        Ok(())
     }
 
-    Ok(())
-}
+    #[test]
+    fn test_relative_uris() -> Result<()> {
+        // Define test cases as tuples of (input, expected_pathname, expected_search, expected_hash)
+        let test_cases = vec![
+            ("", "", "", ""),
+            ("/", "/", "", ""),
+            ("/foo", "/foo", "", ""),
+            ("/foo/", "/foo/", "", ""),
+            ("/foo/bar", "/foo/bar", "", ""),
+            ("?foo=bar", "", "foo=bar", ""),
+            ("?foo=bar&baz=buux", "", "foo=bar&baz=buux", ""),
+            ("/?foo=bar", "/", "foo=bar", ""),
+            ("/foo?foo=bar", "/foo", "foo=bar", ""),
+            ("/foo/?foo=bar", "/foo/", "foo=bar", ""),
+            ("#hash", "", "", "#hash"),
+            ("/#hash", "/", "", "#hash"),
+            ("/foo#hash", "/foo", "", "#hash"),
+            ("/foo/#hash", "/foo/", "", "#hash"),
+            ("?foo=bar#hash", "", "foo=bar", "#hash"),
+        ];
+
+        // Define base URIs to test against
+        let base_uris = vec![
+            "did:web:localhost%3A1234",
+            "at://did:web:localhost%3A1234",
+            "at://did:web:localhost%3A1234/foo/bar?foo=bar&baz=buux#hash",
+        ];
+
+        for base in base_uris {
+            let base_uri = AtUri::new(base.to_string(), None)?;
+
+            for (relative, exp_path, exp_search, exp_hash) in test_cases.iter() {
+                let uri = AtUri::new(relative.to_string(), Some(base.to_string()))?;
+
+                // Verify the components match expectations
+                assert_eq!(uri.get_protocol(), "at:".to_string());
+                assert_eq!(uri.host, base_uri.host);
+                assert_eq!(uri.get_hostname(), base_uri.get_hostname());
+                assert_eq!(uri.get_origin(), base_uri.get_origin());
+                assert_eq!(uri.pathname, exp_path.to_string());
+
+                // Compare search params
+                if exp_search.is_empty() {
+                    assert!(uri.get_search()?.is_none() || uri.get_search()?.unwrap().is_empty());
+                } else {
+                    assert_eq!(uri.get_search()?.unwrap(), exp_search.to_string());
+                }
+
+                // Compare hash
+                assert_eq!(uri.hash, exp_hash.to_string());
+            }
+        }
+
+        Ok(())
+    }
 }

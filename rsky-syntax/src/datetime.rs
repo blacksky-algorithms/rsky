@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use thiserror::Error;
@@ -17,7 +17,9 @@ lazy_static! {
 #[error("InvalidDatetimeError: {0}")]
 pub struct InvalidDatetimeError(String);
 
-pub fn ensure_valid_datetime<S: Into<String>>(dt_str: S) -> Result<(), InvalidDatetimeError> {
+pub fn ensure_valid_datetime<S: Into<String>>(
+    dt_str: S,
+) -> Result<DateTime<FixedOffset>, InvalidDatetimeError> {
     let dt_str: String = dt_str.into();
     // Regex check first - this validates the basic format
     if !DATETIME_REGEX.is_match(&dt_str) {
@@ -62,7 +64,7 @@ pub fn ensure_valid_datetime<S: Into<String>>(dt_str: S) -> Result<(), InvalidDa
         ));
     }
 
-    Ok(())
+    Ok(parsed)
 }
 
 pub fn is_valid_datetime<S: Into<String>>(dt_str: S) -> bool {
