@@ -8,22 +8,26 @@ pub fn atp_uri_regex(input: &str) -> Option<Vec<&str>> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"(?i)^(at://)?((?:did:[a-z0-9:%-]+)|(?:[a-z0-9][a-z0-9.:-]*))(/[^?#\s]*)?(\?[^#\s]+)?(#[^\s]+)?$").unwrap();
     }
-    RE.captures(input).map(|captures| captures
-                .iter()
-                .skip(1) // Skip the first capture which is the entire match
-                .map(|c| c.map_or("", |m| m.as_str()))
-                .collect())
+    RE.captures(input).map(|captures| {
+        captures
+            .iter()
+            .skip(1) // Skip the first capture which is the entire match
+            .map(|c| c.map_or("", |m| m.as_str()))
+            .collect()
+    })
 }
 
 pub fn relative_regex(input: &str) -> Option<Vec<&str>> {
     lazy_static! {
         static ref RE: Regex = Regex::new(r"(?i)^(/[^?#\s]*)?(\?[^#\s]+)?(#[^\s]+)?$").unwrap();
     }
-    RE.captures(input).map(|captures| captures
-                .iter()
-                .skip(1) // Skip the first capture which is the entire match
-                .map(|c| c.map_or("", |m| m.as_str()))
-                .collect())
+    RE.captures(input).map(|captures| {
+        captures
+            .iter()
+            .skip(1) // Skip the first capture which is the entire match
+            .map(|c| c.map_or("", |m| m.as_str()))
+            .collect()
+    })
 }
 
 pub struct ParsedOutput {
@@ -238,7 +242,9 @@ impl Display for AtUri {
             path = format!("/{path}");
         }
         let qs = match self.get_search() {
-            Ok(Some(search_params)) if !search_params.starts_with("?") && !search_params.is_empty() => {
+            Ok(Some(search_params))
+                if !search_params.starts_with("?") && !search_params.is_empty() =>
+            {
                 format!("?{search_params}")
             }
             Ok(Some(search_params)) => search_params,
@@ -534,21 +540,6 @@ mod tests {
     fn test_invalid_str_conversion() {
         let invalid_cases = vec![
             "", // Empty string
-               // @TODO implement AtUri Validation
-               // Note: At this point in time, (commit bd39665) the reference typescript
-               // packages/syntax/src/aturi.ts
-               // does not use ensureValidAtUri or ensureValidAtUriRegex
-               // from packages/syntax/src/aturi_validation.ts
-               // although does "export * from './aturi_validation'"
-               // idk if this is an ommission or not so i won't implment
-               // validation in AtUri at this time.
-               //
-               //
-               // "invalid/uri/format",        // Missing host
-               // "http://not-at-protocol",    // Wrong protocol
-               // "at://",                     // Missing everything after protocol
-               // "at://@invalid-chars@",      // Invalid characters
-               // "at://host/collection/rkey/extra", // Too many path segments
         ];
 
         for case in invalid_cases {
@@ -559,15 +550,7 @@ mod tests {
 
     #[test]
     fn test_invalid_string_conversion() {
-        let invalid_cases = vec![
-            String::from(""),
-            // @TODO implement AtUri Validation
-            // String::from("invalid/uri/format"),
-            // String::from("http://not-at-protocol"),
-            // String::from("at://"),
-            // String::from("at://@invalid-chars@"),
-            // String::from("at://host/collection/rkey/extra"),
-        ];
+        let invalid_cases = vec![String::from("")];
 
         for case in invalid_cases {
             let result: Result<AtUri, _> = case.clone().try_into();
