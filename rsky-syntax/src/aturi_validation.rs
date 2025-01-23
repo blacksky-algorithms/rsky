@@ -51,7 +51,7 @@ pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValida
         ));
     }
     let hacky_empty = String::from("");
-    let fragment_part = uri_parts.get(1).unwrap_or_else(|| &hacky_empty).to_string();
+    let fragment_part = uri_parts.get(1).unwrap_or(&hacky_empty).to_string();
     let uri = uri_parts.first().unwrap().to_string();
     // check that all chars are boring ASCII
     if !VALID_PATH_CHARS.is_match(&uri) {
