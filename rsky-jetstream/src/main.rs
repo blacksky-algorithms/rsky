@@ -82,7 +82,7 @@ async fn update_cursor(
 async fn process(message: String, client: &reqwest::Client) {
     let default_queue_path =
         env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("http://127.0.0.1:8000".into());
-    let default_subscriber_path = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
+    let default_subscriber_path = env::var("JETSTREAM_SUBSCRIPTION_ENDPOINT")
         .unwrap_or("wss://jetstream1.us-west.bsky.network".into());
 
     match read(&message) {
