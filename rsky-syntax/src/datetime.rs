@@ -201,6 +201,19 @@ mod tests {
         expect_valid("2023-01-01T00:00:00-07:00");
         expect_valid("2023-01-01T00:00:00.123456789Z");
         expect_valid("9999-12-31T23:59:59.999Z");
+        // from documentation
+        // preferred
+        expect_valid("1985-04-12T23:20:50.123Z");
+        expect_valid("1985-04-12T23:20:50.123456Z");
+        expect_valid("1985-04-12T23:20:50.120Z");
+        expect_valid("1985-04-12T23:20:50.120000Z");
+
+        // supported
+        expect_valid("1985-04-12T23:20:50.12345678912345Z");
+        expect_valid("1985-04-12T23:20:50Z");
+        expect_valid("1985-04-12T23:20:50.0Z");
+        expect_valid("1985-04-12T23:20:50.123+00:00");
+        expect_valid("1985-04-12T23:20:50.123-07:00");
     }
 
     #[test]
@@ -221,6 +234,34 @@ mod tests {
         expect_invalid("0000-01-01T00:00:00Z");
         expect_invalid("2023-01-01T00:00:00-00:00");
         expect_invalid(&format!("2023-01-01T00:00:00{}", "0".repeat(65)));
+        expect_invalid("0000-01-01T00:00:00.000Z");
+        // Documentation invalid examples
+        expect_invalid("1985-04-12");
+        expect_invalid("1985-04-12T23:20Z");
+        expect_invalid("1985-04-12T23:20:5Z");
+        expect_invalid("1985-04-12T23:20:50.123");
+        expect_invalid("+001985-04-12T23:20:50.123Z");
+        expect_invalid("23:20:50.123Z");
+        expect_invalid("-1985-04-12T23:20:50.123Z");
+        expect_invalid("1985-4-12T23:20:50.123Z");
+        expect_invalid("01985-04-12T23:20:50.123Z");
+        expect_invalid("1985-04-12T23:20:50.123+00");
+        expect_invalid("1985-04-12T23:20:50.123+0000");
+
+        //ISO-8601 strict capitalization
+        expect_invalid("1985-04-12t23:20:50.123Z");
+        expect_invalid("1985-04-12T23:20:50.123z");
+
+        // RFC-3339, but not ISO-8601
+        expect_invalid("1985-04-12T23:20:50.123-00:00");
+        expect_invalid("1985-04-12 23:20:50.123Z");
+
+        // timezone is required
+        expect_invalid("1985-04-12T23:20:50.123");
+
+        // syntax looks ok, but datetime is not valid
+        expect_invalid("1985-04-12T23:99:50.123Z");
+        expect_invalid("1985-00-12T23:20:50.123Z");
     }
 
     #[test]

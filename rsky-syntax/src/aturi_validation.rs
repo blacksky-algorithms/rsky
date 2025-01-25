@@ -10,7 +10,7 @@ use crate::{
 };
 
 // Note: Typescript implementation allows for (8 * 1024) bytes
-const MAX_URI_LEN: usize = 512;
+const MAX_URI_LEN: usize = 8 * 1024;
 
 lazy_static! {
     static ref ATURI_REGEX: Regex = Regex::new(
@@ -32,7 +32,9 @@ pub struct AtUriValidationError(String);
 // Human-readable constraints on ATURI:
 //   - following regular URLs, a 8KByte hard total length limit
 //   - follows ATURI docs on website
-//      - all ASCII characters, no whitespace. non-ASCII could be URL-encoded
+//      - all ASCII characters, no whitespace. non-ASCII could be URL-encoded;
+//        - I believe "non-ASCII could be URL-encoded" to conform to
+//          "Hex-encoding of characters is permitted (but in practice not necessary)" in the docs
 //      - starts "at://"
 //      - "authority" is a valid DID or a valid handle
 //      - optionally, follow "authority" with "/" and valid NSID as start of path
@@ -205,7 +207,7 @@ mod tests {
     fn test_debug_me() {
         expect_invalid(&format!(
             "at://did:plc:asdf123/com.atproto.feed.post/{}",
-            "o".repeat(800)
+            "o".repeat(MAX_URI_LEN + 100)
         ));
     }
 
@@ -367,7 +369,7 @@ mod tests {
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/abc%30123");
     }
     #[test]
-    fn test_is_provabably_too_permissive_about_url_encoding() {
+    fn test_is_probably_too_permissive_about_url_encoding() {
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%30");
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%3");
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%");

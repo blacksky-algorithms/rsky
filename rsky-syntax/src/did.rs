@@ -2,6 +2,18 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use thiserror::Error;
 
+lazy_static! {
+    // Regex for basic ASCII character validation
+    static ref ASCII_CHARS_REGEX: Regex = Regex::new(r"^[a-zA-Z0-9._:%-]*$").unwrap();
+
+    // Complex regex for full DID validation
+    static ref DID_FULL_REGEX: Regex = Regex::new(r"^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$").unwrap();
+}
+
+#[derive(Error, Debug)]
+#[error("InvalidDidError: {0}")]
+pub struct InvalidDidError(String);
+
 // Human-readable constraints:
 //   - valid W3C DID (https://www.w3.org/TR/did-core/#did-syntax)
 //      - entire URI is ASCII: [a-zA-Z0-9._:%-]
@@ -15,19 +27,6 @@ use thiserror::Error;
 //   - in current atproto, only allowing did:plc and did:web. But not *forcing* this at lexicon layer
 //   - hard length limit of 8KBytes
 //   - not going to validate "percent encoding" here
-
-lazy_static! {
-    // Regex for basic ASCII character validation
-    static ref ASCII_CHARS_REGEX: Regex = Regex::new(r"^[a-zA-Z0-9._:%-]*$").unwrap();
-
-    // Complex regex for full DID validation
-    static ref DID_FULL_REGEX: Regex = Regex::new(r"^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$").unwrap();
-}
-
-#[derive(Error, Debug)]
-#[error("InvalidDidError: {0}")]
-pub struct InvalidDidError(String);
-
 pub fn ensure_valid_did<S: Into<String>>(did: S) -> Result<(), InvalidDidError> {
     let did: String = did.into();
     if !did.starts_with("did:") {
@@ -74,7 +73,7 @@ pub fn ensure_valid_did_regex<S: Into<String>>(did: S) -> Result<(), InvalidDidE
         return Err(InvalidDidError("DID didn't validate via regex".into()));
     }
 
-    if did.len() > 2 * 1024 {
+    if did.len() > 2048 {
         return Err(InvalidDidError("DID is too long (2048 chars max)".into()));
     }
 
