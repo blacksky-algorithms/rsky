@@ -335,11 +335,3 @@ async fn main() {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_read_commit_create_like() {}
-}
