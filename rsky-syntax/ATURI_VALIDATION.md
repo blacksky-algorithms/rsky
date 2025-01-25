@@ -7,3 +7,7 @@ At the time of writing this, this rsky-syntax validation of AT-URI reflects the 
   - The Rust DID and Handle validation adheres to the specification.
   - The Rust NSID and TID validation adheres to the specification.
   - The Rust Record Key validation adheres to the specification.
+
+  # References
+
+  1. [rsky-syntax PR](https://github.com/blacksky-algorithms/rsky/pull/39).
