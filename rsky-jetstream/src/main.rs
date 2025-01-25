@@ -300,7 +300,7 @@ async fn main() {
     let default_subscriber_path = env::var("JETSTREAM_SERVER_ENDPOINT")
         .unwrap_or("wss://jetstream1.us-west.bsky.network".into());
     let wanted_collections = env::var("FILTER_PARAM")
-        .unwrap_or("wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.feed.repost&wantedCollections=app.bsky.graph.follow&wantedCollections=app.bsky.feed.like".into());
+        .unwrap_or("".into());
     let client = reqwest::Client::new();
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap();
