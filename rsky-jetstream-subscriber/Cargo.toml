@@ -1,0 +1,24 @@
+[package]
+name = "rsky-jetstream-subscriber"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>", "Ripperoni <email@ripperoni.com>"]
+description = "Jetstream subscriber service"
+license = "Apache-2.0"
+edition = "2021"
+publish = true
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rsky-lexicon = { workspace = true }
+futures = "0.3.28"
+tokio = { version = "1.28.0", features = ["full"] }
+tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
+url = "2.3.1"
+chrono = { version = "0.4.24", features = ["serde"] }
+reqwest = { version = "0.11.16", features = ["json", "rustls"] }
+serde = { version = "1.0.160", features = ["derive"] }
+serde_derive = "^1.0"
+serde_json = "1.0.96"
+dotenvy = "0.15.7"
+anyhow = "1.0.81"
