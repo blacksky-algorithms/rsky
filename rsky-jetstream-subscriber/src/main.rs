@@ -1,7 +1,7 @@
 use chrono::DateTime;
 use dotenvy::dotenv;
 use futures::StreamExt as _;
-use rsky_jetstream::jetstream::{
+use rsky_jetstream_subscriber::jetstream::{
     read, JetstreamRepoAccount, JetstreamRepoAccountMessage, JetstreamRepoCommit,
     JetstreamRepoCommitMessage, JetstreamRepoIdentity, JetstreamRepoIdentityMessage,
     JetstreamRepoMessage, Lexicon,
@@ -22,7 +22,7 @@ use url::Url;
 
 async fn queue_delete(
     url: String,
-    records: Vec<rsky_jetstream::models::DeleteOp>,
+    records: Vec<rsky_jetstream_subscriber::models::DeleteOp>,
     client: &reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("RSKY_API_KEY").map_err(|_| {
@@ -41,7 +41,7 @@ async fn queue_delete(
 
 async fn queue_create<T: serde::ser::Serialize>(
     url: String,
-    records: Vec<rsky_jetstream::models::CreateOp<T>>,
+    records: Vec<rsky_jetstream_subscriber::models::CreateOp<T>>,
     client: &reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("RSKY_API_KEY").map_err(|_| {
@@ -130,7 +130,7 @@ async fn process(message: String, client: &reqwest::Client) {
                                         + commit.did.as_str()
                                         + "/app.bsky.feed.post/"
                                         + commit.commit.rkey.as_str();
-                                    let create = rsky_jetstream::models::CreateOp {
+                                    let create = rsky_jetstream_subscriber::models::CreateOp {
                                         uri: uri.to_owned(),
                                         cid: cid.unwrap().to_string(),
                                         author: commit.did.to_owned(),
@@ -144,7 +144,7 @@ async fn process(message: String, client: &reqwest::Client) {
                                         + commit.did.as_str()
                                         + "/app.bsky.feed.repost/"
                                         + commit.commit.rkey.as_str();
-                                    let create = rsky_jetstream::models::CreateOp {
+                                    let create = rsky_jetstream_subscriber::models::CreateOp {
                                         uri: uri.to_owned(),
                                         cid: cid.unwrap().to_string(),
                                         author: commit.did.to_owned(),
@@ -158,7 +158,7 @@ async fn process(message: String, client: &reqwest::Client) {
                                         + commit.did.as_str()
                                         + "/app.bsky.feed.like/"
                                         + commit.commit.rkey.as_str();
-                                    let create = rsky_jetstream::models::CreateOp {
+                                    let create = rsky_jetstream_subscriber::models::CreateOp {
                                         uri: uri.to_owned(),
                                         cid: cid.unwrap().to_string(),
                                         author: commit.did.to_owned(),
@@ -172,7 +172,7 @@ async fn process(message: String, client: &reqwest::Client) {
                                         + commit.did.as_str()
                                         + "/app.bsky.graph.follow/"
                                         + commit.commit.rkey.as_str();
-                                    let create = rsky_jetstream::models::CreateOp {
+                                    let create = rsky_jetstream_subscriber::models::CreateOp {
                                         uri: uri.to_owned(),
                                         cid: cid.unwrap().to_string(),
                                         author: commit.did.to_owned(),
@@ -190,28 +190,28 @@ async fn process(message: String, client: &reqwest::Client) {
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.post/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
                                 posts_to_delete.push(del);
                             } else if collection == "app.bsky.feed.repost" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.repost/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
                                 reposts_to_delete.push(del);
                             } else if collection == "app.bsky.feed.like" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.like/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
                                 likes_to_delete.push(del);
                             } else if collection == "app.bsky.graph.follow" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.graph.follow/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
                                 follows_to_delete.push(del);
                             }
                         }

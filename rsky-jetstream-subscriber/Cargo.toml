@@ -1,5 +1,5 @@
 [package]
-name = "rsky-jetstream"
+name = "rsky-jetstream-subscriber"
 version = "0.1.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>", "Ripperoni <email@ripperoni.com>"]
 description = "Jetstream subscriber service"
