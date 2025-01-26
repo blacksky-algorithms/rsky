@@ -10,6 +10,8 @@ use futures::stream::{self, StreamExt};
 use lexicon_cid::Cid;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_syntax::aturi::AtUri;
+use rsky_syntax::aturi_validation::ensure_valid_at_uri;
+use rsky_syntax::did::ensure_valid_did;
 use serde_json::Value as JsonValue;
 use std::env;
 use std::str::FromStr;
@@ -40,12 +42,16 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<models::Bac
             || record_type == Ids::AppBskyGraphBlock.as_str()
         {
             if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject)))) = record.get("subject") {
-                // @TODO: Ensure valid DID https://github.com/bluesky-social/atproto/blob/main/packages/syntax/src/did.ts
-                return Ok(vec![models::Backlink {
-                    uri: uri.to_string(),
-                    path: "subject".to_owned(),
-                    link_to: subject.clone(),
-                }]);
+                match ensure_valid_did(&uri) {
+                    Ok(_) => {
+                        return Ok(vec![models::Backlink {
+                            uri: uri.to_string(),
+                            path: "subject".to_owned(),
+                            link_to: subject.clone(),
+                        }])
+                    },
+                    Err(e) => bail!("get_backlinks Error: invalid did {}", e),
+                };
             }
         } else if record_type == Ids::AppBskyFeedLike.as_str()
             || record_type == Ids::AppBskyFeedRepost.as_str()
@@ -54,12 +60,15 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<models::Bac
                 if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject_uri)))) =
                     ref_object.get("uri")
                 {
-                    // TO DO: Ensure valid AT URI
-                    return Ok(vec![models::Backlink {
-                        uri: uri.to_string(),
-                        path: "subject.uri".to_owned(),
-                        link_to: subject_uri.clone(),
-                    }]);
+                    match ensure_valid_at_uri(&uri) {
+                        Ok(_) => {
+                            return Ok(vec![models::Backlink {
+                            uri: uri.to_string(),
+                            path: "subject.uri".to_owned(),
+                            link_to: subject_uri.clone(),
+                        }])},
+                        Err(e) => bail!("get_backlinks Error: invalid AtUri {}", e)
+                    };
                 }
             }
         }

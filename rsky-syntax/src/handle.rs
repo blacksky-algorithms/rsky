@@ -33,17 +33,18 @@ lazy_static! {
 
 #[derive(Error, Debug)]
 pub enum HandleError {
-    #[error("{0}")]
+    #[error("HandleError: Invalid Handle {0}")]
     InvalidHandle(String),
-    #[error("{0}")]
+    #[error("HandleError: Reserved Handle {0}")]
     ReservedHandle(String),
-    #[error("{0}")]
+    #[error("HandleError: Unsupported Domain {0}")]
     UnsupportedDomain(String),
-    #[error("{0}")]
+    #[error("HandleError: Disallowed Domain {0}")]
     DisallowedDomain(String),
 }
 
-pub fn is_valid_tld(handle: &str) -> bool {
+pub fn is_valid_tld<S: Into<String>>(handle: S) -> bool {
+    let handle: String = handle.into();
     let handle_lower = handle.to_lowercase();
     !DISALLOWED_TLDS
         .iter()
@@ -69,9 +70,10 @@ pub fn is_valid_tld(handle: &str) -> bool {
 //  - does not validate whether domain or TLD exists, or is a reserved or
 //    special TLD (eg, .onion or .local)
 //  - does not validate punycode
-pub fn ensure_valid_handle(handle: &str) -> Result<(), HandleError> {
+pub fn ensure_valid_handle<S: Into<String>>(handle: S) -> Result<(), HandleError> {
+    let handle: String = handle.into();
     // Check that all chars are boring ASCII
-    if !ASCII_CHARS_REGEX.is_match(handle) {
+    if !ASCII_CHARS_REGEX.is_match(&handle) {
         return Err(HandleError::InvalidHandle(
             "Disallowed characters in handle (ASCII letters, digits, dashes, periods only)".into(),
         ));
@@ -122,8 +124,9 @@ pub fn ensure_valid_handle(handle: &str) -> Result<(), HandleError> {
     Ok(())
 }
 
-pub fn ensure_valid_handle_regex(handle: &str) -> Result<(), HandleError> {
-    if !HANDLE_FULL_REGEX.is_match(handle) {
+pub fn ensure_valid_handle_regex<S: Into<String>>(handle: S) -> Result<(), HandleError> {
+    let handle: String = handle.into();
+    if !HANDLE_FULL_REGEX.is_match(&handle) {
         return Err(HandleError::InvalidHandle(
             "Handle didn't validate via regex".into(),
         ));
@@ -138,17 +141,20 @@ pub fn ensure_valid_handle_regex(handle: &str) -> Result<(), HandleError> {
     Ok(())
 }
 
-pub fn normalize_handle(handle: &str) -> String {
+pub fn normalize_handle<S: Into<String>>(handle: S) -> String {
+    let handle: String = handle.into();
     handle.to_lowercase()
 }
 
-pub fn normalize_and_ensure_valid_handle(handle: &str) -> Result<String, HandleError> {
+pub fn normalize_and_ensure_valid_handle<S: Into<String>>(
+    handle: S,
+) -> Result<String, HandleError> {
     let normalized = normalize_handle(handle);
     ensure_valid_handle(&normalized)?;
     Ok(normalized)
 }
 
-pub fn is_valid_handle(handle: &str) -> bool {
+pub fn is_valid_handle<S: Into<String>>(handle: S) -> bool {
     ensure_valid_handle(handle).is_ok()
 }
 
