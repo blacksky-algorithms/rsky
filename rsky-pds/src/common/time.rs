@@ -9,12 +9,13 @@ pub const MINUTE: i32 = SECOND * 60;
 pub const HOUR: i32 = MINUTE * 60;
 pub const DAY: i32 = HOUR * 24;
 
-pub fn less_than_ago_ms(time: DateTime<UtcOffset>, range: i32) -> bool {
+pub fn less_than_ago_s(time: DateTime<UtcOffset>, range: i32) -> bool {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("timestamp in micros since UNIX epoch")
-        .as_micros() as usize;
-    now < (time.timestamp() as usize + range as usize)
+        .as_secs() as usize;
+    let x = time.timestamp() as usize + range as usize;
+    now < x
 }
 
 pub fn from_str_to_micros(str: &String) -> i64 {
