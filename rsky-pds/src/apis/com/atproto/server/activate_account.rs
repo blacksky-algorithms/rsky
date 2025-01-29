@@ -7,6 +7,7 @@ use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
+use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -40,8 +41,8 @@ async fn inner_activate_account(
             requester.clone(),
             S3BlobStore::new(requester.clone(), s3_config),
         );
-        let root = actor_store.storage.get_root_detailed().await?;
-        let blocks = actor_store.storage.get_blocks(vec![root.cid]).await?;
+        let root = actor_store.storage.get_root_detailed()?;
+        let blocks = actor_store.storage.get_blocks(vec![root.cid])?;
         let commit_data = CommitData {
             cid: root.cid,
             rev: root.rev,

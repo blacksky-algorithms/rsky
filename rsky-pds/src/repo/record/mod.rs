@@ -49,7 +49,7 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<models::Bac
                             path: "subject".to_owned(),
                             link_to: subject.clone(),
                         }])
-                    },
+                    }
                     Err(e) => bail!("get_backlinks Error: invalid did {}", e),
                 };
             }
@@ -63,11 +63,12 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<models::Bac
                     match ensure_valid_at_uri(&uri) {
                         Ok(_) => {
                             return Ok(vec![models::Backlink {
-                            uri: uri.to_string(),
-                            path: "subject.uri".to_owned(),
-                            link_to: subject_uri.clone(),
-                        }])},
-                        Err(e) => bail!("get_backlinks Error: invalid AtUri {}", e)
+                                uri: uri.to_string(),
+                                path: "subject.uri".to_owned(),
+                                link_to: subject_uri.clone(),
+                            }])
+                        }
+                        Err(e) => bail!("get_backlinks Error: invalid AtUri {}", e),
                     };
                 }
             }
@@ -322,17 +323,17 @@ impl RecordReader {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         Ok(conflicts
-        .into_iter()
-        .flatten()
-        .filter_map(|record| {
-            AtUri::make(
-                env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
-                Some(String::from(uri.get_collection())),
-                Some(record.rkey),
-            )
-            .ok()
-        })
-        .collect::<Vec<AtUri>>())
+            .into_iter()
+            .flatten()
+            .filter_map(|record| {
+                AtUri::make(
+                    env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
+                    Some(String::from(uri.get_collection())),
+                    Some(record.rkey),
+                )
+                .ok()
+            })
+            .collect::<Vec<AtUri>>())
     }
 
     // Transactors
@@ -399,13 +400,9 @@ impl RecordReader {
         }
         println!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
         Ok(())
-
     }
 
-    pub async fn delete_record(
-        &self,
-        uri: &AtUri,
-    ) -> Result<()> {
+    pub async fn delete_record(&self, uri: &AtUri) -> Result<()> {
         println!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;

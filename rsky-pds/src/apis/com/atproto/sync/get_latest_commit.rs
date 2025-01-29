@@ -25,7 +25,7 @@ async fn inner_get_latest_commit(
     let _ = assert_repo_availability(&did, is_user_or_admin).await?;
 
     let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    match actor_store.storage.get_root_detailed().await {
+    match actor_store.storage.get_root_detailed() {
         Ok(res) => Ok(GetLatestCommitOutput {
             cid: res.cid.to_string(),
             rev: res.rev,

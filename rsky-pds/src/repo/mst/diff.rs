@@ -1,17 +1,22 @@
 use crate::repo::data_diff::DataDiff;
 use crate::repo::mst::walker::{MstWalker, WalkerStatus};
 use crate::repo::mst::{NodeEntry, MST};
+use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::{bail, Result};
+use std::fmt::Debug;
 
-pub fn null_diff(tree: MST) -> Result<DataDiff> {
+pub async fn null_diff<B: ReadableBlockstore + Clone + Debug>(tree: MST<B>) -> Result<DataDiff> {
     let mut diff = DataDiff::new();
     for entry in tree.walk() {
-        diff.node_add(entry.clone())?;
+        diff.node_add(entry.clone()).await?;
     }
     Ok(diff)
 }
 
-pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
+pub async fn mst_diff<B: ReadableBlockstore + Clone + Debug>(
+    curr: &mut MST<B>,
+    prev: Option<&mut MST<B>>,
+) -> Result<DataDiff> {
     curr.get_pointer()?;
     return if let Some(prev) = prev {
         prev.get_pointer()?;
@@ -25,13 +30,13 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
             // if one walker is finished, continue walking the other & logging all nodes
             match (&left_walker.status, &right_walker.status) {
                 (WalkerStatus::WalkerStatusDone(_), WalkerStatus::WalkerStatusProgress(ref r)) => {
-                    diff.node_add(r.curr.clone())?;
-                    right_walker.advance()?;
+                    diff.node_add(r.curr.clone()).await?;
+                    right_walker.advance().await?;
                     continue;
                 }
                 (WalkerStatus::WalkerStatusProgress(ref l), WalkerStatus::WalkerStatusDone(_)) => {
-                    diff.node_delete(l.curr.clone())?;
-                    left_walker.advance()?;
+                    diff.node_delete(l.curr.clone()).await?;
+                    left_walker.advance().await?;
                     continue;
                 }
                 _ => (),
@@ -55,14 +60,14 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                             if !left_leaf.value.eq(&right_leaf.value) {
                                 diff.leaf_update(&left_leaf.key, left_leaf.value, right_leaf.value);
                             }
-                            left_walker.advance()?;
-                            right_walker.advance()?;
+                            left_walker.advance().await?;
+                            right_walker.advance().await?;
                         } else if left_leaf.key < right_leaf.key {
                             diff.leaf_delete(&left_leaf.key, left_leaf.value);
-                            left_walker.advance()?;
+                            left_walker.advance().await?;
                         } else {
                             diff.leaf_add(&right_leaf.key, right_leaf.value);
-                            right_walker.advance()?;
+                            right_walker.advance().await?;
                         }
                         continue;
                     }
@@ -75,20 +80,20 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                     // to try to catch up the higher
                     if left_walker.layer()? > right_walker.layer()? {
                         if left.is_leaf() {
-                            diff.node_add(right)?;
-                            right_walker.advance()?;
+                            diff.node_add(right).await?;
+                            right_walker.advance().await?;
                         } else {
-                            diff.node_delete(left)?;
-                            left_walker.step_into()?;
+                            diff.node_delete(left).await?;
+                            left_walker.step_into().await?;
                         }
                         continue;
                     } else if left_walker.layer()? < right_walker.layer()? {
                         if right.is_leaf() {
-                            diff.node_delete(left)?;
-                            left_walker.advance()?;
+                            diff.node_delete(left).await?;
+                            left_walker.advance().await?;
                         } else {
-                            diff.node_add(right)?;
-                            right_walker.step_into()?;
+                            diff.node_add(right).await?;
+                            right_walker.step_into().await?;
                         }
                         continue;
                     }
@@ -100,13 +105,13 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                         (&mut left, &mut right)
                     {
                         if left_tree.get_pointer()?.eq(&right_tree.get_pointer()?) {
-                            left_walker.step_over()?;
-                            right_walker.step_over()?;
+                            left_walker.step_over().await?;
+                            right_walker.step_over().await?;
                         } else {
-                            diff.node_add(right)?;
-                            diff.node_delete(left)?;
-                            left_walker.step_into()?;
-                            right_walker.step_into()?;
+                            diff.node_add(right).await?;
+                            diff.node_delete(left).await?;
+                            left_walker.step_into().await?;
+                            right_walker.step_into().await?;
                         }
                         continue;
                     }
@@ -114,12 +119,12 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
                     // finally, if one pointer is a tree and the other is a leaf,
                     // simply step into the tree
                     if let (NodeEntry::Leaf(_), NodeEntry::MST(_)) = (&left, &right) {
-                        diff.node_add(right)?;
-                        right_walker.step_into()?;
+                        diff.node_add(right).await?;
+                        right_walker.step_into().await?;
                         continue;
                     } else if let (NodeEntry::MST(_), NodeEntry::Leaf(_)) = (&left, &right) {
-                        diff.node_delete(left)?;
-                        left_walker.step_into()?;
+                        diff.node_delete(left).await?;
+                        left_walker.step_into().await?;
                         continue;
                     }
 
@@ -129,6 +134,6 @@ pub fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
         }
         Ok(diff)
     } else {
-        Ok(null_diff(curr.clone())?)
+        Ok(null_diff(curr.clone()).await?)
     };
 }

@@ -41,7 +41,6 @@ async fn inner_update_subject_status(
                     .record
                     .update_record_takedown_status(&subject_at_uri, takedown.clone())
                     .await?;
-
             }
             Subject::RepoBlobRef(subject) => {
                 let actor_store = ActorStore::new(

@@ -1,9 +1,9 @@
 use super::{Leaf, NodeData, NodeEntry, TreeEntry, MST};
 use crate::common;
-use crate::common::ipld;
 use crate::common::ipld::cid_for_cbor;
 use crate::common::tid::Ticker;
-use crate::storage::SqlRepoReader;
+use crate::storage::readable_blockstore::ReadableBlockstore;
+use crate::storage::types::RepoStorage;
 use anyhow::{anyhow, Result};
 use lazy_static::lazy_static;
 use lexicon_cid::Cid;
@@ -12,6 +12,7 @@ use regex::Regex;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::str;
 
 fn is_valid_chars(input: &str) -> bool {
@@ -49,9 +50,11 @@ pub fn ensure_valid_mst_key(key: &str) -> Result<()> {
     }
 }
 
-pub fn cid_for_entries(entries: &[NodeEntry]) -> Result<Cid> {
-    let data = serialize_node_data(entries)?;
-    ipld::cid_for_cbor(&data)
+pub async fn cid_for_entries<B: ReadableBlockstore + Clone + Debug>(
+    entries: &[NodeEntry<B>],
+) -> Result<Cid> {
+    let data = serialize_node_data(entries).await?;
+    cid_for_cbor(&data)
 }
 
 pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
@@ -65,7 +68,9 @@ pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
     Ok(x)
 }
 
-pub fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
+pub async fn serialize_node_data<B: ReadableBlockstore + Clone + Debug>(
+    entries: &[NodeEntry<B>],
+) -> Result<NodeData> {
     let mut data = NodeData {
         l: None,
         e: Vec::new(),
@@ -105,12 +110,12 @@ pub fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
     Ok(data)
 }
 
-pub fn deserialize_node_data(
-    storage: &SqlRepoReader,
+pub fn deserialize_node_data<B: ReadableBlockstore + Clone + Debug>(
+    storage: &B,
     data: &NodeData,
     layer: Option<u32>,
-) -> Result<Vec<NodeEntry>> {
-    let mut entries: Vec<NodeEntry> = Vec::new();
+) -> Result<Vec<NodeEntry<B>>> {
+    let mut entries: Vec<NodeEntry<B>> = Vec::new();
     if let Some(l) = data.l {
         let new_layer: Option<u32>;
         if let Some(layer) = layer {
@@ -148,7 +153,9 @@ pub fn deserialize_node_data(
     Ok(entries)
 }
 
-pub fn layer_for_entries(entries: &[NodeEntry]) -> Result<Option<u32>> {
+pub fn layer_for_entries<B: ReadableBlockstore + Clone + Debug>(
+    entries: &[NodeEntry<B>],
+) -> Result<Option<u32>> {
     let first_leaf = entries.into_iter().find(|entry| entry.is_leaf());
     if let Some(f) = first_leaf {
         match f {
@@ -185,27 +192,30 @@ pub fn leading_zeros_on_hash(key: &[u8]) -> Result<u32> {
 
 pub type IdMapping = BTreeMap<String, Cid>;
 
-pub fn random_cid(storage: &mut Option<&mut SqlRepoReader>) -> Result<Cid> {
+pub async fn random_cid(
+    storage: &mut Option<&mut impl RepoStorage>,
+    rev: Option<String>,
+) -> Result<Cid> {
     let record = json!({ "test": random_str(50) });
     let cid = cid_for_cbor(&record)?;
     let bytes = common::struct_to_cbor(record)?;
     if let Some(ref mut storage) = storage {
-        storage.blocks.set(cid, bytes);
+        if let Some(rev) = rev {
+            storage.put_block(cid, bytes, rev)?;
+        }
     }
     Ok(cid)
 }
 
-pub fn generate_bulk_data_keys(
+pub async fn generate_bulk_data_keys(
     count: usize,
-    mut blockstore: Option<&mut SqlRepoReader>,
+    mut blockstore: Option<&mut impl RepoStorage>,
 ) -> Result<IdMapping> {
     let mut obj: IdMapping = BTreeMap::new();
     for _ in 0..count {
-        let key = format!(
-            "com.example.record/{}",
-            Ticker::new().next(None).to_string()
-        );
-        obj.insert(key, random_cid(&mut blockstore)?);
+        let rev = Ticker::new().next(None).to_string();
+        let key = format!("com.example.record/{}", rev);
+        obj.insert(key, random_cid(&mut blockstore, Some(rev)).await?);
     }
     Ok(obj)
 }
@@ -224,10 +234,19 @@ pub fn random_str(len: usize) -> String {
     result
 }
 
-pub async fn save_mst(storage: &SqlRepoReader, mst: &mut MST) -> Result<Cid> {
+pub async fn save_mst<B: ReadableBlockstore + Clone + Debug>(
+    storage: &mut impl RepoStorage,
+    mst: &mut MST<B>,
+) -> Result<Cid> {
     let diff = mst.get_unstored_blocks()?;
     storage
-        .put_many(diff.blocks, Ticker::new().next(None).to_string())
-        .await?;
+        .put_many(diff.blocks, Ticker::new().next(None).to_string())?;
     Ok(diff.root)
+}
+
+pub fn short_cid(cid: &Cid) -> String {
+    let cid_string = cid.to_string();
+    let len = cid_string.len();
+    let start = if len > 8 { len - 8 } else { 0 };
+    cid_string[start..].to_string()
 }

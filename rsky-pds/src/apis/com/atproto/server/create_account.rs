@@ -7,6 +7,8 @@ use crate::handle::{normalize_and_validate_handle, HandleValidationContext, Hand
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
+use crate::storage::readable_blockstore::ReadableBlockstore;
+use crate::storage::sql_repo::SqlRepoReader;
 use crate::SharedIdResolver;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -19,9 +21,10 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
+use std::fmt::Debug;
 
 #[allow(unused_assignments)]
-async fn inner_server_create_account(
+async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Send>(
     mut body: CreateAccountInput,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
@@ -56,7 +59,7 @@ async fn inner_server_create_account(
     let did = did.unwrap();
 
     let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
+    let commit = match actor_store.create_repo::<B>(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
             eprintln!("{:?}", error);
@@ -131,7 +134,9 @@ pub async fn server_create_account(
             }
         };
 
-    match inner_server_create_account(input, sequencer, s3_config, id_resolver).await {
+    match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver)
+        .await
+    {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             eprintln!("Internal Error: {error}");

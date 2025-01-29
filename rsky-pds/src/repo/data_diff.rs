@@ -2,9 +2,11 @@ use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::repo::mst::diff::mst_diff;
 use crate::repo::mst::{NodeEntry, MST};
+use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::Result;
 use lexicon_cid::Cid;
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataAdd {
@@ -48,22 +50,31 @@ impl DataDiff {
         }
     }
 
-    pub fn of(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
-        mst_diff(curr, prev)
+    pub async fn of<B: ReadableBlockstore + Clone + Debug>(
+        curr: &mut MST<B>,
+        prev: Option<&mut MST<B>>,
+    ) -> Result<DataDiff> {
+        mst_diff(curr, prev).await
     }
 
-    pub fn node_add(&mut self, node: NodeEntry) -> Result<()> {
+    pub async fn node_add<B: ReadableBlockstore + Clone + Debug>(
+        &mut self,
+        node: NodeEntry<B>,
+    ) -> Result<()> {
         match node {
             NodeEntry::Leaf(node) => self.leaf_add(&node.key, node.value),
             NodeEntry::MST(mut node) => {
-                let data = node.serialize()?;
+                let data = node.serialize().await?;
                 self.tree_add(data.cid, data.bytes);
             }
         }
         Ok(())
     }
 
-    pub fn node_delete(&mut self, node: NodeEntry) -> Result<()> {
+    pub async fn node_delete<B: ReadableBlockstore + Clone + Debug>(
+        &mut self,
+        node: NodeEntry<B>,
+    ) -> Result<()> {
         match node {
             NodeEntry::Leaf(node) => {
                 let key = node.key;

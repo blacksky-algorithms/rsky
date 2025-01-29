@@ -5,6 +5,7 @@ use crate::car::read_car_bytes;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
+use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use libipld::Cid;
@@ -37,7 +38,7 @@ async fn inner_get_blocks(
         .collect::<Result<Vec<Cid>>>()?;
 
     let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    let got = actor_store.storage.get_blocks(cids).await?;
+    let got = actor_store.storage.get_blocks(cids)?;
 
     if got.missing.len() > 0 {
         let missing_str = got

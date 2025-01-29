@@ -4,6 +4,7 @@ use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::RecordPath;
 use crate::repo::ActorStore;
+use crate::storage::types::RepoStorage;
 use crate::{auth_verifier, repo};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -35,7 +36,7 @@ async fn inner_get_record(
     let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
     let commit: Option<Cid> = match commit {
         Some(commit) => Some(Cid::from_str(&commit)?),
-        None => actor_store.storage.get_root().await,
+        None => actor_store.storage.get_root(),
     };
 
     match commit {

@@ -22,11 +22,12 @@ use crate::repo::types::{
     RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit, WriteOpAction,
 };
 use crate::repo::util::{cbor_to_lex, lex_to_ipld};
-use crate::storage::{Ipld, SqlRepoReader};
+use crate::storage::readable_blockstore::ReadableBlockstore;
+use crate::storage::types::RepoStorage;
+use crate::storage::{sql_repo::SqlRepoReader, Ipld};
 use anyhow::{anyhow, bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
-use futures::try_join;
 use lazy_static::lazy_static;
 use lexicon_cid::Cid;
 use libipld::cbor::DagCborCodec;
@@ -39,6 +40,7 @@ use serde_cbor::Value as CborValue;
 use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Debug;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -82,7 +84,7 @@ pub struct CommitRecord {
 #[derive(Debug)]
 pub struct Repo {
     storage: SqlRepoReader, // get ipld blocks from db
-    data: MST,
+    data: MST<SqlRepoReader>,
     commit: Commit,
     cid: Cid,
 }
@@ -100,7 +102,7 @@ impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
     pub fn new(did: String, blobstore: S3BlobStore) -> Self {
         ActorStore {
-            storage: SqlRepoReader::new(None, did.clone(), None),
+            storage: SqlRepoReader::new(did.clone(), None),
             record: RecordReader::new(did.clone()),
             pref: PreferenceReader::new(did.clone()),
             did,
@@ -111,7 +113,7 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    pub async fn create_repo(
+    pub async fn create_repo<B: ReadableBlockstore + Clone + Debug>(
         &mut self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
@@ -134,8 +136,9 @@ impl ActorStore {
             self.did.clone(),
             keypair,
             Some(write_ops),
-        )?;
-        self.storage.apply_commit(commit.clone(), None).await?;
+        )
+        .await?;
+        self.storage.apply_commit(commit.clone(), None)?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
@@ -157,12 +160,10 @@ impl ActorStore {
                 .index_writes(writes.clone(), &commit.rev)
                 .await?;
         }
-        try_join!(
-            // persist the commit to repo storage
-            self.storage.apply_commit(commit.clone(), None),
-            // process blobs
-            self.blob.process_write_blobs(writes)
-        )?;
+        // persist the commit to repo storage
+        self.storage.apply_commit(commit.clone(), None)?;
+        // process blobs
+        self.blob.process_write_blobs(writes).await?;
         Ok(commit)
     }
 
@@ -171,7 +172,7 @@ impl ActorStore {
         writes: Vec<PreparedWrite>,
         swap_commit: Option<Cid>,
     ) -> Result<CommitData> {
-        let current_root = self.storage.get_root_detailed().await;
+        let current_root = self.storage.get_root_detailed();
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
                 if !current_root.cid.eq(&swap_commit) {
@@ -180,7 +181,7 @@ impl ActorStore {
             }
             self.storage.cache_rev(current_root.rev).await?;
             let mut new_record_cids: Vec<Cid> = vec![];
-            let mut delete_and_update_uris= vec![];
+            let mut delete_and_update_uris = vec![];
             for write in &writes {
                 match write.clone() {
                     PreparedWrite::Create(c) => new_record_cids.push(c.cid),
@@ -192,7 +193,7 @@ impl ActorStore {
                     PreparedWrite::Delete(d) => {
                         let d_at_uri: AtUri = d.uri.try_into()?;
                         delete_and_update_uris.push(d_at_uri)
-                    },
+                    }
                 }
                 if write.swap_cid().is_none() {
                     continue;
@@ -259,7 +260,10 @@ impl ActorStore {
             // (for instance a record that was moved but cid stayed the same)
             let new_record_blocks = commit.new_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
-                let missing_blocks = self.storage.get_blocks(new_record_blocks.missing).await?;
+                let missing_blocks = <SqlRepoReader as ReadableBlockstore>::get_blocks(
+                    &mut self.storage,
+                    new_record_blocks.missing,
+                )?;
                 commit.new_blocks.add_map(missing_blocks.blocks)?;
             }
             Ok(commit)
@@ -303,7 +307,7 @@ impl ActorStore {
                     PreparedWrite::Delete(write) => {
                         let write_at_uri: AtUri = write.uri.try_into()?;
                         self.record.delete_record(&write_at_uri).await?
-                    },
+                    }
                 })
             })
             .collect::<Vec<_>>()
@@ -364,7 +368,7 @@ impl ActorStore {
 
 impl Repo {
     // static
-    pub fn new(storage: SqlRepoReader, data: MST, commit: Commit, cid: Cid) -> Self {
+    pub fn new(storage: SqlRepoReader, data: MST<SqlRepoReader>, commit: Commit, cid: Cid) -> Self {
         Repo {
             storage: storage.clone(),
             data,
@@ -378,11 +382,16 @@ impl Repo {
         let commit_cid = if let Some(cid) = cid {
             Some(cid)
         } else {
-            storage.get_root().await
+            storage.get_root()
         };
         match commit_cid {
             Some(commit_cid) => {
-                let commit_bytes: Vec<u8> = storage.get_bytes(&commit_cid)?;
+                let commit_bytes: Vec<u8> =
+                    match <SqlRepoReader as ReadableBlockstore>::get_bytes(storage, &commit_cid)?
+                    {
+                        Some(res) => res,
+                        None => bail!("Missing blocks for commit cid {commit_cid}"),
+                    };
                 let block = Block::<DefaultParams>::new(commit_cid, commit_bytes.clone())?;
                 let ipld = block.decode::<DagCborCodec, VendorIpld>()?;
                 // Convert Ipld to Commit
@@ -468,11 +477,20 @@ impl Repo {
         self.commit.version
     }
 
-    pub fn walk_records(&mut self, from: Option<String>) -> impl Iterator<Item = CommitRecord> {
+    pub async fn walk_records(
+        &mut self,
+        from: Option<String>,
+    ) -> impl Iterator<Item = CommitRecord> {
         let mut iter: Vec<CommitRecord> = Vec::new();
-        for leaf in self.data.walk_leaves_from(&from.unwrap_or("".to_owned())) {
+        for leaf in self
+            .data
+            .walk_leaves_from(&from.unwrap_or("".to_owned()))
+            .await
+        {
             let path = util::parse_data_key(&leaf.key).unwrap();
-            let record = self.storage.read_record(&leaf.value).unwrap();
+            let record =
+                <SqlRepoReader as ReadableBlockstore>::read_record(&mut self.storage, &leaf.value)
+                    .unwrap();
             iter.push(CommitRecord {
                 collection: path.collection,
                 rkey: path.rkey,
@@ -483,26 +501,32 @@ impl Repo {
         iter.into_iter()
     }
 
-    pub fn get_record(&mut self, collection: String, rkey: String) -> Result<Option<CborValue>> {
+    pub async fn get_record(
+        &mut self,
+        collection: String,
+        rkey: String,
+    ) -> Result<Option<CborValue>> {
         let data_key = format!("{}/{}", collection, rkey);
-        let cid = self.data.get(&data_key)?;
+        let cid = self.data.get(&data_key).await?;
         match cid {
             None => Ok(None),
             Some(cid) => Ok(Some(
-                self.storage
-                    .read_obj(&cid, |obj| matches!(obj, CborValue::Map(_)))?,
+                <SqlRepoReader as ReadableBlockstore>::read_obj(&mut self.storage, &cid, |obj| {
+                    matches!(obj, CborValue::Map(_))
+                })?,
             )),
         }
     }
 
     pub async fn get_content(&mut self) -> Result<RepoContents> {
-        let entries = self.data.list(None, None, None)?;
+        let entries = self.data.list(None, None, None).await?;
         let cids = entries
             .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let found = self.storage.get_blocks(cids).await?;
+        let found =
+            <SqlRepoReader as ReadableBlockstore>::get_blocks(&mut self.storage, cids)?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -524,21 +548,21 @@ impl Repo {
     }
 
     // static
-    pub fn format_init_commit(
+    pub async fn format_init_commit(
         storage: SqlRepoReader,
         did: String,
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<CommitData> {
         let mut new_blocks = BlockMap::new();
-        let mut data = MST::create(storage, None, None)?;
+        let mut data = MST::create(storage, None, None).await?;
         for record in initial_writes.unwrap_or(Vec::new()) {
             let cid = new_blocks.add(record.record)?;
             let data_key = util::format_data_key(record.collection, record.rkey);
-            data = data.add(&data_key, cid, None)?;
+            data = data.add(&data_key, cid, None).await?;
         }
         let data_cid: Cid = data.get_pointer()?;
-        let diff = DataDiff::of(&mut data, None)?;
+        let diff = DataDiff::of(&mut data, None).await?;
         new_blocks.add_map(diff.new_mst_blocks)?;
         let rev = Ticker::new().next(None);
         let commit = util::sign_commit(
@@ -567,7 +591,7 @@ impl Repo {
         storage: &mut SqlRepoReader,
         commit: CommitData,
     ) -> Result<Self> {
-        storage.apply_commit(commit.clone(), None).await?;
+        storage.apply_commit(commit.clone(), None)?;
         Repo::load(storage, Some(commit.cid)).await
     }
 
@@ -578,7 +602,8 @@ impl Repo {
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
-        let commit = Repo::format_init_commit(storage.clone(), did, keypair, initial_writes)?;
+        let commit =
+            Self::format_init_commit(storage.clone(), did, keypair, initial_writes).await?;
         Repo::create_from_commit(&mut storage, commit).await
     }
 
@@ -599,22 +624,22 @@ impl Repo {
                 RecordWriteOp::Create(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.add(&data_key, cid, None)?;
+                    data = data.add(&data_key, cid, None).await?;
                 }
                 RecordWriteOp::Update(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.update(&data_key, cid)?;
+                    data = data.update(&data_key, cid).await?;
                 }
                 RecordWriteOp::Delete(write) => {
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.delete(&data_key)?;
+                    data = data.delete(&data_key).await?;
                 }
             }
         }
 
         let data_cid = data.get_pointer()?;
-        let diff = DataDiff::of(&mut data, Some(&mut self.data.clone()))?;
+        let diff = DataDiff::of(&mut data, Some(&mut self.data.clone())).await?;
 
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
@@ -658,7 +683,7 @@ impl Repo {
 
     pub async fn apply_commit(&mut self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
-        self.storage.apply_commit(commit_data, None).await?;
+        self.storage.apply_commit(commit_data, None)?;
         Repo::load(&mut self.storage, Some(commit_data_cid)).await
     }
 
