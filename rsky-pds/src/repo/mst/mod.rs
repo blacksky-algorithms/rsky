@@ -88,7 +88,7 @@ impl<B: ReadableBlockstore + Clone + Debug> Iterator for NodeIter<B> {
                 let mut this = self.entries.get(0).unwrap().clone();
                 self.entries.drain(..1);
                 let entries = if let NodeEntry::MST(ref mut subtree) = this {
-                    match futures::executor::block_on(subtree.get_entries()) {
+                    match subtree.get_entries() {
                         Err(_) => vec![],
                         Ok(e) => e.to_vec(),
                     }
@@ -152,7 +152,7 @@ impl<B: ReadableBlockstore + Clone + Debug> Iterator for NodeIterReachable<B> {
                 let mut this = self.entries.get(0).unwrap().clone();
                 self.entries.drain(..1);
                 let entries = if let NodeEntry::MST(ref mut r) = this {
-                    futures::executor::block_on(r.get_entries())
+                    r.get_entries()
                 } else {
                     Err(anyhow::Error::new(DataStoreError::MissingBlock(
                         "Missing Blocks".to_string(),
@@ -485,13 +485,13 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         }
     }
 
-    pub async fn create(
+    pub fn create(
         storage: B,
         entries: Option<Vec<NodeEntry<B>>>,
         layer: Option<u32>,
     ) -> Result<Self> {
         let entries = entries.unwrap_or(Vec::new());
-        let pointer = util::cid_for_entries(entries.as_slice()).await?;
+        let pointer = util::cid_for_entries(entries.as_slice())?;
         Ok(MST::new(storage, pointer, Some(entries), layer))
     }
 
@@ -525,19 +525,16 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     // === "Getters (lazy load)" ===
 
     /// "We don't want to load entries of every subtree, just the ones we need"
-    pub async fn get_entries(&mut self) -> Result<&mut [NodeEntry<B>]> {
+    pub fn get_entries(&mut self) -> Result<&mut [NodeEntry<B>]> {
         // If `self.entries` is not populated, hydrate it first
         if self.entries.is_none() {
             // Read from storage (block store) to get the node data
-            let data: CborValue = self
-                .storage
-                .read_obj(
-                    &self.pointer,
-                    |obj: &CborValue| match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
-                        Ok(_) => true,
-                        Err(_) => false,
-                    },
-                )?;
+            let data: CborValue = self.storage.read_obj(&self.pointer, |obj: &CborValue| {
+                match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
+                    Ok(_) => true,
+                    Err(_) => false,
+                }
+            })?;
             let data: NodeData = serde_cbor::value::from_value(data)?;
 
             // Compute the layer
@@ -565,14 +562,14 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         if !self.outdated_pointer {
             return Ok(self.pointer);
         }
-        let CidAndBytes { cid, .. } = futures::executor::block_on(self.serialize())?;
+        let CidAndBytes { cid, .. } = self.serialize()?;
         self.pointer = cid;
         self.outdated_pointer = false;
         Ok(self.pointer)
     }
 
-    pub async fn serialize(&mut self) -> Result<CidAndBytes> {
-        let mut entries = self.get_entries().await?;
+    pub fn serialize(&mut self) -> Result<CidAndBytes> {
+        let mut entries = self.get_entries()?;
         let mut outdated: Vec<Self> = entries
             .iter()
             .filter_map(|e| match e {
@@ -586,16 +583,16 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
                 .iter_mut()
                 .map(|e| e.get_pointer())
                 .collect::<Result<Vec<Cid>>>()?;
-            entries = self.get_entries().await?
+            entries = self.get_entries()?
         }
-        let data = util::serialize_node_data(entries).await?;
+        let data = util::serialize_node_data(entries)?;
         Ok(CidAndBytes {
             cid: ipld::cid_for_cbor(&data)?,
             bytes: common::struct_to_cbor(data)?,
         })
     }
 
-    pub async fn get_entries_ref(&self) -> Result<Vec<NodeEntry<B>>> {
+    pub fn get_entries_ref(&self) -> Result<Vec<NodeEntry<B>>> {
         // If `self.entries` is not populated, hydrate it first
         return match self.entries {
             None => {
@@ -629,12 +626,12 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         if !self.outdated_pointer {
             return Ok(self.pointer);
         }
-        let CidAndBytes { cid, .. } = futures::executor::block_on(self.serialize_ref())?;
+        let CidAndBytes { cid, .. } = self.serialize_ref()?;
         Ok(cid)
     }
 
-    pub async fn serialize_ref(&self) -> Result<CidAndBytes> {
-        let mut entries = self.get_entries_ref().await?;
+    pub fn serialize_ref(&self) -> Result<CidAndBytes> {
+        let mut entries = self.get_entries_ref()?;
         let mut outdated: Vec<Self> = entries
             .iter()
             .filter_map(|e| match e {
@@ -648,9 +645,9 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
                 .iter_mut()
                 .map(|e| e.get_pointer())
                 .collect::<Result<Vec<Cid>>>()?;
-            entries = self.get_entries_ref().await?;
+            entries = self.get_entries_ref()?;
         }
-        let data = util::serialize_node_data(entries.as_slice()).await?;
+        let data = util::serialize_node_data(entries.as_slice())?;
         Ok(CidAndBytes {
             cid: ipld::cid_for_cbor(&data)?,
             bytes: common::struct_to_cbor(data)?,
@@ -661,7 +658,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     /// In the case of the topmost node in the tree, we look for a key in the node & determine the layer
     /// In the case where we don't find one, we recurse down until we do.
     /// If we still can't find one, then we have an empty tree and the node is layer 0
-    pub async fn get_layer(&mut self) -> Result<u32> {
+    pub fn get_layer(&mut self) -> Result<u32> {
         self.layer = self.attempt_get_layer()?;
         if self.layer.is_none() {
             self.layer = Some(0);
@@ -673,7 +670,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         if self.layer.is_some() {
             return Ok(self.layer);
         };
-        let entries = futures::executor::block_on(self.get_entries())?;
+        let entries = self.get_entries()?;
         let mut layer = util::layer_for_entries(entries)?;
         if layer.is_none() {
             for entry in entries.iter_mut() {
@@ -705,8 +702,8 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
                 blocks,
             });
         }
-        let entries = futures::executor::block_on(self.get_entries())?;
-        let data = futures::executor::block_on(util::serialize_node_data(entries))?;
+        let entries = self.get_entries()?;
+        let data = util::serialize_node_data(entries)?;
         let _ = blocks.add(data)?;
         for entry in entries.iter_mut() {
             if let NodeEntry::MST(ref mut e) = entry {
@@ -722,7 +719,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
 
     /// Adds a new leaf for the given key/value pair
     /// Throws if a leaf with that key already exists
-    pub async fn add(&mut self, key: &str, value: Cid, known_zeros: Option<u32>) -> Result<Self> {
+    pub fn add(&mut self, key: &str, value: Cid, known_zeros: Option<u32>) -> Result<Self> {
         util::ensure_valid_mst_key(&key)?;
         let key_zeros: u32;
         if let Some(z) = known_zeros {
@@ -730,7 +727,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         } else {
             key_zeros = util::leading_zeros_on_hash(key.as_bytes())?;
         }
-        let layer = self.get_layer().await?;
+        let layer = self.get_layer()?;
 
         let new_leaf = Leaf {
             key: key.to_string(),
@@ -739,55 +736,53 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
 
         return if key_zeros == layer {
             // it belongs in this layer
-            let index = self.find_gt_or_equal_leaf_index(&key).await?;
+            let index = self.find_gt_or_equal_leaf_index(&key)?;
 
-            let found = self.at_index(index).await?;
+            let found = self.at_index(index)?;
             if let Some(NodeEntry::Leaf(l)) = found {
                 if l.key == *key {
                     return Err(anyhow!("There is already a value at key: {}", key));
                 }
             }
-            let prev_node = self.at_index(index - 1).await?;
+            let prev_node = self.at_index(index - 1)?;
             if let Some(p) = prev_node {
                 match p {
                     // if entry before is a leaf we can just splice in
-                    NodeEntry::Leaf(_) => self.splice_in(NodeEntry::Leaf(new_leaf), index).await,
+                    NodeEntry::Leaf(_) => self.splice_in(NodeEntry::Leaf(new_leaf), index),
                     // else we try to split the subtree around the key
                     NodeEntry::MST(mut m) => {
-                        let split_sub_tree = m.split_around(key).await?;
+                        let split_sub_tree = m.split_around(key)?;
                         self.replace_with_split(
                             index - 1,
                             split_sub_tree.0,
                             new_leaf,
                             split_sub_tree.1,
                         )
-                        .await
                     }
                 }
             } else {
                 // If we're on far left we can just splice in
-                self.splice_in(NodeEntry::Leaf(new_leaf), index).await
+                self.splice_in(NodeEntry::Leaf(new_leaf), index)
             }
         } else if key_zeros < layer {
             // it belongs on a lower layer
-            let index = self.find_gt_or_equal_leaf_index(key).await?;
-            let prev_node = self.at_index(index - 1).await?;
+            let index = self.find_gt_or_equal_leaf_index(key)?;
+            let prev_node = self.at_index(index - 1)?;
             if let Some(NodeEntry::MST(mut p)) = prev_node {
                 // if entry before is a tree, we add it to that tree
-                let new_subtree = p.add(key, value, Some(key_zeros)).await?;
+                let new_subtree = p.add(key, value, Some(key_zeros))?;
                 self.update_entry(index - 1, NodeEntry::MST(new_subtree))
-                    .await
             } else {
-                let mut sub_tree = self.create_child().await?;
-                let new_subtree = sub_tree.add(key, value, Some(key_zeros)).await?;
-                self.splice_in(NodeEntry::MST(new_subtree), index).await
+                let mut sub_tree = self.create_child()?;
+                let new_subtree = sub_tree.add(key, value, Some(key_zeros))?;
+                self.splice_in(NodeEntry::MST(new_subtree), index)
             }
         } else {
-            let layer = self.get_layer().await?;
+            let layer = self.get_layer()?;
             let extra_layers_to_add = key_zeros - layer;
 
             // it belongs on a higher layer & we must push the rest of the tree down
-            let split = self.split_around(key).await?;
+            let split = self.split_around(key)?;
             // if the newly added key has >=2 more leading zeros than the current highest layer
             // then we need to add in structural nodes in between as well
             let mut left: Option<Self> = split.0;
@@ -795,10 +790,10 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
             // intentionally starting at 1, since first layer is taken care of by split
             for _ in 1..extra_layers_to_add {
                 if let Some(l) = left.clone() {
-                    left = Some(l.create_parent().await?);
+                    left = Some(l.create_parent()?);
                 }
                 if let Some(r) = right.clone() {
-                    right = Some(r.create_parent().await?);
+                    right = Some(r.create_parent()?);
                 }
             }
             let mut updated: Vec<NodeEntry<B>> = Vec::new();
@@ -812,97 +807,90 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
             if let Some(r) = right {
                 updated.push(NodeEntry::MST(r));
             }
-            let mut new_root =
-                MST::create(self.storage.clone(), Some(updated), Some(key_zeros)).await?;
+            let mut new_root = MST::create(self.storage.clone(), Some(updated), Some(key_zeros))?;
             new_root.outdated_pointer = true;
             Ok(new_root)
         };
     }
 
     /// Gets the value at the given key
-    pub async fn get(&mut self, key: &String) -> Result<Option<Cid>> {
-        let index = self.find_gt_or_equal_leaf_index(key).await?;
-        let found = self.at_index(index).await?;
+    pub fn get(&mut self, key: &String) -> Result<Option<Cid>> {
+        let index = self.find_gt_or_equal_leaf_index(key)?;
+        let found = self.at_index(index)?;
         if let Some(NodeEntry::Leaf(f)) = found {
             if f.key == *key {
                 return Ok(Some(f.value));
             }
         }
-        let prev = self.at_index(index - 1).await?;
+        let prev = self.at_index(index - 1)?;
         if let Some(NodeEntry::MST(mut p)) = prev {
-            return Ok(p.get(key).await?);
+            return Ok(p.get(key)?);
         }
         return Ok(None);
     }
 
     /// Edits the value at the given key
     /// Throws if the given key does not exist
-    pub async fn update(&mut self, key: &str, value: Cid) -> Result<Self> {
+    pub fn update(&mut self, key: &str, value: Cid) -> Result<Self> {
         util::ensure_valid_mst_key(key)?;
-        let index = self.find_gt_or_equal_leaf_index(key).await?;
-        let found = self.at_index(index).await?;
+        let index = self.find_gt_or_equal_leaf_index(key)?;
+        let found = self.at_index(index)?;
         if let Some(NodeEntry::Leaf(f)) = found {
             if f.key == *key {
-                return self
-                    .update_entry(
-                        index,
-                        NodeEntry::Leaf(Leaf {
-                            key: key.to_string(),
-                            value,
-                        }),
-                    )
-                    .await;
+                return self.update_entry(
+                    index,
+                    NodeEntry::Leaf(Leaf {
+                        key: key.to_string(),
+                        value,
+                    }),
+                );
             }
         }
-        let prev = self.at_index(index - 1).await?;
+        let prev = self.at_index(index - 1)?;
         if let Some(NodeEntry::MST(mut p)) = prev {
-            let updated_tree = p.update(key, value).await?;
-            return self
-                .update_entry(index - 1, NodeEntry::MST(updated_tree))
-                .await;
+            let updated_tree = p.update(key, value)?;
+            return self.update_entry(index - 1, NodeEntry::MST(updated_tree));
         }
         Err(anyhow!("Could not find a record with key: {}", key))
     }
 
     /// Deletes the value at the given key
-    pub async fn delete(&mut self, key: &String) -> Result<Self> {
-        let altered = self.delete_recurse(key).await?;
-        Ok(altered.trim_top().await?)
+    pub fn delete(&mut self, key: &String) -> Result<Self> {
+        let altered = self.delete_recurse(key)?;
+        Ok(altered.trim_top()?)
     }
 
-    pub async fn delete_recurse(&mut self, key: &String) -> Result<Self> {
-        let index = self.find_gt_or_equal_leaf_index(key).await?;
-        let found = self.at_index(index).await?;
+    pub fn delete_recurse(&mut self, key: &String) -> Result<Self> {
+        let index = self.find_gt_or_equal_leaf_index(key)?;
+        let found = self.at_index(index)?;
         // if found, remove it on this level
         if let Some(NodeEntry::Leaf(f)) = found {
             if f.key == *key {
-                let prev = self.at_index(index - 1).await?;
-                let next = self.at_index(index + 1).await?;
+                let prev = self.at_index(index - 1)?;
+                let next = self.at_index(index + 1)?;
                 return match (prev, next) {
                     (Some(NodeEntry::MST(mut p)), Some(NodeEntry::MST(n))) => {
-                        let merged = p.append_merge(n).await?;
+                        let merged = p.append_merge(n)?;
                         let mut new_tree_entries: Vec<NodeEntry<B>> = Vec::new();
                         new_tree_entries
-                            .append(&mut self.slice(Some(0), Some(index - 1)).await?.to_vec());
+                            .append(&mut self.slice(Some(0), Some(index - 1))?.to_vec());
                         new_tree_entries.push(NodeEntry::MST(merged));
-                        new_tree_entries
-                            .append(&mut self.slice(Some(index + 2), None).await?.to_vec());
+                        new_tree_entries.append(&mut self.slice(Some(index + 2), None)?.to_vec());
                         self.new_tree(new_tree_entries)
                     }
-                    (_, _) => self.remove_entry(index).await,
+                    (_, _) => self.remove_entry(index),
                 };
             }
         }
         // else recurse down to find it
-        let prev = self.at_index(index - 1).await?;
+        let prev = self.at_index(index - 1)?;
         return if let Some(NodeEntry::MST(mut p)) = prev {
-            let subtree = &mut p.delete_recurse(key).await?;
-            let subtree_entries = subtree.get_entries().await?;
+            let subtree = &mut p.delete_recurse(key)?;
+            let subtree_entries = subtree.get_entries()?;
             if subtree_entries.len() == 0 {
-                self.remove_entry(index - 1).await
+                self.remove_entry(index - 1)
             } else {
                 self.update_entry(index - 1, NodeEntry::MST(subtree.clone()))
-                    .await
             }
         } else {
             Err(anyhow!("Could not find a record with key: {}", key))
@@ -913,44 +901,44 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     // -------------------
 
     /// update entry in place
-    pub async fn update_entry(&mut self, index: isize, entry: NodeEntry<B>) -> Result<Self> {
+    pub fn update_entry(&mut self, index: isize, entry: NodeEntry<B>) -> Result<Self> {
         let mut update = Vec::new();
-        for e in self.slice(Some(0), Some(index)).await?.to_vec() {
+        for e in self.slice(Some(0), Some(index))?.to_vec() {
             update.push(e);
         }
         update.push(entry);
-        for e in self.slice(Some(index + 1), None).await?.to_vec() {
+        for e in self.slice(Some(index + 1), None)?.to_vec() {
             update.push(e);
         }
         Ok(self.new_tree(update)?)
     }
 
     /// remove entry at index
-    pub async fn remove_entry(&mut self, index: isize) -> Result<Self> {
+    pub fn remove_entry(&mut self, index: isize) -> Result<Self> {
         let mut updated = Vec::new();
-        updated.append(&mut self.slice(Some(0), Some(index)).await?.to_vec());
-        updated.append(&mut self.slice(Some(index + 1), None).await?.to_vec());
+        updated.append(&mut self.slice(Some(0), Some(index))?.to_vec());
+        updated.append(&mut self.slice(Some(index + 1), None)?.to_vec());
 
         Ok(self.new_tree(updated)?)
     }
 
     /// append entry to end of the node / Vec is allowed here.
-    pub async fn append(&mut self, entry: NodeEntry<B>) -> Result<Self> {
-        let mut entries = self.get_entries().await?.to_vec();
+    pub fn append(&mut self, entry: NodeEntry<B>) -> Result<Self> {
+        let mut entries = self.get_entries()?.to_vec();
         entries.push(entry);
         Ok(self.new_tree(entries)?)
     }
 
     /// prepend entry to end of the node
-    pub async fn prepend(&mut self, entry: NodeEntry<B>) -> Result<Self> {
-        let mut entries = self.get_entries().await?.to_vec();
+    pub fn prepend(&mut self, entry: NodeEntry<B>) -> Result<Self> {
+        let mut entries = self.get_entries()?.to_vec();
         entries.splice(0..0, vec![entry]);
         Ok(self.new_tree(entries)?)
     }
 
     /// returns entry at index
-    pub async fn at_index(&mut self, index: isize) -> Result<Option<NodeEntry<B>>> {
-        let entries = self.get_entries().await?;
+    pub fn at_index(&mut self, index: isize) -> Result<Option<NodeEntry<B>>> {
+        let entries = self.get_entries()?;
         if index >= 0 {
             Ok(entries
                 .into_iter()
@@ -962,12 +950,8 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     }
 
     /// returns a slice of the node
-    pub async fn slice(
-        &mut self,
-        start: Option<isize>,
-        end: Option<isize>,
-    ) -> Result<&[NodeEntry<B>]> {
-        let entries = self.get_entries().await?;
+    pub fn slice(&mut self, start: Option<isize>, end: Option<isize>) -> Result<&[NodeEntry<B>]> {
+        let entries = self.get_entries()?;
         let entry_len = entries.len() as isize;
         match (start, end) {
             (Some(start), Some(end)) => {
@@ -1028,27 +1012,27 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     }
 
     /// inserts entry at index
-    pub async fn splice_in(&mut self, entry: NodeEntry<B>, index: isize) -> Result<Self> {
+    pub fn splice_in(&mut self, entry: NodeEntry<B>, index: isize) -> Result<Self> {
         let mut update = Vec::new();
-        for e in self.slice(Some(0), Some(index)).await?.to_vec() {
+        for e in self.slice(Some(0), Some(index))?.to_vec() {
             update.push(e);
         }
         update.push(entry);
-        for e in self.slice(Some(index), None).await?.to_vec() {
+        for e in self.slice(Some(index), None)?.to_vec() {
             update.push(e);
         }
         self.new_tree(update)
     }
 
     /// replaces an entry with [ Some(tree), Leaf, Some(tree) ]
-    pub async fn replace_with_split(
+    pub fn replace_with_split(
         &mut self,
         index: isize,
         left: Option<Self>,
         leaf: Leaf,
         right: Option<Self>,
     ) -> Result<Self> {
-        let update = self.slice(Some(0), Some(index)).await?;
+        let update = self.slice(Some(0), Some(index))?;
         let mut update = update.to_vec();
         if let Some(l) = left {
             update.push(NodeEntry::MST(l));
@@ -1057,18 +1041,18 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         if let Some(r) = right {
             update.push(NodeEntry::MST(r));
         }
-        let remainder = self.slice(Some(index + 1), None).await?;
+        let remainder = self.slice(Some(index + 1), None)?;
         let remainder = &mut remainder.to_vec();
         update.append(remainder);
         self.new_tree(update)
     }
 
     /// if the topmost node in the tree only points to another tree, trim the top and return the subtree
-    pub async fn trim_top(mut self) -> Result<Self> {
-        let entries = self.get_entries().await?;
+    pub fn trim_top(mut self) -> Result<Self> {
+        let entries = self.get_entries()?;
         return if entries.len() == 1 {
             match entries.into_iter().nth(0) {
-                Some(NodeEntry::MST(n)) => Ok(n.clone().trim_top().await?),
+                Some(NodeEntry::MST(n)) => Ok(n.clone().trim_top()?),
                 _ => Ok(self),
             }
         } else {
@@ -1080,15 +1064,15 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     // -------------------
 
     /// Recursively splits a subtree around a given key
-    pub async fn split_around(&mut self, key: &str) -> Result<(Option<Self>, Option<Self>)> {
-        let index = self.find_gt_or_equal_leaf_index(key).await?;
+    pub fn split_around(&mut self, key: &str) -> Result<(Option<Self>, Option<Self>)> {
+        let index = self.find_gt_or_equal_leaf_index(key)?;
         // split tree around key
         let left_data = {
-            let tmp = self.slice(Some(0), Some(index)).await?;
+            let tmp = self.slice(Some(0), Some(index))?;
             tmp.to_vec()
         };
         let right_data = {
-            let tmp = self.slice(Some(index), None).await?;
+            let tmp = self.slice(Some(index), None)?;
             tmp.to_vec()
         };
         let mut left = self.new_tree(left_data.clone())?;
@@ -1103,23 +1087,23 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
             None
         };
         if let Some(NodeEntry::MST(mut last)) = last_in_left {
-            left = left.remove_entry(left_len as isize - 1).await?;
-            let split = last.split_around(key).await?;
+            left = left.remove_entry(left_len as isize - 1)?;
+            let split = last.split_around(key)?;
             if let Some(s0) = split.0 {
-                left = left.append(NodeEntry::MST(s0)).await?;
+                left = left.append(NodeEntry::MST(s0))?;
             }
             if let Some(s1) = split.1 {
-                right = right.prepend(NodeEntry::MST(s1)).await?;
+                right = right.prepend(NodeEntry::MST(s1))?;
             }
         }
 
         let left_output: Option<Self>;
-        match left.get_entries().await?.len() {
+        match left.get_entries()?.len() {
             0 => left_output = None,
             _ => left_output = Some(left),
         };
         let right_output: Option<Self>;
-        match right.get_entries().await?.len() {
+        match right.get_entries()?.len() {
             0 => right_output = None,
             _ => right_output = Some(right),
         };
@@ -1128,21 +1112,21 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
 
     /// The simple merge case where every key in the right tree is greater than every key in the left tree
     /// (used primarily for deletes)
-    pub async fn append_merge(&mut self, mut to_merge: Self) -> Result<Self> {
-        if self.get_layer().await? != to_merge.get_layer().await? {
+    pub fn append_merge(&mut self, mut to_merge: Self) -> Result<Self> {
+        if self.get_layer()? != to_merge.get_layer()? {
             return Err(anyhow!(
                 "Trying to merge two nodes from different layers of the MST"
             ));
         }
-        let mut self_entries = self.get_entries().await?.to_vec();
-        let mut to_merge_entries = to_merge.get_entries().await?.to_vec();
+        let mut self_entries = self.get_entries()?.to_vec();
+        let mut to_merge_entries = to_merge.get_entries()?.to_vec();
         let last_in_left = self_entries.last();
         let first_in_right = to_merge_entries.first();
         let mut new_tree_entries: Vec<NodeEntry<B>> = Vec::new();
         match (last_in_left, first_in_right) {
             (Some(NodeEntry::MST(l)), Some(NodeEntry::MST(r))) => {
                 let mut new_l = l.clone();
-                let merged = new_l.append_merge(r.clone()).await?;
+                let merged = new_l.append_merge(r.clone())?;
                 self_entries.pop();
                 new_tree_entries.append(&mut self_entries);
                 new_tree_entries.push(NodeEntry::MST(merged));
@@ -1160,19 +1144,18 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     // Create relatives
     // -------------------
 
-    pub async fn create_child(&mut self) -> Result<Self> {
-        let layer = self.get_layer().await?;
-        MST::create(self.storage.clone(), Some(Vec::new()), Some(layer - 1)).await
+    pub fn create_child(&mut self) -> Result<Self> {
+        let layer = self.get_layer()?;
+        MST::create(self.storage.clone(), Some(Vec::new()), Some(layer - 1))
     }
 
-    pub async fn create_parent(mut self) -> Result<Self> {
-        let layer = self.get_layer().await?;
+    pub fn create_parent(mut self) -> Result<Self> {
+        let layer = self.get_layer()?;
         let mut parent = MST::create(
             self.storage.clone(),
             Some(vec![NodeEntry::MST(self)]),
             Some(layer + 1),
-        )
-        .await?;
+        )?;
         parent.outdated_pointer = true;
         Ok(parent)
     }
@@ -1181,8 +1164,8 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     // -------------------
 
     /// finds index of first leaf node that is greater than or equal to the value
-    pub async fn find_gt_or_equal_leaf_index(&mut self, key: &str) -> Result<isize> {
-        let entries = self.get_entries().await?;
+    pub fn find_gt_or_equal_leaf_index(&mut self, key: &str) -> Result<isize> {
+        let entries = self.get_entries()?;
         let maybe_index = entries.iter().position(|entry| match entry {
             NodeEntry::MST(_) => false,
             NodeEntry::Leaf(entry) => entry.key >= key.to_string(),
@@ -1201,13 +1184,13 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     /// Walk tree starting at key
     /// @Rudy Note: This may be suboptimal since we always traverse the tree even though external
     /// controls might stop earlier.
-    pub async fn walk_leaves_from(&mut self, key: &String) -> impl Iterator<Item = Leaf> {
+    pub fn walk_leaves_from(&mut self, key: &String) -> impl Iterator<Item = Leaf> {
         let mut iter: Vec<Leaf> = Vec::new();
-        let index = self.find_gt_or_equal_leaf_index(key).await.unwrap() as usize;
-        let entries = self.get_entries().await.unwrap();
+        let index = self.find_gt_or_equal_leaf_index(key).unwrap() as usize;
+        let entries = self.get_entries().unwrap();
         let prev = entries.get(index - 1).unwrap().clone();
         if let NodeEntry::MST(mut p) = prev {
-            for leaf in p.walk_leaves_from(key).await {
+            for leaf in p.walk_leaves_from(key) {
                 iter.push(leaf);
             }
         }
@@ -1216,7 +1199,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
             match entry {
                 NodeEntry::Leaf(e) => iter.push(e),
                 NodeEntry::MST(mut e) => {
-                    for leaf in e.walk_leaves_from(key).await {
+                    for leaf in e.walk_leaves_from(key) {
                         iter.push(leaf);
                     }
                 }
@@ -1225,7 +1208,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         iter.into_iter()
     }
 
-    pub async fn list(
+    pub fn list(
         &mut self,
         count: Option<usize>,
         after: Option<String>,
@@ -1233,7 +1216,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     ) -> Result<Vec<Leaf>> {
         let mut vals: Vec<Leaf> = Vec::new();
         let after = after.unwrap_or("".to_owned());
-        for leaf in self.walk_leaves_from(&after).await {
+        for leaf in self.walk_leaves_from(&after) {
             if leaf.key == after {
                 continue;
             }
@@ -1250,9 +1233,9 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         Ok(vals)
     }
 
-    pub async fn list_with_prefix(&mut self, prefix: &String, count: usize) -> Result<Vec<Leaf>> {
+    pub fn list_with_prefix(&mut self, prefix: &String, count: usize) -> Result<Vec<Leaf>> {
         let mut vals: Vec<Leaf> = Vec::new();
-        for leaf in self.walk_leaves_from(prefix).await {
+        for leaf in self.walk_leaves_from(prefix) {
             if vals.len() >= count || !leaf.key.starts_with(prefix) {
                 break;
             }
@@ -1306,13 +1289,13 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
     }
 
     /// Walks tree & returns all cids
-    pub async fn all_cids(self) -> Result<CidSet> {
+    pub fn all_cids(self) -> Result<CidSet> {
         let mut cids = CidSet::new(None);
         for entry in self.clone().walk() {
             match entry {
                 NodeEntry::Leaf(leaf) => cids.add(leaf.value),
                 NodeEntry::MST(m) => {
-                    let subtree_cids = m.all_cids().await?;
+                    let subtree_cids = m.all_cids()?;
                     let _ = &cids.add_set(subtree_cids);
                 }
             }
@@ -1409,19 +1392,19 @@ impl<B: ReadableBlockstore + Clone + Debug> MST<B> {
         Ok(())
     }
 
-    pub async fn cids_for_path(&mut self, key: String) -> Result<Vec<Cid>> {
+    pub fn cids_for_path(&mut self, key: String) -> Result<Vec<Cid>> {
         let mut cids: Vec<Cid> = vec![self.get_pointer()?];
-        let index = self.find_gt_or_equal_leaf_index(&key).await?;
-        let found = self.at_index(index).await?;
+        let index = self.find_gt_or_equal_leaf_index(&key)?;
+        let found = self.at_index(index)?;
         if let Some(NodeEntry::Leaf(l)) = found {
             if l.key == *key {
                 cids.push(l.value);
                 return Ok(cids);
             }
         }
-        let prev = self.at_index(index - 1).await?;
+        let prev = self.at_index(index - 1)?;
         if let Some(NodeEntry::MST(mut p)) = prev {
-            cids.append(&mut p.cids_for_path(key).await?);
+            cids.append(&mut p.cids_for_path(key)?);
             return Ok(cids);
         }
         Ok(cids)
@@ -1478,7 +1461,7 @@ mod tests {
     async fn adds_records() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let mapping = generate_bulk_data_keys(254, Some(&mut storage)).await?;
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
         let mut rng = thread_rng();
 
         let mut entries = mapping
@@ -1489,12 +1472,12 @@ mod tests {
 
         for entry in &entries {
             //let start = std::time::Instant::now();
-            mst = mst.add(&entry.0, entry.1, None).await?;
+            mst = mst.add(&entry.0, entry.1, None)?;
             //let duration = start.elapsed();
             //println!("Time:{:?}, Key:{}, Cid:{:?}", duration, &entry.0, entry.1);
         }
         for entry in entries {
-            let got = mst.get(&entry.0).await?;
+            let got = mst.get(&entry.0)?;
             assert_eq!(Some(entry.1), got);
         }
         let total_size = mst.leaf_count()?;
@@ -1507,7 +1490,7 @@ mod tests {
     async fn edits_records() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let mapping = generate_bulk_data_keys(100, Some(&mut storage)).await?;
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
         let mut rng = thread_rng();
 
         let mut entries = mapping
@@ -1517,18 +1500,18 @@ mod tests {
         entries.shuffle(&mut rng);
 
         for entry in &entries {
-            mst = mst.add(&entry.0, entry.1, None).await?;
+            mst = mst.add(&entry.0, entry.1, None)?;
         }
 
         let mut edited: Vec<(String, Cid)> = Vec::new();
         for entry in &entries {
             let mut no_storage: Option<&mut MemoryBlockstore> = None;
             let new_cid = random_cid(&mut no_storage, None).await?;
-            mst = mst.update(&entry.0, new_cid).await?;
+            mst = mst.update(&entry.0, new_cid)?;
             edited.push((entry.0.clone(), new_cid));
         }
         for entry in edited {
-            let got = mst.get(&entry.0).await?;
+            let got = mst.get(&entry.0)?;
             assert_eq!(Some(entry.1), got);
         }
         let total_size = mst.leaf_count()?;
@@ -1541,7 +1524,7 @@ mod tests {
     async fn deletes_records() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let mapping = generate_bulk_data_keys(254, Some(&mut storage)).await?;
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
         let mut rng = thread_rng();
 
         let mut entries = mapping
@@ -1551,26 +1534,26 @@ mod tests {
         entries.shuffle(&mut rng);
 
         for entry in &entries {
-            mst = mst.add(&entry.0, entry.1, None).await?;
+            mst = mst.add(&entry.0, entry.1, None)?;
         }
 
         let to_delete = &entries[0..100];
         let the_rest = &entries[100..entries.len()];
 
         for entry in to_delete {
-            mst = mst.delete(&entry.0).await?;
+            mst = mst.delete(&entry.0)?;
         }
 
         let total_size = mst.clone().leaf_count()?;
         assert_eq!(total_size, 154);
 
         for entry in to_delete {
-            let got = mst.get(&entry.0).await?;
+            let got = mst.get(&entry.0)?;
             assert_eq!(None, got);
         }
 
         for entry in the_rest {
-            let got = mst.get(&entry.0).await?;
+            let got = mst.get(&entry.0)?;
             assert_eq!(Some(entry.1), got);
         }
 
@@ -1581,7 +1564,7 @@ mod tests {
     async fn is_order_independent() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let mapping = generate_bulk_data_keys(254, Some(&mut storage)).await?;
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
         let mut rng = thread_rng();
 
         let mut entries = mapping
@@ -1591,10 +1574,10 @@ mod tests {
         entries.shuffle(&mut rng);
 
         for entry in &entries {
-            mst = mst.add(&entry.0, entry.1, None).await?;
+            mst = mst.add(&entry.0, entry.1, None)?;
         }
 
-        let mut recreated = MST::create(mst.storage.clone(), None, None).await?;
+        let mut recreated = MST::create(mst.storage.clone(), None, None)?;
         let all_nodes = mst.all_nodes()?;
 
         let mut reshuffled = mapping
@@ -1604,7 +1587,7 @@ mod tests {
         reshuffled.shuffle(&mut rng);
 
         for entry in &reshuffled {
-            recreated = recreated.add(&entry.0, entry.1, None).await?;
+            recreated = recreated.add(&entry.0, entry.1, None)?;
         }
         let all_reshuffled = recreated.all_nodes()?;
         assert_eq!(all_nodes.len(), all_reshuffled.len());
@@ -1617,7 +1600,7 @@ mod tests {
     async fn saves_and_loads_from_blockstore() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let _mapping = generate_bulk_data_keys(50, Some(&mut storage)).await;
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
         let mut mst_storage = mst.storage.clone();
         let root = save_mst(&mut mst_storage, &mut mst).await?;
@@ -1636,14 +1619,14 @@ mod tests {
     async fn diffs() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
         let mapping = generate_bulk_data_keys(4, Some(&mut storage)).await?;
-        let mut mst = MST::create(storage.clone(), None, None).await?;
+        let mut mst = MST::create(storage.clone(), None, None)?;
         let entries = mapping
             .iter()
             .map(|e| (e.0.clone(), e.1.clone()))
             .collect::<Vec<(String, Cid)>>();
 
         for entry in &entries {
-            mst = mst.add(&entry.0, entry.1, None).await?;
+            mst = mst.add(&entry.0, entry.1, None)?;
         }
 
         let mut to_diff = mst.clone();
@@ -1662,7 +1645,7 @@ mod tests {
         let mut expected_dels: HashMap<String, DataDelete> = HashMap::new();
 
         for entry in &to_add {
-            to_diff = to_diff.add(&entry.0, entry.1, None).await?;
+            to_diff = to_diff.add(&entry.0, entry.1, None)?;
             expected_adds.insert(
                 entry.0.clone(),
                 DataAdd {
@@ -1675,7 +1658,7 @@ mod tests {
         for entry in &to_edit {
             let mut no_storage: Option<&mut MemoryBlockstore> = None;
             let updated = random_cid(&mut no_storage, None).await?;
-            to_diff = to_diff.update(&entry.0, updated).await?;
+            to_diff = to_diff.update(&entry.0, updated)?;
             expected_updates.insert(
                 entry.0.clone(),
                 DataUpdate {
@@ -1687,7 +1670,7 @@ mod tests {
         }
 
         for entry in &to_del {
-            to_diff = to_diff.delete(&entry.0).await?;
+            to_diff = to_diff.delete(&entry.0)?;
             expected_dels.insert(
                 entry.0.clone(),
                 DataDelete {
@@ -1713,9 +1696,8 @@ mod tests {
                 NodeEntry::MST(ref mut entry) => entry.get_pointer()?,
                 NodeEntry::Leaf(ref entry) => entry.value.clone(),
             };
-            let found = storage.has(cid)?
-                || diff.new_mst_blocks.has(cid)
-                || diff.new_leaf_cids.has(cid);
+            let found =
+                storage.has(cid)? || diff.new_mst_blocks.has(cid) || diff.new_leaf_cids.has(cid);
             assert!(found, "Missing block {cid}")
         }
 
@@ -1727,25 +1709,17 @@ mod tests {
     async fn simple_tree_diffs() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)
-            .await?; // level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
         let mut to_diff = mst.clone();
         let mut expected_adds: HashMap<String, DataAdd> = HashMap::new();
         let mut expected_updates: HashMap<String, DataUpdate> = HashMap::new();
         let mut expected_dels: HashMap<String, DataDelete> = HashMap::new();
 
-        to_diff = to_diff
-            .add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)
-            .await?; // level 0
+        to_diff = to_diff.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
         expected_adds.insert(
             "com.example.record/3jqfcqzm3ft2j".to_string(),
             DataAdd {
@@ -1753,9 +1727,7 @@ mod tests {
                 cid: cid1,
             },
         );
-        to_diff = to_diff
-            .add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)
-            .await?; // level 0
+        to_diff = to_diff.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
         expected_adds.insert(
             "com.example.record/3jqfcqzm4fc2j".to_string(),
             DataAdd {
@@ -1765,9 +1737,7 @@ mod tests {
         );
         let mut no_storage: Option<&mut MemoryBlockstore> = None;
         let updated = random_cid(&mut no_storage, None).await?;
-        to_diff = to_diff
-            .update(&"com.example.record/3jqfcqzm3fs2j", updated)
-            .await?;
+        to_diff = to_diff.update(&"com.example.record/3jqfcqzm3fs2j", updated)?;
         expected_updates.insert(
             "com.example.record/3jqfcqzm3fs2j".to_string(),
             DataUpdate {
@@ -1777,9 +1747,7 @@ mod tests {
             },
         );
 
-        to_diff = to_diff
-            .delete(&"com.example.record/3jqfcqzm3fr2j".to_string())
-            .await?;
+        to_diff = to_diff.delete(&"com.example.record/3jqfcqzm3fr2j".to_string())?;
         expected_dels.insert(
             "com.example.record/3jqfcqzm3fr2j".to_string(),
             DataDelete {
@@ -1804,9 +1772,8 @@ mod tests {
                 NodeEntry::MST(ref mut entry) => entry.get_pointer()?,
                 NodeEntry::Leaf(ref entry) => entry.value.clone(),
             };
-            let found = blockstore.has(cid)?
-                || diff.new_mst_blocks.has(cid)
-                || diff.new_leaf_cids.has(cid);
+            let found =
+                blockstore.has(cid)? || diff.new_mst_blocks.has(cid) || diff.new_leaf_cids.has(cid);
             assert!(found)
         }
 
@@ -1914,53 +1881,51 @@ mod tests {
         let cid1 = Cid::try_from(cid1str)?;
 
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
         // Rejects empty key
-        let result = mst.add(&"".to_string(), cid1, None).await;
+        let result = mst.add(&"".to_string(), cid1, None);
         assert!(result.is_err());
 
         // Rejects a key with no collection
-        let result = mst.add(&"asdf".to_string(), cid1, None).await;
+        let result = mst.add(&"asdf".to_string(), cid1, None);
         assert!(result.is_err());
 
         // Rejects a key with a nested collection
-        let result = mst
-            .add(&"nested/collection/asdf".to_string(), cid1, None)
-            .await;
+        let result = mst.add(&"nested/collection/asdf".to_string(), cid1, None);
         assert!(result.is_err());
 
         // Rejects on empty coll or rkey
-        let result = mst.add(&"coll/".to_string(), cid1, None).await;
+        let result = mst.add(&"coll/".to_string(), cid1, None);
         assert!(result.is_err());
-        let result = mst.add(&"/rkey".to_string(), cid1, None).await;
+        let result = mst.add(&"/rkey".to_string(), cid1, None);
         assert!(result.is_err());
 
         // Rejects non-ascii chars
-        let result = mst.add(&"coll/jalapeñoA".to_string(), cid1, None).await;
+        let result = mst.add(&"coll/jalapeñoA".to_string(), cid1, None);
         assert!(result.is_err());
-        let result = mst.add(&"coll/coöperative".to_string(), cid1, None).await;
+        let result = mst.add(&"coll/coöperative".to_string(), cid1, None);
         assert!(result.is_err());
-        let result = mst.add(&"coll/abc💩".to_string(), cid1, None).await;
+        let result = mst.add(&"coll/abc💩".to_string(), cid1, None);
         assert!(result.is_err());
 
         // Rejects ascii that we don't support
         let invalid_chars = vec!["$", "%", "(", ")", "+", "="];
         for ch in invalid_chars {
             let key = format!("coll/key{}", ch);
-            let result = mst.add(&key, cid1, None).await;
+            let result = mst.add(&key, cid1, None);
             assert!(result.is_err(), "Key '{}' should be invalid", key);
         }
 
         // Rejects keys over 256 chars
         let long_key: String = "a".repeat(253);
         let key = format!("coll/{}", long_key);
-        let result = mst.add(&key, cid1, None).await;
+        let result = mst.add(&key, cid1, None);
         assert!(result.is_err());
 
         // Allows long key under 256 chars
         let long_key: String = "a".repeat(250);
         let key = format!("coll/{}", long_key);
-        let result = mst.add(&key, cid1, None).await;
+        let result = mst.add(&key, cid1, None);
         assert!(result.is_ok());
 
         // Allows URL-safe chars
@@ -1972,7 +1937,7 @@ mod tests {
             "coll/key-",
         ];
         for key in valid_keys {
-            let result = mst.add(&key.to_string(), cid1, None).await;
+            let result = mst.add(&key.to_string(), cid1, None);
             assert!(result.is_ok(), "Key '{}' should be valid", key);
         }
 
@@ -1985,7 +1950,7 @@ mod tests {
     #[tokio::test]
     async fn empty_tree_root() -> Result<()> {
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
         assert_eq!(mst.clone().leaf_count()?, 0);
         assert_eq!(
@@ -2001,11 +1966,9 @@ mod tests {
     async fn trivial_tree() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
-        mst = mst
-            .add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)
-            .await?;
+        mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?;
         assert_eq!(mst.clone().leaf_count()?, 1);
         assert_eq!(
             mst.get_pointer()?.to_string(),
@@ -2020,11 +1983,9 @@ mod tests {
     async fn singlelayer2_tree() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?; //dag-pb
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
-        mst = mst
-            .add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)
-            .await?;
+        mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?;
         assert_eq!(mst.clone().leaf_count()?, 1);
         assert_eq!(mst.clone().layer, Some(2));
         assert_eq!(
@@ -2040,23 +2001,13 @@ mod tests {
     async fn simple_tree() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)
-            .await?; // level 1
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)
-            .await?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // level 0
         assert_eq!(mst.clone().leaf_count()?, 5);
         assert_eq!(
             mst.get_pointer()?.to_string(),
@@ -2073,38 +2024,24 @@ mod tests {
     async fn trim_on_delete() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
         let l1root = "bafyreifnqrwbk6ffmyaz5qtujqrzf5qmxf7cbxvgzktl4e3gabuxbtatv4";
         let l0root = "bafyreie4kjuxbwkhzg2i5dljaswcroeih4dgiqq6pazcmunwt2byd725vi";
 
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fn2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)
-            .await?; // level 1
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)
-            .await?; // level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fu2j".to_string(), cid1, None)
-            .await?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fn2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fu2j".to_string(), cid1, None)?; // level 0
         assert_eq!(mst.clone().leaf_count()?, 6);
-        assert_eq!(mst.get_layer().await?, 1);
+        assert_eq!(mst.get_layer()?, 1);
         assert_eq!(mst.get_pointer()?.to_string(), l1root);
 
-        let mut mst = mst
-            .delete(&"com.example.record/3jqfcqzm3fs2j".to_string())
-            .await?; // level 1
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fs2j".to_string())?; // level 1
         assert_eq!(mst.clone().leaf_count()?, 5);
-        assert_eq!(mst.get_layer().await?, 0);
+        assert_eq!(mst.get_layer()?, 0);
         assert_eq!(mst.get_pointer()?.to_string(), l0root);
 
         Ok(())
@@ -2128,64 +2065,38 @@ mod tests {
     async fn handle_insertion_that_splits_two_layers_down() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
         let l1root = "bafyreiettyludka6fpgp33stwxfuwhkzlur6chs4d2v4nkmq2j3ogpdjem";
         let l2root = "bafyreid2x5eqs4w4qxvc5jiwda4cien3gw2q6cshofxwnvv7iucrmfohpm";
 
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)
-            .await?; // A; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)
-            .await?; // B; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)
-            .await?; // C; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)
-            .await?; // D; level 1
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)
-            .await?; // E; level 0
-                     // GAP for F
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)
-            .await?; // G; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)
-            .await?; // H; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)
-            .await?; // I; level 1
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4ff2j".to_string(), cid1, None)
-            .await?; // J; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fg2j".to_string(), cid1, None)
-            .await?; // K; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fh2j".to_string(), cid1, None)
-            .await?; // L; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fo2j".to_string(), cid1, None)?; // A; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fp2j".to_string(), cid1, None)?; // B; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fr2j".to_string(), cid1, None)?; // C; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fs2j".to_string(), cid1, None)?; // D; level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // E; level 0
+                                                                                             // GAP for F
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)?; // G; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fc2j".to_string(), cid1, None)?; // H; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)?; // I; level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4ff2j".to_string(), cid1, None)?; // J; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fg2j".to_string(), cid1, None)?; // K; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fh2j".to_string(), cid1, None)?; // L; level 0
 
         assert_eq!(mst.clone().leaf_count()?, 11);
-        assert_eq!(mst.get_layer().await?, 1);
+        assert_eq!(mst.get_layer()?, 1);
         assert_eq!(mst.get_pointer()?.to_string(), l1root);
 
         // insert F, which will push E out of the node with G+H to a new node under D
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)
-            .await?; // F; level 2
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // F; level 2
         assert_eq!(mst.clone().leaf_count()?, 12);
-        assert_eq!(mst.get_layer().await?, 2);
+        assert_eq!(mst.get_layer()?, 2);
         assert_eq!(mst.get_pointer()?.to_string(), l2root); // @TODO this is failing
 
         // remove F, which should push E back over with G+H
-        let mut mst = mst
-            .delete(&"com.example.record/3jqfcqzm3fx2j".to_string())
-            .await?; // F; level 2
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fx2j".to_string())?; // F; level 2
         assert_eq!(mst.clone().leaf_count()?, 11);
-        assert_eq!(mst.get_layer().await?, 1);
+        assert_eq!(mst.get_layer()?, 1);
         assert_eq!(mst.get_pointer()?.to_string(), l1root);
 
         Ok(())
@@ -2207,55 +2118,41 @@ mod tests {
     async fn handle_new_layers_that_are_two_higher_than_existing() -> Result<()> {
         let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
         let storage = MemoryBlockstore::default();
-        let mut mst = MST::create(storage, None, None).await?;
+        let mut mst = MST::create(storage, None, None)?;
 
         let l0root = "bafyreidfcktqnfmykz2ps3dbul35pepleq7kvv526g47xahuz3rqtptmky";
         let l2root = "bafyreiavxaxdz7o7rbvr3zg2liox2yww46t7g6hkehx4i4h3lwudly7dhy";
         let l2root2 = "bafyreig4jv3vuajbsybhyvb7gggvpwh2zszwfyttjrj6qwvcsp24h6popu";
 
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)
-            .await?; // A; level 0
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)
-            .await?; // C; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3ft2j".to_string(), cid1, None)?; // A; level 0
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fz2j".to_string(), cid1, None)?; // C; level 0
         assert_eq!(mst.clone().leaf_count()?, 2);
-        assert_eq!(mst.get_layer().await?, 0);
+        assert_eq!(mst.get_layer()?, 0);
         assert_eq!(mst.get_pointer()?.to_string(), l0root);
 
         // insert B, which is two levels above
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)
-            .await?; // B; level 2
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // B; level 2
         assert_eq!(mst.clone().leaf_count()?, 3);
-        assert_eq!(mst.get_layer().await?, 2);
+        assert_eq!(mst.get_layer()?, 2);
         assert_eq!(mst.get_pointer()?.to_string(), l2root);
 
         // remove B
-        let mut mst = mst
-            .delete(&"com.example.record/3jqfcqzm3fx2j".to_string())
-            .await?; // B; level 2
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm3fx2j".to_string())?; // B; level 2
         assert_eq!(mst.clone().leaf_count()?, 2);
-        assert_eq!(mst.get_layer().await?, 0);
+        assert_eq!(mst.get_layer()?, 0);
         assert_eq!(mst.get_pointer()?.to_string(), l0root);
 
         // insert B (level=2) and D (level=1)
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)
-            .await?; // B; level 2
-        let mut mst = mst
-            .add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)
-            .await?; // D; level 1
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm3fx2j".to_string(), cid1, None)?; // B; level 2
+        let mut mst = mst.add(&"com.example.record/3jqfcqzm4fd2j".to_string(), cid1, None)?; // D; level 1
         assert_eq!(mst.clone().leaf_count()?, 4);
-        assert_eq!(mst.get_layer().await?, 2);
+        assert_eq!(mst.get_layer()?, 2);
         assert_eq!(mst.get_pointer()?.to_string(), l2root2);
 
         // remove D
-        let mut mst = mst
-            .delete(&"com.example.record/3jqfcqzm4fd2j".to_string())
-            .await?; // D; level 1
+        let mut mst = mst.delete(&"com.example.record/3jqfcqzm4fd2j".to_string())?; // D; level 1
         assert_eq!(mst.clone().leaf_count()?, 3);
-        assert_eq!(mst.get_layer().await?, 2);
+        assert_eq!(mst.get_layer()?, 2);
         assert_eq!(mst.get_pointer()?.to_string(), l2root);
 
         Ok(())

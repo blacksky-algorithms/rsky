@@ -105,8 +105,8 @@ pub async fn mst_diff<B: ReadableBlockstore + Clone + Debug>(
                         (&mut left, &mut right)
                     {
                         if left_tree.get_pointer()?.eq(&right_tree.get_pointer()?) {
-                            left_walker.step_over().await?;
-                            right_walker.step_over().await?;
+                            left_walker.step_over()?;
+                            right_walker.step_over()?;
                         } else {
                             diff.node_add(right).await?;
                             diff.node_delete(left).await?;

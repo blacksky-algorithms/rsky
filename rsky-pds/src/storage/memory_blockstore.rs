@@ -36,42 +36,42 @@ impl MemoryBlockstore {
 }
 
 impl ReadableBlockstore for MemoryBlockstore {
-     fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         match self.blocks.get(*cid) {
             None => Ok(None),
             Some(res) => Ok(Some(res.clone())),
         }
     }
 
-     fn has(&mut self, cid: Cid) -> Result<bool> {
+    fn has(&mut self, cid: Cid) -> Result<bool> {
         Ok(self.blocks.has(cid))
     }
 
-     fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
+    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         self.blocks.get_many(cids)
     }
 }
 
 impl RepoStorage for MemoryBlockstore {
-     fn get_root(&self) -> Option<Cid> {
+    fn get_root(&self) -> Option<Cid> {
         self.root
     }
 
-     fn put_block(&mut self, cid: Cid, bytes: Vec<u8>, _rev: String) -> Result<()> {
+    fn put_block(&mut self, cid: Cid, bytes: Vec<u8>, _rev: String) -> Result<()> {
         Ok(self.blocks.set(cid, bytes))
     }
 
-     fn put_many(&mut self, to_put: BlockMap, _rev: String) -> Result<()> {
+    fn put_many(&mut self, to_put: BlockMap, _rev: String) -> Result<()> {
         self.blocks.add_map(to_put)
     }
 
-     fn update_root(&mut self, cid: Cid, rev: String, _is_create: Option<bool>) -> Result<()> {
+    fn update_root(&mut self, cid: Cid, rev: String, _is_create: Option<bool>) -> Result<()> {
         self.root = Some(cid);
         self.rev = Some(rev);
         Ok(())
     }
 
-     fn apply_commit(&mut self, commit: CommitData, _is_create: Option<bool>) -> Result<()> {
+    fn apply_commit(&mut self, commit: CommitData, _is_create: Option<bool>) -> Result<()> {
         self.root = Some(commit.cid);
         let rm_cids = commit.removed_cids.to_list();
         for cid in rm_cids {
@@ -83,19 +83,19 @@ impl RepoStorage for MemoryBlockstore {
         Ok(())
     }
 
-     fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         <Self as ReadableBlockstore>::get_bytes(self, cid)
     }
 
-     fn has(&mut self, cid: Cid) -> Result<bool> {
+    fn has(&mut self, cid: Cid) -> Result<bool> {
         <Self as ReadableBlockstore>::has(self, cid)
     }
 
-     fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
+    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         <Self as ReadableBlockstore>::get_blocks(self, cids)
     }
 
-     fn attempt_read(
+    fn attempt_read(
         &mut self,
         cid: &Cid,
         check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
@@ -103,7 +103,7 @@ impl RepoStorage for MemoryBlockstore {
         <Self as ReadableBlockstore>::attempt_read(self, cid, check)
     }
 
-     fn read_obj_and_bytes(
+    fn read_obj_and_bytes(
         &mut self,
         cid: &Cid,
         check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
@@ -111,7 +111,7 @@ impl RepoStorage for MemoryBlockstore {
         <Self as ReadableBlockstore>::read_obj_and_bytes(self, cid, check)
     }
 
-     fn read_obj(
+    fn read_obj(
         &mut self,
         cid: &Cid,
         check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
@@ -119,11 +119,11 @@ impl RepoStorage for MemoryBlockstore {
         <Self as ReadableBlockstore>::read_obj(self, cid, check)
     }
 
-     fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
+    fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
         <Self as ReadableBlockstore>::attempt_read_record(self, cid)
     }
 
-     fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
+    fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
         <Self as ReadableBlockstore>::read_record(self, cid)
     }
 }

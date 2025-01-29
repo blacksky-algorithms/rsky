@@ -50,10 +50,10 @@ pub fn ensure_valid_mst_key(key: &str) -> Result<()> {
     }
 }
 
-pub async fn cid_for_entries<B: ReadableBlockstore + Clone + Debug>(
+pub fn cid_for_entries<B: ReadableBlockstore + Clone + Debug>(
     entries: &[NodeEntry<B>],
 ) -> Result<Cid> {
-    let data = serialize_node_data(entries).await?;
+    let data = serialize_node_data(entries)?;
     cid_for_cbor(&data)
 }
 
@@ -68,7 +68,7 @@ pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
     Ok(x)
 }
 
-pub async fn serialize_node_data<B: ReadableBlockstore + Clone + Debug>(
+pub fn serialize_node_data<B: ReadableBlockstore + Clone + Debug>(
     entries: &[NodeEntry<B>],
 ) -> Result<NodeData> {
     let mut data = NodeData {
@@ -239,8 +239,7 @@ pub async fn save_mst<B: ReadableBlockstore + Clone + Debug>(
     mst: &mut MST<B>,
 ) -> Result<Cid> {
     let diff = mst.get_unstored_blocks()?;
-    storage
-        .put_many(diff.blocks, Ticker::new().next(None).to_string())?;
+    storage.put_many(diff.blocks, Ticker::new().next(None).to_string())?;
     Ok(diff.root)
 }
 

@@ -387,8 +387,7 @@ impl Repo {
         match commit_cid {
             Some(commit_cid) => {
                 let commit_bytes: Vec<u8> =
-                    match <SqlRepoReader as ReadableBlockstore>::get_bytes(storage, &commit_cid)?
-                    {
+                    match <SqlRepoReader as ReadableBlockstore>::get_bytes(storage, &commit_cid)? {
                         Some(res) => res,
                         None => bail!("Missing blocks for commit cid {commit_cid}"),
                     };
@@ -482,11 +481,7 @@ impl Repo {
         from: Option<String>,
     ) -> impl Iterator<Item = CommitRecord> {
         let mut iter: Vec<CommitRecord> = Vec::new();
-        for leaf in self
-            .data
-            .walk_leaves_from(&from.unwrap_or("".to_owned()))
-            .await
-        {
+        for leaf in self.data.walk_leaves_from(&from.unwrap_or("".to_owned())) {
             let path = util::parse_data_key(&leaf.key).unwrap();
             let record =
                 <SqlRepoReader as ReadableBlockstore>::read_record(&mut self.storage, &leaf.value)
@@ -507,26 +502,25 @@ impl Repo {
         rkey: String,
     ) -> Result<Option<CborValue>> {
         let data_key = format!("{}/{}", collection, rkey);
-        let cid = self.data.get(&data_key).await?;
+        let cid = self.data.get(&data_key)?;
         match cid {
             None => Ok(None),
-            Some(cid) => Ok(Some(
-                <SqlRepoReader as ReadableBlockstore>::read_obj(&mut self.storage, &cid, |obj| {
-                    matches!(obj, CborValue::Map(_))
-                })?,
-            )),
+            Some(cid) => Ok(Some(<SqlRepoReader as ReadableBlockstore>::read_obj(
+                &mut self.storage,
+                &cid,
+                |obj| matches!(obj, CborValue::Map(_)),
+            )?)),
         }
     }
 
     pub async fn get_content(&mut self) -> Result<RepoContents> {
-        let entries = self.data.list(None, None, None).await?;
+        let entries = self.data.list(None, None, None)?;
         let cids = entries
             .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let found =
-            <SqlRepoReader as ReadableBlockstore>::get_blocks(&mut self.storage, cids)?;
+        let found = <SqlRepoReader as ReadableBlockstore>::get_blocks(&mut self.storage, cids)?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -555,11 +549,11 @@ impl Repo {
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<CommitData> {
         let mut new_blocks = BlockMap::new();
-        let mut data = MST::create(storage, None, None).await?;
+        let mut data = MST::create(storage, None, None)?;
         for record in initial_writes.unwrap_or(Vec::new()) {
             let cid = new_blocks.add(record.record)?;
             let data_key = util::format_data_key(record.collection, record.rkey);
-            data = data.add(&data_key, cid, None).await?;
+            data = data.add(&data_key, cid, None)?;
         }
         let data_cid: Cid = data.get_pointer()?;
         let diff = DataDiff::of(&mut data, None).await?;
@@ -624,16 +618,16 @@ impl Repo {
                 RecordWriteOp::Create(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.add(&data_key, cid, None).await?;
+                    data = data.add(&data_key, cid, None)?;
                 }
                 RecordWriteOp::Update(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.update(&data_key, cid).await?;
+                    data = data.update(&data_key, cid)?;
                 }
                 RecordWriteOp::Delete(write) => {
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.delete(&data_key).await?;
+                    data = data.delete(&data_key)?;
                 }
             }
         }

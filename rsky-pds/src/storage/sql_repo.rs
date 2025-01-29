@@ -28,7 +28,7 @@ pub struct SqlRepoReader {
 }
 
 impl ReadableBlockstore for SqlRepoReader {
-     fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
@@ -52,12 +52,12 @@ impl ReadableBlockstore for SqlRepoReader {
         }
     }
 
-     fn has(&mut self, cid: Cid) -> Result<bool> {
+    fn has(&mut self, cid: Cid) -> Result<bool> {
         let got = <Self as ReadableBlockstore>::get_bytes(self, &cid)?;
         Ok(got.is_some())
     }
 
-     fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
+    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
@@ -101,14 +101,14 @@ impl ReadableBlockstore for SqlRepoReader {
 }
 
 impl RepoStorage for SqlRepoReader {
-     fn get_root(&self) -> Option<Cid> {
+    fn get_root(&self) -> Option<Cid> {
         match self.get_root_detailed() {
             Ok(root) => Some(root.cid),
             Err(_) => None,
         }
     }
 
-     fn put_block(&mut self, cid: Cid, bytes: Vec<u8>, rev: String) -> Result<()> {
+    fn put_block(&mut self, cid: Cid, bytes: Vec<u8>, rev: String) -> Result<()> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
@@ -125,7 +125,7 @@ impl RepoStorage for SqlRepoReader {
         Ok(())
     }
 
-     fn put_many(&mut self, to_put: BlockMap, rev: String) -> Result<()> {
+    fn put_many(&mut self, to_put: BlockMap, rev: String) -> Result<()> {
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
         let conn = &mut establish_connection()?;
 
@@ -151,7 +151,7 @@ impl RepoStorage for SqlRepoReader {
         Ok(())
     }
 
-     fn update_root(&mut self, cid: Cid, rev: String, is_create: Option<bool>) -> Result<()> {
+    fn update_root(&mut self, cid: Cid, rev: String, is_create: Option<bool>) -> Result<()> {
         use crate::schema::pds::repo_root::dsl as RepoRootSchema;
         let conn = &mut establish_connection()?;
 
@@ -177,26 +177,26 @@ impl RepoStorage for SqlRepoReader {
         Ok(())
     }
 
-     fn apply_commit(&mut self, commit: CommitData, is_create: Option<bool>) -> Result<()> {
+    fn apply_commit(&mut self, commit: CommitData, is_create: Option<bool>) -> Result<()> {
         self.update_root(commit.cid, commit.rev.clone(), is_create)?;
         self.put_many(commit.new_blocks, commit.rev)?;
         self.delete_many(commit.removed_cids.to_list())?;
         Ok(())
     }
 
-     fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         <Self as ReadableBlockstore>::get_bytes(self, cid)
     }
 
-     fn has(&mut self, cid: Cid) -> Result<bool> {
+    fn has(&mut self, cid: Cid) -> Result<bool> {
         <Self as ReadableBlockstore>::has(self, cid)
     }
 
-     fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
+    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
         <Self as ReadableBlockstore>::get_blocks(self, cids)
     }
 
-     fn attempt_read(
+    fn attempt_read(
         &mut self,
         cid: &Cid,
         check: impl Fn(&'_ CborValue) -> bool,
@@ -204,7 +204,7 @@ impl RepoStorage for SqlRepoReader {
         <Self as ReadableBlockstore>::attempt_read(self, cid, check)
     }
 
-     fn read_obj_and_bytes(
+    fn read_obj_and_bytes(
         &mut self,
         cid: &Cid,
         check: impl Fn(&'_ CborValue) -> bool,
@@ -212,19 +212,15 @@ impl RepoStorage for SqlRepoReader {
         <Self as ReadableBlockstore>::read_obj_and_bytes(self, cid, check)
     }
 
-     fn read_obj(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool,
-    ) -> Result<CborValue> {
+    fn read_obj(&mut self, cid: &Cid, check: impl Fn(&'_ CborValue) -> bool) -> Result<CborValue> {
         <Self as ReadableBlockstore>::read_obj(self, cid, check)
     }
 
-     fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
+    fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
         <Self as ReadableBlockstore>::attempt_read_record(self, cid)
     }
 
-     fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
+    fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
         <Self as ReadableBlockstore>::read_record(self, cid)
     }
 }

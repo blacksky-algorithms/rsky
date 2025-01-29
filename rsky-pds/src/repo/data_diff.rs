@@ -64,7 +64,7 @@ impl DataDiff {
         match node {
             NodeEntry::Leaf(node) => self.leaf_add(&node.key, node.value),
             NodeEntry::MST(mut node) => {
-                let data = node.serialize().await?;
+                let data = node.serialize()?;
                 self.tree_add(data.cid, data.bytes);
             }
         }
