@@ -1,6 +1,6 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::ServerConfig;
-use crate::models::ErrorMessageResponse;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
 use crate::repo::types::Ids;
@@ -14,8 +14,6 @@ use atrium_api::app::bsky::feed::get_feed_generator::{
 use atrium_ipld::ipld::Ipld as AtriumIpld;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
-use rocket::response::status;
-use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::AuthorFeed;
 use std::collections::BTreeMap;
@@ -154,7 +152,7 @@ pub async fn get_feed(
     limit: Option<u8>,
     cursor: Option<String>,
     res: GetFeedPipeThrough,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     let res = HandlerPipeThrough {
         encoding: res.encoding,
         buffer: res.buffer,

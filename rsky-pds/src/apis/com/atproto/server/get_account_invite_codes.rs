@@ -1,14 +1,12 @@
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::gen_invite_codes;
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::common::env::{env_bool, env_int};
 use crate::common::RFC3339_VARIANT;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use chrono::NaiveDateTime;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetAccountInviteCodesOutput;
 use std::time::SystemTime;
@@ -148,19 +146,12 @@ pub async fn get_account_invite_codes(
     includeUsed: bool,
     createAvailable: bool,
     auth: AccessFull,
-) -> Result<Json<GetAccountInviteCodesOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<GetAccountInviteCodesOutput>, ApiError> {
     match inner_get_account_invite_codes(includeUsed, createAvailable, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

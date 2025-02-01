@@ -1,14 +1,12 @@
+use crate::apis::ApiError;
 use crate::common::env::{env_bool, env_list, env_str};
-use crate::models::ErrorMessageResponse;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{
     DescribeServerOutput, DescribeServerRefContact, DescribeServerRefLinks,
 };
 
 #[rocket::get("/xrpc/com.atproto.server.describeServer")]
-pub async fn describe_server(
-) -> Result<Json<DescribeServerOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+pub async fn describe_server() -> Result<Json<DescribeServerOutput>, ApiError> {
     let available_user_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
     let invite_code_required = env_bool("PDS_INVITE_REQUIRED");
     let privacy_policy = env_str("PDS_PRIVACY_POLICY_URL");

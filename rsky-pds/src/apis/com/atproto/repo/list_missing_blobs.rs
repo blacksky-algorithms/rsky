@@ -1,12 +1,10 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListMissingBlobsOpts;
 use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::ListMissingBlobsOutput;
@@ -17,7 +15,7 @@ pub async fn list_missing_blobs(
     cursor: Option<String>,
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<ListMissingBlobsOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<ListMissingBlobsOutput>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let limit: u16 = limit.unwrap_or(500);
 
@@ -37,14 +35,7 @@ pub async fn list_missing_blobs(
         }
         Err(error) => {
             eprintln!("{error:?}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ))
+            Err(ApiError::RuntimeError)
         }
     }
 }

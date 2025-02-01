@@ -1,13 +1,11 @@
 use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::common::time::{from_micros_to_utc, HOUR, MINUTE};
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::pipethrough::{PRIVILEGED_METHODS, PROTECTED_METHODS};
 use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetServiceAuthOutput;
 use secp256k1::SecretKey;
@@ -71,19 +69,12 @@ pub async fn get_service_auth(
     // Lexicon (XRPC) method to bind the requested token to
     lxm: Option<String>,
     auth: AccessFull,
-) -> Result<Json<GetServiceAuthOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<GetServiceAuthOutput>, ApiError> {
     match inner_get_service_auth(aud, exp, lxm, auth).await {
         Ok(token) => Ok(Json(GetServiceAuthOutput { token })),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some("Internal error".to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

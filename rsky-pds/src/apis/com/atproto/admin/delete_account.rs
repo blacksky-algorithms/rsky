@@ -1,14 +1,12 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::{sequencer, SharedSequencer};
 use anyhow::Result;
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::DeleteAccountInput;
@@ -43,19 +41,12 @@ pub async fn delete_account(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     _auth: AdminToken,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<(), ApiError> {
     match inner_delete_account(body, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

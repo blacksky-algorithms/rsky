@@ -1,14 +1,12 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
+use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListBlobsOpts;
 use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::sync::ListBlobsOutput;
@@ -58,19 +56,12 @@ pub async fn list_blobs(
     cursor: Option<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<Json<ListBlobsOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<ListBlobsOutput>, ApiError> {
     match inner_list_blobs(did, since, limit, cursor, s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

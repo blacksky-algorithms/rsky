@@ -1,6 +1,6 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
@@ -9,13 +9,10 @@ use crate::SharedLocalViewer;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use rocket::form::validate::Contains;
-use rocket::http::Status;
-use rocket::response::status;
-use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::{AuthorFeed, FeedViewPost, PostView};
 
-const METHOD_NSID: &'static str = "app.bsky.feed.getAuthorFeed";
+const METHOD_NSID: &str = "app.bsky.feed.getAuthorFeed";
 
 pub async fn inner_get_author_feed(
     _actor: String,
@@ -60,14 +57,13 @@ pub async fn get_author_feed(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     if let Some(limit) = limit {
         if limit > 100 {
-            let bad_request = ErrorMessageResponse {
-                code: Some(ErrorCode::BadRequest),
-                message: Some("invalid limit".to_string()),
-            };
-            return Err(status::Custom(Status::BadRequest, Json(bad_request)));
+            return Err(ApiError::BadRequest(
+                "invalid_limit".to_string(),
+                "invalid_limit".to_string(),
+            ));
         }
     }
     if let Some(ref filter) = filter {
@@ -79,20 +75,18 @@ pub async fn get_author_feed(
         ]
         .contains(filter.as_str())
         {
-            let bad_request = ErrorMessageResponse {
-                code: Some(ErrorCode::BadRequest),
-                message: Some("invalid filter".to_string()),
-            };
-            return Err(status::Custom(Status::BadRequest, Json(bad_request)));
+            return Err(ApiError::BadRequest(
+                "invalid filter".to_string(),
+                "invalid filter".to_string(),
+            ));
         }
     }
     match cfg.bsky_app_view {
         None => {
-            let not_found = ErrorMessageResponse {
-                code: Some(ErrorCode::NotFound),
-                message: Some("not found".to_string()),
-            };
-            return Err(status::Custom(Status::NotFound, Json(not_found)));
+            return Err(ApiError::BadRequest(
+                "not found".to_string(),
+                "not found".to_string(),
+            ));
         }
         Some(_) => match inner_get_author_feed(
             actor,
@@ -107,16 +101,7 @@ pub async fn get_author_feed(
         .await
         {
             Ok(response) => Ok(response),
-            Err(error) => {
-                let internal_error = ErrorMessageResponse {
-                    code: Some(ErrorCode::InternalServerError),
-                    message: Some(error.to_string()),
-                };
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(internal_error),
-                ));
-            }
+            Err(error) => Err(ApiError::RuntimeError),
         },
     }
 }

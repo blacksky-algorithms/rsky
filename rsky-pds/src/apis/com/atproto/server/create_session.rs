@@ -1,16 +1,13 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::models::{ErrorCode, ErrorMessageResponse};
-use anyhow::bail;
-use rocket::http::Status;
-use rocket::response::status;
+use crate::apis::ApiError;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
 
 async fn inner_create_session(
     body: Json<CreateSessionInput>,
-) -> Result<CreateSessionOutput, anyhow::Error> {
+) -> Result<CreateSessionOutput, ApiError> {
     let CreateSessionInput {
         password,
         identifier,
@@ -41,19 +38,43 @@ async fn inner_create_session(
     };
     if let Ok(Some(user)) = user {
         let mut app_password_name: Option<String> = None;
-        let valid_account_pass =
-            AccountManager::verify_account_password(&user.did, &password).await?;
+        let valid_account_pass;
+        match AccountManager::verify_account_password(&user.did, &password).await {
+            Ok(res) => {
+                valid_account_pass = res;
+            }
+            Err(e) => {
+                eprintln!("{e:?}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
         if !valid_account_pass {
-            app_password_name = AccountManager::verify_app_password(&user.did, &password).await?;
+            match AccountManager::verify_app_password(&user.did, &password).await {
+                Ok(res) => {
+                    app_password_name = res;
+                }
+                Err(e) => {
+                    eprintln!("{e:?}");
+                    return Err(ApiError::RuntimeError);
+                }
+            }
             if app_password_name.is_none() {
-                bail!("Invalid identifier or password")
+                return Err(ApiError::InvalidLogin);
             }
         }
         if user.takedown_ref.is_some() {
-            bail!("Account has been taken down")
+            return Err(ApiError::AccountTakendown);
         }
-        let (access_jwt, refresh_jwt) =
-            AccountManager::create_session(user.did.clone(), app_password_name).await?;
+        let (access_jwt, refresh_jwt);
+        match AccountManager::create_session(user.did.clone(), app_password_name).await {
+            Ok(res) => {
+                (access_jwt, refresh_jwt) = res;
+            }
+            Err(e) => {
+                eprintln!("{e:?}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
         Ok(CreateSessionOutput {
             did: user.did,
             did_doc: None,
@@ -64,7 +85,7 @@ async fn inner_create_session(
             refresh_jwt,
         })
     } else {
-        bail!("Invalid identifier or password")
+        Err(ApiError::InvalidLogin)
     }
 }
 
@@ -75,21 +96,11 @@ async fn inner_create_session(
 )]
 pub async fn create_session(
     body: Json<CreateSessionInput>,
-) -> Result<Json<CreateSessionOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<CreateSessionOutput>, ApiError> {
     // @TODO: Add rate limiting
 
     match inner_create_session(body).await {
         Ok(res) => Ok(Json(res)),
-        Err(error) => {
-            eprintln!("{error:?}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
-        }
+        Err(error) => Err(error),
     }
 }

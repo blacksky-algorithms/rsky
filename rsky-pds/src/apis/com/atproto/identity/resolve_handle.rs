@@ -1,11 +1,9 @@
 use crate::account_manager::helpers::account::ActorAccount;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::common::env::{env_list, env_str};
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::{SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::identity::ResolveHandleOutput;
@@ -81,19 +79,12 @@ async fn inner_resolve_handle(
 pub async fn resolve_handle(
     handle: String,
     id_resolver: &State<SharedIdResolver>,
-) -> Result<Json<ResolveHandleOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<ResolveHandleOutput>, ApiError> {
     match inner_resolve_handle(handle, id_resolver).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

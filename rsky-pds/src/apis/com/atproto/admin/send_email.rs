@@ -1,11 +1,9 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
 use crate::mailer::moderation::{HtmlMailOpts, ModerationMailer};
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::{SendMailInput, SendMailOutput};
 
@@ -49,19 +47,12 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
 pub async fn send_email(
     body: Json<SendMailInput>,
     _auth: Moderator,
-) -> Result<Json<SendMailOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<SendMailOutput>, ApiError> {
     match inner_send_email(body).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

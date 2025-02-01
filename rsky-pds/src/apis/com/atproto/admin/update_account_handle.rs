@@ -1,15 +1,13 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::get_keys_from_private_key_str;
+use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
 use crate::common::env::env_str;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::UpdateAccountHandleInput;
@@ -76,19 +74,12 @@ pub async fn update_account_handle(
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     _auth: AdminToken,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<(), ApiError> {
     match inner_update_account_handle(body, sequencer, server_config, id_resolver).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

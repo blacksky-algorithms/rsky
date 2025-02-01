@@ -1,3 +1,4 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
@@ -23,9 +24,6 @@ use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use aws_config::SdkConfig;
 use futures::stream::{self, StreamExt};
 use reqwest::header::HeaderMap;
-use rocket::http::Status;
-use rocket::response::status;
-use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::app::bsky::feed::{GetPostThreadOutput, ThreadViewPost, ThreadViewPostEnum};
@@ -35,7 +33,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
 
-const METHOD_NSID: &'static str = "app.bsky.feed.getPostThread";
+const METHOD_NSID: &str = "app.bsky.feed.getPostThread";
 
 pub struct ReadAfterWriteNotFoundOutput {
     pub data: GetPostThreadOutput,
@@ -129,25 +127,16 @@ pub async fn get_post_thread(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
-) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, status::Custom<Json<ErrorMessageResponse>>>
-{
+) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, ApiError> {
     let depth = depth.unwrap_or(6);
     let parentHeight = parentHeight.unwrap_or(80);
     if depth > 1000 || parentHeight > 1000 {
-        let bad_request = ErrorMessageResponse {
-            code: Some(ErrorCode::BadRequest),
-            message: Some("invalid depth or parentHeight. Maximum is 1000.".to_string()),
-        };
-        return Err(status::Custom(Status::BadRequest, Json(bad_request)));
+        return Err(ApiError::InvalidRequest(
+            "invalid depth or parentHeight. Maximum is 1000.".to_string(),
+        ));
     }
     match cfg.bsky_app_view {
-        None => {
-            let not_found = ErrorMessageResponse {
-                code: Some(ErrorCode::NotFound),
-                message: Some("not found".to_string()),
-            };
-            return Err(status::Custom(Status::NotFound, Json(not_found)));
-        }
+        None => return Err(ApiError::RuntimeError),
         Some(_) => match inner_get_post_thread(
             uri,
             depth,
@@ -184,16 +173,12 @@ pub async fn get_post_thread(
                                     Some(message) => Some(message.to_string()),
                                 },
                             };
-                            Err(status::Custom(Status::BadRequest, Json(xrpc_error)))
-                        } else {
-                            let internal_error = ErrorMessageResponse {
-                                code: Some(ErrorCode::InternalServerError),
-                                message: Some(err.to_string()),
-                            };
-                            Err(status::Custom(
-                                Status::InternalServerError,
-                                Json(internal_error),
+                            Err(ApiError::BadRequest(
+                                "XRPCError".to_string(),
+                                xrpc_error.message.unwrap_or("Unknown Error".to_string()),
                             ))
+                        } else {
+                            Err(ApiError::RuntimeError)
                         }
                     }
                     _ => {
@@ -202,10 +187,7 @@ pub async fn get_post_thread(
                             code: Some(ErrorCode::InternalServerError),
                             message: Some(err.to_string()),
                         };
-                        Err(status::Custom(
-                            Status::InternalServerError,
-                            Json(internal_error),
-                        ))
+                        Err(ApiError::RuntimeError)
                     }
                 }
             }
