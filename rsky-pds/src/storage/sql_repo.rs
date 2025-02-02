@@ -1,22 +1,23 @@
-use crate::car::read_car_bytes;
-use crate::db::establish_connection;
-use crate::models::RepoBlock;
-use crate::repo::block_map::{BlockMap, BlocksAndMissing};
-use crate::repo::cid_set::CidSet;
-use crate::repo::types::{CommitData, RepoRecord};
-use crate::storage::readable_blockstore::ReadableBlockstore;
-use crate::storage::types::RepoStorage;
-use crate::storage::RepoRootError::RepoRootNotFoundError;
-use crate::storage::{CidAndRev, ObjAndBytes};
-use crate::{common, models};
+use std::str::FromStr;
+
 use anyhow::Result;
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
 use diesel::*;
 use lexicon_cid::Cid;
-use serde_cbor::Value as CborValue;
-use std::str::FromStr;
+
+use crate::car::read_car_bytes;
+use crate::db::establish_connection;
+use crate::models::RepoBlock;
+use crate::repo::block_map::{BlockMap, BlocksAndMissing};
+use crate::repo::cid_set::CidSet;
+use crate::repo::types::CommitData;
+use crate::storage::readable_blockstore::ReadableBlockstore;
+use crate::storage::types::RepoStorage;
+use crate::storage::CidAndRev;
+use crate::storage::RepoRootError::RepoRootNotFoundError;
+use crate::{common, models};
 
 #[derive(Clone, Debug)]
 pub struct SqlRepoReader {
@@ -182,46 +183,6 @@ impl RepoStorage for SqlRepoReader {
         self.put_many(commit.new_blocks, commit.rev)?;
         self.delete_many(commit.removed_cids.to_list())?;
         Ok(())
-    }
-
-    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
-        <Self as ReadableBlockstore>::get_bytes(self, cid)
-    }
-
-    fn has(&mut self, cid: Cid) -> Result<bool> {
-        <Self as ReadableBlockstore>::has(self, cid)
-    }
-
-    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
-        <Self as ReadableBlockstore>::get_blocks(self, cids)
-    }
-
-    fn attempt_read(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool,
-    ) -> Result<Option<ObjAndBytes>> {
-        <Self as ReadableBlockstore>::attempt_read(self, cid, check)
-    }
-
-    fn read_obj_and_bytes(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool,
-    ) -> Result<ObjAndBytes> {
-        <Self as ReadableBlockstore>::read_obj_and_bytes(self, cid, check)
-    }
-
-    fn read_obj(&mut self, cid: &Cid, check: impl Fn(&'_ CborValue) -> bool) -> Result<CborValue> {
-        <Self as ReadableBlockstore>::read_obj(self, cid, check)
-    }
-
-    fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
-        <Self as ReadableBlockstore>::attempt_read_record(self, cid)
-    }
-
-    fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
-        <Self as ReadableBlockstore>::read_record(self, cid)
     }
 }
 

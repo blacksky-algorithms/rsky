@@ -1,11 +1,9 @@
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
-use crate::repo::types::{CommitData, RepoRecord};
+use crate::repo::types::CommitData;
 use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::storage::types::RepoStorage;
-use crate::storage::ObjAndBytes;
 use anyhow::Result;
 use lexicon_cid::Cid;
-use serde_cbor::Value as CborValue;
 use std::str::FromStr;
 
 #[derive(Clone, Debug)]
@@ -81,49 +79,5 @@ impl RepoStorage for MemoryBlockstore {
             self.blocks.set(Cid::from_str(cid)?, bytes.clone());
         }
         Ok(())
-    }
-
-    fn get_bytes(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>> {
-        <Self as ReadableBlockstore>::get_bytes(self, cid)
-    }
-
-    fn has(&mut self, cid: Cid) -> Result<bool> {
-        <Self as ReadableBlockstore>::has(self, cid)
-    }
-
-    fn get_blocks(&mut self, cids: Vec<Cid>) -> Result<BlocksAndMissing> {
-        <Self as ReadableBlockstore>::get_blocks(self, cids)
-    }
-
-    fn attempt_read(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
-    ) -> Result<Option<ObjAndBytes>> {
-        <Self as ReadableBlockstore>::attempt_read(self, cid, check)
-    }
-
-    fn read_obj_and_bytes(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
-    ) -> Result<ObjAndBytes> {
-        <Self as ReadableBlockstore>::read_obj_and_bytes(self, cid, check)
-    }
-
-    fn read_obj(
-        &mut self,
-        cid: &Cid,
-        check: impl Fn(&'_ CborValue) -> bool + Send + Sync,
-    ) -> Result<CborValue> {
-        <Self as ReadableBlockstore>::read_obj(self, cid, check)
-    }
-
-    fn attempt_read_record(&mut self, cid: &Cid) -> Option<RepoRecord> {
-        <Self as ReadableBlockstore>::attempt_read_record(self, cid)
-    }
-
-    fn read_record(&mut self, cid: &Cid) -> Result<RepoRecord> {
-        <Self as ReadableBlockstore>::read_record(self, cid)
     }
 }

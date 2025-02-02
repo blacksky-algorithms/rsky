@@ -58,8 +58,8 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     }
     let did = did.unwrap();
 
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    let commit = match actor_store.create_repo::<B>(signing_key, Vec::new()).await {
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
             eprintln!("{:?}", error);

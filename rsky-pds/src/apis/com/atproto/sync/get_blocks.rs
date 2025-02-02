@@ -37,8 +37,9 @@ async fn inner_get_blocks(
         .map(|c| Cid::from_str(&c).map_err(anyhow::Error::new))
         .collect::<Result<Vec<Cid>>>()?;
 
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    let got = actor_store.storage.get_blocks(cids)?;
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let mut storage_guard = actor_store.storage.write().await;
+    let got = storage_guard.get_blocks(cids)?;
 
     if got.missing.len() > 0 {
         let missing_str = got

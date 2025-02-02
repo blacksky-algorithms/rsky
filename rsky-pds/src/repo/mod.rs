@@ -42,6 +42,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FoundBlobRef {
@@ -81,20 +83,19 @@ pub struct CommitRecord {
     record: RepoRecord,
 }
 
-#[derive(Debug)]
 pub struct Repo {
-    storage: SqlRepoReader, // get ipld blocks from db
-    data: MST<SqlRepoReader>,
+    storage: Arc<RwLock<dyn RepoStorage>>, // get ipld blocks from db
+    data: MST,
     commit: Commit,
     cid: Cid,
 }
 
 pub struct ActorStore {
     pub did: String,
-    pub storage: SqlRepoReader, // get ipld blocks from db
-    pub record: RecordReader,   // get lexicon records from db
-    pub blob: BlobReader,       // get blobs
-    pub pref: PreferenceReader, // get preferences
+    pub storage: Arc<RwLock<SqlRepoReader>>, // get ipld blocks from db
+    pub record: RecordReader,                // get lexicon records from db
+    pub blob: BlobReader,                    // get blobs
+    pub pref: PreferenceReader,              // get preferences
 }
 
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
@@ -102,7 +103,7 @@ impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
     pub fn new(did: String, blobstore: S3BlobStore) -> Self {
         ActorStore {
-            storage: SqlRepoReader::new(did.clone(), None),
+            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None))),
             record: RecordReader::new(did.clone()),
             pref: PreferenceReader::new(did.clone()),
             did,
@@ -113,8 +114,8 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    pub async fn create_repo<B: ReadableBlockstore + Clone + Debug>(
-        &mut self,
+    pub async fn create_repo(
+        &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitData> {
@@ -138,7 +139,8 @@ impl ActorStore {
             Some(write_ops),
         )
         .await?;
-        self.storage.apply_commit(commit.clone(), None)?;
+        let mut storage_guard = self.storage.write().await;
+        storage_guard.apply_commit(commit.clone(), None)?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
@@ -161,7 +163,8 @@ impl ActorStore {
                 .await?;
         }
         // persist the commit to repo storage
-        self.storage.apply_commit(commit.clone(), None)?;
+        let mut storage_guard = self.storage.write().await;
+        storage_guard.apply_commit(commit.clone(), None)?;
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
@@ -172,14 +175,15 @@ impl ActorStore {
         writes: Vec<PreparedWrite>,
         swap_commit: Option<Cid>,
     ) -> Result<CommitData> {
-        let current_root = self.storage.get_root_detailed();
+        let mut storage_guard = self.storage.write().await;
+        let current_root = storage_guard.get_root_detailed();
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
                 if !current_root.cid.eq(&swap_commit) {
                     bail!("BadCommitSwapError: {0}", current_root.cid)
                 }
             }
-            self.storage.cache_rev(current_root.rev).await?;
+            storage_guard.cache_rev(current_root.rev).await?;
             let mut new_record_cids: Vec<Cid> = vec![];
             let mut delete_and_update_uris = vec![];
             for write in &writes {
@@ -232,7 +236,7 @@ impl ActorStore {
                     ),
                 }?;
             }
-            let mut repo = Repo::load(&mut self.storage, Some(current_root.cid)).await?;
+            let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;
             let write_ops: Vec<RecordWriteOp> = writes
                 .into_iter()
                 .map(write_to_op)
@@ -260,10 +264,7 @@ impl ActorStore {
             // (for instance a record that was moved but cid stayed the same)
             let new_record_blocks = commit.new_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
-                let missing_blocks = <SqlRepoReader as ReadableBlockstore>::get_blocks(
-                    &mut self.storage,
-                    new_record_blocks.missing,
-                )?;
+                let missing_blocks = storage_guard.get_blocks(new_record_blocks.missing)?;
                 commit.new_blocks.add_map(missing_blocks.blocks)?;
             }
             Ok(commit)
@@ -368,9 +369,9 @@ impl ActorStore {
 
 impl Repo {
     // static
-    pub fn new(storage: SqlRepoReader, data: MST<SqlRepoReader>, commit: Commit, cid: Cid) -> Self {
+    pub fn new(storage: Arc<RwLock<dyn RepoStorage>>, data: MST, commit: Commit, cid: Cid) -> Self {
         Repo {
-            storage: storage.clone(),
+            storage,
             data,
             commit,
             cid,
@@ -378,19 +379,22 @@ impl Repo {
     }
 
     // static
-    pub async fn load(storage: &mut SqlRepoReader, cid: Option<Cid>) -> Result<Self> {
+    pub async fn load(storage: Arc<RwLock<dyn RepoStorage>>, cid: Option<Cid>) -> Result<Self> {
         let commit_cid = if let Some(cid) = cid {
             Some(cid)
         } else {
-            storage.get_root()
+            let storage_guard = storage.read().await;
+            storage_guard.get_root()
         };
         match commit_cid {
             Some(commit_cid) => {
-                let commit_bytes: Vec<u8> =
-                    match <SqlRepoReader as ReadableBlockstore>::get_bytes(storage, &commit_cid)? {
+                let commit_bytes: Vec<u8> = {
+                    let mut storage_guard = storage.write().await;
+                    match storage_guard.get_bytes(&commit_cid)? {
                         Some(res) => res,
                         None => bail!("Missing blocks for commit cid {commit_cid}"),
-                    };
+                    }
+                };
                 let block = Block::<DefaultParams>::new(commit_cid, commit_bytes.clone())?;
                 let ipld = block.decode::<DagCborCodec, VendorIpld>()?;
                 // Convert Ipld to Commit
@@ -462,7 +466,7 @@ impl Repo {
                     _ => return Err(anyhow!("Invalid Ipld format for Commit")),
                 };
                 let data = MST::load(storage.clone(), commit.data, None)?;
-                Ok(Repo::new(storage.clone(), data, commit, commit_cid))
+                Ok(Repo::new(storage, data, commit, commit_cid))
             }
             None => bail!("No cid provided and none in storage"),
         }
@@ -481,11 +485,14 @@ impl Repo {
         from: Option<String>,
     ) -> impl Iterator<Item = CommitRecord> {
         let mut iter: Vec<CommitRecord> = Vec::new();
-        for leaf in self.data.walk_leaves_from(&from.unwrap_or("".to_owned())) {
+        for leaf in self
+            .data
+            .walk_leaves_from(&from.unwrap_or("".to_owned()))
+            .await
+        {
             let path = util::parse_data_key(&leaf.key).unwrap();
-            let record =
-                <SqlRepoReader as ReadableBlockstore>::read_record(&mut self.storage, &leaf.value)
-                    .unwrap();
+            let mut storage_guard = self.storage.write().await;
+            let record = storage_guard.read_record(&leaf.value).unwrap();
             iter.push(CommitRecord {
                 collection: path.collection,
                 rkey: path.rkey,
@@ -502,25 +509,25 @@ impl Repo {
         rkey: String,
     ) -> Result<Option<CborValue>> {
         let data_key = format!("{}/{}", collection, rkey);
-        let cid = self.data.get(&data_key)?;
+        let cid = self.data.get(&data_key).await?;
+        let mut storage_guard = self.storage.write().await;
         match cid {
             None => Ok(None),
-            Some(cid) => Ok(Some(<SqlRepoReader as ReadableBlockstore>::read_obj(
-                &mut self.storage,
-                &cid,
-                |obj| matches!(obj, CborValue::Map(_)),
-            )?)),
+            Some(cid) => Ok(Some(
+                storage_guard.read_obj(&cid, Box::new(|obj| matches!(obj, CborValue::Map(_))))?,
+            )),
         }
     }
 
     pub async fn get_content(&mut self) -> Result<RepoContents> {
-        let entries = self.data.list(None, None, None)?;
+        let entries = self.data.list(None, None, None).await?;
         let cids = entries
             .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let found = <SqlRepoReader as ReadableBlockstore>::get_blocks(&mut self.storage, cids)?;
+        let mut storage_guard = self.storage.write().await;
+        let found = storage_guard.get_blocks(cids)?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -543,19 +550,19 @@ impl Repo {
 
     // static
     pub async fn format_init_commit(
-        storage: SqlRepoReader,
+        storage: Arc<RwLock<dyn RepoStorage>>,
         did: String,
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<CommitData> {
         let mut new_blocks = BlockMap::new();
-        let mut data = MST::create(storage, None, None)?;
+        let mut data = MST::create(storage, None, None).await?;
         for record in initial_writes.unwrap_or(Vec::new()) {
             let cid = new_blocks.add(record.record)?;
             let data_key = util::format_data_key(record.collection, record.rkey);
-            data = data.add(&data_key, cid, None)?;
+            data = data.add(&data_key, cid, None).await?;
         }
-        let data_cid: Cid = data.get_pointer()?;
+        let data_cid: Cid = data.get_pointer().await?;
         let diff = DataDiff::of(&mut data, None).await?;
         new_blocks.add_map(diff.new_mst_blocks)?;
         let rev = Ticker::new().next(None);
@@ -582,23 +589,26 @@ impl Repo {
 
     // static
     pub async fn create_from_commit(
-        storage: &mut SqlRepoReader,
+        storage: Arc<RwLock<dyn RepoStorage>>,
         commit: CommitData,
     ) -> Result<Self> {
-        storage.apply_commit(commit.clone(), None)?;
+        {
+            let mut storage_guard = storage.write().await;
+            storage_guard.apply_commit(commit.clone(), None)?;
+        }
         Repo::load(storage, Some(commit.cid)).await
     }
 
     // static
     pub async fn create(
-        mut storage: SqlRepoReader,
+        storage: Arc<RwLock<dyn RepoStorage>>,
         did: String,
         keypair: Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
         let commit =
             Self::format_init_commit(storage.clone(), did, keypair, initial_writes).await?;
-        Repo::create_from_commit(&mut storage, commit).await
+        Self::create_from_commit(storage, commit).await
     }
 
     pub async fn format_commit(
@@ -612,27 +622,27 @@ impl Repo {
         };
         let mut leaves = BlockMap::new();
 
-        let mut data = self.data.clone();
+        let mut data = self.data.clone(); // @TODO: Confirm if this should be clone
         for write in writes {
             match write {
                 RecordWriteOp::Create(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.add(&data_key, cid, None)?;
+                    data = data.add(&data_key, cid, None).await?;
                 }
                 RecordWriteOp::Update(write) => {
                     let cid = leaves.add(write.record)?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.update(&data_key, cid)?;
+                    data = data.update(&data_key, cid).await?;
                 }
                 RecordWriteOp::Delete(write) => {
                     let data_key = util::format_data_key(write.collection, write.rkey);
-                    data = data.delete(&data_key)?;
+                    data = data.delete(&data_key).await?;
                 }
             }
         }
 
-        let data_cid = data.get_pointer()?;
+        let data_cid = data.get_pointer().await?;
         let diff = DataDiff::of(&mut data, Some(&mut self.data.clone())).await?;
 
         let mut new_blocks = diff.new_mst_blocks;
@@ -675,10 +685,13 @@ impl Repo {
         })
     }
 
-    pub async fn apply_commit(&mut self, commit_data: CommitData) -> Result<Self> {
+    pub async fn apply_commit(&self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
-        self.storage.apply_commit(commit_data, None)?;
-        Repo::load(&mut self.storage, Some(commit_data_cid)).await
+        {
+            let mut storage_guard = self.storage.write().await;
+            storage_guard.apply_commit(commit_data, None)?;
+        }
+        Repo::load(self.storage.clone(), Some(commit_data_cid)).await
     }
 
     pub async fn apply_writes(

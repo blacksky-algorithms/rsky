@@ -23,9 +23,15 @@ async fn inner_check_account_status(
         requester.clone(),
         S3BlobStore::new(requester.clone(), s3_config),
     );
-    let repo_root = actor_store.storage.get_root_detailed()?;
-    let (repo_blocks, indexed_records, imported_blobs, expected_blobs) = try_join!(
-        actor_store.storage.count_blocks(),
+    let repo_root = {
+        let storage_guard = actor_store.storage.read().await;
+        storage_guard.get_root_detailed()?
+    };
+    let repo_blocks = {
+        let storage_guard = actor_store.storage.read().await;
+        storage_guard.count_blocks().await?
+    };
+    let (indexed_records, imported_blobs, expected_blobs) = try_join!(
         actor_store.record.record_count(),
         actor_store.blob.blob_count(),
         actor_store.blob.record_blob_count(),

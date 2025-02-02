@@ -1,25 +1,22 @@
 use crate::repo::data_diff::DataDiff;
 use crate::repo::mst::walker::{MstWalker, WalkerStatus};
 use crate::repo::mst::{NodeEntry, MST};
-use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::{bail, Result};
-use std::fmt::Debug;
+use futures::StreamExt;
 
-pub async fn null_diff<B: ReadableBlockstore + Clone + Debug>(tree: MST<B>) -> Result<DataDiff> {
+pub async fn null_diff(tree: MST) -> Result<DataDiff> {
     let mut diff = DataDiff::new();
-    for entry in tree.walk() {
+    let mut stream = Box::pin(tree.walk());
+    while let Some(entry) = stream.next().await {
         diff.node_add(entry.clone()).await?;
     }
     Ok(diff)
 }
 
-pub async fn mst_diff<B: ReadableBlockstore + Clone + Debug>(
-    curr: &mut MST<B>,
-    prev: Option<&mut MST<B>>,
-) -> Result<DataDiff> {
-    curr.get_pointer()?;
+pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
+    curr.get_pointer().await?;
     return if let Some(prev) = prev {
-        prev.get_pointer()?;
+        prev.get_pointer().await?;
         let mut diff = DataDiff::new();
 
         let mut left_walker = MstWalker::new(prev.clone());
@@ -104,9 +101,13 @@ pub async fn mst_diff<B: ReadableBlockstore + Clone + Debug>(
                     if let (NodeEntry::MST(left_tree), NodeEntry::MST(right_tree)) =
                         (&mut left, &mut right)
                     {
-                        if left_tree.get_pointer()?.eq(&right_tree.get_pointer()?) {
-                            left_walker.step_over()?;
-                            right_walker.step_over()?;
+                        if left_tree
+                            .get_pointer()
+                            .await?
+                            .eq(&right_tree.get_pointer().await?)
+                        {
+                            left_walker.step_over().await?;
+                            right_walker.step_over().await?;
                         } else {
                             diff.node_add(right).await?;
                             diff.node_delete(left).await?;

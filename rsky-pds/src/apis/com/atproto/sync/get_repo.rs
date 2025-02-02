@@ -21,7 +21,8 @@ async fn get_car_stream(
     since: Option<String>,
 ) -> Result<Vec<u8>> {
     let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    match actor_store.storage.get_car_stream(since).await {
+    let storage_guard = actor_store.storage.read().await;
+    match storage_guard.get_car_stream(since).await {
         Err(_) => bail!("Could not find repo for DID: {did}"),
         Ok(carstream) => Ok(carstream),
     }

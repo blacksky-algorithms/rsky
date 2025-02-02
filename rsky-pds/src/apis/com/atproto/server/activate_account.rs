@@ -37,12 +37,13 @@ async fn inner_activate_account(
     if let Some(account) = account {
         AccountManager::activate_account(&requester).await?;
 
-        let mut actor_store = ActorStore::new(
+        let actor_store = ActorStore::new(
             requester.clone(),
             S3BlobStore::new(requester.clone(), s3_config),
         );
-        let root = actor_store.storage.get_root_detailed()?;
-        let blocks = actor_store.storage.get_blocks(vec![root.cid])?;
+        let mut storage_guard = actor_store.storage.write().await;
+        let root = storage_guard.get_root_detailed()?;
+        let blocks = storage_guard.get_blocks(vec![root.cid])?;
         let commit_data = CommitData {
             cid: root.cid,
             rev: root.rev,

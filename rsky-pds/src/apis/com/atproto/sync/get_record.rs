@@ -33,17 +33,18 @@ async fn inner_get_record(
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin).await?;
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let storage_guard = actor_store.storage.read().await;
     let commit: Option<Cid> = match commit {
         Some(commit) => Some(Cid::from_str(&commit)?),
-        None => actor_store.storage.get_root(),
+        None => storage_guard.get_root(),
     };
 
     match commit {
         None => bail!("Could not find repo for DID: {did}"),
         Some(commit) => {
             repo::sync::provider::get_records(
-                &mut actor_store.storage,
+                actor_store.storage.clone(),
                 commit,
                 vec![RecordPath { collection, rkey }],
             )

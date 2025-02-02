@@ -1,33 +1,33 @@
 use crate::repo::mst::{NodeEntry, MST};
-use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::{bail, Result};
+use async_recursion::async_recursion;
 use std::fmt::Debug;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct WalkerStatusDone(bool);
 
 #[derive(Clone, Debug)]
-pub struct WalkerStatusProgress<B: ReadableBlockstore + Clone + Debug> {
+pub struct WalkerStatusProgress {
     pub done: bool,
-    pub curr: NodeEntry<B>,
-    pub walking: Option<MST<B>>, // walking set to null if `curr` is the root of the tree
+    pub curr: NodeEntry,
+    pub walking: Option<MST>, // walking set to null if `curr` is the root of the tree
     pub index: usize,
 }
 
 #[derive(Clone, Debug)]
-pub enum WalkerStatus<B: ReadableBlockstore + Clone + Debug> {
+pub enum WalkerStatus {
     WalkerStatusDone(WalkerStatusDone),
-    WalkerStatusProgress(WalkerStatusProgress<B>),
+    WalkerStatusProgress(WalkerStatusProgress),
 }
 
 #[derive(Clone, Debug)]
-pub struct MstWalker<B: ReadableBlockstore + Clone + Debug> {
-    pub stack: Vec<WalkerStatus<B>>,
-    pub status: WalkerStatus<B>,
+pub struct MstWalker {
+    pub stack: Vec<WalkerStatus>,
+    pub status: WalkerStatus,
 }
 
-impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
-    pub fn new(root: MST<B>) -> Self {
+impl MstWalker {
+    pub fn new(root: MST) -> Self {
         MstWalker {
             stack: Vec::new(),
             status: WalkerStatus::WalkerStatusProgress(WalkerStatusProgress {
@@ -58,12 +58,13 @@ impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
     }
 
     /// move to the next node in the subtree, skipping over the subtree
-    pub fn step_over(&mut self) -> Result<()> {
+    #[async_recursion(Sync)]
+    pub async fn step_over(&mut self) -> Result<()> {
         match self.status {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
                 if let Some(ref mut mst) = p.walking {
-                    let entries = mst.get_entries()?;
+                    let entries = mst.get_entries().await?;
                     p.index += 1;
                     let next = entries.into_iter().nth(p.index);
                     if let Some(next) = next {
@@ -72,7 +73,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
                         let popped = self.stack.pop();
                         if let Some(popped) = popped {
                             self.status = popped;
-                            self.step_over()?;
+                            self.step_over().await?;
                         } else {
                             self.status = WalkerStatus::WalkerStatusDone(WalkerStatusDone(true));
                         }
@@ -94,7 +95,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
                 if let Some(_) = p.walking {
                     if let NodeEntry::MST(ref mut curr) = p.curr {
-                        let next = curr.at_index(0)?;
+                        let next = curr.at_index(0).await?;
                         if let Some(next) = next {
                             self.stack.push(clone_of_current_status);
                             p.walking = Some(curr.clone()); // Changes walking to be parent tree
@@ -108,7 +109,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
                     }
                 } else {
                     if let NodeEntry::MST(ref mut mst) = p.curr {
-                        let next = mst.at_index(0)?;
+                        let next = mst.at_index(0).await?;
                         if let Some(next) = next {
                             self.status =
                                 WalkerStatus::WalkerStatusProgress(WalkerStatusProgress {
@@ -136,7 +137,7 @@ impl<B: ReadableBlockstore + Clone + Debug> MstWalker<B> {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
                 if let NodeEntry::Leaf(_) = p.curr {
-                    self.step_over()?;
+                    self.step_over().await?;
                 } else {
                     self.step_into().await?;
                 }
