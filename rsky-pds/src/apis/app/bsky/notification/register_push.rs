@@ -119,7 +119,7 @@ pub async fn register_push(
             match inner_register_push(body, auth, cfg, bsky_app_view.url.clone(), id_resolver).await
             {
                 Ok(_) => Ok(()),
-                Err(error) => {
+                Err(_) => {
                     return Err(ApiError::RuntimeError);
                 }
             }

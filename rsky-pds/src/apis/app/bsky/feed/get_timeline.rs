@@ -75,7 +75,7 @@ pub async fn get_timeline(
         .await
         {
             Ok(response) => Ok(response),
-            Err(error) => {
+            Err(_) => {
                 return Err(ApiError::RuntimeError);
             }
         },

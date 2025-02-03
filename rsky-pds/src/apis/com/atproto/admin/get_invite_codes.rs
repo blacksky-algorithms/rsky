@@ -5,7 +5,6 @@ use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
 use crate::models;
-use crate::models::InviteCode;
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;

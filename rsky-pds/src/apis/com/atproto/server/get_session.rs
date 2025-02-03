@@ -1,7 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetSessionOutput;
 use rsky_syntax::handle::INVALID_HANDLE;
@@ -17,12 +16,6 @@ pub async fn get_session(auth: AccessStandard) -> Result<Json<GetSessionOutput>,
             did_doc: None,
             email_confirmed: Some(user.email_confirmed_at.is_some()),
         })),
-        _ => {
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(format!("Could not find user info for account: `{did:?}`")),
-            };
-            Err(ApiError::RuntimeError)
-        }
+        _ => Err(ApiError::AccountNotFound),
     }
 }

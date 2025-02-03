@@ -168,6 +168,7 @@ impl RepoStorage for SqlRepoReader {
                 .execute(conn)?;
         } else {
             update(RepoRootSchema::repo_root)
+                .filter(RepoRootSchema::did.eq(&self.did))
                 .set((
                     RepoRootSchema::cid.eq(cid.to_string()),
                     RepoRootSchema::rev.eq(rev),
