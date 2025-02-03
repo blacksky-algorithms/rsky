@@ -13,20 +13,23 @@ use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use rsky_syntax::aturi::AtUri;
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CommitEvtOpAction {
     Create,
     Update,
     Delete,
 }
 
-impl CommitEvtOpAction {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for CommitEvtOpAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Match each variant and write its lowercase representation.
         match self {
-            CommitEvtOpAction::Create => "create".to_string(),
-            CommitEvtOpAction::Update => "update".to_string(),
-            CommitEvtOpAction::Delete => "delete".to_string(),
+            CommitEvtOpAction::Create => write!(f, "create"),
+            CommitEvtOpAction::Update => write!(f, "update"),
+            CommitEvtOpAction::Delete => write!(f, "delete"),
         }
     }
 }
@@ -41,12 +44,14 @@ pub struct CommitEvtOp {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CommitEvt {
     pub rebase: bool,
+    #[serde(rename = "tooBig")]
     pub too_big: bool,
     pub repo: String,
     pub commit: Cid,
     pub prev: Option<Cid>,
     pub rev: String,
     pub since: Option<String>,
+    #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
     pub ops: Vec<CommitEvtOp>,
     pub blobs: Vec<Cid>,

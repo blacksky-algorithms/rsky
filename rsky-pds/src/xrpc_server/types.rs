@@ -6,6 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HandlerPipeThrough {
     pub encoding: String,
+    #[serde(with = "serde_bytes")]
     pub buffer: Vec<u8>,
     pub headers: Option<BTreeMap<String, String>>,
 }
@@ -13,6 +14,7 @@ pub struct HandlerPipeThrough {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HandlerPipeThroughProcedure<T: serde::Serialize> {
     pub encoding: String,
+    #[serde(with = "serde_bytes")]
     pub buffer: Vec<u8>,
     pub headers: Option<BTreeMap<String, String>>,
     pub body: Option<T>,

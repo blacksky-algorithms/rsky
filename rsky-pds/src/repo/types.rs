@@ -29,6 +29,7 @@ pub struct Commit {
     pub data: Cid,
     pub prev: Option<Cid>,
     pub version: u8, // Should be 3
+    #[serde(with = "serde_bytes")]
     pub sig: Vec<u8>,
 }
 
@@ -40,6 +41,7 @@ pub struct LegacyV2Commit {
     pub data: Cid,
     pub prev: Option<Cid>,
     pub version: u8, // Should be 2
+    #[serde(with = "serde_bytes")]
     pub sig: Vec<u8>,
 }
 

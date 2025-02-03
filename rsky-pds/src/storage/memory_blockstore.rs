@@ -76,7 +76,7 @@ impl RepoStorage for MemoryBlockstore {
             self.blocks.delete(cid)?;
         }
         for (cid, bytes) in commit.new_blocks.map.iter() {
-            self.blocks.set(Cid::from_str(cid)?, bytes.clone());
+            self.blocks.set(Cid::from_str(cid)?, bytes.0.clone());
         }
         Ok(())
     }

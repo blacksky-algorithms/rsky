@@ -423,6 +423,7 @@ pub struct RepoSeq {
     #[diesel(column_name = eventType)]
     #[serde(rename = "eventType")]
     pub event_type: String,
+    #[diesel(sql_type = Bytea)]
     pub event: Vec<u8>,
     #[diesel(deserialize_as = i16)]
     pub invalidated: Option<i16>,

@@ -2,7 +2,7 @@
 // also adds components from https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/repo/transactor.ts
 
 use crate::common;
-use crate::common::ipld::data_to_cbor_block;
+use crate::common::ipld::cid_for_cbor;
 use crate::common::tid::{Ticker, TID};
 use crate::db::establish_connection;
 use crate::lexicon::LEXICONS;
@@ -786,10 +786,11 @@ pub fn set_collection_name(
 }
 
 pub async fn cid_for_safe_record(record: RepoRecord) -> Result<Cid> {
-    let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;
+    let lex = lex_to_ipld(Lex::Map(record));
+    let block = serde_ipld_dagcbor::to_vec(&lex)?;
     // Confirm whether Block properly transforms between lex and cbor
-    let _ = cbor_to_lex(block.data().to_vec())?;
-    Ok(*block.cid())
+    let _ = cbor_to_lex(block)?;
+    cid_for_cbor(&lex)
 }
 
 pub async fn prepare_create(opts: PrepareCreateOpts) -> Result<PreparedCreateOrUpdate> {

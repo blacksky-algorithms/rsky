@@ -7,9 +7,16 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+// Thinly wraps a Vec<u8>
+// The #[serde(transparent)] attribute ensures that during (de)serialization
+// this newtype is treated the same as the underlying Vec<u8>.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Bytes(#[serde(with = "serde_bytes")] pub Vec<u8>);
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BlockMap {
-    pub map: BTreeMap<String, Vec<u8>>,
+    pub map: BTreeMap<String, Bytes>,
 }
 
 impl BlockMap {
@@ -29,12 +36,12 @@ impl BlockMap {
     }
 
     pub fn set(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
-        self.map.insert(cid.to_string(), bytes);
+        self.map.insert(cid.to_string(), Bytes(bytes));
         ()
     }
 
     pub fn get(&self, cid: Cid) -> Option<&Vec<u8>> {
-        self.map.get(&cid.to_string())
+        self.map.get(&cid.to_string()).map(|bytes| &bytes.0)
     }
     pub fn delete(&mut self, cid: Cid) -> Result<()> {
         self.map.remove(&cid.to_string());
@@ -45,7 +52,7 @@ impl BlockMap {
         let mut missing: Vec<Cid> = Vec::new();
         let mut blocks = BlockMap::new();
         for cid in cids {
-            let got = self.map.get(&cid.to_string());
+            let got = self.map.get(&cid.to_string()).map(|bytes| &bytes.0);
             if let Some(bytes) = got {
                 blocks.set(cid, bytes.clone());
             } else {
@@ -66,7 +73,7 @@ impl BlockMap {
     // Not really using. Issues with closures
     pub fn for_each(&self, cb: impl Fn(&Vec<u8>, Cid) -> ()) -> Result<()> {
         for (key, val) in self.map.iter() {
-            cb(val, Cid::from_str(&key)?);
+            cb(&val.0, Cid::from_str(&key)?);
         }
         Ok(())
     }
@@ -76,7 +83,7 @@ impl BlockMap {
         for (cid, bytes) in self.map.iter() {
             entries.push(CidAndBytes {
                 cid: Cid::from_str(cid)?,
-                bytes: bytes.clone(),
+                bytes: bytes.0.clone(),
             });
         }
         Ok(entries)
@@ -88,7 +95,7 @@ impl BlockMap {
 
     pub fn add_map(&mut self, to_add: BlockMap) -> Result<()> {
         let results = for (cid, bytes) in to_add.map.iter() {
-            self.set(Cid::from_str(cid)?, bytes.clone());
+            self.set(Cid::from_str(cid)?, bytes.0.clone());
         };
         Ok(results)
     }
@@ -100,7 +107,7 @@ impl BlockMap {
     pub fn byte_size(&self) -> Result<usize> {
         let mut size = 0;
         for (_, bytes) in self.map.iter() {
-            size += bytes.len();
+            size += bytes.0.len();
         }
         Ok(size)
     }

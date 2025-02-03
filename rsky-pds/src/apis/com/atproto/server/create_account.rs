@@ -178,7 +178,7 @@ pub async fn server_create_account(
             .await
         {
             Ok(res) => res,
-            Err(e) => return Err(e),
+            Err(e) => return Err(e), // @TODO this needs better error logging
         };
 
     match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver)

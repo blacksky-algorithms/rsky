@@ -136,8 +136,8 @@ impl RepoStorage for SqlRepoReader {
                 cid: cid.to_string(),
                 did: self.did.clone(),
                 repo_rev: rev.clone(),
-                size: bytes.len() as i32,
-                content: bytes.clone(),
+                size: bytes.0.len() as i32,
+                content: bytes.0.clone(),
             });
         }
         let _ = blocks

@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GetFeedPipeThrough {
     pub encoding: String,
+    #[serde(with = "serde_bytes")]
     pub buffer: Vec<u8>,
     pub headers: Option<BTreeMap<String, String>>,
 }

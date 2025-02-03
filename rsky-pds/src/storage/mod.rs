@@ -15,14 +15,15 @@ use thiserror::Error;
 pub enum Ipld {
     /// Represents a Cid.
     Link(Cid),
-    /// Represents a sequence of bytes.
-    Bytes(Vec<u8>),
     /// Represents a list.
     List(Vec<Ipld>),
     /// Represents a map of strings to objects.
     Map(BTreeMap<String, Ipld>),
     /// String
     String(String),
+    /// Represents a sequence of bytes.
+    #[serde(with = "serde_bytes")]
+    Bytes(Vec<u8>),
     /// Represents a Json Value
     Json(JsonValue),
 }
@@ -56,6 +57,7 @@ impl Encode<DagCborCodec> for Ipld {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ObjAndBytes {
     pub obj: CborValue,
+    #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
 }
 
