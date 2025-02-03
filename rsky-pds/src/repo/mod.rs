@@ -25,14 +25,11 @@ use crate::repo::util::{cbor_to_lex, lex_to_ipld};
 use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::storage::types::RepoStorage;
 use crate::storage::{sql_repo::SqlRepoReader, Ipld};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use lazy_static::lazy_static;
 use lexicon_cid::Cid;
-use libipld::cbor::DagCborCodec;
-use libipld::Ipld as VendorIpld;
-use libipld::{Block, DefaultParams};
 use rsky_syntax::aturi::AtUri;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::Serialize;
@@ -175,15 +172,20 @@ impl ActorStore {
         writes: Vec<PreparedWrite>,
         swap_commit: Option<Cid>,
     ) -> Result<CommitData> {
-        let mut storage_guard = self.storage.write().await;
-        let current_root = storage_guard.get_root_detailed();
+        let current_root = {
+            let storage_guard = self.storage.read().await;
+            storage_guard.get_root_detailed()
+        };
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
                 if !current_root.cid.eq(&swap_commit) {
                     bail!("BadCommitSwapError: {0}", current_root.cid)
                 }
             }
-            storage_guard.cache_rev(current_root.rev).await?;
+            {
+                let mut storage_guard = self.storage.write().await;
+                storage_guard.cache_rev(current_root.rev).await?;
+            }
             let mut new_record_cids: Vec<Cid> = vec![];
             let mut delete_and_update_uris = vec![];
             for write in &writes {
@@ -264,7 +266,10 @@ impl ActorStore {
             // (for instance a record that was moved but cid stayed the same)
             let new_record_blocks = commit.new_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
-                let missing_blocks = storage_guard.get_blocks(new_record_blocks.missing)?;
+                let missing_blocks = {
+                    let mut storage_guard = self.storage.write().await;
+                    storage_guard.get_blocks(new_record_blocks.missing)?
+                };
                 commit.new_blocks.add_map(missing_blocks.blocks)?;
             }
             Ok(commit)
@@ -395,76 +400,7 @@ impl Repo {
                         None => bail!("Missing blocks for commit cid {commit_cid}"),
                     }
                 };
-                let block = Block::<DefaultParams>::new(commit_cid, commit_bytes.clone())?;
-                let ipld = block.decode::<DagCborCodec, VendorIpld>()?;
-                // Convert Ipld to Commit
-                let commit: Commit = match ipld {
-                    VendorIpld::Map(m) => Commit {
-                        did: m
-                            .get("did")
-                            .and_then(|v| {
-                                if let VendorIpld::String(s) = v {
-                                    Some(s)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| anyhow!("Missing or invalid 'did'"))?
-                            .clone(),
-                        rev: m
-                            .get("rev")
-                            .and_then(|v| {
-                                if let VendorIpld::String(s) = v {
-                                    Some(s)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| anyhow!("Missing or invalid 'rev'"))?
-                            .clone(),
-                        data: m
-                            .get("data")
-                            .and_then(|v| {
-                                if let VendorIpld::Link(cid) = v {
-                                    Some(cid)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| anyhow!("Missing or invalid 'data'"))?
-                            .clone(),
-                        prev: m.get("prev").and_then(|v| {
-                            if let VendorIpld::Link(cid) = v {
-                                Some(cid.clone())
-                            } else {
-                                None
-                            }
-                        }),
-                        version: m
-                            .get("version")
-                            .and_then(|v| {
-                                if let VendorIpld::Integer(i) = v {
-                                    Some(*i)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| anyhow!("Missing or invalid 'version'"))?
-                            as u8,
-                        sig: m
-                            .get("sig")
-                            .and_then(|v| {
-                                if let VendorIpld::Bytes(b) = v {
-                                    Some(b)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| anyhow!("Missing or invalid 'sig'"))?
-                            .clone(),
-                    },
-                    _ => return Err(anyhow!("Invalid Ipld format for Commit")),
-                };
+                let commit: Commit = serde_ipld_dagcbor::from_slice(commit_bytes.as_slice())?;
                 let data = MST::load(storage.clone(), commit.data, None)?;
                 Ok(Repo::new(storage, data, commit, commit_cid))
             }

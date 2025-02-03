@@ -20,9 +20,6 @@ impl BlockMap {
     }
 
     pub fn add<T: Serialize>(&mut self, value: T) -> Result<Cid> {
-        /*let json = serde_json::to_value(&value)?;
-        let record: RepoRecord = serde_json::from_value(json)?;
-        let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;*/
         let cid = ipld::cid_for_cbor(&value)?;
         self.set(
             cid,

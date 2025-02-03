@@ -755,7 +755,6 @@ impl MST {
             });
         }
         let entries = self.get_entries().await?;
-        // @NOTE: I think something's going wrong somewhere here for the calculations
         let data: NodeData = util::serialize_node_data(entries.as_slice()).await?;
         let _ = blocks.add(data)?;
         for entry in entries.iter() {
