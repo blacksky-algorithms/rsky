@@ -246,11 +246,15 @@ pub struct TreeEntry {
 
 impl Debug for TreeEntry {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let t_string = match &self.t {
+            None => None,
+            Some(cid) => Some(cid.to_string()),
+        };
         f.debug_struct("TreeEntry")
             .field("p", &self.p)
             .field("k", &self.k)
             .field("v", &self.v.to_string())
-            .field("t", &self.t)
+            .field("t", &t_string)
             .finish()
     }
 }
@@ -265,8 +269,12 @@ pub struct NodeData {
 
 impl Debug for NodeData {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TreeEntry")
-            .field("l", &self.l)
+        let cid = match &self.l {
+            None => None,
+            Some(cid) => Some(cid.to_string()),
+        };
+        f.debug_struct("NodeData")
+            .field("l", &cid)
             .field("e", &self.e)
             .finish()
     }
@@ -747,7 +755,8 @@ impl MST {
             });
         }
         let entries = self.get_entries().await?;
-        let data = util::serialize_node_data(entries.as_slice()).await?;
+        // @NOTE: I think something's going wrong somewhere here for the calculations
+        let data: NodeData = util::serialize_node_data(entries.as_slice()).await?;
         let _ = blocks.add(data)?;
         for entry in entries.iter() {
             if let NodeEntry::MST(e) = entry {
@@ -1710,11 +1719,10 @@ mod tests {
         Ok(())
     }
 
-    // @TODO: Increase record sizes
     #[tokio::test(flavor = "multi_thread")]
     async fn diffs() -> Result<()> {
         let mut storage = MemoryBlockstore::default();
-        let mapping = generate_bulk_data_keys(4, Some(&mut storage)).await?;
+        let mapping = generate_bulk_data_keys(100, Some(&mut storage)).await?;
         let mut mst = MST::create(Arc::new(RwLock::new(storage)), None, None).await?;
         let entries = mapping
             .iter()
@@ -1730,15 +1738,15 @@ mod tests {
 
         let to_add = {
             let mut mst_storage = mst.storage.write().await;
-            generate_bulk_data_keys(2, Some(&mut *mst_storage))
+            generate_bulk_data_keys(50, Some(&mut *mst_storage))
                 .await?
                 .into_iter()
                 .map(|e| (e.0, e.1))
                 .collect::<Vec<(String, Cid)>>()
         };
 
-        let to_edit = entries[2..3].to_vec();
-        let to_del = entries[3..4].to_vec();
+        let to_edit = entries[10..20].to_vec();
+        let to_del = entries[20..30].to_vec();
 
         let mut expected_adds: HashMap<String, DataAdd> = HashMap::new();
         let mut expected_updates: HashMap<String, DataUpdate> = HashMap::new();
@@ -1781,9 +1789,9 @@ mod tests {
         }
         println!("@TESTS: mst - \n{}", mst);
         let diff = DataDiff::of(&mut to_diff, Some(&mut mst)).await?;
-        assert_eq!(diff.add_list().len(), 2);
-        assert_eq!(diff.update_list().len(), 1);
-        assert_eq!(diff.delete_list().len(), 1);
+        assert_eq!(diff.add_list().len(), 50);
+        assert_eq!(diff.update_list().len(), 10);
+        assert_eq!(diff.delete_list().len(), 10);
 
         assert_eq!(diff.adds, expected_adds);
         assert_eq!(diff.updates, expected_updates);

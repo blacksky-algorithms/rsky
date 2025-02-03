@@ -74,7 +74,8 @@ pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
     let mut i = 0;
     if let Some(NodeEntry::MST(e)) = entries.get(0) {
         i += 1;
-        data.l = Some(e.get_pointer().await?);
+        let cid_guard = e.pointer.read().await;
+        data.l = Some(*cid_guard);
     }
     let mut last_key = "";
     while i < entries.len() {
@@ -85,7 +86,8 @@ pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
             let mut subtree: Option<Cid> = None;
             match next {
                 Some(NodeEntry::MST(tree)) => {
-                    subtree = Some(tree.get_pointer().await?);
+                    let cid_guard = tree.pointer.read().await;
+                    subtree = Some(*cid_guard);
                     i += 1;
                 }
                 _ => (),
@@ -231,6 +233,11 @@ pub fn random_str(len: usize) -> String {
 pub fn short_cid(cid: &Cid) -> String {
     let cid_string = cid.to_string();
     let len = cid_string.len();
-    let start = if len > 8 { len - 8 } else { 0 };
-    cid_string[start..].to_string()
+    if len > 15 {
+        let first = &cid_string[0..7];
+        let last = &cid_string[len - 8..];
+        format!("{}...{}", first, last)
+    } else {
+        cid_string
+    }
 }

@@ -1,6 +1,6 @@
-use crate::common::ipld::data_to_cbor_block;
-use crate::repo::types::{CidAndBytes, Lex, RepoRecord};
-use crate::repo::util::lex_to_ipld;
+use crate::common;
+use crate::common::ipld;
+use crate::repo::types::CidAndBytes;
 use anyhow::Result;
 use lexicon_cid::Cid;
 use serde::Serialize;
@@ -20,14 +20,15 @@ impl BlockMap {
     }
 
     pub fn add<T: Serialize>(&mut self, value: T) -> Result<Cid> {
-        let json = serde_json::to_value(&value)?;
+        /*let json = serde_json::to_value(&value)?;
         let record: RepoRecord = serde_json::from_value(json)?;
-        let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;
+        let block = data_to_cbor_block(&lex_to_ipld(Lex::Map(record)))?;*/
+        let cid = ipld::cid_for_cbor(&value)?;
         self.set(
-            *block.cid(),
-            block.data().to_vec(), //bytes
+            cid,
+            common::struct_to_cbor(value)?, //bytes
         );
-        Ok(*block.cid())
+        Ok(cid)
     }
 
     pub fn set(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
