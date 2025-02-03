@@ -15,6 +15,10 @@
       <sourceFolder url="file://$MODULE_DIR$/rsky-mst/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-identity/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-crypto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-syntax/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-common/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-labeler/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-jetstream-subscriber/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/venv" />
     </content>
