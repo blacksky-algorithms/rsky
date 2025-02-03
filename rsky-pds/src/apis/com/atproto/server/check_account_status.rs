@@ -1,14 +1,12 @@
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::is_valid_did_doc_for_service;
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use futures::try_join;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::CheckAccountStatusOutput;
@@ -59,19 +57,12 @@ async fn inner_check_account_status(
 pub async fn check_account_status(
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<CheckAccountStatusOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<CheckAccountStatusOutput>, ApiError> {
     match inner_check_account_status(auth, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("Internal Error: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some("Internal error".to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

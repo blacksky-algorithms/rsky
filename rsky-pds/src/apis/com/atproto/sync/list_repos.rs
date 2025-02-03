@@ -1,17 +1,15 @@
 use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, ActorAccount, FormattedAccountStatus,
 };
+use crate::apis::ApiError;
 use crate::common::time::{from_millis_to_utc, from_str_to_millis};
 use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
 use diesel::QueryDsl;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::sync::{ListReposOutput, RefRepo as LexiconRepo, RepoStatus};
 
@@ -269,19 +267,12 @@ async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<
 pub async fn list_repos(
     limit: Option<i64>,
     cursor: Option<String>,
-) -> Result<Json<ListReposOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<ListReposOutput>, ApiError> {
     match inner_list_repos(limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

@@ -1,12 +1,10 @@
 use crate::account_manager::AccountManager;
-use crate::models::{ErrorCode, ErrorMessageResponse};
+use crate::apis::ApiError;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
@@ -71,16 +69,12 @@ pub async fn get_record(
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
     req: ProxyRequest<'_>,
-) -> Result<Json<GetRecordOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<GetRecordOutput>, ApiError> {
     match inner_get_record(repo, collection, rkey, cid, s3_config, req).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let not_found = ErrorMessageResponse {
-                code: Some(ErrorCode::NotFound),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(Status::NotFound, Json(not_found)));
+            Err(ApiError::RecordNotFound)
         }
     }
 }

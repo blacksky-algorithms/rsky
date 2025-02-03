@@ -1,14 +1,12 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::common::ContentType;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{BlobConstraint, PreparedBlobRef};
 use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use rocket::data::Data;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{Blob, BlobOutput};
@@ -38,8 +36,8 @@ async fn inner_upload_blob(
         .get_records_for_blob(blobref.get_cid()?)
         .await?;
 
-    if records_for_blob.len() > 0 {
-        let _ = actor_store
+    if !records_for_blob.is_empty() {
+        actor_store
             .blob
             .verify_blob_and_make_permanent(PreparedBlobRef {
                 cid: blobref.get_cid()?,
@@ -70,19 +68,12 @@ pub async fn upload_blob(
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,
-) -> Result<Json<BlobOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<BlobOutput>, ApiError> {
     match inner_upload_blob(auth, blob, content_type, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("{error:?}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

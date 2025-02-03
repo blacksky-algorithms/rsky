@@ -1,11 +1,9 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::actor::{GetPreferencesOutput, RefPreferences};
@@ -34,19 +32,12 @@ async fn inner_get_preferences(
 pub async fn get_preferences(
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
-) -> Result<Json<GetPreferencesOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<GetPreferencesOutput>, ApiError> {
     match inner_get_preferences(s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

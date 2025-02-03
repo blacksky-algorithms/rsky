@@ -1,11 +1,9 @@
 use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityFlags};
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
@@ -57,22 +55,12 @@ async fn inner_update_email(body: Json<UpdateEmailInput>, auth: AccessFull) -> R
     format = "json",
     data = "<body>"
 )]
-pub async fn update_email(
-    body: Json<UpdateEmailInput>,
-    auth: AccessFull,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+pub async fn update_email(body: Json<UpdateEmailInput>, auth: AccessFull) -> Result<(), ApiError> {
     match inner_update_email(body, auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

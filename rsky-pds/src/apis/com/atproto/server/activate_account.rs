@@ -1,19 +1,15 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
 use crate::repo::ActorStore;
 use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::SharedSequencer;
-use anyhow::{bail, Result};
 use aws_config::SdkConfig;
-use rocket::http::Status;
-use rocket::response::status;
-use rocket::serde::json::Json;
 use rocket::State;
 use rsky_syntax::handle::INVALID_HANDLE;
 
@@ -21,7 +17,7 @@ async fn inner_activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-) -> Result<()> {
+) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
     assert_valid_did_documents_for_service(requester.clone()).await?;
 
@@ -65,7 +61,8 @@ async fn inner_activate_account(
         lock.sequence_commit(requester, commit_data, vec![]).await?;
         Ok(())
     } else {
-        bail!("User not found")
+        eprintln!("User not found");
+        Err(ApiError::RuntimeError)
     }
 }
 
@@ -74,19 +71,9 @@ pub async fn activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<(), ApiError> {
     match inner_activate_account(auth, sequencer, s3_config).await {
         Ok(_) => Ok(()),
-        Err(error) => {
-            eprintln!("Internal Error: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some("Internal error".to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
-        }
+        Err(error) => Err(error),
     }
 }

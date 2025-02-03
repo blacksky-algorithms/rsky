@@ -1,21 +1,18 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::apis::com::atproto::server::safe_resolve_did_doc;
+use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::storage::sql_repo::SqlRepoReader;
 use crate::SharedIdResolver;
 use crate::SharedSequencer;
-use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use email_address::*;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
@@ -29,7 +26,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     id_resolver: &State<SharedIdResolver>,
-) -> Result<CreateAccountOutput, anyhow::Error> {
+) -> Result<CreateAccountOutput, ApiError> {
     let CreateAccountInput {
         email,
         handle,
@@ -52,8 +49,8 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             did = Some(did_resp);
         }
         Err(error) => {
-            eprintln!("{:?}", error);
-            bail!("Failed to create DID")
+            eprintln!("Failed to create  DID\n{:?}", error);
+            return Err(ApiError::RuntimeError);
         }
     }
     let did = did.unwrap();
@@ -62,14 +59,22 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
-            eprintln!("{:?}", error);
-            bail!("Failed to create account")
+            eprintln!("Failed to create account\n{:?}", error);
+            return Err(ApiError::RuntimeError);
         }
     };
 
-    let did_doc = safe_resolve_did_doc(id_resolver, &did, Some(true)).await?;
+    let did_doc;
+    match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
+        Ok(res) => did_doc = res,
+        Err(error) => {
+            eprintln!("Error resolving DID Doc\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    }
 
-    let (access_jwt, refresh_jwt) = AccountManager::create_account(CreateAccountOpts {
+    let (access_jwt, refresh_jwt);
+    match AccountManager::create_account(CreateAccountOpts {
         did: did.clone(),
         handle: handle.clone(),
         email,
@@ -79,27 +84,75 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         invite_code,
         deactivated: Some(deactivated),
     })
-    .await?;
+    .await
+    {
+        Ok(res) => {
+            (access_jwt, refresh_jwt) = res;
+        }
+        Err(error) => {
+            eprintln!("Error creating account\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    }
 
     if !deactivated {
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_identity_evt(did.clone(), Some(handle.clone()))
-            .await?;
-        lock.sequence_account_evt(did.clone(), AccountStatus::Active)
-            .await?;
-        lock.sequence_commit(did.clone(), commit.clone(), vec![])
-            .await?;
+        match lock
+            .sequence_identity_evt(did.clone(), Some(handle.clone()))
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Sequence Identity Event failed\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
+        match lock
+            .sequence_account_evt(did.clone(), AccountStatus::Active)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Sequence Account Event failed\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
+        match lock
+            .sequence_commit(did.clone(), commit.clone(), vec![])
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Sequence Commit failed\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
     }
-    AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev)?;
+    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev) {
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Update Repo Root failed\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    }
+
+    let converted_did_doc;
+    match did_doc {
+        None => converted_did_doc = None,
+        Some(did_doc) => match serde_json::to_value(did_doc) {
+            Ok(res) => converted_did_doc = Some(res),
+            Err(error) => {
+                eprintln!("Did Doc failed conversion\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        },
+    }
     Ok(CreateAccountOutput {
         access_jwt,
         refresh_jwt,
         handle,
         did,
-        did_doc: match did_doc {
-            None => None,
-            Some(did_doc) => Some(serde_json::to_value(did_doc)?),
-        },
+        did_doc: converted_did_doc,
     })
 }
 
@@ -115,7 +168,7 @@ pub async fn server_create_account(
     s3_config: &State<SdkConfig>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
-) -> Result<Json<CreateAccountOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<CreateAccountOutput>, ApiError> {
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
         _ => None,
@@ -125,30 +178,14 @@ pub async fn server_create_account(
             .await
         {
             Ok(res) => res,
-            Err(e) => {
-                let internal_error = ErrorMessageResponse {
-                    code: Some(ErrorCode::BadRequest),
-                    message: Some(e.to_string()),
-                };
-                return Err(status::Custom(Status::BadRequest, Json(internal_error)));
-            }
+            Err(e) => return Err(e),
         };
 
     match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver)
         .await
     {
         Ok(response) => Ok(Json(response)),
-        Err(error) => {
-            eprintln!("Internal Error: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some("Internal error".to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -157,7 +194,7 @@ pub async fn validate_inputs_for_local_pds(
     id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
     requester: Option<String>,
-) -> Result<CreateAccountInput> {
+) -> Result<CreateAccountInput, ApiError> {
     let CreateAccountInput {
         email,
         handle,
@@ -171,26 +208,31 @@ pub async fn validate_inputs_for_local_pds(
     } = input;
 
     if plc_op.is_some() {
-        bail!("Unsupported input: `plcOp`");
+        return Err(ApiError::InvalidRequest(
+            "Unsupported input: `plcOp`".to_string(),
+        ));
     }
     if cfg.invites.required && invite_code.is_none() {
-        bail!("No invite code provided");
+        return Err(ApiError::InvalidInviteCode);
     }
     if email.is_none() {
-        bail!("Email is required");
+        return Err(ApiError::InvalidEmail);
     };
     match email {
-        None => bail!("Email is required"),
+        None => Err(ApiError::InvalidEmail),
         Some(email) => {
             let e_slice: &str = &email[..]; // take a full slice of the string
             if !EmailAddress::is_valid(e_slice) {
-                bail!("Invalid email");
+                return Err(ApiError::InvalidEmail);
             }
             if password.is_none() {
-                bail!("Password is required");
+                return Err(ApiError::InvalidPassword);
             };
+            //TODO Not yet allowing people to bring their own DID
             if did.is_some() {
-                bail!("Not yet allowing people to bring their own DID");
+                return Err(ApiError::InvalidRequest(
+                    "Not yet allowing people to bring their own DID".to_string(),
+                ));
             };
             let opts = HandleValidationOpts {
                 handle: handle.clone(),
@@ -202,8 +244,9 @@ pub async fn validate_inputs_for_local_pds(
                 id_resolver,
             };
             let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
+
             if !super::validate_handle(&handle) {
-                bail!("Invalid handle");
+                return Err(ApiError::InvalidHandle);
             };
             if cfg.invites.required && invite_code.is_some() {
                 AccountManager::ensure_invite_is_available(invite_code.clone().unwrap()).await?;
@@ -211,9 +254,9 @@ pub async fn validate_inputs_for_local_pds(
             let handle_accnt = AccountManager::get_account(&handle, None).await?;
             let email_accnt = AccountManager::get_account_by_email(&email, None).await?;
             if handle_accnt.is_some() {
-                bail!("Handle already taken: {handle}");
+                return Err(ApiError::HandleNotAvailable);
             } else if email_accnt.is_some() {
-                bail!("Email already taken: {email}");
+                return Err(ApiError::EmailNotAvailable);
             }
             Ok(CreateAccountInput {
                 email: Some(email),

@@ -1,14 +1,12 @@
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::SharedSequencer;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use libipld::Cid;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::{Subject, SubjectStatus, UpdateSubjectStatusOutput};
@@ -85,19 +83,12 @@ pub async fn update_subject_status(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     _auth: Moderator,
-) -> Result<Json<UpdateSubjectStatusOutput>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<UpdateSubjectStatusOutput>, ApiError> {
     match inner_update_subject_status(body, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

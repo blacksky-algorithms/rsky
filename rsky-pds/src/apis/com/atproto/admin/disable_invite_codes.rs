@@ -1,9 +1,7 @@
 use crate::account_manager::{AccountManager, DisableInviteCodesOpts};
+use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::DisableInviteCodesInput;
 
@@ -27,19 +25,12 @@ async fn inner_disable_invite_codes(body: Json<DisableInviteCodesInput>) -> Resu
 pub async fn disable_invite_codes(
     body: Json<DisableInviteCodesInput>,
     _auth: Moderator,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<(), ApiError> {
     match inner_disable_invite_codes(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

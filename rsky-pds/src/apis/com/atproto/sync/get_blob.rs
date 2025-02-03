@@ -1,7 +1,7 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
+use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -9,9 +9,7 @@ use aws_config::SdkConfig;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::AggregatedBytes;
 use libipld::Cid;
-use rocket::http::{Header, Status};
-use rocket::response::status;
-use rocket::serde::json::Json;
+use rocket::http::Header;
 use rocket::{Responder, State};
 use std::str::FromStr;
 
@@ -48,7 +46,7 @@ pub async fn get_blob(
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-) -> Result<BlobResponder, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<BlobResponder, ApiError> {
     match inner_get_blob(did, cid, s3_config, auth).await {
         Ok(res) => {
             let (bytes, mime_type) = res;
@@ -63,27 +61,16 @@ pub async fn get_blob(
             ))
         }
         Err(error) => {
-            return match error.downcast_ref() {
+            match error.downcast_ref() {
                 Some(GetObjectError::NoSuchKey(_)) => {
                     eprintln!("Error: {}", error);
-                    let internal_error = ErrorMessageResponse {
-                        code: Some(ErrorCode::NotFound),
-                        message: Some("cannot find blob".to_owned()),
-                    };
-                    Err(status::Custom(Status::NotFound, Json(internal_error)))
+                    Err(ApiError::BlobNotFound)
                 }
                 _ => {
                     eprintln!("Error: {}", error);
-                    let internal_error = ErrorMessageResponse {
-                        code: Some(ErrorCode::InternalServerError),
-                        message: Some(error.to_string()),
-                    };
-                    Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ))
+                    Err(ApiError::RuntimeError)
                 }
-            };
+            }
             // @TODO: Need to update error handling to return 404 if we have it but it's in tmp
         }
     }

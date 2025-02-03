@@ -1,14 +1,11 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
-use rocket::http::Status;
-use rocket::response::status;
-use rocket::serde::json::Json;
 
 async fn inner_request_account_delete(auth: AccessStandardIncludeChecks) -> Result<()> {
     let did = auth.access.credentials.unwrap().did.unwrap();
@@ -35,21 +32,12 @@ async fn inner_request_account_delete(auth: AccessStandardIncludeChecks) -> Resu
 }
 
 #[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
-pub async fn request_account_delete(
-    auth: AccessStandardIncludeChecks,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+pub async fn request_account_delete(auth: AccessStandardIncludeChecks) -> Result<(), ApiError> {
     match inner_request_account_delete(auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

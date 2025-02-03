@@ -1,12 +1,10 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
 use crate::common::env::env_str;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use anyhow::{bail, Result};
 use futures::try_join;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::AccountView;
 use rsky_syntax::handle::INVALID_HANDLE;
@@ -57,19 +55,12 @@ async fn inner_get_account_info(did: String) -> Result<AccountView> {
 pub async fn get_account_info(
     did: String,
     _auth: Moderator,
-) -> Result<Json<AccountView>, status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<Json<AccountView>, ApiError> {
     match inner_get_account_info(did).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");
-            let internal_error = ErrorMessageResponse {
-                code: Some(ErrorCode::InternalServerError),
-                message: Some(error.to_string()),
-            };
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(internal_error),
-            ));
+            Err(ApiError::RuntimeError)
         }
     }
 }

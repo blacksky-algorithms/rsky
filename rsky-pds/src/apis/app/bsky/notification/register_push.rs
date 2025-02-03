@@ -1,8 +1,8 @@
 use crate::apis::app::bsky::util::get_did_doc;
+use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardSignupQueued;
 use crate::common::get_notif_endpoint;
 use crate::config::ServerConfig;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::repo::types::Ids;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{anyhow, bail, Result};
@@ -13,8 +13,6 @@ use atrium_api::client::AtpServiceClient;
 use atrium_api::types::string::Did;
 use atrium_ipld::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use rocket::http::Status;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::notification::RegisterPushInput;
@@ -111,35 +109,18 @@ pub async fn register_push(
     auth: AccessStandardSignupQueued,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
-) -> Result<(), status::Custom<Json<ErrorMessageResponse>>> {
+) -> Result<(), ApiError> {
     if !vec!["ios", "android", "web"].contains(&body.platform.as_str()) {
-        let bad_request = ErrorMessageResponse {
-            code: Some(ErrorCode::BadRequest),
-            message: Some("invalid platform".to_string()),
-        };
-        return Err(status::Custom(Status::BadRequest, Json(bad_request)));
+        return Err(ApiError::InvalidRequest("invalid platform".to_string()));
     }
     match &cfg.bsky_app_view {
-        None => {
-            let not_found = ErrorMessageResponse {
-                code: Some(ErrorCode::NotFound),
-                message: Some("not found".to_string()),
-            };
-            return Err(status::Custom(Status::NotFound, Json(not_found)));
-        }
+        None => return Err(ApiError::RuntimeError),
         Some(bsky_app_view) => {
             match inner_register_push(body, auth, cfg, bsky_app_view.url.clone(), id_resolver).await
             {
                 Ok(_) => Ok(()),
                 Err(error) => {
-                    let internal_error = ErrorMessageResponse {
-                        code: Some(ErrorCode::InternalServerError),
-                        message: Some(error.to_string()),
-                    };
-                    return Err(status::Custom(
-                        Status::InternalServerError,
-                        Json(internal_error),
-                    ));
+                    return Err(ApiError::RuntimeError);
                 }
             }
         }
