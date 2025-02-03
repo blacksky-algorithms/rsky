@@ -69,10 +69,12 @@ pub struct AssertionContents {
 pub fn get_random_token() -> String {
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
-        .take(32)
+        .take(50)
         .map(char::from)
         .collect();
-    token[0..5].to_owned() + "-" + &token[5..10]
+    //Bluesky Client doesn't support 1,8,9,0 in the email verification tokens
+    let allowed_token = token.replace(&['1', '8', '9', '0'][..], "");
+    allowed_token[0..5].to_owned() + "-" + &allowed_token[5..10]
 }
 
 pub async fn safe_resolve_did_doc(

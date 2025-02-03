@@ -1,6 +1,6 @@
 use crate::apis::com::atproto::server::get_random_token;
 use crate::common;
-use crate::common::time::{from_str_to_utc, less_than_ago_ms, MINUTE};
+use crate::common::time::{from_str_to_utc, less_than_ago_s, MINUTE};
 use crate::db::establish_connection;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::EmailToken;
@@ -49,7 +49,7 @@ pub async fn assert_valid_token(
         .optional()?;
     if let Some(res) = res {
         let requested_at = from_str_to_utc(&res.requested_at);
-        let expired = !less_than_ago_ms(requested_at, expiration_len);
+        let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
             bail!("Token is expired")
         }
@@ -76,7 +76,7 @@ pub async fn assert_valid_token_and_find_did(
         .optional()?;
     if let Some(res) = res {
         let requested_at = from_str_to_utc(&res.requested_at);
-        let expired = !less_than_ago_ms(requested_at, expiration_len);
+        let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
             bail!("Token is expired")
         }
