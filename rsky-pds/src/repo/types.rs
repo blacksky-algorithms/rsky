@@ -181,6 +181,24 @@ pub enum RecordWriteOp {
     Delete(RecordDeleteOp),
 }
 
+impl RecordWriteOp {
+    pub fn collection(&self) -> String {
+        match self {
+            RecordWriteOp::Create(r) => r.collection.clone(),
+            RecordWriteOp::Update(r) => r.collection.clone(),
+            RecordWriteOp::Delete(r) => r.collection.clone(),
+        }
+    }
+
+    pub fn rkey(&self) -> String {
+        match self {
+            RecordWriteOp::Create(r) => r.rkey.clone(),
+            RecordWriteOp::Update(r) => r.rkey.clone(),
+            RecordWriteOp::Delete(r) => r.rkey.clone(),
+        }
+    }
+}
+
 pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> Result<RecordWriteOp> {
     let write_at_uri: AtUri = write.uri.try_into()?;
     Ok(RecordWriteOp::Create {
@@ -266,6 +284,7 @@ pub struct CommitData {
     pub since: Option<String>,
     pub prev: Option<Cid>,
     pub new_blocks: BlockMap,
+    pub relevant_blocks: BlockMap,
     pub removed_cids: CidSet,
 }
 
@@ -941,4 +960,11 @@ impl Ids {
             _ => bail!("Invalid NSID: `{s:?}` is not a valid nsid"),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct RecordCidClaim {
+    pub collection: String,
+    pub rkey: String,
+    pub cid: Option<Cid>,
 }

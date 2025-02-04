@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use lexicon_cid::Cid;
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::str::FromStr;
@@ -20,6 +21,20 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
         prev: unsigned.prev,
         sig: commit_sig.to_vec(),
     })
+}
+
+pub fn verify_commit_sig(commit: Commit, did_key: &String) -> Result<bool> {
+    let sig = commit.sig;
+    let rest = UnsignedCommit {
+        did: commit.did,
+        rev: commit.rev,
+        data: commit.data,
+        prev: commit.prev,
+        version: commit.version,
+    };
+    let encoded = serde_ipld_dagcbor::to_vec(&rest)?;
+    let hash = Sha256::digest(&*encoded);
+    rsky_crypto::verify::verify_signature(did_key, hash.as_ref(), sig.as_slice(), None)
 }
 
 pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {

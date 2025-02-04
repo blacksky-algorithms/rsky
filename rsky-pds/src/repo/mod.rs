@@ -264,13 +264,13 @@ impl ActorStore {
 
             // find blocks that are relevant to ops but not included in diff
             // (for instance a record that was moved but cid stayed the same)
-            let new_record_blocks = commit.new_blocks.get_many(new_record_cids)?;
+            let new_record_blocks = commit.relevant_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
                 let missing_blocks = {
                     let mut storage_guard = self.storage.write().await;
                     storage_guard.get_blocks(new_record_blocks.missing)?
                 };
-                commit.new_blocks.add_map(missing_blocks.blocks)?;
+                commit.relevant_blocks.add_map(missing_blocks.blocks)?;
             }
             Ok(commit)
         } else {
@@ -518,7 +518,8 @@ impl Repo {
             rev: rev.0,
             since: None,
             prev: None,
-            new_blocks,
+            new_blocks: new_blocks.clone(),
+            relevant_blocks: new_blocks,
             removed_cids: diff.removed_cids,
         })
     }
@@ -559,7 +560,7 @@ impl Repo {
         let mut leaves = BlockMap::new();
 
         let mut data = self.data.clone(); // @TODO: Confirm if this should be clone
-        for write in writes {
+        for write in writes.clone() {
             match write {
                 RecordWriteOp::Create(write) => {
                     let cid = leaves.add(write.record)?;
@@ -584,11 +585,21 @@ impl Repo {
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
 
+        let mut relevant_blocks = BlockMap::new();
+        for op in writes {
+            data.add_blocks_for_path(
+                util::format_data_key(op.collection(), op.rkey()),
+                &mut relevant_blocks,
+            )
+            .await?;
+        }
+
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
         if added_leaves.missing.len() > 0 {
             bail!("Missing leaf blocks: {:?}", added_leaves.missing);
         }
-        new_blocks.add_map(added_leaves.blocks)?;
+        new_blocks.add_map(added_leaves.blocks.clone())?;
+        relevant_blocks.add_map(added_leaves.blocks)?;
 
         let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
 
@@ -602,12 +613,12 @@ impl Repo {
             },
             keypair,
         )?;
-        let commit_cid = new_blocks.add(commit)?;
+        let commit_block_bytes = common::struct_to_cbor(commit.clone())?;
+        let commit_cid = cid_for_cbor(&commit)?;
 
-        // ensure the commit cid actually changed
-        if commit_cid.eq(&self.cid) {
-            new_blocks.delete(commit_cid)?;
-        } else {
+        if !commit_cid.eq(&self.cid) {
+            new_blocks.set(commit_cid, commit_block_bytes.clone());
+            relevant_blocks.set(commit_cid, commit_block_bytes.clone());
             removed_cids.add(self.cid);
         }
 
@@ -617,6 +628,7 @@ impl Repo {
             since: Some(self.commit.rev.clone()),
             prev: Some(self.cid),
             new_blocks,
+            relevant_blocks,
             removed_cids,
         })
     }
@@ -657,7 +669,8 @@ impl Repo {
             rev,
             since: None,
             prev: None,
-            new_blocks,
+            new_blocks: new_blocks.clone(),
+            relevant_blocks: new_blocks,
             removed_cids: CidSet::new(Some(vec![self.cid])),
         })
     }
@@ -902,3 +915,115 @@ pub mod record;
 pub mod sync;
 pub mod types;
 pub mod util;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apis::com::atproto::server::encode_did_key;
+    use crate::car::blocks_to_car_file;
+    use crate::repo::sync::consumer::verify_proofs;
+    use crate::repo::types::{RecordCidClaim, RecordDeleteOp};
+    use crate::storage::memory_blockstore::MemoryBlockstore;
+    use anyhow::Result;
+
+    // @NOTE this test uses a fully deterministic tree structure
+    #[tokio::test]
+    async fn includes_all_relevant_blocks_for_proof_commit_data() -> Result<()> {
+        let did = "did:example:alice";
+        let collection = "com.atproto.test";
+        let record = json!({ "test": 123 });
+
+        let blockstore = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(blockstore)),
+            did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+
+        let mut keys: Vec<String> = Default::default();
+        for i in 0..50 {
+            let rkey = format!("key-{i}");
+            keys.push(rkey.clone());
+            repo = repo
+                .apply_writes(
+                    RecordWriteEnum::Single(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                        action: WriteOpAction::Create,
+                        collection: collection.to_string(),
+                        rkey,
+                        record: serde_json::from_value(record.clone())?,
+                    })),
+                    keypair,
+                )
+                .await?;
+        }
+
+        // this test demonstrates the test case:
+        // specifically in the case of deleting the first key, there is a "rearranged block" that is necessary
+        // in the proof path but _is not_ in newBlocks (as it already existed in the repository)
+        {
+            let commit = repo
+                .format_commit(
+                    RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                        action: WriteOpAction::Delete,
+                        collection: collection.to_string(),
+                        rkey: keys[0].clone(),
+                    })),
+                    keypair,
+                )
+                .await?;
+            let car = blocks_to_car_file(Some(&commit.cid), commit.new_blocks).await?;
+            let did_key = encode_did_key(&keypair.public_key());
+            let result = verify_proofs(
+                car,
+                vec![RecordCidClaim {
+                    collection: collection.to_string(),
+                    rkey: keys[0].clone(),
+                    cid: None,
+                }],
+                did,
+                &did_key,
+            )
+            .await;
+            assert!(matches!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<DataStoreError>()
+                    .unwrap(),
+                DataStoreError::MissingBlock(_)
+            ));
+        }
+
+        for rkey in keys {
+            let commit = repo
+                .format_commit(
+                    RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                        action: WriteOpAction::Delete,
+                        collection: collection.to_string(),
+                        rkey: rkey.clone(),
+                    })),
+                    keypair,
+                )
+                .await?;
+            let car = blocks_to_car_file(Some(&commit.cid), commit.relevant_blocks.clone()).await?;
+            let did_key = encode_did_key(&keypair.public_key());
+            let proof_res = verify_proofs(
+                car,
+                vec![RecordCidClaim {
+                    collection: collection.to_string(),
+                    rkey,
+                    cid: None,
+                }],
+                did,
+                &did_key,
+            )
+            .await?;
+            assert_eq!(proof_res.unverified.len(), 0);
+            repo = repo.apply_commit(commit).await?;
+        }
+        Ok(())
+    }
+}

@@ -45,7 +45,8 @@ async fn inner_activate_account(
             rev: root.rev,
             since: None,
             prev: None,
-            new_blocks: blocks.blocks,
+            new_blocks: blocks.blocks.clone(),
+            relevant_blocks: blocks.blocks,
             removed_cids: CidSet::new(None),
         };
 

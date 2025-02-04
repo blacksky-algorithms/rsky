@@ -7,7 +7,7 @@ use diesel::sql_types::{Bool, Text};
 use diesel::*;
 use lexicon_cid::Cid;
 
-use crate::car::read_car_bytes;
+use crate::car::blocks_to_car_file;
 use crate::db::establish_connection;
 use crate::models::RepoBlock;
 use crate::repo::block_map::{BlockMap, BlocksAndMissing};
@@ -224,7 +224,7 @@ impl SqlRepoReader {
                         break;
                     }
                 }
-                read_car_bytes(Some(&root), car).await
+                blocks_to_car_file(Some(&root), car).await
             }
         }
     }

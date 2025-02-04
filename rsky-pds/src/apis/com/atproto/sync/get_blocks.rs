@@ -2,7 +2,7 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::car::read_car_bytes;
+use crate::car::blocks_to_car_file;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::storage::readable_blockstore::ReadableBlockstore;
@@ -47,7 +47,7 @@ async fn inner_get_blocks(
         bail!("Could not find cids: `{missing_str:?}`");
     }
 
-    let car = read_car_bytes(None, got.blocks).await?;
+    let car = blocks_to_car_file(None, got.blocks).await?;
     Ok(car)
 }
 

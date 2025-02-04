@@ -1493,6 +1493,23 @@ impl MST {
         Ok(cids)
     }
 
+    #[async_recursion(Sync)]
+    pub async fn add_blocks_for_path(&mut self, key: String, blocks: &mut BlockMap) -> Result<()> {
+        let serialized = self.serialize().await?;
+        blocks.set(serialized.cid, serialized.bytes);
+        let index = self.find_gt_or_equal_leaf_index(&key).await?;
+        let found = self.at_index(index).await?;
+        if let Some(NodeEntry::Leaf(found)) = found {
+            if found.key == key {
+                return Ok(());
+            }
+        }
+        match self.at_index(index - 1).await? {
+            Some(NodeEntry::MST(mut prev)) => prev.add_blocks_for_path(key, blocks).await,
+            _ => Ok(()),
+        }
+    }
+
     pub async fn save_mst(&self) -> Result<Cid> {
         let diff = self.get_unstored_blocks().await?;
         let mut storage = self.storage.write().await;

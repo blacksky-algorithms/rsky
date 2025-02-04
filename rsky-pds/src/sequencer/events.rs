@@ -1,5 +1,5 @@
 use crate::account_manager::helpers::account::AccountStatus;
-use crate::car::read_car_bytes;
+use crate::car::blocks_to_car_file;
 use crate::common;
 use crate::common::struct_to_cbor;
 use crate::models::models;
@@ -225,11 +225,15 @@ pub async fn format_seq_commit(
     let mut blobs = CidSet::new(None);
     let car_slice: Vec<u8>;
 
-    if writes.len() > 200 || commit_data.new_blocks.byte_size()? > 1000000 {
+    let mut blocks_to_send = BlockMap::new();
+    blocks_to_send.add_map(commit_data.new_blocks)?;
+    blocks_to_send.add_map(commit_data.relevant_blocks)?;
+
+    if writes.len() > 200 || blocks_to_send.byte_size()? > 1000000 {
         too_big = true;
         let mut just_root = BlockMap::new();
-        just_root.add(commit_data.new_blocks.get(commit_data.cid))?;
-        car_slice = read_car_bytes(Some(&commit_data.cid), just_root).await?;
+        just_root.add(blocks_to_send.get(commit_data.cid))?;
+        car_slice = blocks_to_car_file(Some(&commit_data.cid), just_root).await?;
     } else {
         too_big = false;
         for w in writes {
@@ -259,7 +263,7 @@ pub async fn format_seq_commit(
             }
             ops.push(CommitEvtOp { action, path, cid });
         }
-        car_slice = read_car_bytes(Some(&commit_data.cid), commit_data.new_blocks).await?;
+        car_slice = blocks_to_car_file(Some(&commit_data.cid), blocks_to_send).await?;
     }
 
     let evt = CommitEvt {

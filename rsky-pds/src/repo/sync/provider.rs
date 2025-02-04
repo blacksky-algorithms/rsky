@@ -1,4 +1,4 @@
-use crate::car::read_car_bytes;
+use crate::car::blocks_to_car_file;
 use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
@@ -67,5 +67,5 @@ pub async fn get_records(
     for block in found.blocks.entries()? {
         car.set(block.cid, block.bytes)
     }
-    read_car_bytes(Some(&commit_cid), car).await
+    blocks_to_car_file(Some(&commit_cid), car).await
 }
