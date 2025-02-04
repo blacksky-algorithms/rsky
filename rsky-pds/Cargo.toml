@@ -75,6 +75,7 @@ webpki-roots = { version = "0.26.0-alpha.1" }
 lexicon_cid = { package = "cid", version = "0.10.1", features = ["serde-codec"] }
 async-recursion = "1.1.1"
 once_cell = "1.19.0"
+async-stream = "0.3.5"
 
 
 [dependencies.rocket_sync_db_pools]

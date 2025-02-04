@@ -130,6 +130,29 @@ impl BlockMap {
     }
 }
 
+// Helper function for the iterator conversion.
+fn to_cid_and_bytes((cid_str, bytes): (String, Bytes)) -> CidAndBytes {
+    // We assume the key is always valid; otherwise, you could handle the error.
+    let cid = Cid::from_str(&cid_str).expect("BlockMap contains an invalid CID string");
+    CidAndBytes {
+        cid,
+        bytes: bytes.0,
+    }
+}
+
+impl IntoIterator for BlockMap {
+    type Item = CidAndBytes;
+    // Using the iterator returned by BTreeMap's into_iter, then mapping with a function pointer.
+    type IntoIter = std::iter::Map<
+        std::collections::btree_map::IntoIter<String, Bytes>,
+        fn((String, Bytes)) -> CidAndBytes,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.into_iter().map(to_cid_and_bytes)
+    }
+}
+
 #[derive(Debug)]
 pub struct BlocksAndMissing {
     pub blocks: BlockMap,

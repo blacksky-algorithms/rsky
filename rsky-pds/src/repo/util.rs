@@ -3,6 +3,7 @@ use crate::common::tid::Ticker;
 use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
+use futures::{Stream, StreamExt};
 use lexicon_cid::Cid;
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
@@ -137,4 +138,25 @@ pub fn ensure_v3_commit(commit: VersionedCommit) -> Commit {
             sig: commit.sig,
         },
     }
+}
+
+/// Flattens a collection of byte vectors into a single vector
+pub fn flatten_u8_arrays(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(chunks.iter().map(|v| v.len()).sum());
+    for chunk in chunks {
+        result.extend_from_slice(chunk);
+    }
+    result
+}
+
+/// Collects a stream of byte chunks into a single buffer
+pub async fn stream_to_buffer<S>(mut stream: S) -> Result<Vec<u8>>
+where
+    S: Stream<Item = Result<Vec<u8>>> + Unpin,
+{
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buffer.extend_from_slice(&chunk?);
+    }
+    Ok(buffer)
 }
