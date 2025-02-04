@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::fmt::Display;
 use std::time::SystemTime;
 
 const TID_LEN: usize = 13;
@@ -74,8 +75,18 @@ impl TID {
         self.compare_to(other) < 0
     }
 
-    pub fn to_string(self) -> String {
-        self.0
+    pub fn next_str(prev: Option<String>) -> Result<String> {
+        let prev = match prev {
+            None => None,
+            Some(prev) => Some(TID::new(prev)?),
+        };
+        Ok(Ticker::new().next(prev).to_string())
+    }
+}
+
+impl Display for TID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

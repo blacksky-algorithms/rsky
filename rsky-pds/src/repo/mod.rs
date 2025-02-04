@@ -921,15 +921,121 @@ mod tests {
     use super::*;
     use crate::apis::com::atproto::server::encode_did_key;
     use crate::car::blocks_to_car_file;
-    use crate::repo::sync::consumer::verify_proofs;
-    use crate::repo::types::{RecordCidClaim, RecordDeleteOp};
+    use crate::common::sign::sign_without_indexmap;
+    use crate::repo::mst::util::{random_cid, random_str};
+    use crate::repo::sync::consumer::{verify_proofs, verify_records, ConsumerError};
+    use crate::repo::sync::provider::get_records;
+    use crate::repo::types::{RecordCidClaim, RecordDeleteOp, RecordPath};
     use crate::storage::memory_blockstore::MemoryBlockstore;
     use anyhow::Result;
+    use rsky_crypto::utils::random_bytes;
+
+    const TEST_COLLECTIONS: [&'static str; 2] = ["com.example.posts", "com.example.likes"];
+
+    pub struct FillRepoOutput {
+        pub repo: Repo,
+        pub data: RepoContents,
+    }
+
+    pub fn generate_object() -> RepoRecord {
+        serde_json::from_value(json!({ "name": random_str(100) }))
+            .expect("Simple object failed to serialize")
+    }
+
+    pub async fn fill_repo(
+        mut repo: Repo,
+        keypair: Keypair,
+        items_per_collection: usize,
+    ) -> Result<FillRepoOutput> {
+        let mut repo_data: RepoContents = Default::default();
+        let mut writes: Vec<RecordWriteOp> = Default::default();
+        for coll_name in TEST_COLLECTIONS {
+            let mut coll_data: CollectionContents = Default::default();
+            for _ in 0..items_per_collection {
+                let object = generate_object();
+                let rkey = Ticker::new().next(None).to_string();
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: coll_name.to_string(),
+                    rkey,
+                    record: object,
+                }));
+            }
+            repo_data.insert(coll_name.to_string(), coll_data);
+        }
+        let writes = RecordWriteEnum::List(writes);
+        let updated = repo.apply_writes(writes, keypair).await?;
+        Ok(FillRepoOutput {
+            repo: updated,
+            data: repo_data,
+        })
+    }
+
+    pub async fn add_bad_commit(mut repo: Repo, keypair: Keypair) -> Result<Repo> {
+        let object = generate_object();
+        let mut new_blocks = BlockMap::new();
+        let cid = new_blocks.add(object)?;
+        let mut updated_data = repo
+            .data
+            .add(
+                &format!("com.example.test/{}", Ticker::new().next(None)),
+                cid,
+                None,
+            )
+            .await?;
+        let data_cid = updated_data.get_pointer().await?;
+        let diff = DataDiff::of(&mut updated_data, Some(&mut repo.data)).await?;
+        new_blocks.add_map(diff.new_mst_blocks)?;
+        // we generate a bad sig by signing some other data
+        let rev = TID::next_str(Some(repo.commit.rev))?;
+        let commit = Commit {
+            did: repo.commit.did,
+            rev: rev.clone(),
+            data: data_cid,
+            prev: repo.commit.prev,
+            version: repo.commit.version,
+            sig: sign_without_indexmap(&random_bytes(256), &keypair.secret_key())?.to_vec(),
+        };
+        let commit_cid = new_blocks.add(commit)?;
+        {
+            let mut storage_guard = repo.storage.write().await;
+            storage_guard.apply_commit(
+                CommitData {
+                    cid: commit_cid,
+                    rev,
+                    since: None,
+                    prev: Some(repo.cid),
+                    new_blocks,
+                    relevant_blocks: BlockMap::new(),
+                    removed_cids: diff.removed_cids,
+                },
+                None,
+            )?;
+        }
+        Repo::load(repo.storage.clone(), Some(commit_cid)).await
+    }
+
+    pub async fn contents_to_claims(contents: RepoContents) -> Result<Vec<RecordCidClaim>> {
+        let mut claims: Vec<RecordCidClaim> = Default::default();
+        for coll in contents.keys() {
+            if let Some(coll_content) = contents.get(coll) {
+                for rkey in coll_content.keys() {
+                    claims.push(RecordCidClaim {
+                        collection: coll.to_string(),
+                        rkey: rkey.to_string(),
+                        cid: Some(cid_for_cbor(coll_content.get(rkey).unwrap())?),
+                    });
+                }
+            }
+        }
+        Ok(claims)
+    }
 
     // @NOTE this test uses a fully deterministic tree structure
     #[tokio::test]
     async fn includes_all_relevant_blocks_for_proof_commit_data() -> Result<()> {
-        let did = "did:example:alice";
+        let did = "did:example:test";
         let collection = "com.atproto.test";
         let record = json!({ "test": 123 });
 
@@ -1024,6 +1130,298 @@ mod tests {
             assert_eq!(proof_res.unverified.len(), 0);
             repo = repo.apply_commit(commit).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verifies_valid_records() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let claims = contents_to_claims(repo_data).await?;
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert!(results.verified.len() > 0);
+        assert_eq!(results.verified, claims);
+        assert_eq!(results.unverified.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verifies_record_nonexistence() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let _repo_data = filled.data;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: TEST_COLLECTIONS[0].to_string(),
+            rkey: Ticker::new().next(None).to_string(),
+            cid: None,
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert!(results.verified.len() > 0);
+        assert_eq!(results.verified, claims);
+        assert_eq!(results.unverified.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_a_record_that_does_not_exist() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: Ticker::new().next(None).to_string(),
+            cid: real_claims[0].cid.clone(),
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_an_invalid_record_at_a_real_path() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let mut no_storage: Option<&mut dyn RepoStorage> = None;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: real_claims[0].rkey.clone(),
+            cid: Some(random_cid(&mut no_storage, None).await?),
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_a_delete_where_a_record_does_exist() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: real_claims[0].rkey.clone(),
+            cid: None,
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn can_determine_record_proofs_from_car_file() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let possible = contents_to_claims(repo_data.clone()).await?;
+        let claims = vec![
+            // random sampling of records
+            possible[0].clone(),
+            possible[4].clone(),
+            possible[5].clone(),
+            possible[8].clone(),
+        ];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let records = verify_records(proofs, repo_did, &did_key).await?;
+        for record in records {
+            let found_claim = claims
+                .iter()
+                .find(|claim| claim.collection == record.collection && claim.rkey == record.rkey);
+            match found_claim {
+                None => bail!("Could not find record for claim"),
+                Some(found_claim) => assert_eq!(
+                    found_claim.cid,
+                    Some(cid_for_cbor(
+                        repo_data
+                            .get(&record.collection)
+                            .unwrap()
+                            .get(&record.rkey)
+                            .unwrap()
+                    )?)
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_proofs_throws_on_a_bad_signature() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let bad_repo = add_bad_commit(repo, keypair).await?;
+        let claims = contents_to_claims(repo_data).await?;
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(
+            bad_repo.storage.clone(),
+            bad_repo.cid,
+            claims_as_record_paths,
+        )
+        .await?;
+        let result = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await;
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<ConsumerError>().unwrap(),
+            ConsumerError::RepoVerificationError(_)
+        ));
         Ok(())
     }
 }

@@ -962,7 +962,7 @@ impl Ids {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordCidClaim {
     pub collection: String,
     pub rkey: String,
