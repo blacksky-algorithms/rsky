@@ -5,8 +5,10 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use libipld::Cid;
 use secp256k1::SecretKey;
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, Value};
 use std::collections::BTreeMap;
+use data_encoding::BASE32;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 pub struct CreateAtprotoUpdateOpOpts {
@@ -14,6 +16,45 @@ pub struct CreateAtprotoUpdateOpOpts {
     pub handle: Option<String>,
     pub pds: Option<String>,
     pub rotation_keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateAtprotoOpInput {
+    pub signing_key: String,
+    pub handle: String,
+    pub pds: String,
+    pub rotation_keys: Vec<String>,
+}
+
+pub async fn create_op(opts: CreateAtprotoOpInput, secret_key: SecretKey) -> Result<(String, Operation)> {
+    //Build Operation
+    let mut create_op = Operation {
+        r#type: "plc_operation".to_string(),
+        rotation_keys: opts.rotation_keys,
+        verification_methods: BTreeMap::from([("atproto".to_string(), opts.signing_key)]),
+        also_known_as: vec![ensure_atproto_prefix(opts.handle)],
+        services: BTreeMap::from([(
+            "atproto_pds".to_string(),
+            Service {
+                r#type: "AtprotoPersonalDataServer".to_string(),
+                endpoint: ensure_http_prefix(opts.pds),
+            },
+        )]),
+        prev: None,
+        sig: None,
+    };
+
+    //Sign and get DID
+    create_op = sign(create_op, &secret_key);
+    let json = serde_json::to_string(&create_op)?;
+    let hashmap_genesis: IndexMap<String, Value> = serde_json::from_str(&json)?;
+    let signed_genesis_bytes = serde_ipld_dagcbor::to_vec(&hashmap_genesis)?;
+    let mut hasher: Sha256 = Digest::new();
+    hasher.update(signed_genesis_bytes.as_slice());
+    let hash = hasher.finalize();
+    let did_plc = format!("did:plc:{}", BASE32.encode(&hash[..]))[..32].to_lowercase();
+
+    Ok((did_plc, create_op))
 }
 
 pub async fn update_atproto_key_op(
@@ -31,7 +72,7 @@ pub async fn update_atproto_key_op(
             rotation_keys: None,
         },
     )
-    .await
+        .await
 }
 
 pub async fn update_handle_op(
@@ -49,7 +90,7 @@ pub async fn update_handle_op(
             rotation_keys: None,
         },
     )
-    .await
+        .await
 }
 
 pub async fn update_pds_op(
@@ -67,7 +108,7 @@ pub async fn update_pds_op(
             rotation_keys: None,
         },
     )
-    .await
+        .await
 }
 
 pub async fn update_rotation_keys_op(
@@ -85,7 +126,7 @@ pub async fn update_rotation_keys_op(
             rotation_keys: Some(rotation_keys),
         },
     )
-    .await
+        .await
 }
 
 pub async fn create_atproto_update_op(
@@ -117,7 +158,7 @@ pub async fn create_atproto_update_op(
                         [formatted].as_slice(),
                         &normalized.also_known_as[handle_i + 1..],
                     ]
-                    .concat()
+                        .concat()
                 }
             }
         }
@@ -136,7 +177,7 @@ pub async fn create_atproto_update_op(
         }
         updated
     })
-    .await
+        .await
 }
 
 pub async fn create_update_op<G>(
@@ -172,7 +213,7 @@ pub async fn tombstone_op(prev: Cid, key: &SecretKey) -> Result<Tombstone> {
         }),
         key,
     )
-    .await?
+        .await?
     {
         CompatibleOpOrTombstone::Tombstone(op) => Ok(op),
         _ => panic!("Enum type changed"),
@@ -232,4 +273,11 @@ pub fn ensure_atproto_prefix(str: String) -> String {
     }
     let stripped = str.replace("http://", "").replace("https://", "");
     format!("at://{stripped}")
+}
+
+fn sign(mut op: Operation, private_key: &SecretKey) -> Operation {
+    let op_sig = atproto_sign(&op, private_key).unwrap();
+    // Base 64 encode signature bytes
+    op.sig = Some(base64_url::encode(&op_sig).replace("=", ""));
+    op
 }

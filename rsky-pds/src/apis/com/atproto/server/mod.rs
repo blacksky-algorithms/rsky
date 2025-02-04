@@ -1,62 +1,20 @@
 extern crate unsigned_varint;
 use crate::common::env::{env_int, env_str};
-use crate::common::sign::atproto_sign;
-use crate::models::*;
-use crate::{plc, SharedIdResolver, APP_USER_AGENT};
+use crate::{plc, SharedIdResolver};
 use anyhow::{bail, Result};
-use data_encoding::BASE32;
 use diesel::prelude::*;
-use diesel::PgConnection;
-use indexmap::IndexMap;
 use multibase::Base::Base58Btc;
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest;
 use rocket::form::validate::Contains;
 use rocket::State;
 use rsky_identity::types::DidDocument;
-use rsky_lexicon::com::atproto::server::CreateAccountInput;
-use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use sha2::Digest;
 use std::env;
 use unsigned_varint::encode::u16 as encode_varint;
 
 const DID_KEY_PREFIX: &str = "did:key:";
-
-/// Important to user `preserve_order` with serde_json so these bytes are ordered
-/// correctly when encoding.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AtprotoPdsService {
-    #[serde(rename(deserialize = "type", serialize = "type"))]
-    pub r#type: String,
-    pub endpoint: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PlcGenesisServices {
-    pub atproto_pds: AtprotoPdsService,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PlcGenesisVerificationMethods {
-    pub atproto: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PlcGenesisOperation {
-    #[serde(rename(deserialize = "type", serialize = "type"))]
-    pub r#type: String,
-    #[serde(rename(deserialize = "rotationKeys", serialize = "rotationKeys"))]
-    pub rotation_keys: Vec<String>,
-    #[serde(rename(deserialize = "verificationMethods", serialize = "verificationMethods"))]
-    pub verification_methods: PlcGenesisVerificationMethods,
-    #[serde(rename(deserialize = "alsoKnownAs", serialize = "alsoKnownAs"))]
-    pub also_known_as: Vec<String>,
-    pub services: PlcGenesisServices,
-    pub prev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sig: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AssertionContents {
@@ -122,27 +80,6 @@ pub fn validate_handle(handle: &str) -> bool {
     // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
 }
 
-pub fn lookup_user_by_handle(handle: &str, conn: &mut PgConnection) -> Result<Actor> {
-    use crate::schema::pds::actor::dsl as ActorSchema;
-
-    let result = ActorSchema::actor
-        .filter(ActorSchema::handle.eq(handle))
-        .select(Actor::as_select())
-        .first(conn)
-        .map_err(|error| {
-            let context = format!("no user found with handle '{}'", handle);
-            anyhow::Error::new(error).context(context)
-        })?;
-    Ok(result)
-}
-
-pub fn sign(mut genesis: PlcGenesisOperation, private_key: &SecretKey) -> PlcGenesisOperation {
-    let genesis_sig = atproto_sign(&genesis, private_key).unwrap();
-    // Base 64 encode signature bytes
-    genesis.sig = Some(base64_url::encode(&genesis_sig).replace("=", ""));
-    genesis
-}
-
 /// https://github.com/gnunicorn/rust-multicodec/blob/master/src/lib.rs#L249-L260
 pub fn multicodec_wrap(bytes: Vec<u8>) -> Vec<u8> {
     let mut buf = [0u8; 3];
@@ -178,68 +115,6 @@ pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, 
     })?;
     let public_key = secret_key.public_key(&secp);
     Ok((secret_key, public_key))
-}
-
-pub async fn create_did_and_plc_op(
-    handle: &str,
-    input: &CreateAccountInput,
-    signing_key: Keypair,
-) -> Result<String> {
-    let private_key: String;
-    if let Some(recovery_key) = &input.recovery_key {
-        private_key = recovery_key.clone();
-    } else {
-        private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    }
-    let (secret_key, public_key) = get_keys_from_private_key_str(private_key)?;
-
-    println!("Generating and signing PLC directory genesis operation...");
-    let mut create_op = PlcGenesisOperation {
-        r#type: "plc_operation".to_owned(),
-        rotation_keys: vec![encode_did_key(&public_key)],
-        verification_methods: PlcGenesisVerificationMethods {
-            atproto: encode_did_key(&signing_key.public_key()),
-        },
-        also_known_as: vec![format!("at://{handle}")],
-        services: PlcGenesisServices {
-            atproto_pds: AtprotoPdsService {
-                r#type: "AtprotoPersonalDataServer".to_owned(),
-                endpoint: format!(
-                    "https://{}",
-                    env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned())
-                ),
-            },
-        },
-        prev: None,
-        sig: None,
-    };
-    create_op = sign(create_op, &secret_key);
-    let json = serde_json::to_string(&create_op).unwrap();
-    let hashmap_genesis: IndexMap<String, Value> = serde_json::from_str(&json).unwrap();
-    let signed_genesis_bytes = serde_ipld_dagcbor::to_vec(&hashmap_genesis).unwrap();
-    let mut hasher: Sha256 = Digest::new();
-    hasher.update(signed_genesis_bytes.as_slice());
-    let hash = hasher.finalize();
-    let did_plc = &format!("did:plc:{}", BASE32.encode(&hash[..]))[..32].to_lowercase();
-    println!("Created DID {did_plc:#}");
-    println!("publishing......");
-
-    // @TODO: Use plc::Client instead
-    let plc_url = format!(
-        "{0}/{1}",
-        env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
-        did_plc
-    );
-    println!("Publishing to {plc_url}");
-    let client = reqwest::Client::builder()
-        .user_agent(APP_USER_AGENT)
-        .build()?;
-    let response = client.post(plc_url).json(&create_op).send().await?;
-    let res = &response;
-    match res.error_for_status_ref() {
-        Ok(_res) => Ok(did_plc.into()),
-        Err(error) => Err(anyhow::Error::new(error).context(response.text().await?)),
-    }
 }
 
 pub async fn is_valid_did_doc_for_service(did: String) -> Result<bool> {
