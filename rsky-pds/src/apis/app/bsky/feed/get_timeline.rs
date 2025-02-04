@@ -45,6 +45,7 @@ pub async fn inner_get_timeline(
 
 /// Get a view of the requesting account's home timeline.
 /// This is expected to be some form of reverse-chronological feed.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getTimeline?<algorithm>&<limit>&<cursor>")]
 pub async fn get_timeline(
     algorithm: Option<String>,

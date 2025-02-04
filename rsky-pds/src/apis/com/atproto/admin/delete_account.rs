@@ -31,6 +31,7 @@ async fn inner_delete_account(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.deleteAccount",
     format = "json",
@@ -45,7 +46,7 @@ pub async fn delete_account(
     match inner_delete_account(body, sequencer, s3_config).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

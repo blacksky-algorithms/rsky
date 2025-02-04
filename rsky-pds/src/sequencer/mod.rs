@@ -259,6 +259,7 @@ impl Sequencer {
 impl Stream for Sequencer {
     type Item = Result<(), anyhow::Error>;
 
+    #[tracing::instrument(skip_all)]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.destroyed {
             return Poll::Ready(None);
@@ -271,7 +272,7 @@ impl Stream for Sequencer {
             limit: Some(1000),
         })) {
             Err(err) => {
-                eprintln!(
+                tracing::error!(
                     "@LOG: sequencer failed to poll db, err: {}, last_seen: {:?}",
                     err.to_string(),
                     self.last_seen

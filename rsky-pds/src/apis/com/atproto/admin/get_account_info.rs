@@ -51,6 +51,7 @@ async fn inner_get_account_info(did: String) -> Result<AccountView> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.admin.getAccountInfo?<did>")]
 pub async fn get_account_info(
     did: String,
@@ -59,7 +60,7 @@ pub async fn get_account_info(
     match inner_get_account_info(did).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

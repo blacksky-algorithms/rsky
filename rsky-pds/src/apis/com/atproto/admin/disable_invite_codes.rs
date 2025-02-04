@@ -17,6 +17,7 @@ async fn inner_disable_invite_codes(body: Json<DisableInviteCodesInput>) -> Resu
     AccountManager::disable_invite_codes(DisableInviteCodesOpts { codes, accounts }).await
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.disableInviteCodes",
     format = "json",
@@ -29,7 +30,7 @@ pub async fn disable_invite_codes(
     match inner_disable_invite_codes(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

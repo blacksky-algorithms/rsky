@@ -37,6 +37,7 @@ pub async fn inner_get_profiles(
 }
 
 /// Get detailed profile views of multiple actors.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.actor.getProfiles?<actors>")]
 pub async fn get_profiles(
     actors: Vec<String>,

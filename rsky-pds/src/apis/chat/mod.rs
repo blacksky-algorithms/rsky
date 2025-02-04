@@ -13,6 +13,7 @@ use rsky_lexicon::chat::bsky::convo::{
     UnmuteConvoInput, UnmuteConvoOutput, UpdateReadInput, UpdateReadOutput,
 };
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/chat.bsky.actor.deleteAccount")]
 pub async fn delete_account(
     auth: AccessPrivileged,
@@ -25,7 +26,7 @@ pub async fn delete_account(
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -38,6 +39,7 @@ pub async fn delete_account(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/chat.bsky.actor.exportAccountData")]
 pub async fn export_account_data(
     auth: AccessPrivileged,
@@ -59,7 +61,7 @@ pub async fn export_account_data(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -72,6 +74,7 @@ pub async fn export_account_data(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/chat.bsky.convo.deleteMessageForSelf",
     format = "json",
@@ -90,7 +93,7 @@ pub async fn delete_message_for_self(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -103,6 +106,7 @@ pub async fn delete_message_for_self(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[allow(non_snake_case)]
 #[rocket::get("/xrpc/chat.bsky.actor.getConvo?<convoId>")]
@@ -127,7 +131,7 @@ pub async fn get_convo(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -140,6 +144,7 @@ pub async fn get_convo(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/chat.bsky.actor.getConvoForMembers?<members>")]
 pub async fn get_convo_for_members(
@@ -163,7 +168,7 @@ pub async fn get_convo_for_members(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -176,6 +181,7 @@ pub async fn get_convo_for_members(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/chat.bsky.actor.getLog?<cursor>")]
 pub async fn get_log(
@@ -199,7 +205,7 @@ pub async fn get_log(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -212,6 +218,7 @@ pub async fn get_log(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[allow(non_snake_case)]
 #[rocket::get("/xrpc/chat.bsky.actor.getMessages?<convoId>&<limit>&<cursor>")]
@@ -238,7 +245,7 @@ pub async fn get_messages(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -251,6 +258,7 @@ pub async fn get_messages(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/chat.bsky.actor.leaveConvo", format = "json", data = "<body>")]
 pub async fn leave_convo(
     body: Json<LeaveConvoInput>,
@@ -264,7 +272,7 @@ pub async fn leave_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -277,6 +285,7 @@ pub async fn leave_convo(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/chat.bsky.actor.listConvos?<limit>&<cursor>")]
 pub async fn list_convos(
@@ -301,7 +310,7 @@ pub async fn list_convos(
     {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -314,6 +323,7 @@ pub async fn list_convos(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/chat.bsky.actor.muteConvo", format = "json", data = "<body>")]
 pub async fn mute_convo(
     body: Json<MuteConvoInput>,
@@ -327,7 +337,7 @@ pub async fn mute_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -353,7 +363,7 @@ pub async fn send_message(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -371,6 +381,7 @@ pub async fn send_message(
     format = "json",
     data = "<body>"
 )]
+#[tracing::instrument(skip_all)]
 pub async fn send_message_batch(
     body: Json<SendMessageBatchInput>,
     auth: AccessPrivileged,
@@ -386,7 +397,7 @@ pub async fn send_message_batch(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -400,6 +411,7 @@ pub async fn send_message_batch(
 }
 
 #[rocket::post("/xrpc/chat.bsky.actor.unmuteConvo", format = "json", data = "<body>")]
+#[tracing::instrument(skip_all)]
 pub async fn unmute_convo(
     body: Json<UnmuteConvoInput>,
     auth: AccessPrivileged,
@@ -412,7 +424,7 @@ pub async fn unmute_convo(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),
@@ -425,6 +437,7 @@ pub async fn unmute_convo(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/chat.bsky.actor.updateRead", format = "json", data = "<body>")]
 pub async fn update_read(
     body: Json<UpdateReadInput>,
@@ -438,7 +451,7 @@ pub async fn update_read(
     match pipethrough_procedure(&req, requester, Some(body.into_inner())).await {
         Ok(res) => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             let internal_error = ErrorMessageResponse {
                 code: Some(ErrorCode::InternalServerError),
                 message: Some(error.to_string()),

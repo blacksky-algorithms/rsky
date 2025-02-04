@@ -5,6 +5,7 @@ use crate::auth_verifier::AccessStandardIncludeChecks;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
 
+#[tracing::instrument(skip_all)]
 async fn inner_confirm_email(
     body: Json<ConfirmEmailInput>,
     auth: AccessStandardIncludeChecks,
@@ -25,7 +26,7 @@ async fn inner_confirm_email(
             user = res;
         }
         Err(e) => {
-            eprintln!("Error: {e}");
+            tracing::error!("Error: {e}");
             return Err(ApiError::RuntimeError);
         }
     }
@@ -43,7 +44,7 @@ async fn inner_confirm_email(
             {
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("Error: {e}");
+                    tracing::error!("Error: {e}");
                     return Err(ApiError::RuntimeError);
                 }
             }
@@ -56,6 +57,7 @@ async fn inner_confirm_email(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.confirmEmail",
     format = "json",

@@ -45,6 +45,7 @@ async fn robots() -> &'static str {
     "# Hello!\n\n# Crawling the public API is allowed\nUser-agent: *\nAllow: /"
 }
 
+#[tracing::instrument(skip_all)]
 #[get("/xrpc/_health")]
 async fn health(
     connection: DbConn,
@@ -68,7 +69,7 @@ async fn health(
             Ok(Json(version))
         }
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             let internal_error = rsky_pds::models::ErrorMessageResponse {
                 code: Some(rsky_pds::models::ErrorCode::ServiceUnavailable),
                 message: Some(error.to_string()),
@@ -119,6 +120,9 @@ impl Fairing for CORS {
 #[launch]
 async fn rocket() -> _ {
     dotenv().ok();
+
+    let subscriber = tracing_subscriber::FmtSubscriber::new();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let db_url = env::var("DATABASE_URL").unwrap_or("".into());
 

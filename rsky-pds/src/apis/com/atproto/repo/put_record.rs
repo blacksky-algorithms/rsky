@@ -17,6 +17,7 @@ use rsky_lexicon::com::atproto::repo::{PutRecordInput, PutRecordOutput};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
+#[tracing::instrument(skip_all)]
 async fn inner_put_record(
     body: Json<PutRecordInput>,
     auth: AccessStandardIncludeChecks,
@@ -65,7 +66,7 @@ async fn inner_put_record(
                 .record
                 .get_record(&uri, None, Some(true))
                 .await?;
-            println!("@LOG: debug inner_put_record, current: {current:?}");
+            tracing::debug!("@LOG: debug inner_put_record, current: {current:?}");
             let write: PreparedWrite = if current.is_some() {
                 PreparedWrite::Update(
                     prepare_update(PrepareUpdateOpts {
@@ -118,6 +119,7 @@ async fn inner_put_record(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.putRecord", format = "json", data = "<body>")]
 pub async fn put_record(
     body: Json<PutRecordInput>,
@@ -125,11 +127,11 @@ pub async fn put_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
-    println!("@LOG: debug put_record {body:#?}");
+    tracing::debug!("@LOG: debug put_record {body:#?}");
     match inner_put_record(body, auth, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

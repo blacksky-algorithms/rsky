@@ -46,6 +46,7 @@ pub async fn inner_get_author_feed(
 }
 
 /// Get a view of an actor's 'author feed' (post and reposts by the author). Does not require auth.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getAuthorFeed?<actor>&<limit>&<cursor>&<filter>")]
 pub async fn get_author_feed(
     actor: String,

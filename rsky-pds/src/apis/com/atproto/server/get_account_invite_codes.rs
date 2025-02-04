@@ -139,6 +139,7 @@ async fn inner_get_account_invite_codes(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(non_snake_case)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/com.atproto.server.getAccountInviteCodes?<includeUsed>&<createAvailable>")]
@@ -150,7 +151,7 @@ pub async fn get_account_invite_codes(
     match inner_get_account_invite_codes(includeUsed, createAvailable, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -53,6 +53,7 @@ async fn inner_check_account_status(
     })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.checkAccountStatus")]
 pub async fn check_account_status(
     auth: AccessFull,
@@ -61,7 +62,7 @@ pub async fn check_account_status(
     match inner_check_account_status(auth, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

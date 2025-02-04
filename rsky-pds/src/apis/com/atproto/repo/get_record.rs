@@ -10,6 +10,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
 use rsky_syntax::aturi::AtUri;
 
+#[tracing::instrument(skip_all)]
 async fn inner_get_record(
     repo: String,
     collection: String,
@@ -49,7 +50,7 @@ async fn inner_get_record(
             .await
             {
                 Err(error) => {
-                    eprintln!("@LOG: ERROR: {error}");
+                    tracing::error!("@LOG: ERROR: {error}");
                     bail!("Could not locate record")
                 }
                 Ok(res) => {
@@ -61,6 +62,7 @@ async fn inner_get_record(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.repo.getRecord?<repo>&<collection>&<rkey>&<cid>")]
 pub async fn get_record(
     repo: String,
@@ -73,7 +75,7 @@ pub async fn get_record(
     match inner_get_record(repo, collection, rkey, cid, s3_config, req).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RecordNotFound)
         }
     }

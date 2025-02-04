@@ -9,6 +9,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::ListMissingBlobsOutput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.repo.listMissingBlobs?<limit>&<cursor>")]
 pub async fn list_missing_blobs(
     limit: Option<u16>,
@@ -34,7 +35,7 @@ pub async fn list_missing_blobs(
             Ok(Json(ListMissingBlobsOutput { cursor, blobs }))
         }
         Err(error) => {
-            eprintln!("{error:?}");
+            tracing::error!("{error:?}");
             Err(ApiError::RuntimeError)
         }
     }

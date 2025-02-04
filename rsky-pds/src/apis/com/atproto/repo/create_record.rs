@@ -107,6 +107,7 @@ async fn inner_create_record(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.repo.createRecord",
     format = "json",
@@ -118,11 +119,11 @@ pub async fn create_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
-    println!("@LOG: debug create_record {body:#?}");
+    tracing::debug!("@LOG: debug create_record {body:#?}");
     match inner_create_record(body, auth, sequencer, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

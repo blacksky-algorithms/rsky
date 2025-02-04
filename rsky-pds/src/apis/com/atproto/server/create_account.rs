@@ -20,6 +20,7 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::fmt::Debug;
 
+#[tracing::instrument(skip_all)]
 #[allow(unused_assignments)]
 async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Send>(
     mut body: CreateAccountInput,
@@ -49,7 +50,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             did = Some(did_resp);
         }
         Err(error) => {
-            eprintln!("Failed to create  DID\n{:?}", error);
+            tracing::error!("Failed to create  DID\n{:?}", error);
             return Err(ApiError::RuntimeError);
         }
     }
@@ -59,7 +60,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
-            eprintln!("Failed to create account\n{:?}", error);
+            tracing::error!("Failed to create account\n{:?}", error);
             return Err(ApiError::RuntimeError);
         }
     };
@@ -68,7 +69,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
         Ok(res) => did_doc = res,
         Err(error) => {
-            eprintln!("Error resolving DID Doc\n{error}");
+            tracing::error!("Error resolving DID Doc\n{error}");
             return Err(ApiError::RuntimeError);
         }
     }
@@ -90,7 +91,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             (access_jwt, refresh_jwt) = res;
         }
         Err(error) => {
-            eprintln!("Error creating account\n{error}");
+            tracing::error!("Error creating account\n{error}");
             return Err(ApiError::RuntimeError);
         }
     }
@@ -103,7 +104,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         {
             Ok(_) => {}
             Err(error) => {
-                eprintln!("Sequence Identity Event failed\n{error}");
+                tracing::error!("Sequence Identity Event failed\n{error}");
                 return Err(ApiError::RuntimeError);
             }
         }
@@ -113,7 +114,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         {
             Ok(_) => {}
             Err(error) => {
-                eprintln!("Sequence Account Event failed\n{error}");
+                tracing::error!("Sequence Account Event failed\n{error}");
                 return Err(ApiError::RuntimeError);
             }
         }
@@ -123,7 +124,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         {
             Ok(_) => {}
             Err(error) => {
-                eprintln!("Sequence Commit failed\n{error}");
+                tracing::error!("Sequence Commit failed\n{error}");
                 return Err(ApiError::RuntimeError);
             }
         }
@@ -131,7 +132,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev) {
         Ok(_) => {}
         Err(error) => {
-            eprintln!("Update Repo Root failed\n{error}");
+            tracing::error!("Update Repo Root failed\n{error}");
             return Err(ApiError::RuntimeError);
         }
     }
@@ -142,7 +143,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         Some(did_doc) => match serde_json::to_value(did_doc) {
             Ok(res) => converted_did_doc = Some(res),
             Err(error) => {
-                eprintln!("Did Doc failed conversion\n{error}");
+                tracing::error!("Did Doc failed conversion\n{error}");
                 return Err(ApiError::RuntimeError);
             }
         },
@@ -156,6 +157,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.createAccount",
     format = "json",

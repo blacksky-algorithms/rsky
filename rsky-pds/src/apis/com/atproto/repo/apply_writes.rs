@@ -115,6 +115,7 @@ async fn inner_apply_writes(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.applyWrites", format = "json", data = "<body>")]
 pub async fn apply_writes(
     body: Json<ApplyWritesInput>,
@@ -122,11 +123,11 @@ pub async fn apply_writes(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
 ) -> Result<(), ApiError> {
-    println!("@LOG: debug apply_writes {body:#?}");
+    tracing::debug!("@LOG: debug apply_writes {body:#?}");
     match inner_apply_writes(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

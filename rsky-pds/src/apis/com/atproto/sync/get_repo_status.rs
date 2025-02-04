@@ -42,6 +42,7 @@ async fn inner_get_repo(did: String, s3_config: &State<SdkConfig>) -> Result<Get
 
 /// Get the hosting status for a repository, on this server.
 /// Expected to be implemented by PDS and Relay.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRepoStatus?<did>")]
 pub async fn get_repo_status(
     did: String,
@@ -50,7 +51,7 @@ pub async fn get_repo_status(
     match inner_get_repo(did, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

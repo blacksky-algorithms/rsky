@@ -41,6 +41,7 @@ async fn inner_refresh_session(auth: Refresh) -> Result<RefreshSessionOutput, Ap
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.refreshSession")]
 pub async fn refresh_session(auth: Refresh) -> Result<Json<RefreshSessionOutput>, ApiError> {
     match inner_refresh_session(auth).await {

@@ -46,6 +46,7 @@ async fn inner_describe_repo(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.repo.describeRepo?<repo>")]
 pub async fn describe_repo(
     repo: String,
@@ -55,7 +56,7 @@ pub async fn describe_repo(
     match inner_describe_repo(repo, id_resolver, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("{error:?}");
+            tracing::error!("{error:?}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -70,6 +70,7 @@ async fn inner_list_records(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(non_snake_case)]
 #[rocket::get("/xrpc/com.atproto.repo.listRecords?<repo>&<collection>&<limit>&<cursor>&<rkeyStart>&<rkeyEnd>&<reverse>")]
 pub async fn list_records(
@@ -98,7 +99,7 @@ pub async fn list_records(
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -5,6 +5,7 @@ use anyhow::Result;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::UpdateAccountPasswordInput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.updateAccountPassword",
     format = "json",
@@ -19,7 +20,7 @@ pub async fn update_account_password(
     {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

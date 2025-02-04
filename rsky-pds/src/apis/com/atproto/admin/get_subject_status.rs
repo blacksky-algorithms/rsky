@@ -85,6 +85,7 @@ async fn inner_get_subject_status(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.admin.getSubjectStatus?<did>&<uri>&<blob>")]
 pub async fn get_subject_status(
     did: Option<String>,
@@ -96,7 +97,7 @@ pub async fn get_subject_status(
     match inner_get_subject_status(did, uri, blob, s3_config).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             return Err(ApiError::RuntimeError);
         }
     }

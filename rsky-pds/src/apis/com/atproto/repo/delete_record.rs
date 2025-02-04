@@ -90,6 +90,7 @@ async fn inner_delete_record(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.repo.deleteRecord",
     format = "json",
@@ -104,7 +105,7 @@ pub async fn delete_record(
     match inner_delete_record(body, auth, sequencer, s3_config).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

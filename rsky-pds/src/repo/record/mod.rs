@@ -338,7 +338,7 @@ impl RecordReader {
 
     // Transactors
     // -------------------
-
+    #[tracing::instrument(skip_all)]
     pub async fn index_record(
         &self,
         uri: AtUri,
@@ -348,7 +348,7 @@ impl RecordReader {
         repo_rev: String,
         timestamp: Option<String>,
     ) -> Result<()> {
-        println!("@LOG DEBUG RecordReader::index_record, indexing record {uri}");
+        tracing::debug!("@LOG DEBUG RecordReader::index_record, indexing record {uri}");
         let collection = uri.get_collection();
         let rkey = uri.get_rkey();
         let hostname = uri.get_hostname().to_string();
@@ -398,12 +398,13 @@ impl RecordReader {
             }
             self.add_backlinks(backlinks).await?;
         }
-        println!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
+        tracing::debug!("@LOG DEBUG RecordReader::index_record, indexed record {uri}");
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn delete_record(&self, uri: &AtUri) -> Result<()> {
-        println!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
+        tracing::debug!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;
         let conn = &mut establish_connection()?;
@@ -413,7 +414,7 @@ impl RecordReader {
         delete(BacklinkSchema::backlink)
             .filter(BacklinkSchema::uri.eq(uri.to_string()))
             .execute(conn)?;
-        println!("@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}");
+        tracing::debug!("@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}");
         Ok(())
     }
 

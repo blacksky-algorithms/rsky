@@ -5,6 +5,7 @@ use anyhow::Result;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.deactivateAccount",
     format = "json",
@@ -19,7 +20,7 @@ pub async fn deactivate_account(
     match AccountManager::deactivate_account(&did, delete_after).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -33,6 +33,7 @@ async fn inner_get_latest_commit(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getLatestCommit?<did>")]
 pub async fn get_latest_commit(
     did: String,
@@ -42,7 +43,7 @@ pub async fn get_latest_commit(
     match inner_get_latest_commit(did, s3_config, auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

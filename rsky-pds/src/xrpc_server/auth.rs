@@ -41,6 +41,7 @@ pub fn parse_payload(b64: &str) -> Result<JwtPayload> {
     Ok(payload)
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn verify_jwt<G>(
     jwt_str: String,
     own_did: Option<String>, // None indicates to skip the audience check
@@ -85,7 +86,7 @@ where
             let mut valid_sig: bool = match verify_signature_with_key(signing_key.clone()) {
                 Ok(is_valid) => is_valid,
                 Err(err) => {
-                    eprintln!("Error received: {}", err);
+                    tracing::error!("Error received: {}", err);
                     bail!("BadJwtSignature: could not verify jwt signature")
                 }
             };
@@ -97,7 +98,7 @@ where
                     match verify_signature_with_key(fresh_signing_key) {
                         Ok(is_valid) => is_valid,
                         Err(err) => {
-                            eprintln!("Error received: {}", err);
+                            tracing::error!("Error received: {}", err);
                             bail!("BadJwtSignature: could not verify jwt signature")
                         }
                     }

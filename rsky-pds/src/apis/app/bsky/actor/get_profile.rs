@@ -44,6 +44,7 @@ pub async fn inner_get_profile(
 
 /// Get detailed profile view of an actor. Does not require auth,
 /// but contains relevant metadata with auth.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.actor.getProfile?<actor>")]
 pub async fn get_profile(
     // Handle or DID of account to fetch profile of.
