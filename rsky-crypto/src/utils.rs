@@ -1,8 +1,8 @@
 use crate::constants::{BASE58_MULTIBASE_PREFIX, DID_KEY_PREFIX};
 use anyhow::{bail, Result};
 use multibase::decode;
-use secp256k1::rand::RngCore;
 use secp256k1::rand::rngs::OsRng;
+use secp256k1::rand::RngCore;
 
 pub fn extract_multikey(did: &String) -> Result<String> {
     if !did.starts_with(DID_KEY_PREFIX) {
