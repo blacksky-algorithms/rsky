@@ -1258,10 +1258,13 @@ impl MST {
         let mut iter: Vec<Leaf> = Vec::new();
         let index = self.find_gt_or_equal_leaf_index(key).await.unwrap() as usize;
         let entries = self.get_entries().await.unwrap();
-        let prev = entries.get(index - 1).unwrap().clone();
-        if let NodeEntry::MST(mut p) = prev {
-            for leaf in p.walk_leaves_from(key).await {
-                iter.push(leaf);
+        if let Some(prev_index) = index.checked_sub(1) {
+            let prev = entries.get(prev_index);
+            if let Some(NodeEntry::MST(p)) = prev {
+                let mut p = p.clone();
+                for leaf in p.walk_leaves_from(key).await {
+                    iter.push(leaf);
+                }
             }
         }
         for i in index..entries.len() {

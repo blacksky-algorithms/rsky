@@ -455,7 +455,7 @@ impl Repo {
         }
     }
 
-    pub async fn get_content(&mut self) -> Result<RepoContents> {
+    pub async fn get_contents(&mut self) -> Result<RepoContents> {
         let entries = self.data.list(None, None, None).await?;
         let cids = entries
             .clone()
@@ -926,11 +926,15 @@ mod tests {
     use crate::repo::sync::consumer::{verify_proofs, verify_records, ConsumerError};
     use crate::repo::sync::provider::get_records;
     use crate::repo::types::{RecordCidClaim, RecordDeleteOp, RecordPath};
+    use crate::repo::util::verify_commit_sig;
     use crate::storage::memory_blockstore::MemoryBlockstore;
     use anyhow::Result;
+    use rand::prelude::SliceRandom;
+    use rand::thread_rng;
     use rsky_crypto::utils::random_bytes;
 
     const TEST_COLLECTIONS: [&'static str; 2] = ["com.example.posts", "com.example.likes"];
+    const COLL_NAME: &str = "com.example.posts";
 
     pub struct FillRepoOutput {
         pub repo: Repo,
@@ -1032,6 +1036,345 @@ mod tests {
         Ok(claims)
     }
 
+    #[derive(Debug)]
+    pub struct FormatEditOpts {
+        pub adds: Option<usize>,
+        pub updates: Option<usize>,
+        pub deletes: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    pub struct FormatEditOutput {
+        pub commit: CommitData,
+        pub data: RepoContents,
+    }
+
+    pub async fn format_edit(
+        repo: &mut Repo,
+        prev_data: RepoContents,
+        keypair: Keypair,
+        params: FormatEditOpts,
+    ) -> Result<FormatEditOutput> {
+        let (adds, updates, deletes) = (
+            params.adds.unwrap_or(0),
+            params.updates.unwrap_or(0),
+            params.deletes.unwrap_or(0),
+        );
+        let mut repo_data: RepoContents = Default::default();
+        let mut writes: Vec<RecordWriteOp> = Default::default();
+        let mut rng = thread_rng();
+        for coll_name in TEST_COLLECTIONS {
+            let mut coll_data: CollectionContents = match prev_data.get(coll_name) {
+                Some(prev) => prev.clone(),
+                None => Default::default(),
+            };
+
+            let mut entries: Vec<(String, RepoRecord)> = coll_data
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            entries.shuffle(&mut rng);
+
+            for _ in 0..adds {
+                let object = generate_object();
+                let rkey = TID::next_str(None)?;
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: coll_name.to_string(),
+                    rkey,
+                    record: object,
+                }));
+            }
+
+            let to_update = entries[0..updates].to_vec();
+            for i in 0..to_update.len() {
+                let object = generate_object();
+                let rkey = to_update[i].0.clone();
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Update(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Update,
+                    collection: coll_name.to_string(),
+                    rkey: rkey.to_string(),
+                    record: object,
+                }));
+            }
+
+            let to_delete = entries[0..deletes].to_vec();
+            for i in 0..to_delete.len() {
+                let rkey = to_delete[i].0.clone();
+                coll_data.remove(&rkey);
+                writes.push(RecordWriteOp::Delete(RecordDeleteOp {
+                    action: WriteOpAction::Delete,
+                    collection: coll_name.to_string(),
+                    rkey: rkey.to_string(),
+                }));
+            }
+            repo_data.insert(coll_name.to_string(), coll_data);
+        }
+        let commit = repo
+            .format_commit(RecordWriteEnum::List(writes), keypair)
+            .await?;
+        Ok(FormatEditOutput {
+            commit,
+            data: repo_data,
+        })
+    }
+
+    #[tokio::test]
+    async fn creates_repo() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, keypair, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn has_proper_metadata() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        assert_eq!(repo.did(), did_key);
+        assert_eq!(repo.version(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_basic_operations() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let rkey = TID::next_str(None)?;
+        let record = generate_object();
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                    record: record.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_some());
+        let got: RepoRecord = serde_cbor::value::from_value(got.unwrap())?;
+        assert_eq!(got, record);
+
+        let updated_record = generate_object();
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Update(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Update,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                    record: updated_record.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_some());
+        let got: RepoRecord = serde_cbor::value::from_value(got.unwrap())?;
+        assert_eq!(got, updated_record);
+
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                    action: WriteOpAction::Delete,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adds_content_collection() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let contents = repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn edits_and_deletes_content() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let mut repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        repo_data = edit.data;
+        let contents = repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn has_a_valid_signature_to_commit() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let _ = repo.get_contents().await?;
+        let verified = verify_commit_sig(repo.commit, &did_key)?;
+        assert!(verified);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sets_correct_did() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let _ = repo.get_contents().await?;
+        let _ = verify_commit_sig(repo.commit.clone(), &did_key)?;
+        assert_eq!(repo.did(), did_key);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loads_from_blockstore() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data.clone(),
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let old_contents = repo.get_contents().await?;
+        let _ = verify_commit_sig(repo.commit, &did_key)?;
+
+        let mut reloaded_repo = Repo::load(repo.storage.clone(), Some(repo.cid)).await?;
+        let contents = reloaded_repo.get_contents().await?;
+        assert_eq!(contents, old_contents);
+        assert_eq!(reloaded_repo.did(), did_key);
+        assert_eq!(reloaded_repo.version(), 3);
+        Ok(())
+    }
+
     // @NOTE this test uses a fully deterministic tree structure
     #[tokio::test]
     async fn includes_all_relevant_blocks_for_proof_commit_data() -> Result<()> {
@@ -1041,7 +1384,7 @@ mod tests {
 
         let blockstore = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let mut repo = Repo::create(
             Arc::new(RwLock::new(blockstore)),
             did.to_string(),
@@ -1137,7 +1480,7 @@ mod tests {
     async fn verifies_valid_records() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1172,7 +1515,7 @@ mod tests {
     async fn verifies_record_nonexistence() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1211,7 +1554,7 @@ mod tests {
     async fn does_not_verify_a_record_that_does_not_exist() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1251,7 +1594,7 @@ mod tests {
     async fn does_not_verify_an_invalid_record_at_a_real_path() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1292,7 +1635,7 @@ mod tests {
     async fn does_not_verify_a_delete_where_a_record_does_exist() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1332,7 +1675,7 @@ mod tests {
     async fn can_determine_record_proofs_from_car_file() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
@@ -1388,7 +1731,7 @@ mod tests {
     async fn verify_proofs_throws_on_a_bad_signature() -> Result<()> {
         let storage = MemoryBlockstore::default();
         let secp = Secp256k1::new();
-        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = Keypair::new(&secp, &mut thread_rng());
         let repo_did = "did:example:test";
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
