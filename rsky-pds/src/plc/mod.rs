@@ -40,7 +40,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    async fn send_operation(&self, did: &String, op: &OpOrTombstone) -> Result<()> {
+    pub async fn send_operation(&self, did: &String, op: &OpOrTombstone) -> Result<()> {
         let client = reqwest::Client::builder()
             .user_agent(APP_USER_AGENT)
             .build()?;

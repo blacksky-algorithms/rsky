@@ -81,9 +81,11 @@ pub enum ApiError {
     UnsupportedDomain,
     UnresolvableDid,
     IncompatibleDidDoc,
+    WellKnownNotFound,
     AccountNotFound,
     BlobNotFound,
     BadRequest(String, String),
+    AuthRequiredError(String),
 }
 
 #[derive(Serialize)]
@@ -117,7 +119,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                res.set_header(ContentType(::rocket::http::MediaType::const_new(
                     "application",
                     "json",
                     &[],
@@ -132,7 +134,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                res.set_header(ContentType(::rocket::http::MediaType::const_new(
                     "application",
                     "json",
                     &[],
@@ -349,7 +351,22 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 )));
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
-            }
+            },
+            ApiError::WellKnownNotFound => {
+                let body = Json(ErrorBody {
+                    error: "WellKnownNotFound".to_string(),
+                    message: "User not found".to_string(),
+                });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(::rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 404u16 });
+                Ok(res)
+            },
             ApiError::BadRequest(error, message) => {
                 let body = Json(ErrorBody { error, message });
                 let mut res =
@@ -361,7 +378,19 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 )));
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
-            }
+            },
+            ApiError::AuthRequiredError(message) => {
+                let body = Json(ErrorBody { error: "AuthRequiredError".to_string(), message });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(::rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 401u16 });
+                Ok(res)
+            },
             ApiError::RecordNotFound => {
                 let body = Json(ErrorBody {
                     error: "RecordNotFound".to_string(),

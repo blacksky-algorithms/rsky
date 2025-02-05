@@ -1,16 +1,18 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::{AccountManager, CreateAccountOpts};
-use crate::apis::com::atproto::server::safe_resolve_did_doc;
+use crate::apis::com::atproto::server::{
+    encode_did_key, get_keys_from_private_key_str, safe_resolve_did_doc,
+};
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
 use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
+use crate::plc::operations::{create_op, CreateAtprotoOpInput};
+use crate::plc::types::{CompatibleOpOrTombstone, OpOrTombstone, Operation};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use crate::storage::readable_blockstore::ReadableBlockstore;
-use crate::storage::sql_repo::SqlRepoReader;
-use crate::SharedIdResolver;
+use crate::{plc, SharedIdResolver};
 use crate::SharedSequencer;
 use aws_config::SdkConfig;
 use email_address::*;
@@ -19,81 +21,112 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use std::fmt::Debug;
+use crate::common::env::env_str;
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TransformedCreateAccountInput {
+    pub email: String,
+    pub handle: String,
+    pub did: String,
+    pub invite_code: Option<String>,
+    pub password: String,
+    pub signing_key: Keypair,
+    pub plc_op: Option<Operation>,
+    pub deactivated: bool,
+}
+
+//TODO: Potential for taking advantage of async better
 #[tracing::instrument(skip_all)]
-#[allow(unused_assignments)]
-async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Send>(
-    mut body: CreateAccountInput,
+#[rocket::post(
+    "/xrpc/com.atproto.server.createAccount",
+    format = "json",
+    data = "<body>"
+)]
+pub async fn server_create_account(
+    body: Json<CreateAccountInput>,
+    auth: UserDidAuthOptional,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     db: DbConn,
-) -> Result<CreateAccountOutput, ApiError> {
-    let CreateAccountInput {
+) -> Result<Json<CreateAccountOutput>, ApiError> {
+    tracing::info!("Creating new user account");
+    let requester = match auth.access {
+        Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
+        _ => None,
+    };
+    let TransformedCreateAccountInput {
         email,
         handle,
-        mut did, // @TODO: Allow people to bring their own DID
+        did,
         invite_code,
         password,
-        ..
-    } = body.clone();
-    let deactivated = false;
-    if let Some(input_recovery_key) = &body.recovery_key {
-        body.recovery_key = Some(input_recovery_key.to_owned());
-    }
+        deactivated,
+        plc_op,
+        signing_key,
+    } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester).await?;
 
-    let secp = Secp256k1::new();
-    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-    let signing_key = Keypair::from_secret_key(&secp, &secret_key);
-    match super::create_did_and_plc_op(&handle, &body, signing_key).await {
-        Ok(did_resp) => {
-            did = Some(did_resp);
-        }
-        Err(error) => {
-            tracing::error!("Failed to create  DID\n{:?}", error);
-            return Err(ApiError::RuntimeError);
-        }
-    }
-    let did = did.unwrap();
-
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    // Create new actor repo TODO: Proper rollback
+    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
-            tracing::error!("Failed to create account\n{:?}", error);
+            tracing::error!("Failed to create repo\n{:?}", error);
+            actor_store.destroy().await?;
             return Err(ApiError::RuntimeError);
         }
     };
+
+    // Generate a real did with PLC
+    match plc_op {
+        None => {}
+        Some(op) => {
+            let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
+            let plc_client = plc::Client::new(plc_url);
+            match plc_client.send_operation(&did, &OpOrTombstone::Operation(op)).await {
+                Ok(_) => {
+                    tracing::info!("Succesfully sent PLC Operation")
+                }
+                Err(_) => {
+                    tracing::error!("Failed to create did:plc");
+                    actor_store.destroy().await?;
+                    return Err(ApiError::RuntimeError);
+                }
+            }
+        }
+    }
 
     let did_doc;
     match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
         Ok(res) => did_doc = res,
         Err(error) => {
             tracing::error!("Error resolving DID Doc\n{error}");
+            actor_store.destroy().await?;
             return Err(ApiError::RuntimeError);
         }
     }
 
+    // Create Account
     let (access_jwt, refresh_jwt);
     match AccountManager::create_account(CreateAccountOpts {
         did: did.clone(),
         handle: handle.clone(),
-        email,
-        password,
+        email: Some(email),
+        password: Some(password),
         repo_cid: commit.cid,
         repo_rev: commit.rev.clone(),
         invite_code,
         deactivated: Some(deactivated),
     })
-    .await
+        .await
     {
         Ok(res) => {
             (access_jwt, refresh_jwt) = res;
         }
         Err(error) => {
             tracing::error!("Error creating account\n{error}");
+            actor_store.destroy().await.unwrap();
             return Err(ApiError::RuntimeError);
         }
     }
@@ -104,7 +137,9 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             .sequence_identity_evt(did.clone(), Some(handle.clone()))
             .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::debug!("Sequenece identity event succeeded");
+            }
             Err(error) => {
                 tracing::error!("Sequence Identity Event failed\n{error}");
                 return Err(ApiError::RuntimeError);
@@ -114,7 +149,9 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             .sequence_account_evt(did.clone(), AccountStatus::Active)
             .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::debug!("Sequence account event succeeded");
+            }
             Err(error) => {
                 tracing::error!("Sequence Account Event failed\n{error}");
                 return Err(ApiError::RuntimeError);
@@ -124,7 +161,9 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             .sequence_commit(did.clone(), commit.clone(), vec![])
             .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                tracing::debug!("Sequence commit succeeded");
+            }
             Err(error) => {
                 tracing::error!("Sequence Commit failed\n{error}");
                 return Err(ApiError::RuntimeError);
@@ -132,7 +171,9 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
         }
     }
     match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev) {
-        Ok(_) => {}
+        Ok(_) => {
+            tracing::debug!("Successfully updated repo root");
+        }
         Err(error) => {
             tracing::error!("Update Repo Root failed\n{error}");
             return Err(ApiError::RuntimeError);
@@ -150,130 +191,167 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
             }
         },
     }
-    Ok(CreateAccountOutput {
+
+    Ok(Json(CreateAccountOutput {
         access_jwt,
         refresh_jwt,
         handle,
         did,
         did_doc: converted_did_doc,
-    })
+    }))
 }
 
-#[tracing::instrument(skip_all)]
-#[rocket::post(
-    "/xrpc/com.atproto.server.createAccount",
-    format = "json",
-    data = "<body>"
-)]
-pub async fn server_create_account(
-    body: Json<CreateAccountInput>,
-    auth: UserDidAuthOptional,
-    sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
-    cfg: &State<ServerConfig>,
-    id_resolver: &State<SharedIdResolver>,
-    db: DbConn,
-) -> Result<Json<CreateAccountOutput>, ApiError> {
-    let requester = match auth.access {
-        Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
-        _ => None,
-    };
-    let input =
-        match validate_inputs_for_local_pds(cfg, id_resolver, body.clone().into_inner(), requester)
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => return Err(e), // @TODO this needs better error logging
-        };
-
-    match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver, db)
-        .await
-    {
-        Ok(response) => Ok(Json(response)),
-        Err(error) => Err(error),
-    }
-}
-
+/// Validates Create Account Parameters and builds PLC Operation if needed
 pub async fn validate_inputs_for_local_pds(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
     requester: Option<String>,
-) -> Result<CreateAccountInput, ApiError> {
-    let CreateAccountInput {
-        email,
-        handle,
-        did,
-        invite_code,
-        verification_code,
-        verification_phone,
-        password,
-        recovery_key,
-        plc_op,
-    } = input;
+) -> Result<TransformedCreateAccountInput, ApiError> {
+    let did: String;
+    let plc_op;
+    let deactivated: bool;
+    let email;
+    let password;
+    let invite_code;
 
-    if plc_op.is_some() {
+    //PLC Op Validation
+    if input.plc_op.is_some() {
         return Err(ApiError::InvalidRequest(
             "Unsupported input: `plcOp`".to_string(),
         ));
     }
-    if cfg.invites.required && invite_code.is_none() {
+
+    //Invite Code Validation
+    if cfg.invites.required && input.invite_code.is_none() {
         return Err(ApiError::InvalidInviteCode);
+    } else {
+        invite_code = input.invite_code.clone();
     }
-    if email.is_none() {
+
+    //Email Validation
+    if input.email.is_none() {
         return Err(ApiError::InvalidEmail);
     };
-    match email {
-        None => Err(ApiError::InvalidEmail),
-        Some(email) => {
-            let e_slice: &str = &email[..]; // take a full slice of the string
+    match input.email {
+        None => return Err(ApiError::InvalidEmail),
+        Some(ref input_email) => {
+            let e_slice: &str = &input_email[..]; // take a full slice of the string
             if !EmailAddress::is_valid(e_slice) {
                 return Err(ApiError::InvalidEmail);
+            } else {
+                email = input_email.clone();
             }
-            if password.is_none() {
-                return Err(ApiError::InvalidPassword);
-            };
-            //TODO Not yet allowing people to bring their own DID
-            if did.is_some() {
-                return Err(ApiError::InvalidRequest(
-                    "Not yet allowing people to bring their own DID".to_string(),
-                ));
-            };
-            let opts = HandleValidationOpts {
-                handle: handle.clone(),
-                did: requester.clone(),
-                allow_reserved: None,
-            };
-            let validation_ctx = HandleValidationContext {
-                server_config: cfg,
-                id_resolver,
-            };
-            let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
-
-            if !super::validate_handle(&handle) {
-                return Err(ApiError::InvalidHandle);
-            };
-            if cfg.invites.required && invite_code.is_some() {
-                AccountManager::ensure_invite_is_available(invite_code.clone().unwrap()).await?;
-            }
-            let handle_accnt = AccountManager::get_account(&handle, None).await?;
-            let email_accnt = AccountManager::get_account_by_email(&email, None).await?;
-            if handle_accnt.is_some() {
-                return Err(ApiError::HandleNotAvailable);
-            } else if email_accnt.is_some() {
-                return Err(ApiError::EmailNotAvailable);
-            }
-            Ok(CreateAccountInput {
-                email: Some(email),
-                handle,
-                did,
-                invite_code,
-                verification_code,
-                verification_phone,
-                password,
-                recovery_key,
-                plc_op,
-            })
         }
     }
+
+    // Normalize and Ensure Valid Handle
+    let opts = HandleValidationOpts {
+        handle: input.handle.clone(),
+        did: requester.clone(),
+        allow_reserved: None,
+    };
+    let validation_ctx = HandleValidationContext {
+        server_config: cfg,
+        id_resolver,
+    };
+    let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
+    if !super::validate_handle(&handle) {
+        return Err(ApiError::InvalidHandle);
+    };
+
+    // Check Handle and Email are still available
+    let handle_accnt = AccountManager::get_account(&handle, None).await?;
+    let email_accnt = AccountManager::get_account_by_email(&email, None).await?;
+    if handle_accnt.is_some() {
+        return Err(ApiError::HandleNotAvailable);
+    } else if email_accnt.is_some() {
+        return Err(ApiError::EmailNotAvailable);
+    }
+
+    // Check password  exists
+    match input.password {
+        None => return Err(ApiError::InvalidPassword),
+        Some(ref pass) => password = pass.clone()
+    };
+
+    // Get Signing Key
+    let secp = Secp256k1::new();
+    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let signing_key = Keypair::from_secret_key(&secp, &secret_key);
+
+    match input.did {
+        Some(input_did) => {
+            if input_did == requester.unwrap_or("n/a".to_string()) {
+                return Err(ApiError::AuthRequiredError(format!(
+                    "Missing auth to create account with did: {input_did}"
+                )));
+            }
+            did = input_did;
+            plc_op = None;
+            deactivated = true;
+        }
+        None => {
+            let res = format_did_and_plc_op(input, signing_key).await?;
+            did = res.0;
+            plc_op = Some(res.1);
+            deactivated = false;
+        }
+    };
+
+    Ok(TransformedCreateAccountInput {
+        email,
+        handle,
+        did,
+        invite_code,
+        password,
+        signing_key,
+        plc_op,
+        deactivated,
+    })
+}
+
+#[tracing::instrument(skip_all)]
+async fn format_did_and_plc_op(
+    input: CreateAccountInput,
+    signing_key: Keypair,
+) -> Result<(String, Operation), ApiError> {
+    let mut rotation_keys: Vec<String> = Vec::new();
+
+    //Add user provided rotation key
+    if let Some(recovery_key) = &input.recovery_key {
+        rotation_keys.push(recovery_key.clone());
+    }
+
+    //Add PDS rotation key
+    let secp = Secp256k1::new();
+    let private_rotation_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let private_secret_key =
+        SecretKey::from_slice(&hex::decode(private_rotation_key.as_bytes()).unwrap()).unwrap();
+    let rotation_keypair = Keypair::from_secret_key(&secp, &private_secret_key);
+    rotation_keys.push(encode_did_key(&rotation_keypair.public_key()));
+
+    //Build PLC Create Operation
+    let response;
+    let create_op_input = CreateAtprotoOpInput {
+        signing_key: encode_did_key(&signing_key.public_key()),
+        handle: input.handle,
+        pds: format!(
+            "https://{}",
+            env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned())
+        ),
+        rotation_keys,
+    };
+    match create_op(create_op_input, rotation_keypair.secret_key()).await {
+        Ok(res) => {
+            response = res;
+        }
+        Err(error) => {
+            tracing::error!("{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    }
+
+    Ok(response)
 }
