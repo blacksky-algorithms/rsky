@@ -2,8 +2,20 @@ use anyhow::Result;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use dotenvy::dotenv;
+use rocket_sync_db_pools::database;
 use std::env;
+use std::fmt::{Debug, Formatter};
 
+#[database("pg_db")]
+pub struct DbConn(PgConnection);
+
+impl Debug for DbConn {
+    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+// @TODO: Deprecate and replace with DbConn
 #[tracing::instrument(skip_all)]
 pub fn establish_connection() -> Result<PgConnection> {
     dotenv().ok();

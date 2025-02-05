@@ -1,6 +1,7 @@
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::RecordPath;
 use crate::repo::ActorStore;
@@ -23,6 +24,7 @@ async fn inner_get_record(
     commit: Option<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<Vec<u8>> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
@@ -30,11 +32,11 @@ async fn inner_get_record(
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin).await?;
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let storage_guard = actor_store.storage.read().await;
     let commit: Option<Cid> = match commit {
         Some(commit) => Some(Cid::from_str(&commit)?),
-        None => storage_guard.get_root(),
+        None => storage_guard.get_root().await,
     };
 
     match commit {
@@ -61,8 +63,9 @@ pub async fn get_record(
     commit: Option<String>, // DEPRECATED: referenced a repo commit by CID, and retrieved record as of that commit
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<BlockResponder, ApiError> {
-    match inner_get_record(did, collection, rkey, commit, s3_config, auth).await {
+    match inner_get_record(did, collection, rkey, commit, s3_config, auth, db).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

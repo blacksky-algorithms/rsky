@@ -1,6 +1,7 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::common::ContentType;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{BlobConstraint, PreparedBlobRef};
 use crate::repo::ActorStore;
@@ -16,12 +17,14 @@ async fn inner_upload_blob(
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<BlobOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
     let actor_store = ActorStore::new(
         requester.clone(),
         S3BlobStore::new(requester.clone(), s3_config),
+        db,
     );
 
     let metadata = actor_store
@@ -69,8 +72,9 @@ pub async fn upload_blob(
     blob: Data<'_>,
     content_type: ContentType,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<Json<BlobOutput>, ApiError> {
-    match inner_upload_blob(auth, blob, content_type, s3_config).await {
+    match inner_upload_blob(auth, blob, content_type, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("{error:?}");

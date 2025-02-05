@@ -4,7 +4,7 @@
 use crate::common;
 use crate::common::ipld::cid_for_cbor;
 use crate::common::tid::{Ticker, TID};
-use crate::db::establish_connection;
+use crate::db::DbConn;
 use crate::lexicon::LEXICONS;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
@@ -98,9 +98,9 @@ pub struct ActorStore {
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
 impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
-    pub fn new(did: String, blobstore: S3BlobStore) -> Self {
+    pub fn new(did: String, blobstore: S3BlobStore, conn: DbConn) -> Self {
         ActorStore {
-            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None))),
+            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None, conn))),
             record: RecordReader::new(did.clone()),
             pref: PreferenceReader::new(did.clone()),
             did,
@@ -136,8 +136,8 @@ impl ActorStore {
             Some(write_ops),
         )
         .await?;
-        let mut storage_guard = self.storage.write().await;
-        storage_guard.apply_commit(commit.clone(), None)?;
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
@@ -160,8 +160,8 @@ impl ActorStore {
                 .await?;
         }
         // persist the commit to repo storage
-        let mut storage_guard = self.storage.write().await;
-        storage_guard.apply_commit(commit.clone(), None)?;
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
@@ -174,7 +174,7 @@ impl ActorStore {
     ) -> Result<CommitData> {
         let current_root = {
             let storage_guard = self.storage.read().await;
-            storage_guard.get_root_detailed()
+            storage_guard.get_root_detailed().await
         };
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
@@ -267,8 +267,8 @@ impl ActorStore {
             let new_record_blocks = commit.relevant_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
                 let missing_blocks = {
-                    let mut storage_guard = self.storage.write().await;
-                    storage_guard.get_blocks(new_record_blocks.missing)?
+                    let storage_guard = self.storage.read().await;
+                    storage_guard.get_blocks(new_record_blocks.missing).await?
                 };
                 commit.relevant_blocks.add_map(missing_blocks.blocks)?;
             }
@@ -324,13 +324,19 @@ impl ActorStore {
     }
 
     pub async fn destroy(&mut self) -> Result<()> {
+        let did: String = self.did.clone();
+        let storage_guard = self.storage.read().await;
+        let db: Arc<DbConn> = storage_guard.db.clone();
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let blob_rows: Vec<String> = BlobSchema::blob
-            .filter(BlobSchema::did.eq(&self.did))
-            .select(BlobSchema::cid)
-            .get_results(conn)?;
+        let blob_rows: Vec<String> = db
+            .run(move |conn| {
+                BlobSchema::blob
+                    .filter(BlobSchema::did.eq(did))
+                    .select(BlobSchema::cid)
+                    .get_results(conn)
+            })
+            .await?;
         let cids = blob_rows
             .into_iter()
             .map(|row| Ok(Cid::from_str(&row)?))
@@ -354,17 +360,23 @@ impl ActorStore {
         if touched_uris.len() == 0 || cids.len() == 0 {
             return Ok(vec![]);
         }
+        let did: String = self.did.clone();
+        let storage_guard = self.storage.read().await;
+        let db: Arc<DbConn> = storage_guard.db.clone();
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
         let cid_strs: Vec<String> = cids.into_iter().map(|c| c.to_string()).collect();
         let touched_uri_strs: Vec<String> = touched_uris.iter().map(|t| t.to_string()).collect();
-        let res: Vec<String> = RecordSchema::record
-            .filter(RecordSchema::did.eq(&self.did))
-            .filter(RecordSchema::cid.eq_any(cid_strs))
-            .filter(RecordSchema::uri.ne_all(touched_uri_strs))
-            .select(RecordSchema::cid)
-            .get_results(conn)?;
+        let res: Vec<String> = db
+            .run(move |conn| {
+                RecordSchema::record
+                    .filter(RecordSchema::did.eq(did))
+                    .filter(RecordSchema::cid.eq_any(cid_strs))
+                    .filter(RecordSchema::uri.ne_all(touched_uri_strs))
+                    .select(RecordSchema::cid)
+                    .get_results(conn)
+            })
+            .await?;
         Ok(res
             .into_iter()
             .map(|row| Cid::from_str(&row).map_err(|error| anyhow::Error::new(error)))
@@ -389,13 +401,13 @@ impl Repo {
             Some(cid)
         } else {
             let storage_guard = storage.read().await;
-            storage_guard.get_root()
+            storage_guard.get_root().await
         };
         match commit_cid {
             Some(commit_cid) => {
                 let commit_bytes: Vec<u8> = {
-                    let mut storage_guard = storage.write().await;
-                    match storage_guard.get_bytes(&commit_cid)? {
+                    let storage_guard = storage.read().await;
+                    match storage_guard.get_bytes(&commit_cid).await? {
                         Some(res) => res,
                         None => bail!("Missing blocks for commit cid {commit_cid}"),
                     }
@@ -427,8 +439,8 @@ impl Repo {
             .await
         {
             let path = util::parse_data_key(&leaf.key).unwrap();
-            let mut storage_guard = self.storage.write().await;
-            let record = storage_guard.read_record(&leaf.value).unwrap();
+            let storage_guard = self.storage.read().await;
+            let record = storage_guard.read_record(&leaf.value).await.unwrap();
             iter.push(CommitRecord {
                 collection: path.collection,
                 rkey: path.rkey,
@@ -446,11 +458,13 @@ impl Repo {
     ) -> Result<Option<CborValue>> {
         let data_key = format!("{}/{}", collection, rkey);
         let cid = self.data.get(&data_key).await?;
-        let mut storage_guard = self.storage.write().await;
+        let storage_guard = self.storage.read().await;
         match cid {
             None => Ok(None),
             Some(cid) => Ok(Some(
-                storage_guard.read_obj(&cid, Box::new(|obj| matches!(obj, CborValue::Map(_))))?,
+                storage_guard
+                    .read_obj(&cid, Box::new(|obj| matches!(obj, CborValue::Map(_))))
+                    .await?,
             )),
         }
     }
@@ -462,8 +476,8 @@ impl Repo {
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let mut storage_guard = self.storage.write().await;
-        let found = storage_guard.get_blocks(cids)?;
+        let storage_guard = self.storage.read().await;
+        let found = storage_guard.get_blocks(cids).await?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -530,8 +544,8 @@ impl Repo {
         commit: CommitData,
     ) -> Result<Self> {
         {
-            let mut storage_guard = storage.write().await;
-            storage_guard.apply_commit(commit.clone(), None)?;
+            let storage_guard = storage.read().await;
+            storage_guard.apply_commit(commit.clone(), None).await?;
         }
         Repo::load(storage, Some(commit.cid)).await
     }
@@ -636,8 +650,8 @@ impl Repo {
     pub async fn apply_commit(&self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
         {
-            let mut storage_guard = self.storage.write().await;
-            storage_guard.apply_commit(commit_data, None)?;
+            let storage_guard = self.storage.read().await;
+            storage_guard.apply_commit(commit_data, None).await?;
         }
         Repo::load(self.storage.clone(), Some(commit_data_cid)).await
     }
@@ -911,6 +925,7 @@ pub mod error;
 pub mod mst;
 pub mod parse;
 pub mod preference;
+mod readable_repo;
 pub mod record;
 pub mod sync;
 pub mod types;
@@ -920,15 +935,17 @@ pub mod util;
 mod tests {
     use super::*;
     use crate::apis::com::atproto::server::encode_did_key;
-    use crate::car::blocks_to_car_file;
+    use crate::car::{blocks_to_car_file, read_car_with_root};
     use crate::common::sign::sign_without_indexmap;
     use crate::repo::mst::util::{random_cid, random_str};
-    use crate::repo::sync::consumer::{verify_proofs, verify_records, ConsumerError};
-    use crate::repo::sync::provider::get_records;
+    use crate::repo::parse::get_and_parse_record;
+    use crate::repo::sync::consumer::{verify_proofs, verify_records, verify_repo, ConsumerError};
+    use crate::repo::sync::provider::{get_full_repo, get_records};
     use crate::repo::types::{RecordCidClaim, RecordDeleteOp, RecordPath};
-    use crate::repo::util::verify_commit_sig;
+    use crate::repo::util::{stream_to_buffer, verify_commit_sig};
     use crate::storage::memory_blockstore::MemoryBlockstore;
     use anyhow::Result;
+    use futures::pin_mut;
     use rand::prelude::SliceRandom;
     use rand::thread_rng;
     use rsky_crypto::utils::random_bytes;
@@ -1003,19 +1020,21 @@ mod tests {
         };
         let commit_cid = new_blocks.add(commit)?;
         {
-            let mut storage_guard = repo.storage.write().await;
-            storage_guard.apply_commit(
-                CommitData {
-                    cid: commit_cid,
-                    rev,
-                    since: None,
-                    prev: Some(repo.cid),
-                    new_blocks,
-                    relevant_blocks: BlockMap::new(),
-                    removed_cids: diff.removed_cids,
-                },
-                None,
-            )?;
+            let storage_guard = repo.storage.read().await;
+            storage_guard
+                .apply_commit(
+                    CommitData {
+                        cid: commit_cid,
+                        rev,
+                        since: None,
+                        prev: Some(repo.cid),
+                        new_blocks,
+                        relevant_blocks: BlockMap::new(),
+                        removed_cids: diff.removed_cids,
+                    },
+                    None,
+                )
+                .await?;
         }
         Repo::load(repo.storage.clone(), Some(commit_cid)).await
     }
@@ -1765,6 +1784,61 @@ mod tests {
             result.unwrap_err().downcast_ref::<ConsumerError>().unwrap(),
             ConsumerError::RepoVerificationError(_)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_a_full_repo() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let repo_stream = get_full_repo(repo.storage.clone(), repo.cid).await?;
+        pin_mut!(repo_stream);
+        let car_bytes = stream_to_buffer(repo_stream).await?;
+        let mut car = read_car_with_root(car_bytes).await?;
+        let verifed = verify_repo(
+            &mut car.blocks,
+            car.root,
+            Some(&repo_did.to_string()),
+            Some(&did_key),
+            None,
+        )
+        .await?;
+        let sync_storage = MemoryBlockstore::default();
+        sync_storage.apply_commit(verifed.commit, None).await?;
+        let mut loaded_repo =
+            Repo::load(Arc::new(RwLock::new(sync_storage)), Some(car.root)).await?;
+        let contents = loaded_repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        let mut contents_from_ops = RepoContents::default();
+        for write in verifed.creates {
+            match contents_from_ops.get(&write.collection) {
+                Some(_) => (),
+                None => {
+                    contents_from_ops
+                        .insert(write.collection.clone(), CollectionContents::default());
+                    ()
+                }
+            }
+            let parsed = get_and_parse_record(&car.blocks, write.cid)?;
+            contents_from_ops
+                .get_mut(&write.collection)
+                .unwrap()
+                .insert(write.rkey, parsed.record);
+        }
+        assert_eq!(contents_from_ops, repo_data);
         Ok(())
     }
 }

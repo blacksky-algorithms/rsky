@@ -1,6 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::SharedSequencer;
@@ -17,6 +18,7 @@ async fn inner_update_subject_status(
     body: Json<SubjectStatus>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<UpdateSubjectStatusOutput> {
     let SubjectStatus {
         subject,
@@ -34,6 +36,7 @@ async fn inner_update_subject_status(
                 let actor_store = ActorStore::new(
                     subject_at_uri.get_hostname().to_string(),
                     S3BlobStore::new(subject_at_uri.get_hostname().to_string(), s3_config),
+                    db,
                 );
                 actor_store
                     .record
@@ -44,6 +47,7 @@ async fn inner_update_subject_status(
                 let actor_store = ActorStore::new(
                     subject.did.clone(),
                     S3BlobStore::new(subject.did.clone(), s3_config),
+                    db,
                 );
                 actor_store
                     .blob
@@ -83,9 +87,10 @@ pub async fn update_subject_status(
     body: Json<SubjectStatus>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
     _auth: Moderator,
 ) -> Result<Json<UpdateSubjectStatusOutput>, ApiError> {
-    match inner_update_subject_status(body, sequencer, s3_config).await {
+    match inner_update_subject_status(body, sequencer, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -1,4 +1,5 @@
 use crate::common::time::from_str_to_utc;
+use crate::db::DbConn;
 use crate::pipethrough::parse_res;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::viewer::{get_records_since_rev, LocalViewer};
@@ -114,6 +115,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     munge: MungeFn<T>,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<T>> {
     match read_after_write_internal(
         nsid,
@@ -122,6 +124,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
         munge,
         s3_config,
         state_local_viewer,
+        db,
     )
     .await
     {
@@ -144,6 +147,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     munge: MungeFn<T>,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<T>> {
     let headers = &res.headers.clone().unwrap_or_else(|| BTreeMap::new());
     let rev = get_repo_rev(headers);
@@ -153,6 +157,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
             let actor_store = ActorStore::new(
                 requester.clone(),
                 S3BlobStore::new(requester.clone(), s3_config),
+                db,
             );
             let local = get_records_since_rev(&actor_store, rev).await?;
             if local.count <= 0 {

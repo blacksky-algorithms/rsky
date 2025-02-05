@@ -1,6 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
@@ -18,6 +19,7 @@ async fn inner_get_subject_status(
     uri: Option<String>,
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<SubjectStatus> {
     let mut body: Option<SubjectStatus> = None;
     if let Some(blob) = blob {
@@ -25,7 +27,7 @@ async fn inner_get_subject_status(
             None => bail!("Must provide a did to request blob state"),
             Some(did) => {
                 let actor_store =
-                    ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+                    ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
                 let takedown = actor_store
                     .blob
@@ -51,6 +53,7 @@ async fn inner_get_subject_status(
             let actor_store = ActorStore::new(
                 uri_hostname.to_string(),
                 S3BlobStore::new(uri_hostname.to_string(), s3_config),
+                db,
             );
             let (takedown, cid) = try_join!(
                 actor_store.record.get_record_takedown_status(uri.clone()),
@@ -92,9 +95,10 @@ pub async fn get_subject_status(
     uri: Option<String>,
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
     _auth: Moderator,
 ) -> Result<Json<SubjectStatus>, ApiError> {
-    match inner_get_subject_status(did, uri, blob, s3_config).await {
+    match inner_get_subject_status(did, uri, blob, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

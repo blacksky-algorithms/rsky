@@ -3,6 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::cid_set::CidSet;
 use crate::repo::types::CommitData;
@@ -18,6 +19,7 @@ async fn inner_activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
     assert_valid_did_documents_for_service(requester.clone()).await?;
@@ -37,10 +39,11 @@ async fn inner_activate_account(
         let actor_store = ActorStore::new(
             requester.clone(),
             S3BlobStore::new(requester.clone(), s3_config),
+            db,
         );
-        let mut storage_guard = actor_store.storage.write().await;
-        let root = storage_guard.get_root_detailed()?;
-        let blocks = storage_guard.get_blocks(vec![root.cid])?;
+        let storage_guard = actor_store.storage.read().await;
+        let root = storage_guard.get_root_detailed().await?;
+        let blocks = storage_guard.get_blocks(vec![root.cid]).await?;
         let commit_data = CommitData {
             cid: root.cid,
             rev: root.rev,
@@ -74,8 +77,9 @@ pub async fn activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<(), ApiError> {
-    match inner_activate_account(auth, sequencer, s3_config).await {
+    match inner_activate_account(auth, sequencer, s3_config, db).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

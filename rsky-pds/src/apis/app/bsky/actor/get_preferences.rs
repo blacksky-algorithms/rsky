@@ -1,5 +1,6 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -11,12 +12,14 @@ use rsky_lexicon::app::bsky::actor::{GetPreferencesOutput, RefPreferences};
 async fn inner_get_preferences(
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
+    db: DbConn,
 ) -> Result<GetPreferencesOutput> {
     let auth = auth.access.credentials.unwrap();
     let requester = auth.did.unwrap().clone();
     let actor_store = ActorStore::new(
         requester.clone(),
         S3BlobStore::new(requester.clone(), s3_config),
+        db,
     );
     let preferences: Vec<RefPreferences> = actor_store
         .pref
@@ -33,8 +36,9 @@ async fn inner_get_preferences(
 pub async fn get_preferences(
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
+    db: DbConn,
 ) -> Result<Json<GetPreferencesOutput>, ApiError> {
-    match inner_get_preferences(s3_config, auth).await {
+    match inner_get_preferences(s3_config, auth, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -1,5 +1,6 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -12,6 +13,7 @@ async fn inner_put_preferences(
     body: Json<PutPreferencesInput>,
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
+    db: DbConn,
 ) -> Result<(), ApiError> {
     let PutPreferencesInput { preferences } = body.into_inner();
     let auth = auth.access.credentials.unwrap();
@@ -19,6 +21,7 @@ async fn inner_put_preferences(
     let actor_store = ActorStore::new(
         requester.clone(),
         S3BlobStore::new(requester.clone(), s3_config),
+        db,
     );
     actor_store
         .pref
@@ -37,8 +40,9 @@ pub async fn put_preferences(
     body: Json<PutPreferencesInput>,
     s3_config: &State<SdkConfig>,
     auth: AccessStandard,
+    db: DbConn,
 ) -> Result<(), ApiError> {
-    match inner_put_preferences(body, s3_config, auth).await {
+    match inner_put_preferences(body, s3_config, auth, db).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

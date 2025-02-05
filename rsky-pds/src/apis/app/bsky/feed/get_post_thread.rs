@@ -1,6 +1,7 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
+use crate::db::DbConn;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util::{
@@ -51,6 +52,7 @@ pub async fn inner_get_post_thread(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
     let requester: String = match auth.access.credentials {
         None => "".to_string(),
@@ -65,6 +67,7 @@ pub async fn inner_get_post_thread(
                 get_post_thread_munge,
                 s3_config,
                 state_local_viewer,
+                db,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -83,6 +86,7 @@ pub async fn inner_get_post_thread(
                             let actor_store = ActorStore::new(
                                 requester.clone(),
                                 S3BlobStore::new(requester.clone(), s3_config),
+                                db,
                             );
                             let local_viewer_lock = state_local_viewer.local_viewer.read().await;
                             let local_viewer = local_viewer_lock(actor_store);
@@ -128,6 +132,7 @@ pub async fn get_post_thread(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, ApiError> {
     let depth = depth.unwrap_or(6);
     let parentHeight = parentHeight.unwrap_or(80);
@@ -147,6 +152,7 @@ pub async fn get_post_thread(
             s3_config,
             state_local_viewer,
             cfg,
+            db,
         )
         .await
         {

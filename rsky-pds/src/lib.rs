@@ -9,10 +9,8 @@ use crate::read_after_write::viewer::LocalViewerCreator;
 use crate::sequencer::Sequencer;
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClient;
-use diesel::pg::PgConnection;
 use event_emitter_rs::EventEmitter;
 use lazy_static::lazy_static;
-use rocket_sync_db_pools::database;
 use rsky_identity::IdResolver;
 use tokio::sync::RwLock;
 
@@ -23,9 +21,6 @@ pub static APP_USER_AGENT: &str = concat!(
     "/",
     env!("CARGO_PKG_VERSION"),
 );
-
-#[database("pg_db")]
-pub struct DbConn(PgConnection);
 
 pub struct SharedSequencer {
     pub sequencer: RwLock<Sequencer>,
