@@ -1,6 +1,7 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
+use crate::db::DbConn;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
@@ -21,6 +22,7 @@ pub async fn inner_get_actor_likes(
     res: HandlerPipeThrough,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
     let requester: Option<String> = match auth.access.credentials {
         None => None,
@@ -36,6 +38,7 @@ pub async fn inner_get_actor_likes(
                 get_author_munge,
                 s3_config,
                 state_local_viewer,
+                db,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -54,6 +57,7 @@ pub async fn get_actor_likes(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     if let Some(limit) = limit {
         if limit > 100 {
@@ -70,6 +74,7 @@ pub async fn get_actor_likes(
             res,
             s3_config,
             state_local_viewer,
+            db,
         )
         .await
         {

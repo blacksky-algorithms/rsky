@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{PreparedDelete, PreparedWrite};
 use crate::repo::{
@@ -22,6 +23,7 @@ async fn inner_create_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<CreateRecordOutput> {
     let CreateRecordInput {
         repo,
@@ -62,7 +64,7 @@ async fn inner_create_record(
         .await?;
 
         let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
         let backlink_conflicts: Vec<AtUri> = match validate {
             Some(true) => {
                 let write_at_uri: AtUri = write.uri.clone().try_into()?;
@@ -117,9 +119,10 @@ pub async fn create_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     println!("@LOG: debug create_record {body:#?}");
-    match inner_create_record(body, auth, sequencer, s3_config).await {
+    match inner_create_record(body, auth, sequencer, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");

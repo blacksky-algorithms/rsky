@@ -1,5 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::{common, SharedIdResolver};
@@ -15,6 +16,7 @@ async fn inner_describe_repo(
     repo: String,
     id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<DescribeRepoOutput> {
     let account = AccountManager::get_account(&repo, None).await?;
     match account {
@@ -32,6 +34,7 @@ async fn inner_describe_repo(
             let mut actor_store = ActorStore::new(
                 account.did.clone(),
                 S3BlobStore::new(account.did.clone(), s3_config),
+                db,
             );
             let collections = actor_store.record.list_collections().await?;
 
@@ -51,8 +54,9 @@ pub async fn describe_repo(
     repo: String,
     id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<Json<DescribeRepoOutput>, ApiError> {
-    match inner_describe_repo(repo, id_resolver, s3_config).await {
+    match inner_describe_repo(repo, id_resolver, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("{error:?}");

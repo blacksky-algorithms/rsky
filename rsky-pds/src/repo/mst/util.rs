@@ -197,7 +197,7 @@ pub async fn random_cid(
     let bytes = common::struct_to_cbor(record)?;
     if let Some(ref mut storage) = storage {
         if let Some(rev) = rev {
-            storage.put_block(cid, bytes, rev)?;
+            storage.put_block(cid, bytes, rev).await?;
         }
     }
     Ok(cid)

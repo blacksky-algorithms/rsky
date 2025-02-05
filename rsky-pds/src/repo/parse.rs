@@ -30,7 +30,7 @@ pub fn get_and_parse_record(blocks: &BlockMap, cid: Cid) -> Result<RecordAndByte
 pub fn get_and_parse_by_kind(
     blocks: &BlockMap,
     cid: Cid,
-    check: impl Fn(&'_ CborValue) -> bool,
+    check: impl FnOnce(CborValue) -> bool,
 ) -> Result<ObjAndBytes> {
     let bytes = blocks.get(cid);
     return if let Some(b) = bytes {
@@ -45,12 +45,12 @@ pub fn get_and_parse_by_kind(
 pub fn parse_obj_by_kind(
     bytes: Vec<u8>,
     cid: Cid,
-    check: impl Fn(&'_ CborValue) -> bool,
+    check: impl FnOnce(CborValue) -> bool,
 ) -> Result<ObjAndBytes> {
     let obj: CborValue = serde_ipld_dagcbor::from_slice(bytes.as_slice()).map_err(|error| {
         anyhow::Error::new(DataStoreError::UnexpectedObject(cid)).context(error)
     })?;
-    if check(&obj) {
+    if check(obj.clone()) {
         Ok(ObjAndBytes { obj, bytes })
     } else {
         Err(anyhow::Error::new(DataStoreError::UnexpectedObject(cid)))

@@ -2,6 +2,7 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::ListBlobsOpts;
 use crate::repo::ActorStore;
@@ -18,6 +19,7 @@ async fn inner_list_blobs(
     cursor: Option<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<ListBlobsOutput> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
@@ -26,7 +28,7 @@ async fn inner_list_blobs(
     };
     let _ = assert_repo_availability(&did, is_user_or_admin).await?;
 
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let blob_cids = actor_store
         .blob
         .list_blobs(ListBlobsOpts {
@@ -56,8 +58,9 @@ pub async fn list_blobs(
     cursor: Option<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<Json<ListBlobsOutput>, ApiError> {
-    match inner_list_blobs(did, since, limit, cursor, s3_config, auth).await {
+    match inner_list_blobs(did, since, limit, cursor, s3_config, auth, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");

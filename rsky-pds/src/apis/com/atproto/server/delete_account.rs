@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags}
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
+use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
@@ -16,6 +17,7 @@ async fn inner_delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<(), ApiError> {
     let DeleteAccountInput {
         did,
@@ -43,7 +45,7 @@ async fn inner_delete_account(
         .await?;
 
         let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
         actor_store.destroy().await?;
         AccountManager::delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;
@@ -69,9 +71,10 @@ pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
     _auth: AdminToken,
 ) -> Result<(), ApiError> {
-    match inner_delete_account(body, sequencer, s3_config).await {
+    match inner_delete_account(body, sequencer, s3_config, db).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

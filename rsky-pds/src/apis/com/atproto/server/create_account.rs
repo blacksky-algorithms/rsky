@@ -4,6 +4,7 @@ use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
+use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
@@ -26,6 +27,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     id_resolver: &State<SharedIdResolver>,
+    db: DbConn,
 ) -> Result<CreateAccountOutput, ApiError> {
     let CreateAccountInput {
         email,
@@ -55,7 +57,7 @@ async fn inner_server_create_account<B: ReadableBlockstore + Clone + Debug + Sen
     }
     let did = did.unwrap();
 
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -168,6 +170,7 @@ pub async fn server_create_account(
     s3_config: &State<SdkConfig>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
+    db: DbConn,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
@@ -181,7 +184,7 @@ pub async fn server_create_account(
             Err(e) => return Err(e), // @TODO this needs better error logging
         };
 
-    match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver)
+    match inner_server_create_account::<SqlRepoReader>(input, sequencer, s3_config, id_resolver, db)
         .await
     {
         Ok(response) => Ok(Json(response)),

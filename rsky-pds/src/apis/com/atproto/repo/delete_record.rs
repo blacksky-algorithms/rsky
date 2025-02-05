@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::PreparedWrite;
 use crate::repo::{prepare_delete, ActorStore, PrepareDeleteOpts};
@@ -20,6 +21,7 @@ async fn inner_delete_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<()> {
     let DeleteRecordInput {
         repo,
@@ -61,7 +63,7 @@ async fn inner_delete_record(
                 swap_cid: swap_record_cid,
             })?;
             let mut actor_store =
-                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
             let write_at_uri: AtUri = write.uri.clone().try_into()?;
             let record = actor_store
                 .record
@@ -100,8 +102,9 @@ pub async fn delete_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<(), ApiError> {
-    match inner_delete_record(body, auth, sequencer, s3_config).await {
+    match inner_delete_record(body, auth, sequencer, s3_config, db).await {
         Ok(()) => Ok(()),
         Err(error) => {
             eprintln!("@LOG: ERROR: {error}");

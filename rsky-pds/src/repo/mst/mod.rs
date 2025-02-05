@@ -19,9 +19,10 @@ use crate::repo::block_map::BlockMap;
 use crate::repo::cid_set::CidSet;
 use crate::repo::error::DataStoreError;
 use crate::repo::parse;
-use crate::repo::types::{BlockWriter, CidAndBytes};
+use crate::repo::types::CidAndBytes;
 use crate::storage::types::RepoStorage;
 use crate::storage::ObjAndBytes;
+use crate::vendored::iroh_car::CarWriter;
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use futures::{Stream, StreamExt};
@@ -32,6 +33,7 @@ use serde_cbor::Value as CborValue;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::{fmt, mem};
+use tokio::io::DuplexStream;
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
@@ -451,16 +453,6 @@ where
     }
 }
 
-/*impl IntoIterator for NodeEntry {
-    type Item = NodeEntry;
-
-    type IntoIter = NodeIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}*/
-
 #[derive(Debug)]
 pub struct UnstoredBlocks {
     root: Cid,
@@ -623,17 +615,19 @@ impl MST {
             let mut entries = self.entries.write().await;
             if entries.is_none() {
                 // Read from storage (block store) to get the node data
-                let mut storage_guard = self.storage.write().await;
+                let storage_guard = self.storage.read().await;
                 let pointer = self.pointer.read().await;
-                let data: CborValue = storage_guard.read_obj(
-                    &*pointer,
-                    Box::new(|obj: &CborValue| {
-                        match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
-                            Ok(_) => true,
-                            Err(_) => false,
-                        }
-                    }),
-                )?;
+                let data: CborValue = storage_guard
+                    .read_obj(
+                        &*pointer,
+                        Box::new(|obj: CborValue| {
+                            match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
+                                Ok(_) => true,
+                                Err(_) => false,
+                            }
+                        }),
+                    )
+                    .await?;
                 let data: NodeData = serde_cbor::value::from_value(data)?;
 
                 // Compute the layer
@@ -745,8 +739,8 @@ impl MST {
         let mut blocks = BlockMap::new();
         let pointer = self.get_pointer().await?;
         let already_has = {
-            let mut storage_guard = self.storage.write().await;
-            storage_guard.has(pointer)?
+            let storage_guard = self.storage.read().await;
+            storage_guard.has(pointer).await?
         };
         if already_has {
             return Ok(UnstoredBlocks {
@@ -1420,16 +1414,18 @@ impl MST {
     }
 
     /// Sync Protocol
-    /// @TODO: This needs to implement an actual CarWriter
-    pub async fn write_to_car_stream(&mut self, car: &mut BlockWriter) -> Result<()> {
+    pub async fn write_to_car_stream(
+        &mut self,
+        mut car: CarWriter<DuplexStream>,
+    ) -> Result<CarWriter<DuplexStream>> {
         let mut leaves = CidSet::new(None);
         let mut to_fetch = CidSet::new(None);
         to_fetch.add(self.get_pointer().await?);
         while to_fetch.size() > 0 {
             let mut next_layer = CidSet::new(None);
             let fetched = {
-                let mut storage_guard = self.storage.write().await;
-                storage_guard.get_blocks(to_fetch.to_list())?
+                let storage_guard = self.storage.read().await;
+                storage_guard.get_blocks(to_fetch.to_list()).await?
             };
             if fetched.missing.len() > 0 {
                 return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
@@ -1439,16 +1435,13 @@ impl MST {
             }
             for cid in to_fetch.to_list() {
                 let found: ObjAndBytes =
-                    parse::get_and_parse_by_kind(&fetched.blocks, cid, |obj: &CborValue| {
+                    parse::get_and_parse_by_kind(&fetched.blocks, cid, |obj: CborValue| {
                         match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
                             Ok(_) => true,
                             Err(_) => false,
                         }
                     })?;
-                car.push(CidAndBytes {
-                    cid,
-                    bytes: found.bytes,
-                });
+                car.write(cid, found.bytes).await?;
                 let node_data: NodeData = serde_cbor::value::from_value(found.obj)?;
                 let entries = util::deserialize_node_data(self.storage.clone(), &node_data, None)?;
 
@@ -1462,8 +1455,8 @@ impl MST {
             to_fetch = next_layer;
         }
         let leaf_data = {
-            let mut storage_guard = self.storage.write().await;
-            storage_guard.get_blocks(leaves.to_list())?
+            let storage_guard = self.storage.read().await;
+            storage_guard.get_blocks(leaves.to_list()).await?
         };
         if leaf_data.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
@@ -1472,9 +1465,9 @@ impl MST {
             )));
         }
         for leaf in leaf_data.blocks.entries()? {
-            car.push(leaf);
+            car.write(leaf.cid, leaf.bytes).await?;
         }
-        Ok(())
+        Ok(car)
     }
 
     #[async_recursion(Sync)]
@@ -1515,8 +1508,10 @@ impl MST {
 
     pub async fn save_mst(&self) -> Result<Cid> {
         let diff = self.get_unstored_blocks().await?;
-        let mut storage = self.storage.write().await;
-        storage.put_many(diff.blocks, Ticker::new().next(None).to_string())?;
+        let storage = self.storage.read().await;
+        storage
+            .put_many(diff.blocks, Ticker::new().next(None).to_string())
+            .await?;
         Ok(diff.root)
     }
 }
@@ -1825,7 +1820,7 @@ mod tests {
                 NodeEntry::MST(ref mut entry) => entry.get_pointer().await?,
                 NodeEntry::Leaf(ref entry) => entry.value.clone(),
             };
-            let found = (&mut *storage_guard).has(cid)?
+            let found = (&mut *storage_guard).has(cid).await?
                 || diff.new_mst_blocks.has(cid)
                 || diff.new_leaf_cids.has(cid);
             assert!(found, "Missing block {cid}")
@@ -1917,7 +1912,7 @@ mod tests {
                 NodeEntry::MST(ref mut entry) => entry.get_pointer().await?,
                 NodeEntry::Leaf(ref entry) => entry.value.clone(),
             };
-            let found = (&mut *blockstore_guard).has(cid)?
+            let found = (&mut *blockstore_guard).has(cid).await?
                 || diff.new_mst_blocks.has(cid)
                 || diff.new_leaf_cids.has(cid);
             assert!(found)

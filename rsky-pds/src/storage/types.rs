@@ -4,12 +4,32 @@ use crate::storage::readable_blockstore::ReadableBlockstore;
 use anyhow::Result;
 use lexicon_cid::Cid;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 
 pub trait RepoStorage: ReadableBlockstore + Send + Sync + Debug {
     // Writeable
-    fn get_root(&self) -> Option<Cid>;
-    fn put_block(&mut self, cid: Cid, bytes: Vec<u8>, rev: String) -> Result<()>;
-    fn put_many(&mut self, to_put: BlockMap, rev: String) -> Result<()>;
-    fn update_root(&mut self, cid: Cid, rev: String, is_create: Option<bool>) -> Result<()>;
-    fn apply_commit(&mut self, commit: CommitData, is_create: Option<bool>) -> Result<()>;
+    fn get_root<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Cid>> + Send + Sync + 'a>>;
+    fn put_block<'a>(
+        &'a self,
+        cid: Cid,
+        bytes: Vec<u8>,
+        rev: String,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
+    fn put_many<'a>(
+        &'a self,
+        to_put: BlockMap,
+        rev: String,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
+    fn update_root<'a>(
+        &'a self,
+        cid: Cid,
+        rev: String,
+        is_create: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
+    fn apply_commit<'a>(
+        &'a self,
+        commit: CommitData,
+        is_create: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
 }
