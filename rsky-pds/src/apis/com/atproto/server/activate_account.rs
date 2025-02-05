@@ -14,6 +14,7 @@ use aws_config::SdkConfig;
 use rocket::State;
 use rsky_syntax::handle::INVALID_HANDLE;
 
+#[tracing::instrument(skip_all)]
 async fn inner_activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
@@ -65,11 +66,12 @@ async fn inner_activate_account(
         lock.sequence_commit(requester, commit_data, vec![]).await?;
         Ok(())
     } else {
-        eprintln!("User not found");
+        tracing::error!("User not found");
         Err(ApiError::RuntimeError)
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.activateAccount")]
 pub async fn activate_account(
     auth: AccessFull,

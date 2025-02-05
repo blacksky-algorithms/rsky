@@ -50,6 +50,7 @@ async fn inner_list_blobs(
 
 /// List blob CIDs for an account, since some repo revision. Does not require auth;
 /// implemented by PDS
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.listBlobs?<did>&<since>&<limit>&<cursor>")]
 pub async fn list_blobs(
     did: String,
@@ -63,7 +64,7 @@ pub async fn list_blobs(
     match inner_list_blobs(did, since, limit, cursor, s3_config, auth, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

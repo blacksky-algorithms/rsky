@@ -30,6 +30,7 @@ async fn inner_put_preferences(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/app.bsky.actor.putPreferences",
     format = "json",

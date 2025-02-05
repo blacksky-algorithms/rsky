@@ -40,6 +40,7 @@ async fn inner_request_email_update(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestEmailUpdate")]
 pub async fn request_email_update(
     auth: AccessStandardIncludeChecks,
@@ -47,7 +48,7 @@ pub async fn request_email_update(
     match inner_request_email_update(auth).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

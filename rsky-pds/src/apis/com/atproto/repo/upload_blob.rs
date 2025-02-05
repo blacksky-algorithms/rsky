@@ -65,6 +65,7 @@ async fn inner_upload_blob(
     })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.uploadBlob", data = "<blob>")]
 pub async fn upload_blob(
     auth: AccessStandardIncludeChecks,
@@ -76,7 +77,7 @@ pub async fn upload_blob(
     match inner_upload_blob(auth, blob, content_type, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("{error:?}");
+            tracing::error!("{error:?}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -54,6 +54,7 @@ async fn inner_get_record(
 
 /// Get data blocks needed to prove the existence or non-existence of record in the current version
 /// of repo. Does not require auth.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRecord?<did>&<collection>&<rkey>&<commit>")]
 pub async fn get_record(
     did: String,
@@ -67,7 +68,7 @@ pub async fn get_record(
     match inner_get_record(did, collection, rkey, commit, s3_config, auth, db).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

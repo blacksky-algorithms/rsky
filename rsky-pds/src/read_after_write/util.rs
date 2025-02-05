@@ -107,6 +107,7 @@ pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     nsid: String,
     requester: String,
@@ -129,7 +130,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     {
         Ok(read_after_write_result) => Ok(read_after_write_result),
         Err(err) => {
-            eprintln!(
+            tracing::error!(
                 "Error in read after write munge {} {}",
                 err.to_string(),
                 requester

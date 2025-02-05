@@ -43,6 +43,7 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.admin.sendEmail", format = "json", data = "<body>")]
 pub async fn send_email(
     body: Json<SendMailInput>,
@@ -51,7 +52,7 @@ pub async fn send_email(
     match inner_send_email(body).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

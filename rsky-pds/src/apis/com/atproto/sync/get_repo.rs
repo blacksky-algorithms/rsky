@@ -45,6 +45,7 @@ async fn inner_get_repo(
 
 /// Download a repository export as CAR file. Optionally only a 'diff' since a previous revision.
 /// Does not require auth; implemented by PDS.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRepo?<did>&<since>")]
 pub async fn get_repo(
     did: String,
@@ -56,7 +57,7 @@ pub async fn get_repo(
     match inner_get_repo(did, since, s3_config, auth, db).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

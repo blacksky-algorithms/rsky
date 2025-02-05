@@ -263,6 +263,7 @@ async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<
     })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.listRepos?<limit>&<cursor>")]
 pub async fn list_repos(
     limit: Option<i64>,
@@ -271,7 +272,7 @@ pub async fn list_repos(
     match inner_list_repos(limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -55,6 +55,7 @@ async fn inner_get_blocks(
 
 /// Get data blocks from a given repo, by CID. For example, intermediate MST nodes, or records.
 /// Does not require auth; implemented by PDS.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getBlocks?<did>&<cids>")]
 pub async fn get_blocks(
     did: String,
@@ -66,7 +67,7 @@ pub async fn get_blocks(
     match inner_get_blocks(did, cids, s3_config, auth, db).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

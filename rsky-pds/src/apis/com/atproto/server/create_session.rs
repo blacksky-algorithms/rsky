@@ -5,6 +5,7 @@ use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
 
+#[tracing::instrument(skip_all)]
 async fn inner_create_session(
     body: Json<CreateSessionInput>,
 ) -> Result<CreateSessionOutput, ApiError> {
@@ -44,7 +45,7 @@ async fn inner_create_session(
                 valid_account_pass = res;
             }
             Err(e) => {
-                eprintln!("{e:?}");
+                tracing::error!("{e:?}");
                 return Err(ApiError::RuntimeError);
             }
         }
@@ -54,7 +55,7 @@ async fn inner_create_session(
                     app_password_name = res;
                 }
                 Err(e) => {
-                    eprintln!("{e:?}");
+                    tracing::error!("{e:?}");
                     return Err(ApiError::RuntimeError);
                 }
             }
@@ -71,7 +72,7 @@ async fn inner_create_session(
                 (access_jwt, refresh_jwt) = res;
             }
             Err(e) => {
-                eprintln!("{e:?}");
+                tracing::error!("{e:?}");
                 return Err(ApiError::RuntimeError);
             }
         }

@@ -77,6 +77,7 @@ pub fn get_random_token() -> String {
     allowed_token[0..5].to_owned() + "-" + &allowed_token[5..10]
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn safe_resolve_did_doc(
     id_resolver: &State<SharedIdResolver>,
     did: &String,
@@ -86,7 +87,7 @@ pub async fn safe_resolve_did_doc(
     match lock.did.resolve(did.clone(), force_refresh).await {
         Ok(did_doc) => Ok(did_doc),
         Err(err) => {
-            eprintln!(
+            tracing::error!(
                 "@LOG: failed to resolve did doc for `{did}` with error: `{}`",
                 err.to_string()
             );

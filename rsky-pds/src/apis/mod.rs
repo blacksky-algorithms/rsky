@@ -30,6 +30,7 @@ impl<'a> FromParam<'a> for Nsid {
 }
 
 // Lower ranks have higher presidence
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/<nsid>?<query..>", rank = 2)]
 pub async fn bsky_api_forwarder(
@@ -56,7 +57,7 @@ pub async fn bsky_api_forwarder(
             Ok(ProxyResponder(res.buffer, content_length, content_type))
         }
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

@@ -5,6 +5,7 @@ use rsky_lexicon::com::atproto::server::{
     DescribeServerOutput, DescribeServerRefContact, DescribeServerRefLinks,
 };
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.describeServer")]
 pub async fn describe_server() -> Result<Json<DescribeServerOutput>, ApiError> {
     let available_user_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");

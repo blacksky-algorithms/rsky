@@ -121,6 +121,7 @@ pub async fn inner_get_post_thread(
 /// will be applied for authed requests.
 #[allow(non_snake_case)]
 #[allow(unused_variables)]
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getPostThread?<uri>&<depth>&<parentHeight>")]
 pub async fn get_post_thread(
     uri: String,               // Reference (AT-URI) to post record.
@@ -188,11 +189,7 @@ pub async fn get_post_thread(
                         }
                     }
                     _ => {
-                        eprintln!("@LOG: ERROR: {err}");
-                        let internal_error = ErrorMessageResponse {
-                            code: Some(ErrorCode::InternalServerError),
-                            message: Some(err.to_string()),
-                        };
+                        tracing::error!("@LOG: ERROR: {err}");
                         Err(ApiError::RuntimeError)
                     }
                 }

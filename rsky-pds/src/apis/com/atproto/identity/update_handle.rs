@@ -13,6 +13,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::identity::UpdateHandleInput;
 use std::env;
 
+#[tracing::instrument(skip_all)]
 async fn inner_update_handle(
     body: Json<UpdateHandleInput>,
     sequencer: &State<SharedSequencer>,
@@ -63,18 +64,19 @@ async fn inner_update_handle(
         .await
     {
         Ok(_) => (),
-        Err(error) => eprintln!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
+        Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
     };
     match lock
         .sequence_handle_update(requester.clone(), handle.clone())
         .await
     {
         Ok(_) => (),
-        Err(error) => eprintln!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
+        Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
     };
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.identity.updateHandle",
     format = "json",
@@ -90,7 +92,7 @@ pub async fn update_handle(
     match inner_update_handle(body, sequencer, server_config, id_resolver, auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

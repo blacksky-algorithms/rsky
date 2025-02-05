@@ -42,6 +42,7 @@ async fn inner_get_blob(
 
 /// Get a blob associated with a given account. Returns the full blob as originally uploaded.
 /// Does not require auth; implemented by PDS.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getBlob?<did>&<cid>")]
 pub async fn get_blob(
     did: String,
@@ -66,11 +67,11 @@ pub async fn get_blob(
         Err(error) => {
             match error.downcast_ref() {
                 Some(GetObjectError::NoSuchKey(_)) => {
-                    eprintln!("Error: {}", error);
+                    tracing::error!("Error: {}", error);
                     Err(ApiError::BlobNotFound)
                 }
                 _ => {
-                    eprintln!("Error: {}", error);
+                    tracing::error!("Error: {}", error);
                     Err(ApiError::RuntimeError)
                 }
             }

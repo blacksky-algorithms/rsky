@@ -55,7 +55,7 @@ pub async fn subscribe_repos<'a>(
             })
         );
 
-        println!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
+        tracing::debug!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
         let backfill_time = get_backfill_limit(cfg.subscription.repo_backfill_limit_ms);
 
         let mut outbox_cursor: Option<i64> = None;
@@ -284,7 +284,7 @@ pub async fn subscribe_repos<'a>(
                             match message {
                                 ws::Message::Close(close_frame) => {
                                     // Handle Close message
-                                    println!("Received Close message: {:?}", close_frame);
+                                    tracing::info!("Received Close message: {:?}", close_frame);
                                     let close_frame = ws::frame::CloseFrame {
                                         code: ws::frame::CloseCode::Normal,
                                         reason: "Client disconnected".to_string().into(),
@@ -293,25 +293,25 @@ pub async fn subscribe_repos<'a>(
                                 },
                                 ws::Message::Ping(payload) => {
                                     // Respond to Ping with Pong
-                                    println!("Received Ping message");
+                                    tracing::info!("Received Ping message");
                                     let pong_message = ws::Message::Pong(payload);
                                     yield pong_message;
                                 },
                                 ws::Message::Pong(_) => {
                                     // Received Pong, can log or ignore
-                                    println!("Received Pong message");
+                                    tracing::info!("Received Pong message");
                                 },
                                 _ => {
-                                    println!("Received other message: {:?}", message);
+                                    tracing::info!("Received other message: {:?}", message);
                                 }
                             }
                         },
                         Some(Err(err)) => {
-                            println!("WebSocket error: {:?}", err);
+                            tracing::info!("WebSocket error: {:?}", err);
                             break;
                         },
                         None => {
-                            println!("WebSocket closed.");
+                            tracing::info!("WebSocket closed.");
                             break;
                         }
                     }

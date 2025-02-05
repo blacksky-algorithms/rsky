@@ -5,6 +5,7 @@ use anyhow::Result;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::EnableAccountInvitesInput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.enableAccountInvites",
     format = "json",
@@ -18,7 +19,7 @@ pub async fn enable_account_invites(
     match AccountManager::set_account_invites_disabled(&account, false).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

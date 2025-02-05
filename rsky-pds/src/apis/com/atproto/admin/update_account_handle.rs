@@ -63,6 +63,7 @@ async fn inner_update_account_handle(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.updateAccountHandle",
     format = "json",
@@ -78,7 +79,7 @@ pub async fn update_account_handle(
     match inner_update_account_handle(body, sequencer, server_config, id_resolver).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

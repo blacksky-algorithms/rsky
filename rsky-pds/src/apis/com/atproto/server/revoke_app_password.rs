@@ -4,6 +4,7 @@ use crate::auth_verifier::AccessFull;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::RevokeAppPasswordInput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.revokeAppPassword",
     format = "json",
@@ -19,7 +20,7 @@ pub async fn revoke_app_password(
     match AccountManager::revoke_app_password(requester, name).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

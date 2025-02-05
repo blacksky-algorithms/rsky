@@ -47,6 +47,7 @@ pub async fn inner_get_actor_likes(
 }
 
 /// Get a list of posts liked by an actor. Does not require auth.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getActorLikes?<actor>&<limit>&<cursor>")]
 pub async fn get_actor_likes(
     actor: String,
@@ -80,7 +81,7 @@ pub async fn get_actor_likes(
         {
             Ok(response) => Ok(response),
             Err(error) => {
-                eprintln!("{error}");
+                tracing::error!("{error}");
                 Err(ApiError::RuntimeError)
             }
         },

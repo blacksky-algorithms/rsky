@@ -332,6 +332,7 @@ async fn inner_get_invite_codes(
     })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.admin.getInviteCodes?<sort>&<limit>&<cursor>")]
 pub async fn get_invite_codes(
     sort: Option<String>,
@@ -342,7 +343,7 @@ pub async fn get_invite_codes(
     match inner_get_invite_codes(sort, limit, cursor).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

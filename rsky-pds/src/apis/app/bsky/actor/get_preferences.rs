@@ -31,6 +31,7 @@ async fn inner_get_preferences(
 
 /// Get private preferences attached to the current account. Expected use is synchronization
 /// between multiple devices, and import/export during account migration. Requires auth.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.actor.getPreferences")]
 pub async fn get_preferences(
     s3_config: &State<SdkConfig>,
@@ -40,7 +41,7 @@ pub async fn get_preferences(
     match inner_get_preferences(s3_config, auth, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

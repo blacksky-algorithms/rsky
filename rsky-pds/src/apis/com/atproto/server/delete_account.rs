@@ -13,6 +13,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::DeleteAccountInput;
 
+#[tracing::instrument(skip_all)]
 async fn inner_delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
@@ -57,11 +58,12 @@ async fn inner_delete_account(
         sequencer::delete_all_for_user(&did, Some(vec![account_seq, tombstone_seq])).await?;
         Ok(())
     } else {
-        eprintln!("account not found");
+        tracing::error!("account not found");
         Err(ApiError::RuntimeError)
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.deleteAccount",
     format = "json",

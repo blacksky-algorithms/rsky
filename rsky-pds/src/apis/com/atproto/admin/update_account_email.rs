@@ -27,6 +27,7 @@ async fn inner_update_account_email(body: Json<UpdateAccountEmailInput>) -> Resu
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.updateAccountEmail",
     format = "json",
@@ -39,7 +40,7 @@ pub async fn update_account_email(
     match inner_update_account_email(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

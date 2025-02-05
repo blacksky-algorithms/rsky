@@ -77,6 +77,7 @@ async fn inner_update_subject_status(
     Ok(UpdateSubjectStatusOutput { subject, takedown })
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.admin.updateSubjectStatus",
     format = "json",
@@ -92,7 +93,7 @@ pub async fn update_subject_status(
     match inner_update_subject_status(body, sequencer, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }
