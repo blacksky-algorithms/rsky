@@ -10,13 +10,16 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
-use rocket::State;
+use rocket::{Data, State};
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
+use futures::StreamExt;
+use rocket::data::ToByteUnit;
 use url::Url;
+use rsky_identity::types::DidDocument;
 
 pub struct OverrideOpts {
     pub aud: Option<String>,
@@ -173,6 +176,31 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
     parse_proxy_res(res).await
 }
 
+pub async fn pipethrough_procedure_new<'r>(
+    req: &'r ProxyRequest<'_>,
+    requester: Option<String>,
+    body: Option<Data<'_>>,
+) -> Result<HandlerPipeThrough> {
+    let UrlAndAud {
+        url,
+        aud,
+        lxm: nsid,
+    } = format_url_and_aud(req, None).await?;
+    let headers = format_headers(req, aud, nsid, requester).await?;
+    let encoded_body: Option<Vec<u8>> = match body {
+        None => None,
+        Some(mut body) => {
+            let mut res:  Vec<u8> = Vec::new();
+            body.open(50.megabytes()).stream_to(&mut res).await?;
+            Some(res)
+        },
+    };
+    let req_init = format_req_init(req, url, headers, encoded_body)?;
+    let res = make_request(req_init).await?;
+    parse_proxy_res(res).await
+}
+
+
 // Request setup/formatting
 // -------------------
 
@@ -309,7 +337,7 @@ pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<
                                 did_doc,
                                 GetServiceEndpointOpts {
                                     id: format!("#{service_id}"),
-                                    r#type: None,
+                                    r#type: Some(String::from("BskyChatService")),
                                 },
                             ) {
                                 None => bail!(InvalidRequestError::CannotResolveServiceUrl),
