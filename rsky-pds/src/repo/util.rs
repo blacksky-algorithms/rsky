@@ -1,14 +1,21 @@
 use crate::common::sign::sign_without_indexmap;
 use crate::common::tid::Ticker;
-use crate::repo::types::{Commit, Lex, RecordPath, RepoRecord, UnsignedCommit, VersionedCommit};
+use crate::repo::data_diff::DataDiff;
+use crate::repo::types::{
+    Commit, Lex, RecordCreateOrDeleteDescript, RecordPath, RecordUpdateDescript,
+    RecordWriteDescript, RepoRecord, UnsignedCommit, VersionedCommit, WriteOpAction,
+};
 use crate::storage::Ipld;
 use anyhow::{bail, Result};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
 use lexicon_cid::Cid;
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::str::FromStr;
+use tokio::try_join;
 
 pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
     let commit_sig = sign_without_indexmap(&unsigned, &keypair.secret_key())?;
@@ -20,6 +27,20 @@ pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit>
         prev: unsigned.prev,
         sig: commit_sig.to_vec(),
     })
+}
+
+pub fn verify_commit_sig(commit: Commit, did_key: &String) -> Result<bool> {
+    let sig = commit.sig;
+    let rest = UnsignedCommit {
+        did: commit.did,
+        rev: commit.rev,
+        data: commit.data,
+        prev: commit.prev,
+        version: commit.version,
+    };
+    let encoded = serde_ipld_dagcbor::to_vec(&rest)?;
+    let hash = Sha256::digest(&*encoded);
+    rsky_crypto::verify::verify_signature(did_key, hash.as_ref(), sig.as_slice(), None)
 }
 
 pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
@@ -91,6 +112,68 @@ pub fn cbor_to_lex_record(val: Vec<u8>) -> Result<RepoRecord> {
     }
 }
 
+pub fn ensure_creates(
+    descripts: Vec<RecordWriteDescript>,
+) -> Result<Vec<RecordCreateOrDeleteDescript>> {
+    let mut creates: Vec<RecordCreateOrDeleteDescript> = Default::default();
+    for descript in descripts {
+        match descript {
+            RecordWriteDescript::Create(create) => creates.push(create),
+            _ => bail!("Unexpected action: {}", descript.action()),
+        }
+    }
+    Ok(creates)
+}
+
+pub async fn diff_to_write_descripts(diff: &DataDiff) -> Result<Vec<RecordWriteDescript>> {
+    let (add_list, update_list, delete_list) = try_join!(
+        // Process add_list
+        stream::iter(diff.add_list())
+            .then(|add| async move {
+                let RecordPath { collection, rkey } = parse_data_key(&add.key)?;
+                Ok::<RecordWriteDescript, anyhow::Error>(RecordWriteDescript::Create(
+                    RecordCreateOrDeleteDescript {
+                        action: WriteOpAction::Create,
+                        collection,
+                        rkey,
+                        cid: add.cid,
+                    },
+                ))
+            })
+            .try_collect::<Vec<_>>(),
+        // Process update_list
+        stream::iter(diff.update_list())
+            .then(|upd| async move {
+                let RecordPath { collection, rkey } = parse_data_key(&upd.key)?;
+                Ok::<RecordWriteDescript, anyhow::Error>(RecordWriteDescript::Update(
+                    RecordUpdateDescript {
+                        action: WriteOpAction::Update,
+                        collection,
+                        rkey,
+                        cid: upd.cid,
+                        prev: upd.prev,
+                    },
+                ))
+            })
+            .try_collect::<Vec<_>>(),
+        // Process delete_list
+        stream::iter(diff.delete_list())
+            .then(|del| async move {
+                let RecordPath { collection, rkey } = parse_data_key(&del.key)?;
+                Ok::<RecordWriteDescript, anyhow::Error>(RecordWriteDescript::Delete(
+                    RecordCreateOrDeleteDescript {
+                        action: WriteOpAction::Delete,
+                        collection,
+                        rkey,
+                        cid: del.cid,
+                    },
+                ))
+            })
+            .try_collect::<Vec<_>>()
+    )?;
+    Ok([add_list, update_list, delete_list].concat())
+}
+
 pub fn parse_data_key(key: &String) -> Result<RecordPath> {
     let parts: Vec<&str> = key.split("/").collect();
     if parts.len() != 2 {
@@ -122,4 +205,25 @@ pub fn ensure_v3_commit(commit: VersionedCommit) -> Commit {
             sig: commit.sig,
         },
     }
+}
+
+/// Flattens a collection of byte vectors into a single vector
+pub fn flatten_u8_arrays(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(chunks.iter().map(|v| v.len()).sum());
+    for chunk in chunks {
+        result.extend_from_slice(chunk);
+    }
+    result
+}
+
+/// Collects a stream of byte chunks into a single buffer
+pub async fn stream_to_buffer<S>(mut stream: S) -> Result<Vec<u8>>
+where
+    S: Stream<Item = Result<Vec<u8>>> + Unpin,
+{
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buffer.extend_from_slice(&chunk?);
+    }
+    Ok(buffer)
 }

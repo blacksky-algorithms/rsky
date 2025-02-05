@@ -47,6 +47,7 @@ pub struct ProxyRequest<'r> {
 impl<'r> FromRequest<'r> for HandlerPipeThrough {
     type Error = anyhow::Error;
 
+    #[tracing::instrument(skip_all)]
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         match AccessStandard::from_request(req).await {
             Outcome::Success(output) => {
@@ -93,7 +94,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                                 headers,
                             } = xrpc
                             {
-                                eprintln!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
+                                tracing::error!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
                             }
                             Outcome::Error((Status::BadRequest, error))
                         }
@@ -183,6 +184,7 @@ const REQ_HEADERS_TO_FORWARD: [&'static str; 4] = [
     "x-bsky-topics",
 ];
 
+#[tracing::instrument(skip_all)]
 pub async fn format_url_and_aud<'r>(
     req: &'r ProxyRequest<'_>,
     aud_override: Option<String>,
@@ -192,7 +194,7 @@ pub async fn format_url_and_aud<'r>(
     let default_proxy = default_service(req, &nsid).await;
     let service_url = match proxy_to {
         Some(ref proxy_to) => {
-            println!(
+            tracing::info!(
                 "@LOG: format_url_and_aud() proxy_to: {:?}",
                 proxy_to.service_url
             );
@@ -337,12 +339,12 @@ pub fn parse_req_nsid(req: &ProxyRequest) -> String {
 
 // Sending request
 // -------------------
-
+#[tracing::instrument(skip_all)]
 pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
     let res = req_init.send().await;
     match res {
         Err(e) => {
-            println!("@LOG WARN: pipethrough network error {}", e.to_string());
+            tracing::error!("@LOG WARN: pipethrough network error {}", e.to_string());
             bail!(InvalidRequestError::XRPCError(XRPCError::UpstreamFailure))
         }
         Ok(res) => match res.error_for_status_ref() {
@@ -487,11 +489,12 @@ pub fn parse_res<T: DeserializeOwned>(_nsid: String, res: HandlerPipeThrough) ->
     Ok(record)
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn read_array_buffer_res(res: Response) -> Result<Vec<u8>> {
     match res.bytes().await {
         Ok(bytes) => Ok(bytes.to_vec()),
         Err(err) => {
-            println!("@LOG WARN: pipethrough network error {}", err.to_string());
+            tracing::error!("@LOG WARN: pipethrough network error {}", err.to_string());
             bail!("UpstreamFailure")
         }
     }

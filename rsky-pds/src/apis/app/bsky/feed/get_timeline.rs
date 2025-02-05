@@ -1,6 +1,7 @@
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
+use crate::db::DbConn;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
@@ -21,6 +22,7 @@ pub async fn inner_get_timeline(
     res: HandlerPipeThrough,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
     let requester: Option<String> = match auth.access.credentials {
         None => None,
@@ -36,6 +38,7 @@ pub async fn inner_get_timeline(
                 get_timeline_munge,
                 s3_config,
                 state_local_viewer,
+                db,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -45,6 +48,7 @@ pub async fn inner_get_timeline(
 
 /// Get a view of the requesting account's home timeline.
 /// This is expected to be some form of reverse-chronological feed.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getTimeline?<algorithm>&<limit>&<cursor>")]
 pub async fn get_timeline(
     algorithm: Option<String>,
@@ -55,6 +59,7 @@ pub async fn get_timeline(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
+    db: DbConn,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     if let Some(limit) = limit {
         if limit > 100 || limit < 1 {
@@ -71,6 +76,7 @@ pub async fn get_timeline(
             res,
             s3_config,
             state_local_viewer,
+            db,
         )
         .await
         {

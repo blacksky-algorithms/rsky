@@ -146,6 +146,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
 }
 
 /// Get a hydrated feed from an actor's selected feed generator. Implemented by App View.
+#[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/app.bsky.feed.getFeed?<feed>&<limit>&<cursor>")]
 pub async fn get_feed(

@@ -150,8 +150,9 @@ pub fn get_notif_endpoint(doc: DidDocument) -> Option<String> {
     )
 }
 
+#[tracing::instrument(skip_all)]
 pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> Option<String> {
-    println!(
+    tracing::info!(
         "@LOG: common::get_service_endpoint() doc: {:?}; opts: {:?}",
         doc, opts
     );

@@ -44,6 +44,7 @@ async fn inner_request_password_reset(body: Json<RequestPasswordResetInput>) -> 
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.requestPasswordReset",
     format = "json",
@@ -56,7 +57,7 @@ pub async fn request_password_reset(
     match inner_request_password_reset(body).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

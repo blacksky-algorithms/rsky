@@ -1,5 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::{bail, Result};
@@ -25,6 +26,7 @@ async fn inner_list_records(
     // Flag to reverse the order of the returned records.
     reverse: bool,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<ListRecordsOutput> {
     if limit > 100 {
         bail!("Error: limit can not be greater than 100")
@@ -32,7 +34,7 @@ async fn inner_list_records(
     let did = AccountManager::get_did_for_actor(&repo, None).await?;
     if let Some(did) = did {
         let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
         let records: Vec<Record> = actor_store
             .record
@@ -70,6 +72,7 @@ async fn inner_list_records(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[allow(non_snake_case)]
 #[rocket::get("/xrpc/com.atproto.repo.listRecords?<repo>&<collection>&<limit>&<cursor>&<rkeyStart>&<rkeyEnd>&<reverse>")]
 pub async fn list_records(
@@ -87,18 +90,19 @@ pub async fn list_records(
     // Flag to reverse the order of the returned records.
     reverse: Option<bool>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<Json<ListRecordsOutput>, ApiError> {
     let limit = limit.unwrap_or(50);
     let reverse = reverse.unwrap_or(false);
 
     match inner_list_records(
-        repo, collection, limit, cursor, rkeyStart, rkeyEnd, reverse, s3_config,
+        repo, collection, limit, cursor, rkeyStart, rkeyEnd, reverse, s3_config, db,
     )
     .await
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

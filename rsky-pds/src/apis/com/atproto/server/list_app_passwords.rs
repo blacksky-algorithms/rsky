@@ -4,6 +4,7 @@ use crate::auth_verifier::AccessFull;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{AppPassword, ListAppPasswordsOutput};
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.listAppPasswords")]
 pub async fn list_app_passwords(
     auth: AccessFull,
@@ -21,7 +22,7 @@ pub async fn list_app_passwords(
             Ok(Json(ListAppPasswordsOutput { passwords }))
         }
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             return Err(ApiError::RuntimeError);
         }
     }

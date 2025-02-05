@@ -31,12 +31,13 @@ async fn inner_request_account_delete(auth: AccessStandardIncludeChecks) -> Resu
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
 pub async fn request_account_delete(auth: AccessStandardIncludeChecks) -> Result<(), ApiError> {
     match inner_request_account_delete(auth).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

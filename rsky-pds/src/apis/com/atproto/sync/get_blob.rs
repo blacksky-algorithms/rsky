@@ -2,6 +2,7 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use anyhow::Result;
@@ -22,6 +23,7 @@ async fn inner_get_blob(
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<(Vec<u8>, Option<String>)> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
@@ -31,7 +33,7 @@ async fn inner_get_blob(
     let _ = assert_repo_availability(&did, is_user_or_admin).await?;
 
     let cid = Cid::from_str(&cid)?;
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
     let found = actor_store.blob.get_blob(cid).await?;
     let buf: AggregatedBytes = found.stream.collect().await?;
@@ -40,14 +42,16 @@ async fn inner_get_blob(
 
 /// Get a blob associated with a given account. Returns the full blob as originally uploaded.
 /// Does not require auth; implemented by PDS.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getBlob?<did>&<cid>")]
 pub async fn get_blob(
     did: String,
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<BlobResponder, ApiError> {
-    match inner_get_blob(did, cid, s3_config, auth).await {
+    match inner_get_blob(did, cid, s3_config, auth, db).await {
         Ok(res) => {
             let (bytes, mime_type) = res;
             Ok(BlobResponder(
@@ -63,11 +67,11 @@ pub async fn get_blob(
         Err(error) => {
             match error.downcast_ref() {
                 Some(GetObjectError::NoSuchKey(_)) => {
-                    eprintln!("Error: {}", error);
+                    tracing::error!("Error: {}", error);
                     Err(ApiError::BlobNotFound)
                 }
                 _ => {
-                    eprintln!("Error: {}", error);
+                    tracing::error!("Error: {}", error);
                     Err(ApiError::RuntimeError)
                 }
             }

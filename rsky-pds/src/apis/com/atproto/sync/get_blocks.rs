@@ -2,7 +2,8 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::car::read_car_bytes;
+use crate::car::blocks_to_car_file;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
 use crate::storage::readable_blockstore::ReadableBlockstore;
@@ -21,6 +22,7 @@ async fn inner_get_blocks(
     cids: Vec<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<Vec<u8>> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
@@ -34,9 +36,9 @@ async fn inner_get_blocks(
         .map(|c| Cid::from_str(&c).map_err(anyhow::Error::new))
         .collect::<Result<Vec<Cid>>>()?;
 
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
-    let mut storage_guard = actor_store.storage.write().await;
-    let got = storage_guard.get_blocks(cids)?;
+    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    let storage_guard = actor_store.storage.read().await;
+    let got = storage_guard.get_blocks(cids).await?;
 
     if got.missing.len() > 0 {
         let missing_str = got
@@ -47,23 +49,25 @@ async fn inner_get_blocks(
         bail!("Could not find cids: `{missing_str:?}`");
     }
 
-    let car = read_car_bytes(None, got.blocks).await?;
+    let car = blocks_to_car_file(None, got.blocks).await?;
     Ok(car)
 }
 
 /// Get data blocks from a given repo, by CID. For example, intermediate MST nodes, or records.
 /// Does not require auth; implemented by PDS.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getBlocks?<did>&<cids>")]
 pub async fn get_blocks(
     did: String,
     cids: Vec<String>,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
+    db: DbConn,
 ) -> Result<BlockResponder, ApiError> {
-    match inner_get_blocks(did, cids, s3_config, auth).await {
+    match inner_get_blocks(did, cids, s3_config, auth, db).await {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

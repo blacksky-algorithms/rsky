@@ -61,7 +61,7 @@ pub struct ObjAndBytes {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CidAndRev {
     pub cid: Cid,
     pub rev: String,
@@ -76,4 +76,5 @@ pub enum RepoRootError {
 pub mod memory_blockstore;
 pub mod readable_blockstore;
 pub mod sql_repo;
+pub mod sync_storage;
 pub mod types;

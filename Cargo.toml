@@ -6,7 +6,7 @@ resolver = "2"
 cargo = { version = "0.84.0",features = ["vendored-openssl"] }
 rsky-lexicon = {path = "rsky-lexicon", version = "0.2.3"}
 rsky-identity = {path = "rsky-identity", version = "0.1.0"}
-rsky-crypto = {path = "rsky-crypto", version = "0.1.0"}
+rsky-crypto = {path = "rsky-crypto", version = "0.1.1"}
 rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
 rsky-common = {path = "rsky-common", version = "0.1.0"}
 

@@ -4,6 +4,7 @@ use crate::auth_verifier::AccessFull;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateAppPasswordInput, CreateAppPasswordOutput};
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.createAppPassword",
     format = "json",
@@ -19,7 +20,7 @@ pub async fn create_app_password(
     {
         Ok(app_password) => Ok(Json(app_password)),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

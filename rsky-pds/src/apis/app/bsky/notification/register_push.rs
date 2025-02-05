@@ -99,6 +99,7 @@ pub async fn inner_register_push(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/app.bsky.notification.registerPush",
     format = "json",

@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::PreparedWrite;
 use crate::repo::{
@@ -23,6 +24,7 @@ async fn inner_apply_writes(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<()> {
     let tx: ApplyWritesInput = body.into_inner();
     let ApplyWritesInput {
@@ -99,7 +101,7 @@ async fn inner_apply_writes(
         };
 
         let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
         let commit = actor_store
             .process_writes(writes.clone(), swap_commit_cid)
@@ -115,18 +117,20 @@ async fn inner_apply_writes(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.applyWrites", format = "json", data = "<body>")]
 pub async fn apply_writes(
     body: Json<ApplyWritesInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<(), ApiError> {
-    println!("@LOG: debug apply_writes {body:#?}");
-    match inner_apply_writes(body, auth, sequencer, s3_config).await {
+    tracing::debug!("@LOG: debug apply_writes {body:#?}");
+    match inner_apply_writes(body, auth, sequencer, s3_config, db).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

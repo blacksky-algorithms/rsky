@@ -7,6 +7,7 @@ use rsky_lexicon::com::atproto::server::{
     AccountCodes, CreateInviteCodeInput, CreateInviteCodeOutput,
 };
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.createInviteCode",
     format = "json",
@@ -34,7 +35,7 @@ pub async fn create_invite_code(
     {
         Ok(_) => Ok(Json(CreateInviteCodeOutput { code })),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

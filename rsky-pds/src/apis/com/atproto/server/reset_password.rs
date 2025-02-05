@@ -3,6 +3,7 @@ use crate::apis::ApiError;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::ResetPasswordInput;
 
+#[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.resetPassword",
     format = "json",
@@ -13,7 +14,7 @@ pub async fn reset_password(body: Json<ResetPasswordInput>) -> Result<(), ApiErr
     match AccountManager::reset_password(ResetPasswordOpts { token, password }).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

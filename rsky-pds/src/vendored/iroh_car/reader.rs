@@ -57,6 +57,10 @@ where
             Ok(maybe_block.map(|b| (b, this)))
         })
     }
+
+    pub fn get_roots(&self) -> &[Cid] {
+        self.header.roots()
+    }
 }
 
 #[cfg(test)]

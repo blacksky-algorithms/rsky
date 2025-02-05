@@ -4,7 +4,7 @@
 use crate::common;
 use crate::common::ipld::cid_for_cbor;
 use crate::common::tid::{Ticker, TID};
-use crate::db::establish_connection;
+use crate::db::DbConn;
 use crate::lexicon::LEXICONS;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::blob::BlobReader;
@@ -98,9 +98,9 @@ pub struct ActorStore {
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
 impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
-    pub fn new(did: String, blobstore: S3BlobStore) -> Self {
+    pub fn new(did: String, blobstore: S3BlobStore, conn: DbConn) -> Self {
         ActorStore {
-            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None))),
+            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None, conn))),
             record: RecordReader::new(did.clone()),
             pref: PreferenceReader::new(did.clone()),
             did,
@@ -136,8 +136,8 @@ impl ActorStore {
             Some(write_ops),
         )
         .await?;
-        let mut storage_guard = self.storage.write().await;
-        storage_guard.apply_commit(commit.clone(), None)?;
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
@@ -160,8 +160,8 @@ impl ActorStore {
                 .await?;
         }
         // persist the commit to repo storage
-        let mut storage_guard = self.storage.write().await;
-        storage_guard.apply_commit(commit.clone(), None)?;
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
@@ -174,7 +174,7 @@ impl ActorStore {
     ) -> Result<CommitData> {
         let current_root = {
             let storage_guard = self.storage.read().await;
-            storage_guard.get_root_detailed()
+            storage_guard.get_root_detailed().await
         };
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
@@ -264,13 +264,13 @@ impl ActorStore {
 
             // find blocks that are relevant to ops but not included in diff
             // (for instance a record that was moved but cid stayed the same)
-            let new_record_blocks = commit.new_blocks.get_many(new_record_cids)?;
+            let new_record_blocks = commit.relevant_blocks.get_many(new_record_cids)?;
             if new_record_blocks.missing.len() > 0 {
                 let missing_blocks = {
-                    let mut storage_guard = self.storage.write().await;
-                    storage_guard.get_blocks(new_record_blocks.missing)?
+                    let storage_guard = self.storage.read().await;
+                    storage_guard.get_blocks(new_record_blocks.missing).await?
                 };
-                commit.new_blocks.add_map(missing_blocks.blocks)?;
+                commit.relevant_blocks.add_map(missing_blocks.blocks)?;
             }
             Ok(commit)
         } else {
@@ -324,13 +324,19 @@ impl ActorStore {
     }
 
     pub async fn destroy(&mut self) -> Result<()> {
+        let did: String = self.did.clone();
+        let storage_guard = self.storage.read().await;
+        let db: Arc<DbConn> = storage_guard.db.clone();
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let blob_rows: Vec<String> = BlobSchema::blob
-            .filter(BlobSchema::did.eq(&self.did))
-            .select(BlobSchema::cid)
-            .get_results(conn)?;
+        let blob_rows: Vec<String> = db
+            .run(move |conn| {
+                BlobSchema::blob
+                    .filter(BlobSchema::did.eq(did))
+                    .select(BlobSchema::cid)
+                    .get_results(conn)
+            })
+            .await?;
         let cids = blob_rows
             .into_iter()
             .map(|row| Ok(Cid::from_str(&row)?))
@@ -354,17 +360,23 @@ impl ActorStore {
         if touched_uris.len() == 0 || cids.len() == 0 {
             return Ok(vec![]);
         }
+        let did: String = self.did.clone();
+        let storage_guard = self.storage.read().await;
+        let db: Arc<DbConn> = storage_guard.db.clone();
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
         let cid_strs: Vec<String> = cids.into_iter().map(|c| c.to_string()).collect();
         let touched_uri_strs: Vec<String> = touched_uris.iter().map(|t| t.to_string()).collect();
-        let res: Vec<String> = RecordSchema::record
-            .filter(RecordSchema::did.eq(&self.did))
-            .filter(RecordSchema::cid.eq_any(cid_strs))
-            .filter(RecordSchema::uri.ne_all(touched_uri_strs))
-            .select(RecordSchema::cid)
-            .get_results(conn)?;
+        let res: Vec<String> = db
+            .run(move |conn| {
+                RecordSchema::record
+                    .filter(RecordSchema::did.eq(did))
+                    .filter(RecordSchema::cid.eq_any(cid_strs))
+                    .filter(RecordSchema::uri.ne_all(touched_uri_strs))
+                    .select(RecordSchema::cid)
+                    .get_results(conn)
+            })
+            .await?;
         Ok(res
             .into_iter()
             .map(|row| Cid::from_str(&row).map_err(|error| anyhow::Error::new(error)))
@@ -389,13 +401,13 @@ impl Repo {
             Some(cid)
         } else {
             let storage_guard = storage.read().await;
-            storage_guard.get_root()
+            storage_guard.get_root().await
         };
         match commit_cid {
             Some(commit_cid) => {
                 let commit_bytes: Vec<u8> = {
-                    let mut storage_guard = storage.write().await;
-                    match storage_guard.get_bytes(&commit_cid)? {
+                    let storage_guard = storage.read().await;
+                    match storage_guard.get_bytes(&commit_cid).await? {
                         Some(res) => res,
                         None => bail!("Missing blocks for commit cid {commit_cid}"),
                     }
@@ -427,8 +439,8 @@ impl Repo {
             .await
         {
             let path = util::parse_data_key(&leaf.key).unwrap();
-            let mut storage_guard = self.storage.write().await;
-            let record = storage_guard.read_record(&leaf.value).unwrap();
+            let storage_guard = self.storage.read().await;
+            let record = storage_guard.read_record(&leaf.value).await.unwrap();
             iter.push(CommitRecord {
                 collection: path.collection,
                 rkey: path.rkey,
@@ -446,24 +458,26 @@ impl Repo {
     ) -> Result<Option<CborValue>> {
         let data_key = format!("{}/{}", collection, rkey);
         let cid = self.data.get(&data_key).await?;
-        let mut storage_guard = self.storage.write().await;
+        let storage_guard = self.storage.read().await;
         match cid {
             None => Ok(None),
             Some(cid) => Ok(Some(
-                storage_guard.read_obj(&cid, Box::new(|obj| matches!(obj, CborValue::Map(_))))?,
+                storage_guard
+                    .read_obj(&cid, Box::new(|obj| matches!(obj, CborValue::Map(_))))
+                    .await?,
             )),
         }
     }
 
-    pub async fn get_content(&mut self) -> Result<RepoContents> {
+    pub async fn get_contents(&mut self) -> Result<RepoContents> {
         let entries = self.data.list(None, None, None).await?;
         let cids = entries
             .clone()
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<Cid>>();
-        let mut storage_guard = self.storage.write().await;
-        let found = storage_guard.get_blocks(cids)?;
+        let storage_guard = self.storage.read().await;
+        let found = storage_guard.get_blocks(cids).await?;
         if found.missing.len() > 0 {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
@@ -518,7 +532,8 @@ impl Repo {
             rev: rev.0,
             since: None,
             prev: None,
-            new_blocks,
+            new_blocks: new_blocks.clone(),
+            relevant_blocks: new_blocks,
             removed_cids: diff.removed_cids,
         })
     }
@@ -529,8 +544,8 @@ impl Repo {
         commit: CommitData,
     ) -> Result<Self> {
         {
-            let mut storage_guard = storage.write().await;
-            storage_guard.apply_commit(commit.clone(), None)?;
+            let storage_guard = storage.read().await;
+            storage_guard.apply_commit(commit.clone(), None).await?;
         }
         Repo::load(storage, Some(commit.cid)).await
     }
@@ -559,7 +574,7 @@ impl Repo {
         let mut leaves = BlockMap::new();
 
         let mut data = self.data.clone(); // @TODO: Confirm if this should be clone
-        for write in writes {
+        for write in writes.clone() {
             match write {
                 RecordWriteOp::Create(write) => {
                     let cid = leaves.add(write.record)?;
@@ -584,11 +599,21 @@ impl Repo {
         let mut new_blocks = diff.new_mst_blocks;
         let mut removed_cids = diff.removed_cids;
 
+        let mut relevant_blocks = BlockMap::new();
+        for op in writes {
+            data.add_blocks_for_path(
+                util::format_data_key(op.collection(), op.rkey()),
+                &mut relevant_blocks,
+            )
+            .await?;
+        }
+
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
         if added_leaves.missing.len() > 0 {
             bail!("Missing leaf blocks: {:?}", added_leaves.missing);
         }
-        new_blocks.add_map(added_leaves.blocks)?;
+        new_blocks.add_map(added_leaves.blocks.clone())?;
+        relevant_blocks.add_map(added_leaves.blocks)?;
 
         let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
 
@@ -602,12 +627,12 @@ impl Repo {
             },
             keypair,
         )?;
-        let commit_cid = new_blocks.add(commit)?;
+        let commit_block_bytes = common::struct_to_cbor(commit.clone())?;
+        let commit_cid = cid_for_cbor(&commit)?;
 
-        // ensure the commit cid actually changed
-        if commit_cid.eq(&self.cid) {
-            new_blocks.delete(commit_cid)?;
-        } else {
+        if !commit_cid.eq(&self.cid) {
+            new_blocks.set(commit_cid, commit_block_bytes.clone());
+            relevant_blocks.set(commit_cid, commit_block_bytes.clone());
             removed_cids.add(self.cid);
         }
 
@@ -617,6 +642,7 @@ impl Repo {
             since: Some(self.commit.rev.clone()),
             prev: Some(self.cid),
             new_blocks,
+            relevant_blocks,
             removed_cids,
         })
     }
@@ -624,8 +650,8 @@ impl Repo {
     pub async fn apply_commit(&self, commit_data: CommitData) -> Result<Self> {
         let commit_data_cid = commit_data.cid.clone();
         {
-            let mut storage_guard = self.storage.write().await;
-            storage_guard.apply_commit(commit_data, None)?;
+            let storage_guard = self.storage.read().await;
+            storage_guard.apply_commit(commit_data, None).await?;
         }
         Repo::load(self.storage.clone(), Some(commit_data_cid)).await
     }
@@ -657,7 +683,8 @@ impl Repo {
             rev,
             since: None,
             prev: None,
-            new_blocks,
+            new_blocks: new_blocks.clone(),
+            relevant_blocks: new_blocks,
             removed_cids: CidSet::new(Some(vec![self.cid])),
         })
     }
@@ -898,7 +925,920 @@ pub mod error;
 pub mod mst;
 pub mod parse;
 pub mod preference;
+mod readable_repo;
 pub mod record;
 pub mod sync;
 pub mod types;
 pub mod util;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apis::com::atproto::server::encode_did_key;
+    use crate::car::{blocks_to_car_file, read_car_with_root};
+    use crate::common::sign::sign_without_indexmap;
+    use crate::repo::mst::util::{random_cid, random_str};
+    use crate::repo::parse::get_and_parse_record;
+    use crate::repo::sync::consumer::{verify_proofs, verify_records, verify_repo, ConsumerError};
+    use crate::repo::sync::provider::{get_full_repo, get_records};
+    use crate::repo::types::{RecordCidClaim, RecordDeleteOp, RecordPath};
+    use crate::repo::util::{stream_to_buffer, verify_commit_sig};
+    use crate::storage::memory_blockstore::MemoryBlockstore;
+    use anyhow::Result;
+    use futures::pin_mut;
+    use rand::prelude::SliceRandom;
+    use rand::thread_rng;
+    use rsky_crypto::utils::random_bytes;
+
+    const TEST_COLLECTIONS: [&'static str; 2] = ["com.example.posts", "com.example.likes"];
+    const COLL_NAME: &str = "com.example.posts";
+
+    pub struct FillRepoOutput {
+        pub repo: Repo,
+        pub data: RepoContents,
+    }
+
+    pub fn generate_object() -> RepoRecord {
+        serde_json::from_value(json!({ "name": random_str(100) }))
+            .expect("Simple object failed to serialize")
+    }
+
+    pub async fn fill_repo(
+        mut repo: Repo,
+        keypair: Keypair,
+        items_per_collection: usize,
+    ) -> Result<FillRepoOutput> {
+        let mut repo_data: RepoContents = Default::default();
+        let mut writes: Vec<RecordWriteOp> = Default::default();
+        for coll_name in TEST_COLLECTIONS {
+            let mut coll_data: CollectionContents = Default::default();
+            for _ in 0..items_per_collection {
+                let object = generate_object();
+                let rkey = Ticker::new().next(None).to_string();
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: coll_name.to_string(),
+                    rkey,
+                    record: object,
+                }));
+            }
+            repo_data.insert(coll_name.to_string(), coll_data);
+        }
+        let writes = RecordWriteEnum::List(writes);
+        let updated = repo.apply_writes(writes, keypair).await?;
+        Ok(FillRepoOutput {
+            repo: updated,
+            data: repo_data,
+        })
+    }
+
+    pub async fn add_bad_commit(mut repo: Repo, keypair: Keypair) -> Result<Repo> {
+        let object = generate_object();
+        let mut new_blocks = BlockMap::new();
+        let cid = new_blocks.add(object)?;
+        let mut updated_data = repo
+            .data
+            .add(
+                &format!("com.example.test/{}", Ticker::new().next(None)),
+                cid,
+                None,
+            )
+            .await?;
+        let data_cid = updated_data.get_pointer().await?;
+        let diff = DataDiff::of(&mut updated_data, Some(&mut repo.data)).await?;
+        new_blocks.add_map(diff.new_mst_blocks)?;
+        // we generate a bad sig by signing some other data
+        let rev = TID::next_str(Some(repo.commit.rev))?;
+        let commit = Commit {
+            did: repo.commit.did,
+            rev: rev.clone(),
+            data: data_cid,
+            prev: repo.commit.prev,
+            version: repo.commit.version,
+            sig: sign_without_indexmap(&random_bytes(256), &keypair.secret_key())?.to_vec(),
+        };
+        let commit_cid = new_blocks.add(commit)?;
+        {
+            let storage_guard = repo.storage.read().await;
+            storage_guard
+                .apply_commit(
+                    CommitData {
+                        cid: commit_cid,
+                        rev,
+                        since: None,
+                        prev: Some(repo.cid),
+                        new_blocks,
+                        relevant_blocks: BlockMap::new(),
+                        removed_cids: diff.removed_cids,
+                    },
+                    None,
+                )
+                .await?;
+        }
+        Repo::load(repo.storage.clone(), Some(commit_cid)).await
+    }
+
+    pub async fn contents_to_claims(contents: RepoContents) -> Result<Vec<RecordCidClaim>> {
+        let mut claims: Vec<RecordCidClaim> = Default::default();
+        for coll in contents.keys() {
+            if let Some(coll_content) = contents.get(coll) {
+                for rkey in coll_content.keys() {
+                    claims.push(RecordCidClaim {
+                        collection: coll.to_string(),
+                        rkey: rkey.to_string(),
+                        cid: Some(cid_for_cbor(coll_content.get(rkey).unwrap())?),
+                    });
+                }
+            }
+        }
+        Ok(claims)
+    }
+
+    #[derive(Debug)]
+    pub struct FormatEditOpts {
+        pub adds: Option<usize>,
+        pub updates: Option<usize>,
+        pub deletes: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    pub struct FormatEditOutput {
+        pub commit: CommitData,
+        pub data: RepoContents,
+    }
+
+    pub async fn format_edit(
+        repo: &mut Repo,
+        prev_data: RepoContents,
+        keypair: Keypair,
+        params: FormatEditOpts,
+    ) -> Result<FormatEditOutput> {
+        let (adds, updates, deletes) = (
+            params.adds.unwrap_or(0),
+            params.updates.unwrap_or(0),
+            params.deletes.unwrap_or(0),
+        );
+        let mut repo_data: RepoContents = Default::default();
+        let mut writes: Vec<RecordWriteOp> = Default::default();
+        let mut rng = thread_rng();
+        for coll_name in TEST_COLLECTIONS {
+            let mut coll_data: CollectionContents = match prev_data.get(coll_name) {
+                Some(prev) => prev.clone(),
+                None => Default::default(),
+            };
+
+            let mut entries: Vec<(String, RepoRecord)> = coll_data
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            entries.shuffle(&mut rng);
+
+            for _ in 0..adds {
+                let object = generate_object();
+                let rkey = TID::next_str(None)?;
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: coll_name.to_string(),
+                    rkey,
+                    record: object,
+                }));
+            }
+
+            let to_update = entries[0..updates].to_vec();
+            for i in 0..to_update.len() {
+                let object = generate_object();
+                let rkey = to_update[i].0.clone();
+                coll_data.insert(rkey.clone(), object.clone());
+                writes.push(RecordWriteOp::Update(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Update,
+                    collection: coll_name.to_string(),
+                    rkey: rkey.to_string(),
+                    record: object,
+                }));
+            }
+
+            let to_delete = entries[0..deletes].to_vec();
+            for i in 0..to_delete.len() {
+                let rkey = to_delete[i].0.clone();
+                coll_data.remove(&rkey);
+                writes.push(RecordWriteOp::Delete(RecordDeleteOp {
+                    action: WriteOpAction::Delete,
+                    collection: coll_name.to_string(),
+                    rkey: rkey.to_string(),
+                }));
+            }
+            repo_data.insert(coll_name.to_string(), coll_data);
+        }
+        let commit = repo
+            .format_commit(RecordWriteEnum::List(writes), keypair)
+            .await?;
+        Ok(FormatEditOutput {
+            commit,
+            data: repo_data,
+        })
+    }
+
+    #[tokio::test]
+    async fn creates_repo() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, keypair, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn has_proper_metadata() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        assert_eq!(repo.did(), did_key);
+        assert_eq!(repo.version(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_basic_operations() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let rkey = TID::next_str(None)?;
+        let record = generate_object();
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                    record: record.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_some());
+        let got: RepoRecord = serde_cbor::value::from_value(got.unwrap())?;
+        assert_eq!(got, record);
+
+        let updated_record = generate_object();
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Update(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Update,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                    record: updated_record.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_some());
+        let got: RepoRecord = serde_cbor::value::from_value(got.unwrap())?;
+        assert_eq!(got, updated_record);
+
+        repo = repo
+            .apply_writes(
+                RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                    action: WriteOpAction::Delete,
+                    collection: COLL_NAME.to_string(),
+                    rkey: rkey.clone(),
+                })),
+                keypair,
+            )
+            .await?;
+        let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
+        assert!(got.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adds_content_collection() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let contents = repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn edits_and_deletes_content() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let mut repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        repo_data = edit.data;
+        let contents = repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn has_a_valid_signature_to_commit() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let _ = repo.get_contents().await?;
+        let verified = verify_commit_sig(repo.commit, &did_key)?;
+        assert!(verified);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sets_correct_did() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data,
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let _ = repo.get_contents().await?;
+        let _ = verify_commit_sig(repo.commit.clone(), &did_key)?;
+        assert_eq!(repo.did(), did_key);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loads_from_blockstore() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            keypair,
+            None,
+        )
+        .await?;
+        let filled = fill_repo(repo, keypair, 100).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let edit = format_edit(
+            &mut repo,
+            repo_data.clone(),
+            keypair,
+            FormatEditOpts {
+                adds: Some(20),
+                updates: Some(20),
+                deletes: Some(20),
+            },
+        )
+        .await?;
+        repo = repo.apply_commit(edit.commit).await?;
+        let old_contents = repo.get_contents().await?;
+        let _ = verify_commit_sig(repo.commit, &did_key)?;
+
+        let mut reloaded_repo = Repo::load(repo.storage.clone(), Some(repo.cid)).await?;
+        let contents = reloaded_repo.get_contents().await?;
+        assert_eq!(contents, old_contents);
+        assert_eq!(reloaded_repo.did(), did_key);
+        assert_eq!(reloaded_repo.version(), 3);
+        Ok(())
+    }
+
+    // @NOTE this test uses a fully deterministic tree structure
+    #[tokio::test]
+    async fn includes_all_relevant_blocks_for_proof_commit_data() -> Result<()> {
+        let did = "did:example:test";
+        let collection = "com.atproto.test";
+        let record = json!({ "test": 123 });
+
+        let blockstore = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(blockstore)),
+            did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+
+        let mut keys: Vec<String> = Default::default();
+        for i in 0..50 {
+            let rkey = format!("key-{i}");
+            keys.push(rkey.clone());
+            repo = repo
+                .apply_writes(
+                    RecordWriteEnum::Single(RecordWriteOp::Create(RecordCreateOrUpdateOp {
+                        action: WriteOpAction::Create,
+                        collection: collection.to_string(),
+                        rkey,
+                        record: serde_json::from_value(record.clone())?,
+                    })),
+                    keypair,
+                )
+                .await?;
+        }
+
+        // this test demonstrates the test case:
+        // specifically in the case of deleting the first key, there is a "rearranged block" that is necessary
+        // in the proof path but _is not_ in newBlocks (as it already existed in the repository)
+        {
+            let commit = repo
+                .format_commit(
+                    RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                        action: WriteOpAction::Delete,
+                        collection: collection.to_string(),
+                        rkey: keys[0].clone(),
+                    })),
+                    keypair,
+                )
+                .await?;
+            let car = blocks_to_car_file(Some(&commit.cid), commit.new_blocks).await?;
+            let did_key = encode_did_key(&keypair.public_key());
+            let result = verify_proofs(
+                car,
+                vec![RecordCidClaim {
+                    collection: collection.to_string(),
+                    rkey: keys[0].clone(),
+                    cid: None,
+                }],
+                did,
+                &did_key,
+            )
+            .await;
+            assert!(matches!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<DataStoreError>()
+                    .unwrap(),
+                DataStoreError::MissingBlock(_)
+            ));
+        }
+
+        for rkey in keys {
+            let commit = repo
+                .format_commit(
+                    RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
+                        action: WriteOpAction::Delete,
+                        collection: collection.to_string(),
+                        rkey: rkey.clone(),
+                    })),
+                    keypair,
+                )
+                .await?;
+            let car = blocks_to_car_file(Some(&commit.cid), commit.relevant_blocks.clone()).await?;
+            let did_key = encode_did_key(&keypair.public_key());
+            let proof_res = verify_proofs(
+                car,
+                vec![RecordCidClaim {
+                    collection: collection.to_string(),
+                    rkey,
+                    cid: None,
+                }],
+                did,
+                &did_key,
+            )
+            .await?;
+            assert_eq!(proof_res.unverified.len(), 0);
+            repo = repo.apply_commit(commit).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verifies_valid_records() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let claims = contents_to_claims(repo_data).await?;
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert!(results.verified.len() > 0);
+        assert_eq!(results.verified, claims);
+        assert_eq!(results.unverified.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verifies_record_nonexistence() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let _repo_data = filled.data;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: TEST_COLLECTIONS[0].to_string(),
+            rkey: Ticker::new().next(None).to_string(),
+            cid: None,
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert!(results.verified.len() > 0);
+        assert_eq!(results.verified, claims);
+        assert_eq!(results.unverified.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_a_record_that_does_not_exist() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: Ticker::new().next(None).to_string(),
+            cid: real_claims[0].cid.clone(),
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_an_invalid_record_at_a_real_path() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let mut no_storage: Option<&mut dyn RepoStorage> = None;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: real_claims[0].rkey.clone(),
+            cid: Some(random_cid(&mut no_storage, None).await?),
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_verify_a_delete_where_a_record_does_exist() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let real_claims = contents_to_claims(repo_data).await?;
+        let claims: Vec<RecordCidClaim> = vec![RecordCidClaim {
+            collection: real_claims[0].collection.clone(),
+            rkey: real_claims[0].rkey.clone(),
+            cid: None,
+        }];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let results = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await?;
+
+        assert_eq!(results.verified.len(), 0);
+        assert!(results.unverified.len() > 0);
+        assert_eq!(results.unverified, claims);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn can_determine_record_proofs_from_car_file() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let possible = contents_to_claims(repo_data.clone()).await?;
+        let claims = vec![
+            // random sampling of records
+            possible[0].clone(),
+            possible[4].clone(),
+            possible[5].clone(),
+            possible[8].clone(),
+        ];
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(repo.storage.clone(), repo.cid, claims_as_record_paths).await?;
+        let records = verify_records(proofs, repo_did, &did_key).await?;
+        for record in records {
+            let found_claim = claims
+                .iter()
+                .find(|claim| claim.collection == record.collection && claim.rkey == record.rkey);
+            match found_claim {
+                None => bail!("Could not find record for claim"),
+                Some(found_claim) => assert_eq!(
+                    found_claim.cid,
+                    Some(cid_for_cbor(
+                        repo_data
+                            .get(&record.collection)
+                            .unwrap()
+                            .get(&record.rkey)
+                            .unwrap()
+                    )?)
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_proofs_throws_on_a_bad_signature() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let bad_repo = add_bad_commit(repo, keypair).await?;
+        let claims = contents_to_claims(repo_data).await?;
+        let claims_as_record_paths: Vec<RecordPath> = claims
+            .clone()
+            .into_iter()
+            .map(|c| RecordPath {
+                collection: c.collection,
+                rkey: c.rkey,
+            })
+            .collect();
+        let proofs = get_records(
+            bad_repo.storage.clone(),
+            bad_repo.cid,
+            claims_as_record_paths,
+        )
+        .await?;
+        let result = verify_proofs(proofs, claims.clone(), repo_did, &did_key).await;
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<ConsumerError>().unwrap(),
+            ConsumerError::RepoVerificationError(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_a_full_repo() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let repo_did = "did:example:test";
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            repo_did.to_string(),
+            keypair,
+            None,
+        )
+        .await?;
+        let did_key = encode_did_key(&keypair.public_key());
+        let filled = fill_repo(repo, keypair, 5).await?;
+        repo = filled.repo;
+        let repo_data = filled.data;
+        let repo_stream = get_full_repo(repo.storage.clone(), repo.cid).await?;
+        pin_mut!(repo_stream);
+        let car_bytes = stream_to_buffer(repo_stream).await?;
+        let mut car = read_car_with_root(car_bytes).await?;
+        let verifed = verify_repo(
+            &mut car.blocks,
+            car.root,
+            Some(&repo_did.to_string()),
+            Some(&did_key),
+            None,
+        )
+        .await?;
+        let sync_storage = MemoryBlockstore::default();
+        sync_storage.apply_commit(verifed.commit, None).await?;
+        let mut loaded_repo =
+            Repo::load(Arc::new(RwLock::new(sync_storage)), Some(car.root)).await?;
+        let contents = loaded_repo.get_contents().await?;
+        assert_eq!(contents, repo_data);
+        let mut contents_from_ops = RepoContents::default();
+        for write in verifed.creates {
+            match contents_from_ops.get(&write.collection) {
+                Some(_) => (),
+                None => {
+                    contents_from_ops
+                        .insert(write.collection.clone(), CollectionContents::default());
+                    ()
+                }
+            }
+            let parsed = get_and_parse_record(&car.blocks, write.cid)?;
+            contents_from_ops
+                .get_mut(&write.collection)
+                .unwrap()
+                .insert(write.rkey, parsed.record);
+        }
+        assert_eq!(contents_from_ops, repo_data);
+        Ok(())
+    }
+}

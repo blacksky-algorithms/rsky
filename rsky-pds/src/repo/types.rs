@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use lexicon_cid::Cid;
 use rsky_syntax::aturi::AtUri;
 use std::collections::BTreeMap;
+use std::fmt;
 
 // Repo nodes
 // ---------------
@@ -153,10 +154,22 @@ impl PreparedWrite {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WriteOpAction {
     Create,
     Update,
     Delete,
+}
+
+impl fmt::Display for WriteOpAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Match each variant and write its lowercase representation.
+        match self {
+            WriteOpAction::Create => write!(f, "create"),
+            WriteOpAction::Update => write!(f, "update"),
+            WriteOpAction::Delete => write!(f, "delete"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -179,6 +192,24 @@ pub enum RecordWriteOp {
     Create(RecordCreateOrUpdateOp),
     Update(RecordCreateOrUpdateOp),
     Delete(RecordDeleteOp),
+}
+
+impl RecordWriteOp {
+    pub fn collection(&self) -> String {
+        match self {
+            RecordWriteOp::Create(r) => r.collection.clone(),
+            RecordWriteOp::Update(r) => r.collection.clone(),
+            RecordWriteOp::Delete(r) => r.collection.clone(),
+        }
+    }
+
+    pub fn rkey(&self) -> String {
+        match self {
+            RecordWriteOp::Create(r) => r.rkey.clone(),
+            RecordWriteOp::Update(r) => r.rkey.clone(),
+            RecordWriteOp::Delete(r) => r.rkey.clone(),
+        }
+    }
 }
 
 pub fn create_write_to_op(write: PreparedCreateOrUpdate) -> Result<RecordWriteOp> {
@@ -254,6 +285,16 @@ pub enum RecordWriteDescript {
     Delete(RecordCreateOrDeleteDescript),
 }
 
+impl RecordWriteDescript {
+    pub fn action(&self) -> String {
+        match self {
+            RecordWriteDescript::Create(r) => r.action.to_string(),
+            RecordWriteDescript::Update(r) => r.action.to_string(),
+            RecordWriteDescript::Delete(r) => r.action.to_string(),
+        }
+    }
+}
+
 pub type WriteLog = Vec<Vec<RecordWriteDescript>>;
 
 // Updates/Commits
@@ -266,6 +307,7 @@ pub struct CommitData {
     pub since: Option<String>,
     pub prev: Option<Cid>,
     pub new_blocks: BlockMap,
+    pub relevant_blocks: BlockMap,
     pub removed_cids: CidSet,
 }
 
@@ -311,7 +353,7 @@ pub struct RecordClaim {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct VerifiedDiff {
-    pub write: Vec<RecordWriteDescript>,
+    pub writes: Vec<RecordWriteDescript>,
     pub commit: CommitData,
 }
 
@@ -327,8 +369,6 @@ pub struct CidAndBytes {
     pub cid: Cid,
     pub bytes: Vec<u8>,
 }
-
-pub type BlockWriter = Vec<CidAndBytes>;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum Ids {
@@ -941,4 +981,11 @@ impl Ids {
             _ => bail!("Invalid NSID: `{s:?}` is not a valid nsid"),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordCidClaim {
+    pub collection: String,
+    pub rkey: String,
+    pub cid: Option<Cid>,
 }

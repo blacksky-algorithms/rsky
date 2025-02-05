@@ -59,6 +59,7 @@ pub async fn inner_get_service_auth(
 }
 
 /// Get a signed token on behalf of the requesting DID for the requested service.
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.getServiceAuth?<aud>&<exp>&<lxm>")]
 pub async fn get_service_auth(
     // The DID of the service that the token will be used to authenticate with
@@ -73,7 +74,7 @@ pub async fn get_service_auth(
     match inner_get_service_auth(aud, exp, lxm, auth).await {
         Ok(token) => Ok(Json(GetServiceAuthOutput { token })),
         Err(error) => {
-            eprintln!("Internal Error: {error}");
+            tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
     }

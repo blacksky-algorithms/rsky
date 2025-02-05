@@ -50,6 +50,7 @@ impl PreferenceReader {
         Ok(account_prefs)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn put_preferences(
         &self,
         values: Vec<RefPreferences>,
@@ -67,7 +68,7 @@ impl PreferenceReader {
                     .filter(|value| !pref_in_scope(scope.clone(), value.get_type()))
                     .collect::<Vec<&RefPreferences>>();
                 if not_in_scope.len() > 0 {
-                    println!(
+                    tracing::info!(
                         "@LOG: PreferenceReader::put_preferences() debug scope: {:?}, values: {:?}",
                         scope, values
                     );

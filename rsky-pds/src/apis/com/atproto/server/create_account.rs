@@ -6,6 +6,7 @@ use crate::apis::com::atproto::server::{
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
+use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{CompatibleOpOrTombstone, OpOrTombstone, Operation};
@@ -48,6 +49,7 @@ pub async fn server_create_account(
     s3_config: &State<SdkConfig>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
+    db: DbConn,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -66,7 +68,7 @@ pub async fn server_create_account(
     } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester).await?;
 
     // Create new actor repo TODO: Proper rollback
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {

@@ -75,6 +75,7 @@ async fn inner_resolve_handle(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.identity.resolveHandle?<handle>")]
 pub async fn resolve_handle(
     handle: String,
@@ -83,7 +84,7 @@ pub async fn resolve_handle(
     match inner_resolve_handle(handle, id_resolver).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }

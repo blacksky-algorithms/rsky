@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::db::DbConn;
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::types::{CommitData, PreparedWrite};
 use crate::repo::{
@@ -17,11 +18,13 @@ use rsky_lexicon::com::atproto::repo::{PutRecordInput, PutRecordOutput};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
+#[tracing::instrument(skip_all)]
 async fn inner_put_record(
     body: Json<PutRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<PutRecordOutput> {
     let PutRecordInput {
         repo,
@@ -59,13 +62,13 @@ async fn inner_put_record(
         };
         let (commit, write): (Option<CommitData>, PreparedWrite) = {
             let mut actor_store =
-                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config));
+                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
             let current = actor_store
                 .record
                 .get_record(&uri, None, Some(true))
                 .await?;
-            println!("@LOG: debug inner_put_record, current: {current:?}");
+            tracing::debug!("@LOG: debug inner_put_record, current: {current:?}");
             let write: PreparedWrite = if current.is_some() {
                 PreparedWrite::Update(
                     prepare_update(PrepareUpdateOpts {
@@ -118,18 +121,20 @@ async fn inner_put_record(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.putRecord", format = "json", data = "<body>")]
 pub async fn put_record(
     body: Json<PutRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
+    db: DbConn,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
-    println!("@LOG: debug put_record {body:#?}");
-    match inner_put_record(body, auth, sequencer, s3_config).await {
+    tracing::debug!("@LOG: debug put_record {body:#?}");
+    match inner_put_record(body, auth, sequencer, s3_config, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            eprintln!("@LOG: ERROR: {error}");
+            tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
     }
