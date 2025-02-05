@@ -5,6 +5,7 @@ use crate::apis::com::atproto::server::{
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
+use crate::common::env::env_str;
 use crate::config::ServerConfig;
 use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
@@ -12,8 +13,8 @@ use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{CompatibleOpOrTombstone, OpOrTombstone, Operation};
 use crate::repo::aws::s3::S3BlobStore;
 use crate::repo::ActorStore;
-use crate::{plc, SharedIdResolver};
 use crate::SharedSequencer;
+use crate::{plc, SharedIdResolver};
 use aws_config::SdkConfig;
 use email_address::*;
 use rocket::serde::json::Json;
@@ -21,7 +22,6 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use crate::common::env::env_str;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TransformedCreateAccountInput {
@@ -68,7 +68,8 @@ pub async fn server_create_account(
     } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester).await?;
 
     // Create new actor repo TODO: Proper rollback
-    let mut actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    let mut actor_store =
+        ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -84,7 +85,10 @@ pub async fn server_create_account(
         Some(op) => {
             let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
             let plc_client = plc::Client::new(plc_url);
-            match plc_client.send_operation(&did, &OpOrTombstone::Operation(op)).await {
+            match plc_client
+                .send_operation(&did, &OpOrTombstone::Operation(op))
+                .await
+            {
                 Ok(_) => {
                     tracing::info!("Succesfully sent PLC Operation")
                 }
@@ -119,7 +123,7 @@ pub async fn server_create_account(
         invite_code,
         deactivated: Some(deactivated),
     })
-        .await
+    .await
     {
         Ok(res) => {
             (access_jwt, refresh_jwt) = res;
@@ -272,7 +276,7 @@ pub async fn validate_inputs_for_local_pds(
     // Check password  exists
     match input.password {
         None => return Err(ApiError::InvalidPassword),
-        Some(ref pass) => password = pass.clone()
+        Some(ref pass) => password = pass.clone(),
     };
 
     // Get Signing Key

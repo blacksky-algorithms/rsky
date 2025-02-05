@@ -70,7 +70,8 @@ impl PreferenceReader {
                 if not_in_scope.len() > 0 {
                     tracing::info!(
                         "@LOG: PreferenceReader::put_preferences() debug scope: {:?}, values: {:?}",
-                        scope, values
+                        scope,
+                        values
                     );
                     bail!("Do not have authorization to set preferences.");
                 }

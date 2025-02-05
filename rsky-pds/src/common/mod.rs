@@ -154,7 +154,8 @@ pub fn get_notif_endpoint(doc: DidDocument) -> Option<String> {
 pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> Option<String> {
     tracing::info!(
         "@LOG: common::get_service_endpoint() doc: {:?}; opts: {:?}",
-        doc, opts
+        doc,
+        opts
     );
     let did = get_did(&doc);
     match doc.service {

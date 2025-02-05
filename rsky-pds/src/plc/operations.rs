@@ -2,13 +2,13 @@ use crate::common::ipld::cid_for_cbor;
 use crate::common::sign::atproto_sign;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service, Tombstone};
 use anyhow::Result;
+use data_encoding::BASE32;
 use indexmap::IndexMap;
 use libipld::Cid;
 use secp256k1::SecretKey;
 use serde_json::{Value as JsonValue, Value};
-use std::collections::BTreeMap;
-use data_encoding::BASE32;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct CreateAtprotoUpdateOpOpts {
@@ -26,7 +26,10 @@ pub struct CreateAtprotoOpInput {
     pub rotation_keys: Vec<String>,
 }
 
-pub async fn create_op(opts: CreateAtprotoOpInput, secret_key: SecretKey) -> Result<(String, Operation)> {
+pub async fn create_op(
+    opts: CreateAtprotoOpInput,
+    secret_key: SecretKey,
+) -> Result<(String, Operation)> {
     //Build Operation
     let mut create_op = Operation {
         r#type: "plc_operation".to_string(),
@@ -72,7 +75,7 @@ pub async fn update_atproto_key_op(
             rotation_keys: None,
         },
     )
-        .await
+    .await
 }
 
 pub async fn update_handle_op(
@@ -90,7 +93,7 @@ pub async fn update_handle_op(
             rotation_keys: None,
         },
     )
-        .await
+    .await
 }
 
 pub async fn update_pds_op(
@@ -108,7 +111,7 @@ pub async fn update_pds_op(
             rotation_keys: None,
         },
     )
-        .await
+    .await
 }
 
 pub async fn update_rotation_keys_op(
@@ -126,7 +129,7 @@ pub async fn update_rotation_keys_op(
             rotation_keys: Some(rotation_keys),
         },
     )
-        .await
+    .await
 }
 
 pub async fn create_atproto_update_op(
@@ -158,7 +161,7 @@ pub async fn create_atproto_update_op(
                         [formatted].as_slice(),
                         &normalized.also_known_as[handle_i + 1..],
                     ]
-                        .concat()
+                    .concat()
                 }
             }
         }
@@ -177,7 +180,7 @@ pub async fn create_atproto_update_op(
         }
         updated
     })
-        .await
+    .await
 }
 
 pub async fn create_update_op<G>(
@@ -213,7 +216,7 @@ pub async fn tombstone_op(prev: Cid, key: &SecretKey) -> Result<Tombstone> {
         }),
         key,
     )
-        .await?
+    .await?
     {
         CompatibleOpOrTombstone::Tombstone(op) => Ok(op),
         _ => panic!("Enum type changed"),
