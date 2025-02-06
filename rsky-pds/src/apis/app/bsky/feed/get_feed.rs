@@ -42,18 +42,24 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                     match limit {
                         Ok(limit) => match limit {
                             Some(limit) if limit > 100 => {
+                                req.local_cache(|| {
+                                    Some(ApiError::InvalidRequest("`limit` is invalid".to_string()))
+                                });
                                 return Outcome::Error((
                                     Status::BadRequest,
                                     anyhow!("`limit` is invalid"),
-                                ))
+                                ));
                             }
                             _ => (),
                         },
                         _ => {
+                            req.local_cache(|| {
+                                Some(ApiError::InvalidRequest("`limit` is invalid".to_string()))
+                            });
                             return Outcome::Error((
                                 Status::BadRequest,
                                 anyhow!("`limit` is invalid"),
-                            ))
+                            ));
                         }
                     }
                 }
@@ -77,10 +83,13 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                 {
                                     Ok(res) => res,
                                     Err(error) => {
+                                        req.local_cache(|| {
+                                            Some(ApiError::InvalidRequest(error.to_string()))
+                                        });
                                         return Outcome::Error((
                                             Status::BadRequest,
                                             anyhow!(error.to_string()),
-                                        ))
+                                        ));
                                     }
                                 };
                                 let headers = req.headers().clone().into_iter().fold(
@@ -93,7 +102,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                         acc
                                     },
                                 );
-                                let req = ProxyRequest {
+                                let proxy_req = ProxyRequest {
                                     headers,
                                     query: match req.uri().query() {
                                         None => None,
@@ -108,7 +117,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                                 };
                                 match pipethrough(
-                                    &req,
+                                    &proxy_req,
                                     requester,
                                     OverrideOpts {
                                         aud: Some(data.view.did.to_string()),
@@ -124,7 +133,12 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                         buffer: res.buffer,
                                         headers: res.headers,
                                     }),
-                                    Err(error) => Outcome::Error((Status::BadRequest, error)),
+                                    Err(error) => {
+                                        req.local_cache(|| {
+                                            Some(ApiError::InvalidRequest(error.to_string()))
+                                        });
+                                        Outcome::Error((Status::BadRequest, error))
+                                    }
                                 }
                             }
                             _ => Outcome::Error((
@@ -133,13 +147,21 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                             )),
                         }
                     }
-                    _ => Outcome::Error((Status::BadRequest, anyhow!("`feed` is invalid"))),
+                    _ => {
+                        req.local_cache(|| {
+                            Some(ApiError::InvalidRequest("`feed` is invalid".to_string()))
+                        });
+                        Outcome::Error((Status::BadRequest, anyhow!("`feed` is invalid")))
+                    }
                 }
             }
-            Outcome::Error(err) => Outcome::Error((
-                Status::BadRequest,
-                anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-            )),
+            Outcome::Error(err) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                Outcome::Error((
+                    Status::BadRequest,
+                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
+                ))
+            }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }
     }
