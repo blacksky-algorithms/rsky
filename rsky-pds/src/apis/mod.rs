@@ -63,7 +63,7 @@ pub async fn bsky_api_forwarder(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ApiError {
     RuntimeError,
     InvalidLogin,
