@@ -293,7 +293,8 @@ async fn rocket() -> _ {
                 chat::send_message_batch,
                 chat::unmute_convo,
                 chat::update_read,
-                bsky_api_forwarder,
+                bsky_api_get_forwarder,
+                bsky_api_post_forwarder,
                 well_known,
                 all_options
             ],

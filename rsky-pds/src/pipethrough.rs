@@ -1,3 +1,4 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::common::{get_service_endpoint, GetServiceEndpointOpts};
 use crate::config::{ServerConfig, ServiceConfig};
@@ -5,12 +6,15 @@ use crate::repo::types::Ids;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
+use futures::StreamExt;
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
+use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
-use rocket::State;
+use rocket::{Data, State};
+use rsky_identity::types::DidDocument;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
@@ -174,6 +178,49 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
     parse_proxy_res(res).await
 }
 
+#[tracing::instrument(skip_all)]
+pub async fn pipethrough_procedure_post<'r>(
+    req: &'r ProxyRequest<'_>,
+    requester: Option<String>,
+    body: Option<Data<'_>>,
+) -> Result<HandlerPipeThrough, ApiError> {
+    let UrlAndAud {
+        url,
+        aud,
+        lxm: nsid,
+    } = format_url_and_aud(req, None).await?;
+    let headers = format_headers(req, aud, nsid, requester).await?;
+    let encoded_body: Option<Vec<u8>>;
+    match body {
+        None => encoded_body = None,
+        Some(mut body) => {
+            let res;
+            match body.open(50.megabytes()).into_string().await {
+                Ok(res1) => {
+                    tracing::info!(res1.value);
+                    res = res1.value;
+                }
+                Err(error) => {
+                    tracing::error!("{error}");
+                    return Err(ApiError::RuntimeError);
+                }
+            }
+            match serde_json::to_string(&res) {
+                Ok(encoded_res) => {
+                    encoded_body = Some(encoded_res.into_bytes());
+                }
+                Err(error) => {
+                    tracing::error!("{error}");
+                    return Err(ApiError::RuntimeError);
+                }
+            }
+        }
+    };
+    let req_init = format_req_init(req, url, headers, encoded_body)?;
+    let res = make_request(req_init).await?;
+    Ok(parse_proxy_res(res).await?)
+}
+
 // Request setup/formatting
 // -------------------
 
@@ -286,7 +333,7 @@ pub fn format_req_init(
                 .http2_keep_alive_timeout(Duration::from_secs(5))
                 .default_headers(headers)
                 .build()?;
-            Ok(client.post(url).json(&body))
+            Ok(client.post(url).body(body.unwrap()))
         }
         _ => bail!(InvalidRequestError::MethodNotFound),
     }
@@ -311,7 +358,7 @@ pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<
                                 did_doc,
                                 GetServiceEndpointOpts {
                                     id: format!("#{service_id}"),
-                                    r#type: None,
+                                    r#type: Some(String::from("BskyChatService")),
                                 },
                             ) {
                                 None => bail!(InvalidRequestError::CannotResolveServiceUrl),
