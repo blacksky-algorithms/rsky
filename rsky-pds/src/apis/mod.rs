@@ -459,5 +459,4 @@ impl From<handle::errors::Error> for ApiError {
 }
 
 pub mod app;
-pub mod chat;
 pub mod com;
