@@ -16,7 +16,7 @@ use rocket::request::{FromRequest, Outcome, Request};
 use rocket::{Data, State};
 use rsky_identity::types::DidDocument;
 use serde::de::DeserializeOwned;
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
@@ -190,7 +190,7 @@ pub async fn pipethrough_procedure_post<'r>(
         lxm: nsid,
     } = format_url_and_aud(req, None).await?;
     let headers = format_headers(req, aud, nsid, requester).await?;
-    let encoded_body: Option<Vec<u8>>;
+    let encoded_body: Option<Value>;
     match body {
         None => encoded_body = None,
         Some(mut body) => {
@@ -205,9 +205,9 @@ pub async fn pipethrough_procedure_post<'r>(
                     return Err(ApiError::RuntimeError);
                 }
             }
-            match serde_json::to_string(&res) {
-                Ok(encoded_res) => {
-                    encoded_body = Some(encoded_res.into_bytes());
+            match serde_json::from_str(res.as_str()) {
+                Ok(res) => {
+                    encoded_body = Some(res);
                 }
                 Err(error) => {
                     tracing::error!("{error}");
@@ -216,7 +216,7 @@ pub async fn pipethrough_procedure_post<'r>(
             }
         }
     };
-    let req_init = format_req_init(req, url, headers, encoded_body)?;
+    let req_init = format_req_init_with_value(req, url, headers, encoded_body)?;
     let res = make_request(req_init).await?;
     Ok(parse_proxy_res(res).await?)
 }
@@ -334,6 +334,44 @@ pub fn format_req_init(
                 .default_headers(headers)
                 .build()?;
             Ok(client.post(url).body(body.unwrap()))
+        }
+        _ => bail!(InvalidRequestError::MethodNotFound),
+    }
+}
+
+pub fn format_req_init_with_value(
+    req: &ProxyRequest,
+    url: Url,
+    headers: HeaderMap,
+    body: Option<Value>,
+) -> Result<RequestBuilder> {
+    match req.method {
+        Method::Get => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.get(url))
+        }
+        Method::Head => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.head(url))
+        }
+        Method::Post => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.post(url).json(&body.unwrap()))
         }
         _ => bail!(InvalidRequestError::MethodNotFound),
     }
