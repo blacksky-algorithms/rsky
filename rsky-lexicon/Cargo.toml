@@ -1,6 +1,6 @@
 [package]
 name = "rsky-lexicon"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 publish = true
 description = "Bluesky API library"
@@ -17,12 +17,13 @@ chrono = { version = "0.4.24", features = ["serde"] }
 derive_builder = "0.12.0"
 miette = "5.8.0"
 parking_lot = "0.12.1"
-serde = { version = "1.0.160", features = ["derive"] }
-serde_json = "1.0.96"
-serde_cbor = "0.11.2"
+serde = {workspace = true}
+serde_json = {workspace = true}
+serde_cbor = {workspace = true}
 serde_derive = "^1.0"
 serde_bytes = "0.11.9"
 thiserror = "1.0.40"
-secp256k1 = { version = "0.28.2", features = ["serde", "rand"] }
-libipld = "0.16.0"
-lexicon_cid = { package = "cid", version = "0.10.1", features = ["serde-codec"] }
+secp256k1 = {workspace = true}
+libipld = {workspace = true}
+lexicon_cid = {workspace = true}
+anyhow = "1.0.79" # @TODO: Remove anyhow in lib

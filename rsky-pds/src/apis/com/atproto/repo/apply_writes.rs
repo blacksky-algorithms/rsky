@@ -1,13 +1,13 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::types::PreparedWrite;
-use crate::repo::{
-    prepare_create, prepare_delete, prepare_update, ActorStore, PrepareCreateOpts,
-    PrepareDeleteOpts, PrepareUpdateOpts,
+use crate::repo::prepare::{
+    prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
+    PrepareUpdateOpts,
 };
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -17,6 +17,7 @@ use libipld::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ApplyWritesInput, ApplyWritesInputRefWrite};
+use rsky_repo::types::PreparedWrite;
 use std::str::FromStr;
 
 async fn inner_apply_writes(

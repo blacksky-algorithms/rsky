@@ -1,13 +1,11 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::types::{PreparedDelete, PreparedWrite};
-use crate::repo::{
-    prepare_create, prepare_delete, ActorStore, PrepareCreateOpts, PrepareDeleteOpts,
-};
+use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -15,6 +13,7 @@ use libipld::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{CreateRecordInput, CreateRecordOutput};
+use rsky_repo::types::{PreparedDelete, PreparedWrite};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 

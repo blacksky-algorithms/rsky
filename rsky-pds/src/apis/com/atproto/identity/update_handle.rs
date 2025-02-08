@@ -3,13 +3,13 @@ use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::get_keys_from_private_key_str;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardCheckTakedown;
-use crate::common::env::env_str;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rocket::State;
+use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::identity::UpdateHandleInput;
 use std::env;
 

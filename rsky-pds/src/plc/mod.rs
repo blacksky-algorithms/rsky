@@ -1,8 +1,8 @@
-use crate::common::encode_uri_component;
 use crate::plc::operations::update_handle_op;
 use crate::plc::types::{CompatibleOp, OpOrTombstone};
 use crate::APP_USER_AGENT;
 use anyhow::{bail, Result};
+use rsky_common::encode_uri_component;
 use secp256k1::SecretKey;
 use serde::de::DeserializeOwned;
 use types::{CompatibleOpOrTombstone, DocumentData};

@@ -2,10 +2,10 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
-use crate::common::env::env_str;
 use anyhow::{bail, Result};
 use futures::try_join;
 use rocket::serde::json::Json;
+use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::admin::AccountView;
 use rsky_syntax::handle::INVALID_HANDLE;
 

@@ -1,0 +1,40 @@
+[package]
+name = "rsky-repo"
+version = "0.0.1"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Rust crate for atproto repositories, an in particular the Merkle Search Tree (MST) data structure."
+license = "Apache-2.0"
+edition = "2021"
+publish = true
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-repo"
+documentation = "https://docs.rs/rsky-repo"
+
+[dependencies]
+rsky-syntax = { workspace = true }
+rsky-common = { workspace = true }
+rsky-crypto = {workspace = true}
+rsky-lexicon = {workspace = true}
+serde = {workspace = true}
+serde_derive = {workspace = true}
+serde_cbor = { workspace = true }
+serde_ipld_dagcbor = {workspace = true}
+serde_json = {workspace = true}
+serde_bytes = {workspace = true}
+lexicon_cid = {workspace = true}
+tokio = {workspace = true}
+async-recursion = "1.1.1"
+sha2 = {workspace = true}
+anyhow = "1.0.79" # @TODO: Remove anyhow in lib
+futures = "0.3.28"
+thiserror = "1.0.40"
+async-stream = "0.3.5"
+async-trait = "0.1.86"
+integer-encoding = { version = "3", features = ["tokio_async"] }
+rand = "0.8.5"
+rand_core = "0.6.4"
+secp256k1 = {workspace = true}
+libipld = {workspace = true}
+
+regex = "1.10.3"
+lazy_static = "1.4.0"

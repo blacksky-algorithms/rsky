@@ -1,16 +1,41 @@
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::common::ContentType;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::types::{BlobConstraint, PreparedBlobRef};
-use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use rocket::data::Data;
+use rocket::http::Status;
+use rocket::request::{FromRequest, Outcome};
 use rocket::serde::json::Json;
-use rocket::State;
+use rocket::{Request, State};
+use rsky_common::BadContentTypeError;
 use rsky_lexicon::com::atproto::repo::{Blob, BlobOutput};
+use rsky_repo::types::{BlobConstraint, PreparedBlobRef};
+
+#[derive(Clone)]
+pub struct ContentType {
+    pub name: String,
+}
+
+/// Used mainly as a way to parse out content-type from request
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ContentType {
+    type Error = BadContentTypeError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.content_type() {
+            None => Outcome::Error((
+                Status::UnsupportedMediaType,
+                BadContentTypeError::MissingType,
+            )),
+            Some(content_type) => Outcome::Success(ContentType {
+                name: content_type.to_string(),
+            }),
+        }
+    }
+}
 
 async fn inner_upload_blob(
     auth: AccessStandardIncludeChecks,

@@ -1,4 +1,3 @@
-use crate::common::{get_random_str, now};
 use crate::db::establish_connection;
 use crate::models;
 use crate::models::AppPassword;
@@ -9,6 +8,7 @@ use argon2::{
 };
 use base64ct::{Base64, Encoding};
 use diesel::*;
+use rsky_common::{get_random_str, now};
 use rsky_lexicon::com::atproto::server::CreateAppPasswordOutput;
 use sha2::{Digest, Sha256};
 

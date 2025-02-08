@@ -45,10 +45,9 @@ lazy_static! {
 }
 
 pub mod account_manager;
+pub mod actor_store;
 pub mod apis;
 pub mod auth_verifier;
-pub mod car;
-pub mod common;
 pub mod config;
 pub mod context;
 pub mod crawlers;
@@ -64,7 +63,5 @@ pub mod read_after_write;
 pub mod repo;
 pub mod schema;
 pub mod sequencer;
-pub mod storage;
-mod vendored;
 pub mod well_known;
 pub mod xrpc_server;

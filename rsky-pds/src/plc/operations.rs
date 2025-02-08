@@ -1,10 +1,10 @@
-use crate::common::ipld::cid_for_cbor;
-use crate::common::sign::atproto_sign;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service, Tombstone};
 use anyhow::Result;
 use data_encoding::BASE32;
 use indexmap::IndexMap;
 use libipld::Cid;
+use rsky_common::ipld::cid_for_cbor;
+use rsky_common::sign::atproto_sign;
 use secp256k1::SecretKey;
 use serde_json::{Value as JsonValue, Value};
 use sha2::{Digest, Sha256};
