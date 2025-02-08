@@ -1,16 +1,16 @@
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
+use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::types::RecordPath;
-use crate::repo::ActorStore;
-use crate::storage::types::RepoStorage;
-use crate::{auth_verifier, repo};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use libipld::Cid;
 use rocket::{Responder, State};
+use rsky_repo::storage::types::RepoStorage;
+use rsky_repo::types::RecordPath;
 use std::str::FromStr;
 
 #[derive(Responder)]
@@ -42,7 +42,7 @@ async fn inner_get_record(
     match commit {
         None => bail!("Could not find repo for DID: {did}"),
         Some(commit) => {
-            repo::sync::provider::get_records(
+            rsky_repo::sync::provider::get_records(
                 actor_store.storage.clone(),
                 commit,
                 vec![RecordPath { collection, rkey }],

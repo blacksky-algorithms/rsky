@@ -1,9 +1,9 @@
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::ActorStore;
-use crate::{common, SharedIdResolver};
+use crate::SharedIdResolver;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use rocket::serde::json::Json;
@@ -28,7 +28,7 @@ async fn inner_describe_repo(
                 Err(err) => bail!("Could not resolve DID: `{err}`"),
                 Ok(res) => res,
             };
-            let handle = common::get_handle(&did_doc);
+            let handle = rsky_common::get_handle(&did_doc);
             let handle_is_correct = handle == account.handle;
 
             let mut actor_store = ActorStore::new(

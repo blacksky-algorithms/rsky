@@ -1,11 +1,11 @@
 use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags};
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
 use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::ActorStore;
 use crate::sequencer;
 use crate::SharedSequencer;
 use aws_config::SdkConfig;

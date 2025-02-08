@@ -1,15 +1,15 @@
-use crate::common;
 use crate::db::establish_connection;
 use anyhow::Result;
 use diesel::*;
 use libipld::Cid;
+use rsky_common;
 
 pub fn update_root(did: String, cid: Cid, rev: String) -> Result<()> {
     // @TODO balance risk of a race in the case of a long retry
     use crate::schema::pds::repo_root::dsl as RepoRootSchema;
     let conn = &mut establish_connection()?;
 
-    let now = common::now();
+    let now = rsky_common::now();
 
     insert_into(RepoRootSchema::repo_root)
         .values((

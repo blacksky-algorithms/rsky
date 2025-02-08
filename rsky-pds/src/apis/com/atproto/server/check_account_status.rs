@@ -1,10 +1,10 @@
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::is_valid_did_doc_for_service;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::ActorStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use futures::try_join;

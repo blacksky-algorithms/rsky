@@ -1,9 +1,7 @@
 use crate::apis::app::bsky::util::get_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardSignupQueued;
-use crate::common::get_notif_endpoint;
 use crate::config::ServerConfig;
-use crate::repo::types::Ids;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{anyhow, bail, Result};
 use atrium_api::app::bsky::notification::register_push::{
@@ -15,7 +13,9 @@ use atrium_ipld::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use rocket::serde::json::Json;
 use rocket::State;
+use rsky_common::get_notif_endpoint;
 use rsky_lexicon::app::bsky::notification::RegisterPushInput;
+use rsky_repo::types::Ids;
 
 pub async fn inner_register_push(
     body: Json<RegisterPushInput>,

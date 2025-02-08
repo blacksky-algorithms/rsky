@@ -1,9 +1,9 @@
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::ActorStore;
 use crate::SharedSequencer;
 use anyhow::Result;
 use aws_config::SdkConfig;

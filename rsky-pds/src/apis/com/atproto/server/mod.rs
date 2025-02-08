@@ -1,20 +1,13 @@
-extern crate unsigned_varint;
-use crate::common::env::{env_int, env_str};
 use crate::{plc, SharedIdResolver};
 use anyhow::{bail, Result};
-use diesel::prelude::*;
-use multibase::Base::Base58Btc;
 use rand::{distributions::Alphanumeric, Rng};
-use reqwest;
 use rocket::form::validate::Contains;
 use rocket::State;
+use rsky_common::env::{env_int, env_str};
+use rsky_crypto::utils::encode_did_key;
 use rsky_identity::types::DidDocument;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
-use sha2::Digest;
 use std::env;
-use unsigned_varint::encode::u16 as encode_varint;
-
-const DID_KEY_PREFIX: &str = "did:key:";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AssertionContents {
@@ -79,29 +72,6 @@ pub fn validate_handle(handle: &str) -> bool {
     let s_slice: &str = &suffix[..]; // take a full slice of the string
     handle.ends_with(s_slice)
     // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
-}
-
-/// https://github.com/gnunicorn/rust-multicodec/blob/master/src/lib.rs#L249-L260
-pub fn multicodec_wrap(bytes: Vec<u8>) -> Vec<u8> {
-    let mut buf = [0u8; 3];
-    encode_varint(0xe7, &mut buf);
-    let mut v: Vec<u8> = Vec::new();
-    for b in &buf {
-        v.push(*b);
-        // varint uses first bit to indicate another byte follows, stop if not the case
-        if *b <= 127 {
-            break;
-        }
-    }
-    v.extend(bytes);
-    v
-}
-
-pub fn encode_did_key(pubkey: &PublicKey) -> String {
-    let pk_compact = pubkey.serialize();
-    let pk_wrapped = multicodec_wrap(pk_compact.to_vec());
-    let pk_multibase = multibase::encode(Base58Btc, pk_wrapped.as_slice());
-    format!("{DID_KEY_PREFIX}{pk_multibase}")
 }
 
 pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {

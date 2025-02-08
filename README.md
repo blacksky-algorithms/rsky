@@ -37,12 +37,14 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 | `rsky-lexicon`: schema definition language                 | [README](./rsky-lexicon/README.md)  | [![Crate](https://img.shields.io/crates/v/rsky-lexicon?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-lexicon)   |
 | `rsky-syntax`: string parsers for identifiers              | [README](./rsky-syntax/README.md)   | [![Crate](https://img.shields.io/crates/v/rsky-syntax?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-syntax)     |
 | `rsky-common`: shared code                                 | [README](./rsky-common/README.md)   | [![Crate](https://img.shields.io/crates/v/rsky-common?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-common)     |
+| `rsky-repo`: data storage structure, including MST         | [README](./rsky-repo/README.md)     | [![Crate](https://img.shields.io/crates/v/rsky-repo?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-repo)         |
 
 **Rust Services:**
 
 - `rsky-pds`: "Personal Data Server", hosting repo content for atproto accounts. It differs from the canonical Typescript implementation by using Postgres instead of SQLite, s3 compatible blob storage instead of on-disk, and mailgun for emailing. All to make the PDS easier to migrate between cloud hosting providers and more maintainable.
 - `rsky-feedgen`: Bluesky feed generator that closely follows the use cases of the Blacksky community.
 - `rsky-firehose`: Firehose consumer.
+- `rsky-jetstream-subscriber`: Firehose consumer for Jetstream.
 - `rsky-labeler`: Firehose consumer that labels content.
 
 ## About AT Protocol

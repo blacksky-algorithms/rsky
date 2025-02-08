@@ -1,17 +1,17 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::db::DbConn;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::cid_set::CidSet;
-use crate::repo::types::CommitData;
-use crate::repo::ActorStore;
-use crate::storage::readable_blockstore::ReadableBlockstore;
 use crate::SharedSequencer;
 use aws_config::SdkConfig;
 use rocket::State;
+use rsky_repo::cid_set::CidSet;
+use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
+use rsky_repo::types::CommitData;
 use rsky_syntax::handle::INVALID_HANDLE;
 
 #[tracing::instrument(skip_all)]

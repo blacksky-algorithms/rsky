@@ -1,15 +1,15 @@
 use crate::account_manager::helpers::account::AccountStatus;
-use crate::car::blocks_to_car_file;
-use crate::common;
-use crate::common::struct_to_cbor;
 use crate::models::models;
-use crate::repo::block_map::BlockMap;
-use crate::repo::cid_set::CidSet;
-use crate::repo::types::{CommitData, PreparedWrite};
-use crate::repo::util::format_data_key;
 use anyhow::Result;
 use lexicon_cid::Cid;
+use rsky_common;
+use rsky_common::struct_to_cbor;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
+use rsky_repo::block_map::BlockMap;
+use rsky_repo::car::blocks_to_car_file;
+use rsky_repo::cid_set::CidSet;
+use rsky_repo::types::{CommitData, PreparedWrite};
+use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};
@@ -95,7 +95,7 @@ impl Default for TypedCommitEvt {
         Self {
             r#type: "commit".to_string(),
             seq: 0,
-            time: common::now(),
+            time: rsky_common::now(),
             evt: CommitEvt {
                 rebase: false,
                 too_big: false,
@@ -125,7 +125,7 @@ impl Default for TypedHandleEvt {
         Self {
             r#type: "handle".to_string(),
             seq: 0,
-            time: common::now(),
+            time: rsky_common::now(),
             evt: HandleEvt {
                 did: "".to_string(),
                 handle: "".to_string(),
@@ -281,8 +281,8 @@ pub async fn format_seq_commit(
     Ok(models::RepoSeq::new(
         did,
         "append".to_string(),
-        struct_to_cbor(evt)?,
-        common::now(),
+        struct_to_cbor(&evt)?,
+        rsky_common::now(),
     ))
 }
 
@@ -294,8 +294,8 @@ pub async fn format_seq_handle_update(did: String, handle: String) -> Result<mod
     Ok(models::RepoSeq::new(
         did,
         "handle".to_string(),
-        struct_to_cbor(evt)?,
-        common::now(),
+        struct_to_cbor(&evt)?,
+        rsky_common::now(),
     ))
 }
 
@@ -313,8 +313,8 @@ pub async fn format_seq_identity_evt(
     Ok(models::RepoSeq::new(
         did,
         "identity".to_string(),
-        struct_to_cbor(evt)?,
-        common::now(),
+        struct_to_cbor(&evt)?,
+        rsky_common::now(),
     ))
 }
 
@@ -337,8 +337,8 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
     Ok(models::RepoSeq::new(
         did,
         "account".to_string(),
-        struct_to_cbor(evt)?,
-        common::now(),
+        struct_to_cbor(&evt)?,
+        rsky_common::now(),
     ))
 }
 
@@ -347,7 +347,7 @@ pub async fn format_seq_tombstone(did: String) -> Result<models::RepoSeq> {
     Ok(models::RepoSeq::new(
         did,
         "tombstone".to_string(),
-        struct_to_cbor(evt)?,
-        common::now(),
+        struct_to_cbor(&evt)?,
+        rsky_common::now(),
     ))
 }
