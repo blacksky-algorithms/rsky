@@ -38,7 +38,24 @@ pub struct CORS;
 
 #[get("/")]
 async fn index() -> &'static str {
-    "This is an AT Protocol Personal Data Server (PDS): https://github.com/blacksky-algorithms/rsky\n\nMost API routes are under /xrpc/"
+    r#"
+    .------..------..------..------.
+    |R.--. ||S.--. ||K.--. ||Y.--. |
+    | :(): || :/\: || :/\: || (\/) |
+    | ()() || :\/: || :\/: || :\/: |
+    | '--'R|| '--'S|| '--'K|| '--'Y|
+    `------'`------'`------'`------'
+    .------..------..------.
+    |P.--. ||D.--. ||S.--. |
+    | :/\: || :/\: || :/\: |
+    | (__) || (__) || :\/: |
+    | '--'P|| '--'D|| '--'S|
+    `------'`------'`------'
+    
+    This is an atproto [https://atproto.com] Personal Data Server (PDS) running the rsky-pds codebase [https://github.com/blacksky-algorithms/rsky]
+
+    Most API routes are under /xrpc/
+    "#
 }
 
 #[get("/robots.txt")]
