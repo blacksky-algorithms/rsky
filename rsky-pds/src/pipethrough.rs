@@ -11,13 +11,12 @@ use reqwest::{Client, RequestBuilder, Response};
 use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
-use rocket::State;
 use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
 use rsky_repo::types::Ids;
 use rocket::{Data, State};
 use rsky_identity::types::DidDocument;
 use serde::de::DeserializeOwned;
-use serde_json::{Value as JsonValue, Value};
+use serde_json::{Value as JsonValue};
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
@@ -191,7 +190,7 @@ pub async fn pipethrough_procedure_post<'r>(
         lxm: nsid,
     } = format_url_and_aud(req, None).await?;
     let headers = format_headers(req, aud, nsid, requester).await?;
-    let encoded_body: Option<Value>;
+    let encoded_body: Option<JsonValue>;
     match body {
         None => encoded_body = None,
         Some(mut body) => {
@@ -344,7 +343,7 @@ pub fn format_req_init_with_value(
     req: &ProxyRequest,
     url: Url,
     headers: HeaderMap,
-    body: Option<Value>,
+    body: Option<JsonValue>,
 ) -> Result<RequestBuilder> {
     match req.method {
         Method::Get => {
