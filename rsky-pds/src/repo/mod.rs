@@ -108,6 +108,11 @@ impl ActorStore {
         }
     }
 
+    pub async fn get_repo_root(&self) -> Option<Cid> {
+        let storage_guard = self.storage.read().await;
+        return storage_guard.get_root().await;
+    }
+
     // Transactors
     // -------------------
 
@@ -165,6 +170,19 @@ impl ActorStore {
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
+    }
+
+    pub async fn apply_commit(
+        &mut self,
+        commit: CommitData,
+        is_create: Option<bool>
+    ) -> Result<()> {
+        // persist the commit to repo storage
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), is_create).await?;
+        // process blobs
+        // self.blob.process_write_blobs(writes).await?;
+        Ok(())
     }
 
     pub async fn format_commit(
