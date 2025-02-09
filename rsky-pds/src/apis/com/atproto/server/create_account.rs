@@ -1,24 +1,23 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::{AccountManager, CreateAccountOpts};
-use crate::apis::com::atproto::server::{
-    encode_did_key, get_keys_from_private_key_str, safe_resolve_did_doc,
-};
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
-use crate::common::env::env_str;
 use crate::config::ServerConfig;
 use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
-use crate::plc::types::{CompatibleOpOrTombstone, OpOrTombstone, Operation};
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::ActorStore;
+use crate::plc::types::{OpOrTombstone, Operation};
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
 use aws_config::SdkConfig;
 use email_address::*;
 use rocket::serde::json::Json;
 use rocket::State;
+use rsky_common::env::env_str;
+use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;

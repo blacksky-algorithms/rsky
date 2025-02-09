@@ -1,5 +1,3 @@
-use crate::common;
-use crate::common::RFC3339_VARIANT;
 use crate::db::establish_connection;
 use crate::schema::pds::account::dsl as AccountSchema;
 use crate::schema::pds::account::table as AccountTable;
@@ -13,6 +11,8 @@ use diesel::helper_types::{Eq, IntoBoxed};
 use diesel::pg::Pg;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::*;
+use rsky_common;
+use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use std::ops::Add;
 use std::time::SystemTime;
@@ -227,7 +227,7 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
 pub fn register_account(did: String, email: String, password: String) -> Result<()> {
     let conn = &mut establish_connection()?;
 
-    let created_at = common::now();
+    let created_at = rsky_common::now();
 
     // @TODO record recovery key for bring your own recovery key
     let _: String = insert_into(AccountSchema::account)
@@ -272,7 +272,7 @@ pub async fn update_account_takedown_status(did: &String, takedown: StatusAttr) 
     let takedown_ref: Option<String> = match takedown.applied {
         true => match takedown.r#ref {
             Some(takedown_ref) => Some(takedown_ref),
-            None => Some(common::now()),
+            None => Some(rsky_common::now()),
         },
         false => None,
     };
@@ -289,7 +289,7 @@ pub async fn deactivate_account(did: &String, delete_after: Option<String>) -> R
     update(ActorSchema::actor)
         .filter(ActorSchema::did.eq(did))
         .set((
-            ActorSchema::deactivatedAt.eq(common::now()),
+            ActorSchema::deactivatedAt.eq(rsky_common::now()),
             ActorSchema::deleteAfter.eq(delete_after),
         ))
         .execute(conn)?;

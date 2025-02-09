@@ -3,7 +3,6 @@ use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::ServerConfig;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
-use crate::repo::types::Ids;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError};
 use crate::{SharedATPAgent, SharedIdResolver};
 use anyhow::{anyhow, Result};
@@ -16,6 +15,7 @@ use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::AuthorFeed;
+use rsky_repo::types::Ids;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

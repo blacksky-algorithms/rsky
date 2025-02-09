@@ -1,6 +1,6 @@
 use crate::apis::ApiError;
-use crate::common::env::{env_bool, env_list, env_str};
 use rocket::serde::json::Json;
+use rsky_common::env::{env_bool, env_list, env_str};
 use rsky_lexicon::com::atproto::server::{
     DescribeServerOutput, DescribeServerRefContact, DescribeServerRefLinks,
 };

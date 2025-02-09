@@ -1,3 +1,5 @@
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
@@ -9,9 +11,6 @@ use crate::read_after_write::util::{
     ReadAfterWriteResponse,
 };
 use crate::read_after_write::viewer::LocalViewer;
-use crate::repo::aws::s3::S3BlobStore;
-use crate::repo::types::Ids;
-use crate::repo::ActorStore;
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{SharedLocalViewer, APP_USER_AGENT};
 use anyhow::{anyhow, Result};
@@ -28,6 +27,7 @@ use reqwest::header::HeaderMap;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::app::bsky::feed::{GetPostThreadOutput, ThreadViewPost, ThreadViewPostEnum};
+use rsky_repo::types::Ids;
 use rsky_syntax::aturi::AtUri;
 use std::collections::BTreeMap;
 use std::future::Future;

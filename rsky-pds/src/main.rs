@@ -17,11 +17,11 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
+use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use rsky_pds::account_manager::AccountManager;
 use rsky_pds::apis::*;
-use rsky_pds::common::env::env_list;
 use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::db::DbConn;
@@ -39,7 +39,24 @@ pub struct CORS;
 
 #[get("/")]
 async fn index() -> &'static str {
-    "This is an AT Protocol Personal Data Server (PDS): https://github.com/blacksky-algorithms/rsky\n\nMost API routes are under /xrpc/"
+    r#"
+    .------..------..------..------.
+    |R.--. ||S.--. ||K.--. ||Y.--. |
+    | :(): || :/\: || :/\: || (\/) |
+    | ()() || :\/: || :\/: || :\/: |
+    | '--'R|| '--'S|| '--'K|| '--'Y|
+    `------'`------'`------'`------'
+    .------..------..------.
+    |P.--. ||D.--. ||S.--. |
+    | :/\: || :/\: || :/\: |
+    | (__) || (__) || :\/: |
+    | '--'P|| '--'D|| '--'S|
+    `------'`------'`------'
+    
+    This is an atproto [https://atproto.com] Personal Data Server (PDS) running the rsky-pds codebase [https://github.com/blacksky-algorithms/rsky]
+
+    Most API routes are under /xrpc/
+    "#
 }
 
 #[get("/robots.txt")]

@@ -1,8 +1,8 @@
-use crate::common::struct_to_cbor;
 use crate::xrpc_server::stream::types::{
     ErrorFrameBody, ErrorFrameHeader, FrameType, MessageFrameHeader,
 };
 use anyhow::Result;
+use rsky_common::struct_to_cbor;
 use serde_json::Value;
 
 pub trait Frame {

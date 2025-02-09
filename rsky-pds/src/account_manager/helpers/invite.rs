@@ -1,9 +1,9 @@
 use crate::account_manager::DisableInviteCodesOpts;
-use crate::common;
 use crate::db::establish_connection;
 use crate::models::models;
 use anyhow::{bail, Result};
 use diesel::*;
+use rsky_common;
 use rsky_lexicon::com::atproto::server::AccountCodes;
 use rsky_lexicon::com::atproto::server::{
     InviteCode as LexiconInviteCode, InviteCodeUse as LexiconInviteCodeUse,
@@ -67,7 +67,7 @@ pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
 
-    let created_at = common::now();
+    let created_at = rsky_common::now();
 
     let rows: Vec<models::InviteCode> = to_create
         .into_iter()
@@ -102,7 +102,7 @@ pub async fn create_account_invite_codes(
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     let conn = &mut establish_connection()?;
 
-    let now = common::now();
+    let now = rsky_common::now();
 
     let rows: Vec<models::InviteCode> = codes
         .into_iter()

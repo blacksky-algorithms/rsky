@@ -8,9 +8,6 @@ use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
-use crate::common;
-use crate::common::time::{from_micros_to_str, from_str_to_micros, HOUR};
-use crate::common::RFC3339_VARIANT;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
@@ -18,6 +15,9 @@ use chrono::DateTime;
 use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
+use rsky_common;
+use rsky_common::time::{from_micros_to_str, from_str_to_micros, HOUR};
+use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -136,7 +136,7 @@ impl AccountManager {
             expires_in: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
-        let now = common::now();
+        let now = rsky_common::now();
 
         if let Some(invite_code) = invite_code.clone() {
             invite::ensure_invite_is_available(invite_code).await?;
@@ -415,7 +415,7 @@ impl AccountManager {
     pub async fn confirm_email<'em>(opts: ConfirmEmailOpts<'em>) -> Result<()> {
         let ConfirmEmailOpts { did, token } = opts;
         email_token::assert_valid_token(did, EmailTokenPurpose::ConfirmEmail, token, None).await?;
-        let now = common::now();
+        let now = rsky_common::now();
         try_join!(
             email_token::delete_email_token(did, EmailTokenPurpose::ConfirmEmail),
             account::set_email_confirmed_at(did, now)
