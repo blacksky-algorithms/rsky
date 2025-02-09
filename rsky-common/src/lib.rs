@@ -141,11 +141,13 @@ pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> O
             match found {
                 None => None,
                 Some(found) => match opts.r#type {
-                    None => None,
+                    None => {
+                        validate_url(&found.service_endpoint)
+                    },
                     Some(opts_type) if found.r#type == opts_type => {
                         validate_url(&found.service_endpoint)
-                    }
-                    _ => None,
+                    },
+                    _ => { None }
                 },
             }
         }
@@ -175,3 +177,49 @@ pub mod ipld;
 pub mod sign;
 pub mod tid;
 pub mod time;
+
+#[cfg(test)]
+mod tests {
+    use rsky_identity::types::{DidDocument, Service};
+    use crate::{get_service_endpoint, validate_url, GetServiceEndpointOpts};
+
+    #[test]
+    fn test_validate_url_when_invalid() {
+        let text = "rsky.com".to_string();
+        let result = validate_url(&text);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_validate_url_when_valid() {
+        let text = "https://rsky.com".to_string();
+        let result = validate_url(&text);
+        assert_eq!(result.is_some(), true);
+    }
+
+    #[test]
+    fn test_get_service_endpoint() {
+        let text = "https://rsky.com".to_string();
+        let result = validate_url(&text);
+
+        let mut service =  Vec::new();
+        service.push(Service {
+            id: "#bsky_chat".to_string(),
+            r#type: "BskyChatService".to_string(),
+            service_endpoint: "https://api.bsky.chat".to_string(),
+        });
+        let doc = DidDocument {
+            context: None,
+            id: "#bsky_chat".to_string(),
+            also_known_as: None,
+            verification_method: None,
+            service: Some(service),
+        };
+        let opts = GetServiceEndpointOpts {
+            id: "#bsky_chat".to_string(),
+            r#type: Some("BskyChatService".to_string()),
+        };
+        let result = get_service_endpoint(doc, opts);
+        assert_eq!(result.is_some(), true);
+    }
+}

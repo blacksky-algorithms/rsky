@@ -11,12 +11,12 @@ use reqwest::{Client, RequestBuilder, Response};
 use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
-use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
-use rsky_repo::types::Ids;
 use rocket::{Data, State};
+use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
 use rsky_identity::types::DidDocument;
+use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
-use serde_json::{Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
@@ -396,7 +396,7 @@ pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<
                                 did_doc,
                                 GetServiceEndpointOpts {
                                     id: format!("#{service_id}"),
-                                    r#type: Some(String::from("BskyChatService")),
+                                    r#type: None,
                                 },
                             ) {
                                 None => bail!(InvalidRequestError::CannotResolveServiceUrl),
@@ -599,4 +599,20 @@ pub fn is_safe_url(url: Url) -> bool {
             true
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_atproto_proxy_header() {
+        // let text = "#blacksky? more like #niggersky";
+        // let result = contains_explicit_slurs(text);
+        // assert_eq!(
+        //     result, true,
+        //     "Provided text should be flagged, actual: {}",
+        //     result
+        // );
+    }
 }
