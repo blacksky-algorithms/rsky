@@ -4,7 +4,6 @@ use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
-use futures::StreamExt;
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
@@ -13,7 +12,6 @@ use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::{Data, State};
 use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
-use rsky_identity::types::DidDocument;
 use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
@@ -193,18 +191,17 @@ pub async fn pipethrough_procedure_post<'r>(
     let encoded_body: Option<JsonValue>;
     match body {
         None => encoded_body = None,
-        Some(mut body) => {
-            let res;
-            match body.open(50.megabytes()).into_string().await {
+        Some(body) => {
+            let res = match body.open(50.megabytes()).into_string().await {
                 Ok(res1) => {
                     tracing::info!(res1.value);
-                    res = res1.value;
+                    res1.value
                 }
                 Err(error) => {
                     tracing::error!("{error}");
                     return Err(ApiError::RuntimeError);
                 }
-            }
+            };
             match serde_json::from_str(res.as_str()) {
                 Ok(res) => {
                     encoded_body = Some(res);
@@ -589,7 +586,7 @@ pub fn is_safe_url(url: Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
-    return match url.host_str() {
+    match url.host_str() {
         None => false,
         Some(hostname) if hostname == "localhost" => false,
         Some(hostname) => {
@@ -598,21 +595,5 @@ pub fn is_safe_url(url: Url) -> bool {
             }
             true
         }
-    };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_atproto_proxy_header() {
-        // let text = "#blacksky? more like #niggersky";
-        // let result = contains_explicit_slurs(text);
-        // assert_eq!(
-        //     result, true,
-        //     "Provided text should be flagged, actual: {}",
-        //     result
-        // );
     }
 }
