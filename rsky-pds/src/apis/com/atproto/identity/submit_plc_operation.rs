@@ -1,23 +1,22 @@
-use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::get_keys_from_private_key_str;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
+use crate::config::ServerConfig;
+use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
-use crate::plc::types::{OpOrTombstone, Operation, Service};
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_common::env::env_str;
 use rsky_crypto::utils::encode_did_key;
 use std::env;
-use rocket::State;
-use crate::config::ServerConfig;
 
 async fn validate_submit_plc_operation_request(
     did: &str,
     op: &Operation,
-    public_endpoint: &str
+    public_endpoint: &str,
 ) -> Result<(), ApiError> {
-    /// Validate Rotation Key
     let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let (_, public_key) = get_keys_from_private_key_str(private_key)?;
     let plc_rotation_key = encode_did_key(&public_key);
@@ -27,38 +26,41 @@ async fn validate_submit_plc_operation_request(
         ));
     }
 
-    /// Validate Signing Key
     let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let (_, public_key) = get_keys_from_private_key_str(private_key)?;
     let signing_rotation_key = encode_did_key(&public_key);
     match op.verification_methods.get("atproto") {
         None => {
-            return Err(ApiError::InvalidRequest("Incorrect signing key".to_string()))
+            return Err(ApiError::InvalidRequest(
+                "Incorrect signing key".to_string(),
+            ))
         }
         Some(res) => {
             if res.clone() != signing_rotation_key {
-                return Err(ApiError::InvalidRequest("Incorrect signing key".to_string()))
+                return Err(ApiError::InvalidRequest(
+                    "Incorrect signing key".to_string(),
+                ));
             }
         }
     }
 
-    /// Validate Services
     let services = op.services.get("atproto_pds");
     match services {
-        None => {
-            return Err(ApiError::InvalidRequest("Missing atproto_pds".to_string()))
-        }
+        None => return Err(ApiError::InvalidRequest("Missing atproto_pds".to_string())),
         Some(res) => {
             if res.r#type != "AtprotoPersonalDataServer" {
-                return Err(ApiError::InvalidRequest("Incorrect type on atproto_pds service".to_string()))
+                return Err(ApiError::InvalidRequest(
+                    "Incorrect type on atproto_pds service".to_string(),
+                ));
             }
-            if res.endpoint != public_endpoint.to_string() {
-                return Err(ApiError::InvalidRequest("Incorrect endpoint on atproto_pds service".to_string()))
+            if res.endpoint != *public_endpoint {
+                return Err(ApiError::InvalidRequest(
+                    "Incorrect endpoint on atproto_pds service".to_string(),
+                ));
             }
         }
     }
 
-    /// Validate Handle
     let account = match AccountManager::get_account(
         &did.to_string(),
         Some(AvailabilityFlags {
@@ -66,7 +68,7 @@ async fn validate_submit_plc_operation_request(
             include_taken_down: None,
         }),
     )
-        .await
+    .await
     {
         Ok(res) => match res {
             None => {
@@ -80,18 +82,21 @@ async fn validate_submit_plc_operation_request(
             return Err(ApiError::RuntimeError);
         }
     };
-    match account.handle {
-        Some(handle) => {
-            let op_handle = match op.also_known_as.get(0) {
-                None => { return Err(ApiError::InvalidRequest("No handle provided in operation".to_string()))}
-                Some(handle) => { handle.clone() }
-            };
-
-            if op_handle != format!("at://{handle}") {
-                return Err(ApiError::InvalidRequest("Incorrect handle in alsoKnownAs".to_string()))
+    if let Some(handle) = account.handle {
+        let op_handle = match op.also_known_as.first() {
+            None => {
+                return Err(ApiError::InvalidRequest(
+                    "No handle provided in operation".to_string(),
+                ))
             }
-        },
-        None => {}
+            Some(handle) => handle.clone(),
+        };
+
+        if op_handle != format!("at://{handle}") {
+            return Err(ApiError::InvalidRequest(
+                "Incorrect handle in alsoKnownAs".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -131,11 +136,12 @@ pub async fn submit_plc_operation(
         }
     }
     let mut sequence_lock = sequencer.sequencer.write().await;
-    sequence_lock.sequence_identity_evt(did.clone(), None).await?;
+    sequence_lock
+        .sequence_identity_evt(did.clone(), None)
+        .await?;
     let mut id_lock = id_resolver.id_resolver.write().await;
-    match id_lock.did.ensure_resolve(&did, None).await {
-        Err(error) => tracing::error!("Failed to fresh did after plc update\n{error}") ,
-        Ok(_) => {},
+    if let Err(error) = id_lock.did.ensure_resolve(&did, None).await {
+        tracing::error!("Failed to fresh did after plc update\n{error}")
     };
     Ok(())
 }
