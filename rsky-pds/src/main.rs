@@ -242,7 +242,7 @@ async fn rocket() -> _ {
                 com::atproto::admin::update_subject_status::update_subject_status,
                 com::atproto::identity::resolve_handle::resolve_handle,
                 com::atproto::identity::update_handle::update_handle,
-                com::atproto::identity::request_plc_operation::request_plc_operation,
+                com::atproto::identity::request_plc_operation_signature::request_plc_operation_signature,
                 com::atproto::repo::apply_writes::apply_writes,
                 com::atproto::repo::create_record::create_record,
                 com::atproto::repo::delete_record::delete_record,

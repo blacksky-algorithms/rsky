@@ -17,16 +17,15 @@ pub async fn request_plc_operation_signature(auth: AccessFull) -> Result<(), Api
         .await?
         .expect("Account not found despite valid access");
 
-    let token;
-    match AccountManager::create_email_token(&requester, EmailTokenPurpose::PlcOperation).await {
-        Ok(res) => {
-            token = res;
-        }
-        Err(error) => {
-            tracing::error!("Failed to create plc operation token\n{error}");
-            return Err(ApiError::RuntimeError);
-        }
-    }
+    let token =
+        match AccountManager::create_email_token(&requester, EmailTokenPurpose::PlcOperation).await
+        {
+            Ok(res) => res,
+            Err(error) => {
+                tracing::error!("Failed to create plc operation token\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        };
 
     match send_plc_operation(account.email.unwrap(), TokenParam { token }).await {
         Ok(_) => {
@@ -34,7 +33,7 @@ pub async fn request_plc_operation_signature(auth: AccessFull) -> Result<(), Api
         }
         Err(error) => {
             tracing::error!("Failed to send PLC Operation Token Email\n{error}");
-            return Err(ApiError::RuntimeError)
+            return Err(ApiError::RuntimeError);
         }
     }
 
