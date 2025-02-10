@@ -4,7 +4,7 @@ use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
 use crate::plc;
-use crate::plc::operations::{create_update_op};
+use crate::plc::operations::create_update_op;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service};
 use rocket::serde::json::Json;
 use rsky_common::env::env_str;
@@ -29,7 +29,7 @@ pub struct SignPlcOperationRequest {
 pub async fn sign_plc_operation(
     body: Json<SignPlcOperationRequest>,
     auth: AccessFull,
-) -> Result<Operation, ApiError> {
+) -> Result<Json<Operation>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let request = body.into_inner();
     let token = request.token.clone();
@@ -62,15 +62,6 @@ pub async fn sign_plc_operation(
         }
     };
 
-    let handle;
-    match request.also_known_as.first() {
-        Some(res) => {
-            handle = Some(res.clone());
-        }
-        None => {
-            handle = None;
-        }
-    }
     let private_key = env_str("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let (secret_rotation_key, _) = get_keys_from_private_key_str(private_key)?;
 
@@ -79,10 +70,10 @@ pub async fn sign_plc_operation(
         &secret_rotation_key,
         |normalized: Operation| -> Operation {
             let mut updated = normalized.clone();
-            updated.also_known_as = request.also_known_as;
-            updated.services = request.services;
-            updated.verification_methods = request.verification_methods;
-            updated.rotation_keys = request.rotation_keys;
+            updated.also_known_as = request.also_known_as.clone();
+            updated.services = request.services.clone();
+            updated.verification_methods = request.verification_methods.clone();
+            updated.rotation_keys = request.rotation_keys.clone();
             updated
         },
     )
@@ -90,10 +81,10 @@ pub async fn sign_plc_operation(
     {
         Ok(res) => res,
         Err(error) => {
-            tracing::error!("Error creating signed operation", error);
+            tracing::error!("Error creating signed operation\n{error}");
             return Err(ApiError::RuntimeError);
         }
     };
 
-    Ok(operation)
+    Ok(Json(operation))
 }
