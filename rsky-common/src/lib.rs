@@ -141,13 +141,11 @@ pub fn get_service_endpoint(doc: DidDocument, opts: GetServiceEndpointOpts) -> O
             match found {
                 None => None,
                 Some(found) => match opts.r#type {
-                    None => {
-                        validate_url(&found.service_endpoint)
-                    },
+                    None => validate_url(&found.service_endpoint),
                     Some(opts_type) if found.r#type == opts_type => {
                         validate_url(&found.service_endpoint)
-                    },
-                    _ => { None }
+                    }
+                    _ => None,
                 },
             }
         }
@@ -180,8 +178,8 @@ pub mod time;
 
 #[cfg(test)]
 mod tests {
-    use rsky_identity::types::{DidDocument, Service};
     use crate::{get_service_endpoint, validate_url, GetServiceEndpointOpts};
+    use rsky_identity::types::{DidDocument, Service};
 
     #[test]
     fn test_validate_url_when_invalid() {
@@ -202,7 +200,7 @@ mod tests {
         let text = "https://rsky.com".to_string();
         let result = validate_url(&text);
 
-        let mut service =  Vec::new();
+        let mut service = Vec::new();
         service.push(Service {
             id: "#bsky_chat".to_string(),
             r#type: "BskyChatService".to_string(),
