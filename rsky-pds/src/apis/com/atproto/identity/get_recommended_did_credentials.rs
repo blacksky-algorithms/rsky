@@ -1,14 +1,12 @@
-use rsky_crypto::constants::DID_KEY_PREFIX;
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
-use crate::db::DbConn;
-use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
-use std::collections::BTreeMap;
-use std::env;
 use rocket::serde::json::Json;
 use rsky_crypto::utils::encode_did_key;
+use secp256k1::{Keypair, Secp256k1, SecretKey};
+use std::collections::BTreeMap;
+use std::env;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
