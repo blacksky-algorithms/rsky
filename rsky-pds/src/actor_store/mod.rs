@@ -93,7 +93,7 @@ impl ActorStore {
     pub async fn process_import_repo(
         &mut self,
         commit: CommitData,
-        writes: Vec<PreparedWrite>
+        writes: Vec<PreparedWrite>,
     ) -> Result<()> {
         {
             let immutable_borrow = &self;
