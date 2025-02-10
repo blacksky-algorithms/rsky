@@ -1,18 +1,23 @@
-## Summary
-<!-- Briefly describe the changes in this PR -->
+---
+name: Feature request
+about: Suggest an idea for this project
+title: ''
+labels: feature-request
+assignees: ''
+---
 
-## Related Issues
-<!-- Link any relevant issues -->
+**Is your feature request related to a problem? Please describe.**
 
-## Changes
-- [ ] Feature implementation
-- [ ] Bug fix
-- [ ] Documentation update
-- [ ] Other (please specify):
+<!-- A clear and concise description of what the problem is. Ex. I'm always frustrated when [...] -->
 
-## Checklist
-- [ ] I have tested the changes (including writing unit tests).
-- [ ] I confirm that my implementation aligns with the [canonical Typescript implementation](https://github.com/bluesky-social/atproto) and/or [atproto spec](https://atproto.com/specs/atp)
-- [ ] I have updated relevant documentation.
-- [ ] I have formatted my code correctly
-- [ ] I have provided examples for how this code works or will be used
+**Describe the solution you'd like**
+
+<!-- A clear and concise description of what you want to happen. -->
+
+**Describe alternatives you've considered**
+
+<!-- A clear and concise description of any alternative solutions or features you've considered. -->
+
+**Additional context**
+
+<!-- Add any other context or screenshots about the feature request here. -->
