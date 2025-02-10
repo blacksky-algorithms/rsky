@@ -13,6 +13,7 @@ use rocket::figment::{
 };
 use rocket::http::Header;
 use rocket::http::Status;
+use rocket::request::local_cache;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
@@ -32,7 +33,6 @@ use rsky_pds::{
     SharedATPAgent, SharedIdResolver, SharedLocalViewer, SharedSequencer, APP_USER_AGENT,
 };
 use std::env;
-use rocket::request::local_cache;
 use tokio::sync::RwLock;
 
 pub struct CORS;
@@ -103,15 +103,11 @@ async fn health(
 
 #[tracing::instrument(skip_all)]
 #[catch(default)]
-async fn default_catcher(status: Status, request: &Request<'_>) -> ApiError {
+async fn default_catcher(_status: Status, request: &Request<'_>) -> ApiError {
     let api_error: &Option<ApiError> = request.local_cache(|| None);
     match api_error {
-        None => {
-            ApiError::RuntimeError
-        }
-        Some(error) => {
-            error.clone()
-        }
+        None => ApiError::RuntimeError,
+        Some(error) => error.clone(),
     }
 }
 

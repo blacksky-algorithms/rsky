@@ -414,14 +414,8 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
                 None => {
                     let error = AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
-                    req.local_cache(|| {
-                        Some(ApiError::InvalidRequest(
-                            error.to_string()))
-                    });
-                    Outcome::Error((
-                        Status::BadRequest,
-                        error,
-                    ))
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    Outcome::Error((Status::BadRequest, error))
                 }
             },
             Err(error) => {

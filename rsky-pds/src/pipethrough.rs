@@ -1,3 +1,4 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
@@ -17,7 +18,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
-use crate::apis::ApiError;
 
 pub struct OverrideOpts {
     pub aud: Option<String>,
@@ -103,16 +103,17 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                         _ => {
                             req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                             Outcome::Error((Status::BadRequest, error))
-                        },
+                        }
                     },
                 }
             }
             Outcome::Error(err) => {
                 req.local_cache(|| Some(ApiError::RuntimeError));
                 Outcome::Error((
-                Status::BadRequest,
-                anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-            ))},
+                    Status::BadRequest,
+                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
+                ))
+            }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }
     }
