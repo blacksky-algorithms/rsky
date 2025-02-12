@@ -12,8 +12,9 @@ use futures::{stream, StreamExt};
 use lexicon_cid::Cid;
 use rocket::data::ToByteUnit;
 use rocket::{Data, State};
+use rsky_common::env::env_int;
 use rsky_repo::block_map::BlockMap;
-use rsky_repo::car::read_car_with_root;
+use rsky_repo::car::read_stream_car_with_root;
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::repo::Repo;
 use rsky_repo::sync::consumer::{verify_diff, VerifyRepoInput};
@@ -42,10 +43,9 @@ pub async fn import_repo(
     };
 
     // Process imported car
-    let import_datastream = blob.open(100.megabytes());
-    let import_bytes = import_datastream.into_bytes().await.unwrap().value;
-
-    let car_with_root = match read_car_with_root(import_bytes).await {
+    let max_import_size = env_int("IMPORT_REPO_LIMIT").unwrap_or(100).megabytes();
+    let import_datastream = blob.open(max_import_size);
+    let car_with_root = match read_stream_car_with_root(import_datastream).await {
         Ok(res) => res,
         Err(error) => {
             return Err(ApiError::InvalidRequest(error.to_string()));
