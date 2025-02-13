@@ -10,21 +10,72 @@ use crate::repo::prepare::{
 use aws_config::SdkConfig;
 use futures::{stream, StreamExt};
 use lexicon_cid::Cid;
-use rocket::data::ToByteUnit;
-use rocket::{Data, State};
+use reqwest::header;
+use rocket::data::{FromData, Outcome, ToByteUnit};
+use rocket::http::Status;
+use rocket::{Data, Request, State};
 use rsky_common::env::env_int;
 use rsky_repo::block_map::BlockMap;
-use rsky_repo::car::read_stream_car_with_root;
+use rsky_repo::car::{read_stream_car_with_root, CarWithRoot};
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::repo::Repo;
 use rsky_repo::sync::consumer::{verify_diff, VerifyRepoInput};
 use rsky_repo::types::{PreparedWrite, RecordWriteDescript, VerifiedDiff};
 
+struct ImportRepoInput {
+    car_with_root: CarWithRoot,
+}
+
+#[rocket::async_trait]
+impl<'r> FromData<'r> for ImportRepoInput {
+    type Error = ApiError;
+
+    #[tracing::instrument(skip_all)]
+    async fn from_data(req: &'r Request<'_>, data: Data<'r>) -> Outcome<'r, Self, Self::Error> {
+        let max_import_size = env_int("IMPORT_REPO_LIMIT").unwrap_or(100).megabytes();
+        match req.headers().get_one(header::CONTENT_LENGTH.as_ref()) {
+            None => {
+                let error = ApiError::InvalidRequest("Missing content-length header".to_string());
+                req.local_cache(|| Some(error.clone()));
+                Outcome::Error((Status::BadRequest, error))
+            }
+            Some(res) => match res.parse::<usize>() {
+                Ok(content_length) => {
+                    if content_length.bytes() > max_import_size {
+                        let error = ApiError::InvalidRequest(format!(
+                            "Content-Length is greater than maximum of {max_import_size}"
+                        ));
+                        req.local_cache(|| Some(error.clone()));
+                        return Outcome::Error((Status::BadRequest, error));
+                    }
+
+                    let import_datastream = data.open(content_length.megabytes());
+                    match read_stream_car_with_root(import_datastream).await {
+                        Ok(car_with_root) => Outcome::Success(ImportRepoInput { car_with_root }),
+                        Err(error) => {
+                            let error = ApiError::InvalidRequest(error.to_string());
+                            req.local_cache(|| Some(error.clone()));
+                            Outcome::Error((Status::BadRequest, error))
+                        }
+                    }
+                }
+                Err(_error) => {
+                    tracing::error!("{}", format!("Error parsing content-length\n{_error}"));
+                    let error =
+                        ApiError::InvalidRequest("Error parsing content-length".to_string());
+                    req.local_cache(|| Some(error.clone()));
+                    Outcome::Error((Status::BadRequest, error))
+                }
+            },
+        }
+    }
+}
+
 #[tracing::instrument(skip_all)]
-#[rocket::post("/xrpc/com.atproto.repo.importRepo", data = "<blob>")]
+#[rocket::post("/xrpc/com.atproto.repo.importRepo", data = "<import_repo_input>")]
 pub async fn import_repo(
     auth: AccessFullImport,
-    blob: Data<'_>,
+    import_repo_input: ImportRepoInput,
     s3_config: &State<SdkConfig>,
     db: DbConn,
 ) -> Result<(), ApiError> {
@@ -43,14 +94,7 @@ pub async fn import_repo(
     };
 
     // Process imported car
-    let max_import_size = env_int("IMPORT_REPO_LIMIT").unwrap_or(100).megabytes();
-    let import_datastream = blob.open(max_import_size);
-    let car_with_root = match read_stream_car_with_root(import_datastream).await {
-        Ok(res) => res,
-        Err(error) => {
-            return Err(ApiError::InvalidRequest(error.to_string()));
-        }
-    };
+    let car_with_root = import_repo_input.car_with_root;
 
     // Get verified difference from current repo and imported repo
     let mut imported_blocks: BlockMap = car_with_root.blocks;
