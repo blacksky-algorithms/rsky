@@ -319,34 +319,34 @@ mod test {
     use crate::rocket;
     use rocket::http::{ContentType, Header, Status};
     use rocket::local::asynchronous::Client;
-    use rocket::{async_test, Response};
     use rsky_lexicon::com::atproto::server::{
         CreateAccountInput, CreateSessionInput, CreateSessionOutput,
     };
 
-    use std::sync::Once;
+    // We use a lock to synchronize between tests so FS operations don't race.
+    static FS_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
 
-    static INIT: Once = Once::new();
+    // We use a lock to synchronize between tests so FS operations don't race.
+    static CLIENT_LOCK: parking_lot::Mutex<Option<Client>> = parking_lot::const_mutex(None);
+    static mut CLIENT: Option<Client> = None;
 
-    pub async fn client() -> Client {
-        let mut result: Option<Client> = None;
-        INIT.call_once(async || {
-            // initialization code here
-            result = Some(
-                Client::untracked(rocket().await)
+    async unsafe fn client() -> Client {
+        match CLIENT {
+            None => {
+                let x = Client::untracked(rocket().await)
                     .await
-                    .expect("Rocket Client"),
-            );
-        })
-        .await;
-        result.unwrap()
+                    .expect("Rocket Client");
+                CLIENT =  Some(x);
+                x
+            }
+        }
     }
 
     fn setup_database() {}
 
-    #[async_test]
+    #[tokio::test]
     async fn test_create_invite_code() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let input = CreateAccountInput {
             email: Some("testing_user@rsky.com".to_string()),
             handle: "testing_user.rsky.com".to_string(),
@@ -368,9 +368,9 @@ mod test {
         assert_eq!(response.status(), Status::Ok);
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_create_account() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
 
         let input = CreateAccountInput {
             email: Some("testing_user@rsky.com".to_string()),
@@ -393,9 +393,9 @@ mod test {
         assert_eq!(response.status(), Status::Ok);
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_create_session() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let input = CreateSessionInput {
             identifier: "testing_user.rsky.com".to_string(),
             password: "testing_password".to_string(),
@@ -411,9 +411,9 @@ mod test {
         let body = response.into_json::<CreateSessionOutput>().await.unwrap();
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_get_session() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let mut response = client
             .get("/xrpc/com.atproto.server.getSession")
             .header(Header::new("", ""))
@@ -422,9 +422,9 @@ mod test {
         assert_eq!(response.status(), Status::Ok);
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_resolve_handle() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let mut response = client
             .get("/xrpc/com.atproto.identity.resolveHandle?ripperoni.com")
             .dispatch()
@@ -432,16 +432,16 @@ mod test {
         assert_eq!(response.status(), Status::Ok);
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_index() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let mut response = client.get("/").dispatch().await;
         assert_eq!(response.status(), Status::Ok);
     }
 
-    #[async_test]
+    #[tokio::test]
     async fn test_robots_txt() {
-        let client = client().await;
+        let client = unsafe { client() }.await;
         let mut response = client.get("/robots.txt").dispatch().await;
         let response_status = response.status();
         let response_body = response.into_string().await.unwrap();
