@@ -37,7 +37,7 @@ use tokio::sync::RwLock;
 pub struct CORS;
 
 #[get("/")]
-async fn index() -> &'static str {
+pub async fn index() -> &'static str {
     r#"
     .------..------..------..------.
     |R.--. ||S.--. ||K.--. ||Y.--. |
@@ -59,13 +59,13 @@ async fn index() -> &'static str {
 }
 
 #[get("/robots.txt")]
-async fn robots() -> &'static str {
+pub async fn robots() -> &'static str {
     "# Hello!\n\n# Crawling the public API is allowed\nUser-agent: *\nAllow: /"
 }
 
 #[tracing::instrument(skip_all)]
 #[get("/xrpc/_health")]
-async fn health(
+pub async fn health(
     connection: DbConn,
 ) -> Result<
     Json<rsky_pds::models::ServerVersion>,
@@ -312,4 +312,143 @@ async fn rocket() -> _ {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
+}
+
+#[cfg(test)]
+mod test {
+    use crate::rocket;
+    use rocket::http::{ContentType, Header, Status};
+    use rocket::local::asynchronous::Client;
+    use rocket::{async_test, Response};
+    use rsky_lexicon::com::atproto::server::{
+        CreateAccountInput, CreateSessionInput, CreateSessionOutput,
+    };
+
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    pub async fn client() -> Client {
+        let mut result: Option<Client> = None;
+        INIT.call_once(async || {
+            // initialization code here
+            result = Some(
+                Client::untracked(rocket().await)
+                    .await
+                    .expect("Rocket Client"),
+            );
+        })
+        .await;
+        result.unwrap()
+    }
+
+    fn setup_database() {}
+
+    #[async_test]
+    async fn test_create_invite_code() {
+        let client = client().await;
+        let input = CreateAccountInput {
+            email: Some("testing_user@rsky.com".to_string()),
+            handle: "testing_user.rsky.com".to_string(),
+            did: None,
+            invite_code: None,
+            verification_code: None,
+            verification_phone: None,
+            password: Some("test_password".to_string()),
+            recovery_key: None,
+            plc_op: None,
+        };
+        let response = client
+            .post("/xrpc/com.atproto.server.createAccount")
+            .header(ContentType::JSON)
+            .body(serde_json::to_string(&input).unwrap().into_bytes())
+            .dispatch()
+            .await;
+        let x = response.body();
+        assert_eq!(response.status(), Status::Ok);
+    }
+
+    #[async_test]
+    async fn test_create_account() {
+        let client = client().await;
+
+        let input = CreateAccountInput {
+            email: Some("testing_user@rsky.com".to_string()),
+            handle: "testing_user.rsky.com".to_string(),
+            did: None,
+            invite_code: None,
+            verification_code: None,
+            verification_phone: None,
+            password: Some("test_password".to_string()),
+            recovery_key: None,
+            plc_op: None,
+        };
+        let response = client
+            .post("/xrpc/com.atproto.server.createAccount")
+            .header(ContentType::JSON)
+            .body(serde_json::to_string(&input).unwrap().into_bytes())
+            .dispatch()
+            .await;
+        let x = response.body();
+        assert_eq!(response.status(), Status::Ok);
+    }
+
+    #[async_test]
+    async fn test_create_session() {
+        let client = client().await;
+        let input = CreateSessionInput {
+            identifier: "testing_user.rsky.com".to_string(),
+            password: "testing_password".to_string(),
+        };
+        let mut response = client
+            .post("/xrpc/com.atproto.server.createSession")
+            .body(serde_json::to_string(&input).unwrap().into_bytes())
+            .dispatch()
+            .await;
+        let status = response.status();
+
+        assert_eq!(status, Status::Ok);
+        let body = response.into_json::<CreateSessionOutput>().await.unwrap();
+    }
+
+    #[async_test]
+    async fn test_get_session() {
+        let client = client().await;
+        let mut response = client
+            .get("/xrpc/com.atproto.server.getSession")
+            .header(Header::new("", ""))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+
+    #[async_test]
+    async fn test_resolve_handle() {
+        let client = client().await;
+        let mut response = client
+            .get("/xrpc/com.atproto.identity.resolveHandle?ripperoni.com")
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+
+    #[async_test]
+    async fn test_index() {
+        let client = client().await;
+        let mut response = client.get("/").dispatch().await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+
+    #[async_test]
+    async fn test_robots_txt() {
+        let client = client().await;
+        let mut response = client.get("/robots.txt").dispatch().await;
+        let response_status = response.status();
+        let response_body = response.into_string().await.unwrap();
+        assert_eq!(response_status, Status::Ok);
+        assert_eq!(
+            response_body,
+            "# Hello!\n\n# Crawling the public API is allowed\nUser-agent: *\nAllow: /"
+        );
+    }
 }
