@@ -1,3 +1,4 @@
+use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
@@ -6,9 +7,10 @@ use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response};
+use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
-use rocket::State;
+use rocket::{Data, State};
 use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
 use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
@@ -174,6 +176,48 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
     parse_proxy_res(res).await
 }
 
+#[tracing::instrument(skip_all)]
+pub async fn pipethrough_procedure_post<'r>(
+    req: &'r ProxyRequest<'_>,
+    requester: Option<String>,
+    body: Option<Data<'_>>,
+) -> Result<HandlerPipeThrough, ApiError> {
+    let UrlAndAud {
+        url,
+        aud,
+        lxm: nsid,
+    } = format_url_and_aud(req, None).await?;
+    let headers = format_headers(req, aud, nsid, requester).await?;
+    let encoded_body: Option<JsonValue>;
+    match body {
+        None => encoded_body = None,
+        Some(body) => {
+            let res = match body.open(50.megabytes()).into_string().await {
+                Ok(res1) => {
+                    tracing::info!(res1.value);
+                    res1.value
+                }
+                Err(error) => {
+                    tracing::error!("{error}");
+                    return Err(ApiError::RuntimeError);
+                }
+            };
+            match serde_json::from_str(res.as_str()) {
+                Ok(res) => {
+                    encoded_body = Some(res);
+                }
+                Err(error) => {
+                    tracing::error!("{error}");
+                    return Err(ApiError::RuntimeError);
+                }
+            }
+        }
+    };
+    let req_init = format_req_init_with_value(req, url, headers, encoded_body)?;
+    let res = make_request(req_init).await?;
+    Ok(parse_proxy_res(res).await?)
+}
+
 // Request setup/formatting
 // -------------------
 
@@ -286,7 +330,45 @@ pub fn format_req_init(
                 .http2_keep_alive_timeout(Duration::from_secs(5))
                 .default_headers(headers)
                 .build()?;
-            Ok(client.post(url).json(&body))
+            Ok(client.post(url).body(body.unwrap()))
+        }
+        _ => bail!(InvalidRequestError::MethodNotFound),
+    }
+}
+
+pub fn format_req_init_with_value(
+    req: &ProxyRequest,
+    url: Url,
+    headers: HeaderMap,
+    body: Option<JsonValue>,
+) -> Result<RequestBuilder> {
+    match req.method {
+        Method::Get => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.get(url))
+        }
+        Method::Head => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.head(url))
+        }
+        Method::Post => {
+            let client = Client::builder()
+                .user_agent(APP_USER_AGENT)
+                .http2_keep_alive_while_idle(true)
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .default_headers(headers)
+                .build()?;
+            Ok(client.post(url).json(&body.unwrap()))
         }
         _ => bail!(InvalidRequestError::MethodNotFound),
     }
@@ -504,7 +586,7 @@ pub fn is_safe_url(url: Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
-    return match url.host_str() {
+    match url.host_str() {
         None => false,
         Some(hostname) if hostname == "localhost" => false,
         Some(hostname) => {
@@ -513,5 +595,5 @@ pub fn is_safe_url(url: Url) -> bool {
             }
             true
         }
-    };
+    }
 }
