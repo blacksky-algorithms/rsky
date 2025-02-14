@@ -223,6 +223,27 @@ pub async fn access_check<'r>(
     }
 }
 
+pub struct AccessFullImport {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessFullImport {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let opts = ValidateAccessTokenOpts {
+            check_takedown: Some(true),
+            check_deactivated: Some(false),
+        };
+        match access_check(req, vec![AuthScope::Access], Some(opts)).await {
+            Outcome::Success(access) => Outcome::Success(AccessFullImport { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+        }
+    }
+}
+
 pub struct AccessFull {
     pub access: AccessOutput,
 }
@@ -788,7 +809,7 @@ pub async fn validate_access_token<'r>(
         let found: ActorAccount = match AccountManager::get_account(
             &did,
             Some(AvailabilityFlags {
-                include_deactivated: None,
+                include_deactivated: Some(true),
                 include_taken_down: Some(true),
             }),
         )

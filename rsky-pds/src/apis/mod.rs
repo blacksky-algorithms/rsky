@@ -1,13 +1,16 @@
 use crate::auth_verifier::AccessStandard;
 use crate::handle;
 use crate::handle::errors::ErrorKind;
-use crate::pipethrough::{pipethrough_procedure, ProxyRequest};
+use crate::models::{ErrorCode, ErrorMessageResponse};
+use crate::pipethrough::{pipethrough_procedure, pipethrough_procedure_post, ProxyRequest};
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::FromParam;
-use rocket::response::Responder;
+use rocket::response::status;
 use rocket::serde::json::Json;
-use rocket::{response, Request};
+use rocket::{response, Data, Request, Responder};
+use rsky_lexicon::chat::bsky::convo::MuteConvoInput;
+use std::collections::HashMap;
 
 #[derive(Responder)]
 #[response(status = 200)]
@@ -33,7 +36,7 @@ impl<'a> FromParam<'a> for Nsid {
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
 #[rocket::get("/xrpc/<nsid>?<query..>", rank = 2)]
-pub async fn bsky_api_forwarder(
+pub async fn bsky_api_get_forwarder(
     nsid: Nsid,
     query: Option<&str>,
     auth: AccessStandard,
@@ -63,7 +66,32 @@ pub async fn bsky_api_forwarder(
     }
 }
 
-#[derive(Debug, Clone)]
+#[rocket::post("/xrpc/<nsid>", data = "<body>", rank = 2)]
+pub async fn bsky_api_post_forwarder(
+    body: Data<'_>,
+    nsid: Nsid,
+    auth: AccessStandard,
+    req: ProxyRequest<'_>,
+) -> Result<ProxyResponder, ApiError> {
+    let requester: Option<String> = match auth.access.credentials {
+        None => None,
+        Some(credentials) => credentials.did,
+    };
+
+    let res = pipethrough_procedure_post(&req, requester, Some(body)).await?;
+    let headers = res.headers.expect("Upstream responded without headers.");
+    let content_length = match headers.get("content-length") {
+        None => Header::new("content-length", res.buffer.len().to_string()),
+        Some(val) => Header::new("content-length", val.to_string()),
+    };
+    let content_type = match headers.get("content-type") {
+        None => Header::new("content-type", "application/octet-stream".to_string()),
+        Some(val) => Header::new("Content-Type", val.to_string()),
+    };
+    Ok(ProxyResponder(res.buffer, content_length, content_type))
+}
+
+#[derive(Clone, Debug)]
 pub enum ApiError {
     RuntimeError,
     InvalidLogin,
@@ -431,5 +459,4 @@ impl From<handle::errors::Error> for ApiError {
 }
 
 pub mod app;
-pub mod chat;
 pub mod com;
