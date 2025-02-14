@@ -2,7 +2,9 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
+use crate::config::ServerConfig;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::GetRecommendedDidCredentialsResponse;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -13,6 +15,7 @@ use std::env;
 #[rocket::get("/xrpc/com.atproto.identity.getRecommendedDidCredentials")]
 pub async fn get_recommended_did_credentials(
     auth: AccessStandard,
+    cfg: &State<ServerConfig>,
 ) -> Result<Json<GetRecommendedDidCredentialsResponse>, ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
     let availability_flags = AvailabilityFlags {
@@ -50,11 +53,10 @@ pub async fn get_recommended_did_credentials(
     let rotation_keypair = Keypair::from_secret_key(&secp, &private_secret_key);
     rotation_keys.push(encode_did_key(&rotation_keypair.public_key()));
 
-    let endpoint = format!("https://{}", env::var("PDS_HOSTNAME").unwrap());
     let services = json!({
         "atproto_pds": {
-            "type": "AtprotoPersonalDataServer".to_string(),
-            "endpoint": endpoint
+            "type": "AtprotoPersonalDataServer",
+            "endpoint": cfg.service.public_url
         }
     });
     let response = GetRecommendedDidCredentialsResponse {
