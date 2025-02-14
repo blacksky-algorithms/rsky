@@ -49,7 +49,7 @@ impl<'r> FromData<'r> for ImportRepoInput {
                         return Outcome::Error((Status::BadRequest, error));
                     }
 
-                    let import_datastream = data.open(content_length.megabytes());
+                    let import_datastream = data.open(content_length.bytes());
                     match read_stream_car_with_root(import_datastream).await {
                         Ok(car_with_root) => Outcome::Success(ImportRepoInput { car_with_root }),
                         Err(error) => {
