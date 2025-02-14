@@ -21,6 +21,7 @@ use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::repo::Repo;
 use rsky_repo::sync::consumer::{verify_diff, VerifyRepoInput};
 use rsky_repo::types::{PreparedWrite, RecordWriteDescript, VerifiedDiff};
+use std::num::NonZeroU64;
 
 struct ImportRepoInput {
     car_with_root: CarWithRoot,
@@ -39,7 +40,7 @@ impl<'r> FromData<'r> for ImportRepoInput {
                 req.local_cache(|| Some(error.clone()));
                 Outcome::Error((Status::BadRequest, error))
             }
-            Some(res) => match res.parse::<usize>() {
+            Some(res) => match res.parse::<NonZeroU64>() {
                 Ok(content_length) => {
                     if content_length.bytes() > max_import_size {
                         let error = ApiError::InvalidRequest(format!(
