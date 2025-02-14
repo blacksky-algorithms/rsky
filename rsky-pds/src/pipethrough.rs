@@ -65,7 +65,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                         acc
                     },
                 );
-                let req = ProxyRequest {
+                let proxy_req = ProxyRequest {
                     headers,
                     query: match req.uri().query() {
                         None => None,
@@ -77,7 +77,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                 };
                 match pipethrough(
-                    &req,
+                    &proxy_req,
                     requester,
                     OverrideOpts {
                         aud: None,
@@ -98,16 +98,23 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                             {
                                 tracing::error!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
                             }
+                            req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                             Outcome::Error((Status::BadRequest, error))
                         }
-                        _ => Outcome::Error((Status::BadRequest, error)),
+                        _ => {
+                            req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                            Outcome::Error((Status::BadRequest, error))
+                        }
                     },
                 }
             }
-            Outcome::Error(err) => Outcome::Error((
-                Status::BadRequest,
-                anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-            )),
+            Outcome::Error(err) => {
+                req.local_cache(|| Some(ApiError::RuntimeError));
+                Outcome::Error((
+                    Status::BadRequest,
+                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
+                ))
+            }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }
     }

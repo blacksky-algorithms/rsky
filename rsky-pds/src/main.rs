@@ -13,6 +13,7 @@ use rocket::figment::{
 };
 use rocket::http::Header;
 use rocket::http::Status;
+use rocket::request::local_cache;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
@@ -100,13 +101,14 @@ async fn health(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[catch(default)]
-async fn default_catcher() -> Json<rsky_pds::models::ErrorMessageResponse> {
-    let internal_error = rsky_pds::models::ErrorMessageResponse {
-        code: Some(rsky_pds::models::ErrorCode::InternalServerError),
-        message: Some("Internal error.".to_string()),
-    };
-    Json(internal_error)
+async fn default_catcher(_status: Status, request: &Request<'_>) -> ApiError {
+    let api_error: &Option<ApiError> = request.local_cache(|| None);
+    match api_error {
+        None => ApiError::RuntimeError,
+        Some(error) => error.clone(),
+    }
 }
 
 /// Catches all OPTION requests in order to get the CORS related Fairing triggered.
