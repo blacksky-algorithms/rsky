@@ -8,17 +8,8 @@ use crate::plc::operations::create_update_op;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service};
 use rocket::serde::json::Json;
 use rsky_common::env::env_str;
+use rsky_lexicon::com::atproto::identity::SignPlcOperationRequest;
 use std::collections::BTreeMap;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignPlcOperationRequest {
-    pub token: String,
-    pub rotation_keys: Vec<String>,
-    pub also_known_as: Vec<String>,
-    pub verification_methods: BTreeMap<String, String>,
-    pub services: BTreeMap<String, Service>,
-}
 
 #[rocket::post(
     "/xrpc/com.atproto.identity.signPlcOperation",
