@@ -42,7 +42,7 @@ impl<'r> FromData<'r> for ImportRepoInput {
             }
             Some(res) => match res.parse::<NonZeroU64>() {
                 Ok(content_length) => {
-                    if content_length.bytes() > max_import_size {
+                    if content_length.get().bytes() > max_import_size {
                         let error = ApiError::InvalidRequest(format!(
                             "Content-Length is greater than maximum of {max_import_size}"
                         ));
@@ -50,7 +50,7 @@ impl<'r> FromData<'r> for ImportRepoInput {
                         return Outcome::Error((Status::BadRequest, error));
                     }
 
-                    let import_datastream = data.open(content_length.bytes());
+                    let import_datastream = data.open(content_length.get().bytes());
                     match read_stream_car_with_root(import_datastream).await {
                         Ok(car_with_root) => Outcome::Success(ImportRepoInput { car_with_root }),
                         Err(error) => {
