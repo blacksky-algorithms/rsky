@@ -56,15 +56,59 @@ pub async fn sign_plc_operation(
     let private_key = env_str("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let (secret_rotation_key, _) = get_keys_from_private_key_str(private_key)?;
 
+    //If request doesn't contain field, check last op for field. In the case of CreateOpV1,
+    // we don't set it (which is aligned with BSky Implementation
+    let also_known_as = match request.also_known_as {
+        None => match last_op {
+            CompatibleOp::CreateOpV1(_) => None,
+            CompatibleOp::Operation(ref op) => Some(op.also_known_as.clone()),
+        },
+        Some(res) => Some(res),
+    };
+    let services = match request.services {
+        None => match last_op {
+            CompatibleOp::CreateOpV1(_) => None,
+            CompatibleOp::Operation(ref op) => Some(op.services.clone()),
+        },
+        Some(res) => match serde_json::from_value::<BTreeMap<String, Service>>(res) {
+            Ok(services) if !services.is_empty() => Some(services),
+            _ => match last_op {
+                CompatibleOp::CreateOpV1(_) => None,
+                CompatibleOp::Operation(ref op) => Some(op.services.clone()),
+            },
+        },
+    };
+    let verification_methods = match request.verification_methods {
+        None => match last_op {
+            CompatibleOp::CreateOpV1(_) => None,
+            CompatibleOp::Operation(ref op) => Some(op.verification_methods.clone()),
+        },
+        Some(res) => Some(res),
+    };
+    let rotation_keys = match request.rotation_keys {
+        None => match last_op {
+            CompatibleOp::CreateOpV1(_) => None,
+            CompatibleOp::Operation(ref op) => Some(op.rotation_keys.clone()),
+        },
+        Some(res) => Some(res),
+    };
     let operation = match create_update_op(
         last_op,
         &secret_rotation_key,
         |normalized: Operation| -> Operation {
             let mut updated = normalized.clone();
-            updated.also_known_as = request.also_known_as.clone();
-            updated.services = request.services.clone();
-            updated.verification_methods = request.verification_methods.clone();
-            updated.rotation_keys = request.rotation_keys.clone();
+            if let Some(also_known_as) = &also_known_as {
+                updated.also_known_as = also_known_as.clone();
+            }
+            if let Some(services) = &services {
+                updated.services = services.clone();
+            }
+            if let Some(verification_methods) = &verification_methods {
+                updated.verification_methods = verification_methods.clone();
+            }
+            if let Some(rotation_keys) = &rotation_keys {
+                updated.rotation_keys = rotation_keys.clone();
+            }
             updated
         },
     )
