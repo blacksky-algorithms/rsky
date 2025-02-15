@@ -246,6 +246,7 @@ async fn rocket() -> _ {
                 com::atproto::identity::update_handle::update_handle,
                 com::atproto::identity::get_recommended_did_credentials::get_recommended_did_credentials,
                 com::atproto::identity::sign_plc_operation::sign_plc_operation,
+                com::atproto::identity::request_plc_operation_signature::request_plc_operation_signature,
                 com::atproto::repo::apply_writes::apply_writes,
                 com::atproto::repo::create_record::create_record,
                 com::atproto::repo::delete_record::delete_record,
