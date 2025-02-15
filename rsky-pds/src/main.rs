@@ -13,6 +13,7 @@ use rocket::figment::{
 };
 use rocket::http::Header;
 use rocket::http::Status;
+use rocket::request::local_cache;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
@@ -100,13 +101,14 @@ async fn health(
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[catch(default)]
-async fn default_catcher() -> Json<rsky_pds::models::ErrorMessageResponse> {
-    let internal_error = rsky_pds::models::ErrorMessageResponse {
-        code: Some(rsky_pds::models::ErrorCode::InternalServerError),
-        message: Some("Internal error.".to_string()),
-    };
-    Json(internal_error)
+async fn default_catcher(_status: Status, request: &Request<'_>) -> ApiError {
+    let api_error: &Option<ApiError> = request.local_cache(|| None);
+    match api_error {
+        None => ApiError::RuntimeError,
+        Some(error) => error.clone(),
+    }
 }
 
 /// Catches all OPTION requests in order to get the CORS related Fairing triggered.
@@ -243,6 +245,7 @@ async fn rocket() -> _ {
                 com::atproto::identity::resolve_handle::resolve_handle,
                 com::atproto::identity::update_handle::update_handle,
                 com::atproto::identity::get_recommended_did_credentials::get_recommended_did_credentials,
+                com::atproto::identity::sign_plc_operation::sign_plc_operation,
                 com::atproto::repo::apply_writes::apply_writes,
                 com::atproto::repo::create_record::create_record,
                 com::atproto::repo::delete_record::delete_record,
@@ -297,21 +300,8 @@ async fn rocket() -> _ {
                 app::bsky::feed::get_post_thread::get_post_thread,
                 app::bsky::feed::get_timeline::get_timeline,
                 app::bsky::notification::register_push::register_push,
-                chat::delete_message_for_self,
-                chat::delete_account,
-                chat::export_account_data,
-                chat::get_convo,
-                chat::get_convo_for_members,
-                chat::get_log,
-                chat::get_messages,
-                chat::leave_convo,
-                chat::list_convos,
-                chat::mute_convo,
-                chat::send_message,
-                chat::send_message_batch,
-                chat::unmute_convo,
-                chat::update_read,
-                bsky_api_forwarder,
+                bsky_api_get_forwarder,
+                bsky_api_post_forwarder,
                 well_known,
                 all_options
             ],

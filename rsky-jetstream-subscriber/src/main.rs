@@ -1,23 +1,11 @@
-use chrono::DateTime;
-use dotenvy::dotenv;
 use futures::StreamExt as _;
-use rsky_jetstream_subscriber::jetstream::{
-    read, JetstreamRepoAccount, JetstreamRepoAccountMessage, JetstreamRepoCommit,
-    JetstreamRepoCommitMessage, JetstreamRepoIdentity, JetstreamRepoIdentityMessage,
-    JetstreamRepoMessage, Lexicon,
-};
+use rsky_jetstream_subscriber::jetstream::{read, JetstreamRepoMessage, Lexicon};
 use rsky_lexicon::app::bsky::feed::like::Like;
 use rsky_lexicon::app::bsky::feed::{Post, Repost};
 use rsky_lexicon::app::bsky::graph::follow::Follow;
-use rsky_lexicon::com::atproto::sync::SubscribeRepos;
-use serde::Deserialize;
 use std::env;
-use std::io::Cursor;
-use std::str::FromStr;
-use std::{thread, time::Duration};
-use tokio::net::TcpStream;
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 async fn queue_delete(
@@ -102,7 +90,7 @@ async fn process(message: String, client: &reqwest::Client) {
                         tracing::info!("Operations empty.");
                     }
                     // update stored cursor every 20 events or so
-                    if (&commit.time_us).rem_euclid(20) == 0 {
+                    if commit.time_us.rem_euclid(20) == 0 {
                         let cursor_endpoint = format!("{}/cursor", default_queue_path);
                         let resp = update_cursor(
                             cursor_endpoint,
@@ -125,7 +113,7 @@ async fn process(message: String, client: &reqwest::Client) {
                             let cid = commit.commit.cid;
                             match commit.commit.record {
                                 Some(Lexicon::AppBskyFeedPost(r)) => {
-                                    let post: Post = r;
+                                    let post: Post = *r;
                                     let uri = String::from("at://")
                                         + commit.did.as_str()
                                         + "/app.bsky.feed.post/"
@@ -190,28 +178,28 @@ async fn process(message: String, client: &reqwest::Client) {
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.post/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri };
                                 posts_to_delete.push(del);
                             } else if collection == "app.bsky.feed.repost" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.repost/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri };
                                 reposts_to_delete.push(del);
                             } else if collection == "app.bsky.feed.like" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.feed.like/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri };
                                 likes_to_delete.push(del);
                             } else if collection == "app.bsky.graph.follow" {
                                 let uri = String::from("at://")
                                     + commit.did.as_str()
                                     + "/app.bsky.graph.follow/"
                                     + commit.commit.rkey.as_str();
-                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri: uri };
+                                let del = rsky_jetstream_subscriber::models::DeleteOp { uri };
                                 follows_to_delete.push(del);
                             }
                         }
@@ -222,7 +210,7 @@ async fn process(message: String, client: &reqwest::Client) {
                 JetstreamRepoMessage::Account(_) => {}
             }
 
-            if posts_to_create.len() > 0 {
+            if !posts_to_create.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "posts");
                 let resp = queue_create(queue_endpoint, posts_to_create, client).await;
                 match resp {
@@ -230,7 +218,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if posts_to_delete.len() > 0 {
+            if !posts_to_delete.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "posts");
                 let resp = queue_delete(queue_endpoint, posts_to_delete, client).await;
                 match resp {
@@ -238,7 +226,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if reposts_to_create.len() > 0 {
+            if !reposts_to_create.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "reposts");
                 let resp = queue_create(queue_endpoint, reposts_to_create, client).await;
                 match resp {
@@ -246,7 +234,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if reposts_to_delete.len() > 0 {
+            if !reposts_to_delete.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "reposts");
                 let resp = queue_delete(queue_endpoint, reposts_to_delete, client).await;
                 match resp {
@@ -254,7 +242,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if likes_to_create.len() > 0 {
+            if !likes_to_create.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "likes");
                 let resp = queue_create(queue_endpoint, likes_to_create, client).await;
                 match resp {
@@ -262,7 +250,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if likes_to_delete.len() > 0 {
+            if !likes_to_delete.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "likes");
                 let resp = queue_delete(queue_endpoint, likes_to_delete, client).await;
                 match resp {
@@ -270,7 +258,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if follows_to_create.len() > 0 {
+            if !follows_to_create.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/create", default_queue_path, "follows");
                 let resp = queue_create(queue_endpoint, follows_to_create, client).await;
                 match resp {
@@ -278,7 +266,7 @@ async fn process(message: String, client: &reqwest::Client) {
                     Err(error) => tracing::error!("Records failed to queue: {error:?}"),
                 };
             }
-            if follows_to_delete.len() > 0 {
+            if !follows_to_delete.is_empty() {
                 let queue_endpoint = format!("{}/queue/{}/delete", default_queue_path, "follows");
                 let resp = queue_delete(queue_endpoint, follows_to_delete, client).await;
                 match resp {
