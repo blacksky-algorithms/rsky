@@ -24,3 +24,12 @@ pub struct SignPlcOperationRequest {
     pub verification_methods: Option<BTreeMap<String, String>>,
     pub services: Option<JsonValue>,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRecommendedDidCredentialsResponse {
+    pub also_known_as: Vec<String>,
+    pub verification_methods: JsonValue,
+    pub rotation_keys: Vec<String>,
+    pub services: JsonValue,
+}
