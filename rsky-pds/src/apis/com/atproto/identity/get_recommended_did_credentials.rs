@@ -34,24 +34,13 @@ pub async fn get_recommended_did_credentials(
         }
     }
 
-    let secp = Secp256k1::new();
-    let signing_private_key =
-        env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").expect("Signing Key Missing");
-    let signing_secret_key =
-        SecretKey::from_slice(&hex::decode(signing_private_key.as_bytes()).unwrap()).unwrap();
-    let signing_keypair = Keypair::from_secret_key(&secp, &signing_secret_key);
+    let signing_key = get_public_signing_key()?;
     let verification_methods = json!({
-        "atproto": encode_did_key(&signing_keypair.public_key())
+        "atproto": signing_key
     });
 
-    let mut rotation_keys = Vec::new();
-    let secp = Secp256k1::new();
-    let private_rotation_key =
-        env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").expect("Rotation Key Missing");
-    let private_secret_key =
-        SecretKey::from_slice(&hex::decode(private_rotation_key.as_bytes()).unwrap()).unwrap();
-    let rotation_keypair = Keypair::from_secret_key(&secp, &private_secret_key);
-    rotation_keys.push(encode_did_key(&rotation_keypair.public_key()));
+    let rotation_key = get_public_rotation_key()?;
+    let rotation_keys = vec![rotation_key];
 
     let services = json!({
         "atproto_pds": {
@@ -66,4 +55,58 @@ pub async fn get_recommended_did_credentials(
         services,
     };
     Ok(Json(response))
+}
+
+fn get_public_rotation_key() -> Result<String, ApiError> {
+    let secp = Secp256k1::new();
+    let private_rotation_key = match env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX") {
+        Ok(res) => res,
+        Err(error) => {
+            tracing::error!("Error geting rotation private key\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
+    match hex::decode(private_rotation_key.as_bytes()) {
+        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+            Ok(secret_key) => {
+                let rotation_keypair = Keypair::from_secret_key(&secp, &secret_key);
+                Ok(encode_did_key(&rotation_keypair.public_key()))
+            }
+            Err(error) => {
+                tracing::error!("Error geting rotation secret key from bytes\n{error}");
+                Err(ApiError::RuntimeError)
+            }
+        },
+        Err(error) => {
+            tracing::error!("Unable to hex decode rotation key\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
+}
+
+fn get_public_signing_key() -> Result<String, ApiError> {
+    let secp = Secp256k1::new();
+    let private_signing_key = match env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX") {
+        Ok(res) => res,
+        Err(error) => {
+            tracing::error!("Error geting signing private key\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
+    match hex::decode(private_signing_key.as_bytes()) {
+        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+            Ok(secret_key) => {
+                let signing_keypair = Keypair::from_secret_key(&secp, &secret_key);
+                Ok(encode_did_key(&signing_keypair.public_key()))
+            }
+            Err(error) => {
+                tracing::error!("Error geting signing secret key from bytes\n{error}");
+                Err(ApiError::RuntimeError)
+            }
+        },
+        Err(error) => {
+            tracing::error!("Unable to hex decode signing key\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
 }
