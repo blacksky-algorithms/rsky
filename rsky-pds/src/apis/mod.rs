@@ -91,7 +91,7 @@ pub async fn bsky_api_post_forwarder(
     Ok(ProxyResponder(res.buffer, content_length, content_type))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ApiError {
     RuntimeError,
     InvalidLogin,

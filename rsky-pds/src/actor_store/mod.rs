@@ -47,6 +47,11 @@ impl ActorStore {
         }
     }
 
+    pub async fn get_repo_root(&self) -> Option<Cid> {
+        let storage_guard = self.storage.read().await;
+        storage_guard.get_root().await
+    }
+
     // Transactors
     // -------------------
 
@@ -83,6 +88,26 @@ impl ActorStore {
             .collect::<Vec<PreparedWrite>>();
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
+    }
+
+    pub async fn process_import_repo(
+        &mut self,
+        commit: CommitData,
+        writes: Vec<PreparedWrite>,
+    ) -> Result<()> {
+        {
+            let immutable_borrow = &self;
+            // & send to indexing
+            immutable_borrow
+                .index_writes(writes.clone(), &commit.rev)
+                .await?;
+        }
+        // persist the commit to repo storage
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
+        // process blobs
+        self.blob.process_write_blobs(writes).await?;
+        Ok(())
     }
 
     pub async fn process_writes(

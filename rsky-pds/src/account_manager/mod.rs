@@ -440,6 +440,15 @@ impl AccountManager {
         email_token::assert_valid_token(did, purpose, token, None).await
     }
 
+    pub async fn assert_valid_email_token_and_cleanup(
+        did: &String,
+        purpose: EmailTokenPurpose,
+        token: &String,
+    ) -> Result<()> {
+        email_token::assert_valid_token(did, purpose, token, None).await?;
+        email_token::delete_email_token(did, purpose).await
+    }
+
     pub async fn create_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<String> {
         email_token::create_email_token(did, purpose).await
     }
