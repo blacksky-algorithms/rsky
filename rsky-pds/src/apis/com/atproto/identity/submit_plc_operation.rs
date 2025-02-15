@@ -1,6 +1,5 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::apis::com::atproto::server::get_keys_from_private_key_str;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
@@ -8,27 +7,98 @@ use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_common::env::env_str;
 use rsky_crypto::utils::encode_did_key;
+use rsky_lexicon::com::atproto::identity::SubmitPlcOperationRequest;
+use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 
-async fn validate_submit_plc_operation_request(
+#[tracing::instrument(skip_all)]
+fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
+    match &auth.access.credentials {
+        None => {
+            tracing::error!("Failed to find access credentials");
+            Err(ApiError::RuntimeError)
+        }
+        Some(res) => match &res.did {
+            None => {
+                tracing::error!("Failed to find did");
+                Err(ApiError::RuntimeError)
+            }
+            Some(did) => Ok(did.clone()),
+        },
+    }
+}
+
+#[tracing::instrument(skip_all)]
+fn get_public_rotation_key() -> Result<String, ApiError> {
+    let secp = Secp256k1::new();
+    let private_rotation_key = match env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX") {
+        Ok(res) => res,
+        Err(error) => {
+            tracing::error!("Error geting rotation private key\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
+    match hex::decode(private_rotation_key.as_bytes()) {
+        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+            Ok(secret_key) => {
+                let rotation_keypair = Keypair::from_secret_key(&secp, &secret_key);
+                Ok(encode_did_key(&rotation_keypair.public_key()))
+            }
+            Err(error) => {
+                tracing::error!("Error geting rotation secret key from bytes\n{error}");
+                Err(ApiError::RuntimeError)
+            }
+        },
+        Err(error) => {
+            tracing::error!("Unable to hex decode rotation key\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+fn get_public_signing_key() -> Result<String, ApiError> {
+    let secp = Secp256k1::new();
+    let private_signing_key = match env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX") {
+        Ok(res) => res,
+        Err(error) => {
+            tracing::error!("Error geting signing private key\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
+    match hex::decode(private_signing_key.as_bytes()) {
+        Ok(bytes) => match SecretKey::from_slice(&bytes) {
+            Ok(secret_key) => {
+                let signing_keypair = Keypair::from_secret_key(&secp, &secret_key);
+                Ok(encode_did_key(&signing_keypair.public_key()))
+            }
+            Err(error) => {
+                tracing::error!("Error geting signing secret key from bytes\n{error}");
+                Err(ApiError::RuntimeError)
+            }
+        },
+        Err(error) => {
+            tracing::error!("Unable to hex decode signing key\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+async fn validate_plc_request(
     did: &str,
     op: &Operation,
     public_endpoint: &str,
 ) -> Result<(), ApiError> {
-    let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let (_, public_key) = get_keys_from_private_key_str(private_key)?;
-    let plc_rotation_key = encode_did_key(&public_key);
-    if !op.rotation_keys.contains(&plc_rotation_key) {
+    let public_rotation_key = get_public_signing_key()?;
+    if !op.rotation_keys.contains(&public_rotation_key) {
         return Err(ApiError::InvalidRequest(
             "Rotation keys do not include server's rotation key".to_string(),
         ));
     }
 
-    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let (_, public_key) = get_keys_from_private_key_str(private_key)?;
-    let signing_rotation_key = encode_did_key(&public_key);
+    let public_signing_key = get_public_signing_key()?;
     match op.verification_methods.get("atproto") {
         None => {
             return Err(ApiError::InvalidRequest(
@@ -36,7 +106,7 @@ async fn validate_submit_plc_operation_request(
             ))
         }
         Some(res) => {
-            if res.clone() != signing_rotation_key {
+            if res.clone() != public_signing_key {
                 return Err(ApiError::InvalidRequest(
                     "Incorrect signing key".to_string(),
                 ));
@@ -102,6 +172,38 @@ async fn validate_submit_plc_operation_request(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
+async fn do_plc_operation(plc_url: &str, did: &str, op: Operation) -> Result<(), ApiError> {
+    let plc_client = plc::Client::new(plc_url.to_string());
+    match plc_client
+        .send_operation(&did.to_string(), &OpOrTombstone::Operation(op))
+        .await
+    {
+        Ok(_res) => {
+            tracing::info!("Successfully sent PLC Update Operation");
+            Ok(())
+        }
+        Err(error) => {
+            tracing::error!("Failed to update did:plc\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
+}
+
+#[tracing::instrument(skip_all)]
+fn validate_operation_body(request: SubmitPlcOperationRequest) -> Result<Operation, ApiError> {
+    match serde_json::from_value::<Operation>(request.operation) {
+        Ok(op) => {
+            tracing::debug!("Sucessfully parsed operation body");
+            Ok(op)
+        }
+        Err(error) => {
+            tracing::error!("Error parsing operation body\n{error}");
+            Err(ApiError::InvalidRequest("Invalid operation".to_string()))
+        }
+    }
+}
+
 #[rocket::post(
     "/xrpc/com.atproto.identity.submitPlcOperation",
     format = "json",
@@ -109,39 +211,32 @@ async fn validate_submit_plc_operation_request(
 )]
 #[tracing::instrument(skip_all)]
 pub async fn submit_plc_operation(
-    body: Json<Operation>,
+    body: Json<SubmitPlcOperationRequest>,
     auth: AccessStandard,
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
-    let op = body.into_inner();
-    let public_endpoint = server_config.service.public_url.as_str();
+    let did = get_requester_did(&auth)?;
 
-    validate_submit_plc_operation_request(did.as_str(), &op, public_endpoint).await?;
+    //Validate and transform request
+    let op = validate_operation_body(body.into_inner())?;
 
-    let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
-    let plc_client = plc::Client::new(plc_url);
-    match plc_client
-        .send_operation(&did, &OpOrTombstone::Operation(op))
-        .await
-    {
-        Ok(_) => {
-            tracing::info!("Successfully sent PLC Update Operation");
-        }
-        Err(_) => {
-            tracing::error!("Failed to update did:plc");
-            return Err(ApiError::RuntimeError);
-        }
-    }
-    let mut sequence_lock = sequencer.sequencer.write().await;
-    sequence_lock
-        .sequence_identity_evt(did.clone(), None)
-        .await?;
+    //Validate PLC Operation is valid
+    validate_plc_request(did.as_str(), &op, server_config.service.public_url.as_str()).await?;
+
+    //Send PLC Operation to PLC Service
+    do_plc_operation(server_config.identity.plc_url.as_str(), did.as_str(), op).await?;
+
+    //Update Sequencer
+    let mut seq_lock = sequencer.sequencer.write().await;
+    seq_lock.sequence_identity_evt(did.clone(), None).await?;
+
+    //Refresh DID after PLC update
     let mut id_lock = id_resolver.id_resolver.write().await;
     if let Err(error) = id_lock.did.ensure_resolve(&did, None).await {
         tracing::error!("Failed to fresh did after plc update\n{error}")
     };
+
     Ok(())
 }

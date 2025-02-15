@@ -24,3 +24,9 @@ pub struct SignPlcOperationRequest {
     pub verification_methods: Option<BTreeMap<String, String>>,
     pub services: Option<JsonValue>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitPlcOperationRequest {
+    pub operation: JsonValue,
+}
