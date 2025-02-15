@@ -1,27 +1,10 @@
-use rocket::http::{ContentType, Status};
+use crate::common::get_admin_token;
+use rocket::http::{ContentType, Header, Status};
+use rsky_lexicon::com::atproto::server::{CreateInviteCodeOutput, CreateSessionOutput};
+use serde_json::json;
 use testcontainers::runners::AsyncRunner;
-use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
-use testcontainers_modules::{postgres};
+
 mod common;
-
-#[tokio::test]
-async fn test_create_session() {
-    let client = common::setup().await;
-    let input = CreateSessionInput {
-        identifier: "dw12a1d321.rsky.ripperoni.com".to_string(),
-        password: "ngAUvO6BGYipTfDjjdT9ozgJ".to_string(),
-    };
-    let response = client
-        .post("/xrpc/com.atproto.server.createSession")
-        .header(ContentType::JSON)
-        .body(serde_json::to_string(&input).unwrap().into_bytes())
-        .dispatch()
-        .await;
-    let status = response.status();
-
-    assert_eq!(status, Status::Ok);
-    response.into_json::<CreateSessionOutput>().await.unwrap();
-}
 
 #[tokio::test]
 async fn test_index() {
@@ -41,4 +24,65 @@ async fn test_robots_txt() {
         response_body,
         "# Hello!\n\n# Crawling the public API is allowed\nUser-agent: *\nAllow: /"
     );
+}
+
+#[tokio::test]
+async fn test_create_invite_code() {
+    let client = common::setup().await;
+    let input = json!({
+        "useCount": 1
+    });
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createInviteCode")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", get_admin_token()))
+        .body(input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+
+    assert_eq!(response_status, Status::Ok);
+    response
+        .into_json::<CreateInviteCodeOutput>()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_create_invite_code_and_account() {
+    let client = common::setup().await;
+
+    let input = json!({
+        "useCount": 1
+    });
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createInviteCode")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", get_admin_token()))
+        .body(input.to_string())
+        .dispatch()
+        .await;
+    let invite_code = response
+        .into_json::<CreateInviteCodeOutput>()
+        .await
+        .unwrap()
+        .code;
+
+    let account_input = json!({
+        "email": "newemail@rsky.com",
+        "handle": "newhandle.rsky.com",
+        "password": "password",
+        "inviteCode": invite_code
+    });
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createAccount")
+        .header(ContentType::JSON)
+        .body(account_input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
 }
