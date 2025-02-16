@@ -33,3 +33,9 @@ pub struct GetRecommendedDidCredentialsResponse {
     pub rotation_keys: Vec<String>,
     pub services: JsonValue,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitPlcOperationRequest {
+    pub operation: JsonValue,
+}
