@@ -1,5 +1,5 @@
 use crate::account_manager::DisableInviteCodesOpts;
-use crate::db::establish_connection;
+use crate::db::{establish_connection, DbConn};
 use crate::models::models;
 use anyhow::{bail, Result};
 use diesel::*;
@@ -63,33 +63,33 @@ pub fn record_invite_use(did: String, invite_code: Option<String>, now: String) 
     Ok(())
 }
 
-pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
+pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32, db: &DbConn) -> Result<()> {
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
-    let conn = &mut establish_connection()?;
-
     let created_at = rsky_common::now();
 
-    let rows: Vec<models::InviteCode> = to_create
-        .into_iter()
-        .flat_map(|account| {
-            let for_account = account.account;
-            account
-                .codes
-                .iter()
-                .map(|code| models::InviteCode {
-                    code: code.clone(),
-                    available_uses: use_count.clone(),
-                    disabled: 0,
-                    for_account: for_account.clone(),
-                    created_by: "admin".to_owned(),
-                    created_at: created_at.clone(),
-                })
-                .collect::<Vec<models::InviteCode>>()
-        })
-        .collect();
-    insert_into(InviteCodeSchema::invite_code)
-        .values(&rows)
-        .execute(conn)?;
+    db.run(move |conn| {
+        let rows: Vec<models::InviteCode> = to_create
+            .into_iter()
+            .flat_map(|account| {
+                let for_account = account.account;
+                account
+                    .codes
+                    .iter()
+                    .map(|code| models::InviteCode {
+                        code: code.clone(),
+                        available_uses: use_count.clone(),
+                        disabled: 0,
+                        for_account: for_account.clone(),
+                        created_by: "admin".to_owned(),
+                        created_at: created_at.clone(),
+                    })
+                    .collect::<Vec<models::InviteCode>>()
+            })
+            .collect();
+        insert_into(InviteCodeSchema::invite_code)
+            .values(&rows)
+            .execute(conn).unwrap();
+    }).await;
     Ok(())
 }
 

@@ -6,6 +6,7 @@ use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{
     AccountCodes, CreateInviteCodeInput, CreateInviteCodeOutput,
 };
+use crate::db::DbConn;
 
 #[tracing::instrument(skip_all)]
 #[rocket::post(
@@ -15,6 +16,7 @@ use rsky_lexicon::com::atproto::server::{
 )]
 pub async fn create_invite_code(
     body: Json<CreateInviteCodeInput>,
+    db: &DbConn,
     _auth: AdminToken,
 ) -> Result<Json<CreateInviteCodeOutput>, ApiError> {
     // @TODO: verify admin auth token
@@ -30,6 +32,7 @@ pub async fn create_invite_code(
             account: for_account.unwrap_or("admin".to_owned()),
         }],
         use_count,
+        db,
     )
     .await
     {

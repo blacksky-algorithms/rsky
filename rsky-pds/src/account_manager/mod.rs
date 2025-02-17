@@ -24,6 +24,7 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
 use std::time::SystemTime;
+use crate::db::DbConn;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -315,8 +316,8 @@ impl AccountManager {
         invite::ensure_invite_is_available(code).await
     }
 
-    pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
-        invite::create_invite_codes(to_create, use_count).await
+    pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32, db: &DbConn) -> Result<()> {
+        invite::create_invite_codes(to_create, use_count, db).await
     }
 
     pub async fn create_account_invite_codes(

@@ -1,3 +1,4 @@
+use diesel::row::NamedRow;
 use crate::common::get_admin_token;
 use rocket::http::{ContentType, Header, Status};
 use rsky_lexicon::com::atproto::server::{CreateInviteCodeOutput, CreateSessionOutput};
@@ -8,14 +9,16 @@ mod common;
 
 #[tokio::test]
 async fn test_index() {
-    let client = common::setup().await;
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(postgres).await;
     let response = client.get("/").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
 }
 
 #[tokio::test]
 async fn test_robots_txt() {
-    let client = common::setup().await;
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(postgres).await;
     let response = client.get("/robots.txt").dispatch().await;
     let response_status = response.status();
     let response_body = response.into_string().await.unwrap();
@@ -28,7 +31,8 @@ async fn test_robots_txt() {
 
 #[tokio::test]
 async fn test_create_invite_code() {
-    let client = common::setup().await;
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(postgres).await;
     let input = json!({
         "useCount": 1
     });
@@ -51,7 +55,8 @@ async fn test_create_invite_code() {
 
 #[tokio::test]
 async fn test_create_invite_code_and_account() {
-    let client = common::setup().await;
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(postgres).await;
 
     let input = json!({
         "useCount": 1
@@ -71,8 +76,8 @@ async fn test_create_invite_code_and_account() {
         .code;
 
     let account_input = json!({
-        "email": "newemail@rsky.com",
-        "handle": "newhandle.rsky.com",
+        "email": "newemail7@rsky.com",
+        "handle": "newhandle7.rsky.com",
         "password": "password",
         "inviteCode": invite_code
     });

@@ -193,13 +193,21 @@ impl Fairing for CORS {
     }
 }
 
-pub async fn build_rocket() -> Rocket<Build> {
+pub struct RocketConfig {
+    pub db_url: String,
+}
+
+pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
     let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    // tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let db_url = env::var("DATABASE_URL").unwrap_or("".into());
+    let db_url = if let Some(cfg) = cfg {
+        cfg.db_url
+    } else {
+        env::var("DATABASE_URL").unwrap_or("".into())
+    };
 
     let db: Map<_, Value> = map! {
         "url" => db_url.into(),

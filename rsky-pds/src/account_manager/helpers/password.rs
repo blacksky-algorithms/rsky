@@ -1,4 +1,4 @@
-use crate::db::establish_connection;
+use crate::db::{establish_connection, DbConn};
 use crate::models;
 use crate::models::AppPassword;
 use anyhow::{anyhow, bail, Result};
@@ -17,15 +17,15 @@ pub struct UpdateUserPasswordOpts {
     pub password_encrypted: String,
 }
 
-pub async fn verify_account_password(did: &String, password: &String) -> Result<bool> {
+pub async fn verify_account_password(did: &String, password: &String, db: &DbConn) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
-    let conn = &mut establish_connection()?;
-
-    let found = AccountSchema::account
-        .filter(AccountSchema::did.eq(did))
-        .select(models::Account::as_select())
-        .first(conn)
-        .optional()?;
+    let found =  db.run(move |conn| {
+        AccountSchema::account
+            .filter(AccountSchema::did.eq(did))
+            .select(models::Account::as_select())
+            .first(conn)
+            .optional()
+    }).await?;
     if let Some(found) = found {
         verify(password, &found.password)
     } else {
@@ -120,24 +120,26 @@ pub async fn create_app_password(did: String, name: String) -> Result<CreateAppP
     }
 }
 
-pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
+pub async fn list_app_passwords(did: &String, db: &DbConn) -> Result<Vec<(String, String)>> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-    let conn = &mut establish_connection()?;
+    let res = db.run(move |conn|  {
+        AppPasswordSchema::app_password
+            .filter(AppPasswordSchema::did.eq(did))
+            .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
+            .get_results(conn)
+    }).await;
 
-    Ok(AppPasswordSchema::app_password
-        .filter(AppPasswordSchema::did.eq(did))
-        .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
-        .get_results(conn)?)
+    Ok(res?)
 }
 
-pub async fn update_user_password(opts: UpdateUserPasswordOpts) -> Result<()> {
+pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &DbConn) -> Result<()> {
     use crate::schema::pds::account::dsl as AccountSchema;
-    let conn = &mut establish_connection()?;
-
-    update(AccountSchema::account)
-        .filter(AccountSchema::did.eq(opts.did))
-        .set(AccountSchema::password.eq(opts.password_encrypted))
-        .execute(conn)?;
+    db.run(move |conn| {
+        update(AccountSchema::account)
+            .filter(AccountSchema::did.eq(opts.did))
+            .set(AccountSchema::password.eq(opts.password_encrypted))
+            .execute(conn)
+    }).await?;
     Ok(())
 }
 
