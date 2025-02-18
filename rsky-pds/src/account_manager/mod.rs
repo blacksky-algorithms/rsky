@@ -252,6 +252,34 @@ impl AccountManager {
         Ok((access_jwt, refresh_jwt))
     }
 
+    pub async fn create_session_v2(
+        did: String,
+        app_password_name: Option<String>,
+        db: &DbConn
+    ) -> Result<(String, String)> {
+        let secp = Secp256k1::new();
+        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+        let secret_key =
+            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+        let scope = if app_password_name.is_none() {
+            AuthScope::Access
+        } else {
+            AuthScope::AppPass
+        };
+        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
+            did,
+            jwt_key,
+            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            scope: Some(scope),
+            jti: None,
+            expires_in: None,
+        })?;
+        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+        auth::store_refresh_token_v2(refresh_payload, app_password_name, db).await?;
+        Ok((access_jwt, refresh_jwt))
+    }
+
     pub async fn rotate_refresh_token(id: &String) -> Result<Option<(String, String)>> {
         let token = auth::get_refresh_token(id).await?;
         if let Some(token) = token {
@@ -388,11 +416,23 @@ impl AccountManager {
         password::verify_account_password(did, password_str).await
     }
 
+    pub async fn verify_account_password_v2(did: &String, password_str: &String, db: &DbConn) -> Result<bool> {
+        password::verify_account_password_v2(did, password_str, db).await
+    }
+
     pub async fn verify_app_password(
         did: &String,
         password_str: &String,
     ) -> Result<Option<String>> {
         password::verify_app_password(did, password_str).await
+    }
+
+    pub async fn verify_app_password_v2(
+        did: &String,
+        password_str: &String,
+        db: &DbConn
+    ) -> Result<Option<String>> {
+        password::verify_app_password_v2(did, password_str, db).await
     }
 
     pub async fn reset_password(opts: ResetPasswordOpts) -> Result<()> {

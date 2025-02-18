@@ -86,7 +86,6 @@ pub async fn record_invite_use(
     did: String,
     invite_code: Option<String>,
     now: String,
-    db: &DbConn,
 ) -> Result<()> {
     if let Some(invite_code) = invite_code {
         use crate::schema::pds::invite_code_use::dsl as InviteCodeUseSchema;

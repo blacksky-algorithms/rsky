@@ -7,13 +7,15 @@ use rocket::local::asynchronous::Client;
 use rsky_common::env::env_str;
 use rsky_pds::{build_rocket, RocketConfig};
 use std::env;
+use rocket::http::{ContentType, Header, Status};
+use rocket::serde::json::json;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, Image, ImageExt};
 use testcontainers_modules::postgres;
 use testcontainers_modules::postgres::Postgres;
 use tokio::sync::OnceCell;
-
+use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
 // static CLIENT: OnceCell<Client> = OnceCell::const_new();
 // static POSTGRES: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 
@@ -85,4 +87,40 @@ pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
     )
     .await
     .expect("Valid Rocket instance")
+}
+
+pub async fn create_account(client: &Client) -> (String, String) {
+    let input = json!({
+        "useCount": 1
+    });
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createInviteCode")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", get_admin_token()))
+        .body(input.to_string())
+        .dispatch()
+        .await;
+    let invite_code = response
+        .into_json::<CreateInviteCodeOutput>()
+        .await
+        .unwrap()
+        .code;
+
+    let account_input = json!({
+        "did": "did:plc:khvyd3oiw46vif5gm7hijslk",
+        "email": "dummyemail@rsky.com",
+        "handle": "dummaccount.rsky.com",
+        "password": "password",
+        "inviteCode": invite_code
+    });
+
+    client.post("/xrpc/com.atproto.server.createAccount")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", get_admin_token()))
+        .body(account_input.to_string())
+        .dispatch()
+        .await;
+
+    ("dummyemail@rsky.com".to_string(), "password".to_string())
 }

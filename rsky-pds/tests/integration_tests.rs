@@ -1,5 +1,5 @@
 use diesel::row::NamedRow;
-use crate::common::get_admin_token;
+use crate::common::{create_account, get_admin_token};
 use rocket::http::{ContentType, Header, Status};
 use rsky_lexicon::com::atproto::server::{CreateInviteCodeOutput, CreateSessionOutput};
 use serde_json::json;
@@ -92,4 +92,40 @@ async fn test_create_invite_code_and_account() {
         .await;
     let response_status = response.status();
     assert_eq!(response_status, Status::Ok);
+}
+
+#[tokio::test]
+async fn test_create_session() {
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(&postgres).await;
+
+    let (username, password) = create_account(&client).await;
+
+    // Valid Login
+    let session_input = json!({
+        "identifier": username,
+        "password": password,
+    });
+
+    let response = client.post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(session_input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
+
+    // Invalid Login
+    let session_input = json!({
+        "identifier": username,
+        "password": password + "1",
+    });
+
+    let response = client.post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(session_input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::BadRequest);
 }

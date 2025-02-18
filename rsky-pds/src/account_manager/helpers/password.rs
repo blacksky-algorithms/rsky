@@ -1,4 +1,4 @@
-use crate::db::establish_connection;
+use crate::db::{establish_connection, DbConn};
 use crate::models;
 use crate::models::AppPassword;
 use anyhow::{anyhow, bail, Result};
@@ -33,17 +33,70 @@ pub async fn verify_account_password(did: &String, password: &String) -> Result<
     }
 }
 
+pub async fn verify_account_password_v2(
+    did: &String,
+    password: &String,
+    db: &DbConn,
+) -> Result<bool> {
+    use crate::schema::pds::account::dsl as AccountSchema;
+
+    let did = did.clone();
+    let found = db
+        .run(move |conn| {
+            AccountSchema::account
+                .filter(AccountSchema::did.eq(did))
+                .select(models::Account::as_select())
+                .first(conn)
+                .optional()
+        })
+        .await?;
+    if let Some(found) = found {
+        verify(password, &found.password)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn verify_app_password(did: &String, password: &String) -> Result<Option<String>> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
     let conn = &mut establish_connection()?;
 
-    let password_encrypted = hash_app_password(did, password).await?;
+    let did = did.clone();
+    let password = password.clone();
+    let password_encrypted = hash_app_password(&did, &password).await?;
     let found = AppPasswordSchema::app_password
         .filter(AppPasswordSchema::did.eq(did))
         .filter(AppPasswordSchema::password.eq(password_encrypted))
         .select(AppPassword::as_select())
         .first(conn)
         .optional()?;
+    if let Some(found) = found {
+        Ok(Some(found.name))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn verify_app_password_v2(
+    did: &String,
+    password: &String,
+    db: &DbConn,
+) -> Result<Option<String>> {
+    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
+
+    let did = did.clone();
+    let password= password.clone();
+    let password_encrypted = hash_app_password(&did, &password).await?;
+    let found = db
+        .run(move |conn| {
+            AppPasswordSchema::app_password
+                .filter(AppPasswordSchema::did.eq(did))
+                .filter(AppPasswordSchema::password.eq(password_encrypted))
+                .select(AppPassword::as_select())
+                .first(conn)
+                .optional()
+        })
+        .await?;
     if let Some(found) = found {
         Ok(Some(found.name))
     } else {
