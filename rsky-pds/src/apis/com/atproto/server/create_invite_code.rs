@@ -16,7 +16,7 @@ use crate::db::DbConn;
 )]
 pub async fn create_invite_code(
     body: Json<CreateInviteCodeInput>,
-    db: &DbConn,
+    db: DbConn,
     _auth: AdminToken,
 ) -> Result<Json<CreateInviteCodeOutput>, ApiError> {
     // @TODO: verify admin auth token
@@ -32,7 +32,7 @@ pub async fn create_invite_code(
             account: for_account.unwrap_or("admin".to_owned()),
         }],
         use_count,
-        db,
+        &db,
     )
     .await
     {

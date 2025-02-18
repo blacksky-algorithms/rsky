@@ -1,5 +1,5 @@
-use crate::db::establish_connection;
-use crate::schema::pds::account::dsl as AccountSchema;
+use crate::db::{establish_connection, DbConn};
+use crate::schema::pds::account::{dsl as AccountSchema};
 use crate::schema::pds::account::table as AccountTable;
 use crate::schema::pds::actor::dsl as ActorSchema;
 use crate::schema::pds::actor::table as ActorTable;
@@ -147,6 +147,61 @@ pub async fn get_account(
     Ok(found)
 }
 
+pub async fn get_account_v2(
+    _handle_or_did: &String,
+    flags: Option<AvailabilityFlags>,
+    db: &DbConn,
+) -> Result<Option<ActorAccount>> {
+    let handle_or_did = _handle_or_did.clone();
+    let found = db
+        .run(move |conn| {
+            let mut builder = select_account_qb(flags);
+            if handle_or_did.starts_with("did:") {
+                builder = builder.filter(ActorSchema::did.eq(handle_or_did));
+            } else {
+                builder = builder.filter(ActorSchema::handle.eq(handle_or_did));
+            }
+
+            builder
+                .select((
+                    ActorSchema::did,
+                    ActorSchema::handle,
+                    ActorSchema::createdAt,
+                    ActorSchema::takedownRef,
+                    ActorSchema::deactivatedAt,
+                    ActorSchema::deleteAfter,
+                    AccountSchema::email.nullable(),
+                    AccountSchema::emailConfirmedAt.nullable(),
+                    AccountSchema::invitesDisabled.nullable(),
+                ))
+                .first::<(
+                    String,
+                    Option<String>,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<i16>,
+                )>(conn)
+                .map(|res| ActorAccount {
+                    did: res.0,
+                    handle: res.1,
+                    created_at: res.2,
+                    takedown_ref: res.3,
+                    deactivated_at: res.4,
+                    delete_after: res.5,
+                    email: res.6,
+                    email_confirmed_at: res.7,
+                    invites_disabled: res.8,
+                })
+                .optional()
+        })
+        .await?;
+    Ok(found)
+}
+
 pub async fn get_account_by_email(
     email: &String,
     flags: Option<AvailabilityFlags>,
@@ -189,6 +244,51 @@ pub async fn get_account_by_email(
             invites_disabled: res.8,
         })
         .optional()?;
+    Ok(found)
+}
+
+pub async fn get_account_by_email_v2(
+    _email: &String,
+    flags: Option<AvailabilityFlags>,
+    db: &DbConn,
+) -> Result<Option<ActorAccount>> {
+    let email = _email.clone();
+    let found = db.run(move |conn| {select_account_qb(flags)
+        .select((
+            ActorSchema::did,
+            ActorSchema::handle,
+            ActorSchema::createdAt,
+            ActorSchema::takedownRef,
+            ActorSchema::deactivatedAt,
+            ActorSchema::deleteAfter,
+            AccountSchema::email.nullable(),
+            AccountSchema::emailConfirmedAt.nullable(),
+            AccountSchema::invitesDisabled.nullable(),
+        ))
+        .filter(AccountSchema::email.eq(email.to_lowercase()))
+        .first::<(
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i16>,
+        )>(conn)
+        .map(|res| ActorAccount {
+            did: res.0,
+            handle: res.1,
+            created_at: res.2,
+            takedown_ref: res.3,
+            deactivated_at: res.4,
+            delete_after: res.5,
+            email: res.6,
+            email_confirmed_at: res.7,
+            invites_disabled: res.8,
+        })
+        .optional()}).await?;
     Ok(found)
 }
 

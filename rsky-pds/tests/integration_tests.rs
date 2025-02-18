@@ -10,7 +10,7 @@ mod common;
 #[tokio::test]
 async fn test_index() {
     let postgres = common::get_postgres().await;
-    let client = common::get_client(postgres).await;
+    let client = common::get_client(&postgres).await;
     let response = client.get("/").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
 }
@@ -18,7 +18,7 @@ async fn test_index() {
 #[tokio::test]
 async fn test_robots_txt() {
     let postgres = common::get_postgres().await;
-    let client = common::get_client(postgres).await;
+    let client = common::get_client(&postgres).await;
     let response = client.get("/robots.txt").dispatch().await;
     let response_status = response.status();
     let response_body = response.into_string().await.unwrap();
@@ -32,7 +32,7 @@ async fn test_robots_txt() {
 #[tokio::test]
 async fn test_create_invite_code() {
     let postgres = common::get_postgres().await;
-    let client = common::get_client(postgres).await;
+    let client = common::get_client(&postgres).await;
     let input = json!({
         "useCount": 1
     });
@@ -56,7 +56,7 @@ async fn test_create_invite_code() {
 #[tokio::test]
 async fn test_create_invite_code_and_account() {
     let postgres = common::get_postgres().await;
-    let client = common::get_client(postgres).await;
+    let client = common::get_client(&postgres).await;
 
     let input = json!({
         "useCount": 1
@@ -76,8 +76,9 @@ async fn test_create_invite_code_and_account() {
         .code;
 
     let account_input = json!({
-        "email": "newemail7@rsky.com",
-        "handle": "newhandle7.rsky.com",
+        "did": "did:plc:khvyd3oiw46vif5gm7hijslk",
+        "email": "dummyemail@rsky.com",
+        "handle": "dummaccount.rsky.com",
         "password": "password",
         "inviteCode": invite_code
     });
@@ -85,6 +86,7 @@ async fn test_create_invite_code_and_account() {
     let response = client
         .post("/xrpc/com.atproto.server.createAccount")
         .header(ContentType::JSON)
+        .header(Header::new("Authorization", get_admin_token()))
         .body(account_input.to_string())
         .dispatch()
         .await;

@@ -73,7 +73,7 @@ pub async fn get_postgres() -> ContainerAsync<Postgres> {
     postgres
 }
 
-pub async fn get_client(postgres: ContainerAsync<Postgres>) -> Client {
+pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
     let ip_address = postgres.get_bridge_ip_address().await.unwrap().to_string();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);

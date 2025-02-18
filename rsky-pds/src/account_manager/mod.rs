@@ -74,11 +74,27 @@ impl AccountManager {
         account::get_account(handle_or_did, flags).await
     }
 
+    pub async fn get_account_v2(
+        handle_or_did: &String,
+        flags: Option<AvailabilityFlags>,
+        db: &DbConn
+    ) -> Result<Option<ActorAccount>> {
+        account::get_account_v2(handle_or_did, flags, db).await
+    }
+
     pub async fn get_account_by_email(
         email: &String,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<ActorAccount>> {
         account::get_account_by_email(email, flags).await
+    }
+
+    pub async fn get_account_by_email_v2(
+        email: &String,
+        flags: Option<AvailabilityFlags>,
+        db: &DbConn
+    ) -> Result<Option<ActorAccount>> {
+        account::get_account_by_email_v2(email, flags, db).await
     }
 
     pub async fn is_account_activated(did: &String) -> Result<bool> {

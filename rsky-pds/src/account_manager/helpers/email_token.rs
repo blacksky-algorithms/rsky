@@ -1,5 +1,5 @@
 use crate::apis::com::atproto::server::get_random_token;
-use crate::db::{establish_connection, DbConn};
+use crate::db::establish_connection;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::EmailToken;
 use anyhow::{bail, Result};
@@ -35,21 +35,18 @@ pub async fn assert_valid_token(
     purpose: EmailTokenPurpose,
     token: &String,
     expiration_len: Option<i32>,
-    db: &DbConn
 ) -> Result<()> {
     let expiration_len = expiration_len.unwrap_or(MINUTE * 15);
     use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+    let conn = &mut establish_connection()?;
 
-    let res = db.run(move |conn|  {
-        return EmailTokenSchema::email_token
-            .filter(EmailTokenSchema::purpose.eq(purpose))
-            .filter(EmailTokenSchema::did.eq(did))
-            .filter(EmailTokenSchema::token.eq(token.to_uppercase()))
-            .select(EmailToken::as_select())
-            .first(conn)
-            .optional()?;
-    }).await;
-
+    let res = EmailTokenSchema::email_token
+        .filter(EmailTokenSchema::purpose.eq(purpose))
+        .filter(EmailTokenSchema::did.eq(did))
+        .filter(EmailTokenSchema::token.eq(token.to_uppercase()))
+        .select(EmailToken::as_select())
+        .first(conn)
+        .optional()?;
     if let Some(res) = res {
         let requested_at = from_str_to_utc(&res.requested_at);
         let expired = !less_than_ago_s(requested_at, expiration_len);

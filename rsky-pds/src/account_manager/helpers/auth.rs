@@ -1,5 +1,5 @@
 use crate::auth_verifier::AuthScope;
-use crate::db::{establish_connection, DbConn};
+use crate::db::establish_connection;
 use crate::models;
 use anyhow::Result;
 use diesel::*;
@@ -236,14 +236,9 @@ pub async fn store_refresh_token(
     Ok(())
 }
 
-pub async fn revoke_refresh_token(id: String, db: &DbConn) -> Result<bool> {
+pub async fn revoke_refresh_token(id: String) -> Result<bool> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
     let conn = &mut establish_connection()?;
-    db.run(move |conn| {
-        delete(RefreshTokenSchema::refresh_token)
-            .filter(RefreshTokenSchema::id.eq(id))
-            .get_results::<models::RefreshToken>(conn)
-    })
 
     let deleted_rows = delete(RefreshTokenSchema::refresh_token)
         .filter(RefreshTokenSchema::id.eq(id))

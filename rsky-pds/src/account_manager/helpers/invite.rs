@@ -88,8 +88,8 @@ pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32, d
             .collect();
         insert_into(InviteCodeSchema::invite_code)
             .values(&rows)
-            .execute(conn).unwrap();
-    }).await;
+            .execute(conn)
+    }).await?;
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
-use crate::db::{establish_connection, DbConn};
+use crate::db::establish_connection;
 use crate::models::models;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util;
@@ -642,21 +642,10 @@ impl LocalViewer {
     }
 }
 
-pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String, db: &DbConn) -> Result<LocalRecords> {
+pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Result<LocalRecords> {
     use crate::schema::pds::record::dsl as RecordSchema;
     use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
     let conn = &mut establish_connection()?;
-
-    let res: Vec<(models::Record, models::RepoBlock)>  = db.run(move |conn| {
-        RecordSchema::record
-            .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
-            .select((models::Record::as_select(), models::RepoBlock::as_select()))
-            .filter(RecordSchema::did.eq(&actor_store.did))
-            .filter(RecordSchema::repoRev.gt(&rev))
-            .limit(10)
-            .order_by(RecordSchema::repoRev.asc())
-            .get_results(conn)?
-    }).await;
 
     let res: Vec<(models::Record, models::RepoBlock)> = RecordSchema::record
         .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))

@@ -16,7 +16,7 @@ use crate::db::DbConn;
 pub async fn create_invite_codes(
     body: Json<CreateInviteCodesInput>,
     _auth: AdminToken,
-    db: &DbConn,
+    db: DbConn,
 ) -> Result<Json<CreateInviteCodesOutput>, ApiError> {
     // @TODO: verify admin auth token
     let CreateInviteCodesInput {
