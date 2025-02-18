@@ -123,7 +123,7 @@ impl AccountManager {
         }
     }
 
-    pub async fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
+    pub async fn create_account(opts: CreateAccountOpts, db: &DbConn) -> Result<(String, String)> {
         let CreateAccountOpts {
             did,
             handle,
@@ -156,15 +156,15 @@ impl AccountManager {
         let now = rsky_common::now();
 
         if let Some(invite_code) = invite_code.clone() {
-            invite::ensure_invite_is_available(invite_code).await?;
+            invite::ensure_invite_is_available_v2(invite_code, db).await?;
         }
-        account::register_actor(did.clone(), handle, deactivated)?;
+        account::register_actor_v2(did.clone(), handle, deactivated, db).await?;
         if let (Some(email), Some(password_encrypted)) = (email, password_encrypted) {
-            account::register_account(did.clone(), email, password_encrypted)?;
+            account::register_account_v2(did.clone(), email, password_encrypted, db).await?;
         }
-        invite::record_invite_use(did.clone(), invite_code, now)?;
-        auth::store_refresh_token(refresh_payload, None).await?;
-        repo::update_root(did, repo_cid, repo_rev)?;
+        invite::record_invite_use_v2(did.clone(), invite_code, now, db).await?;
+        auth::store_refresh_token_v2(refresh_payload, None, db).await?;
+        repo::update_root_v2(did, repo_cid, repo_rev, db).await?;
         Ok((access_jwt, refresh_jwt))
     }
 
@@ -176,6 +176,10 @@ impl AccountManager {
 
     pub fn update_repo_root(did: String, cid: Cid, rev: String) -> Result<()> {
         Ok(repo::update_root(did, cid, rev)?)
+    }
+
+    pub async fn update_repo_root_v2(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
+        Ok(repo::update_root_v2(did, cid, rev, db).await?)
     }
 
     pub async fn delete_account(did: &String) -> Result<()> {

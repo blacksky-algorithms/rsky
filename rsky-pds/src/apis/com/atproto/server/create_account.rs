@@ -122,7 +122,7 @@ pub async fn server_create_account(
         repo_rev: commit.rev.clone(),
         invite_code,
         deactivated: Some(deactivated),
-    })
+    }, &blob_db)
     .await
     {
         Ok(res) => {
@@ -174,7 +174,7 @@ pub async fn server_create_account(
             }
         }
     }
-    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev) {
+    match AccountManager::update_repo_root_v2(did.clone(), commit.cid, commit.rev, &blob_db).await {
         Ok(_) => {
             tracing::debug!("Successfully updated repo root");
         }
