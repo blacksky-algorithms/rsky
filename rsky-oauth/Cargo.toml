@@ -5,5 +5,8 @@ edition = "2021"
 
 [dependencies]
 http = "1.2.0"
+serde.workspace = true
+serde_json.workspace = true
 thiserror = "2.0.11"
 url = "2.5.4"
+urlencoding = "2.1.3"

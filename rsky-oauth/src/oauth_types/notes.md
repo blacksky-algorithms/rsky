@@ -3,7 +3,7 @@
 - [ ] index.ts -> mod.rs
 - [x] oauth-access-token.ts -> oauth_access_token.rs
 - [ ] oauth-authorization-code-grant-token-request.ts -> oauth_authorization_code_grant_token_request.rs
-- [ ] oauth-authorization-details.ts -> oauth_authorization_details.rs
+- [x] oauth-authorization-details.ts -> oauth_authorization_details.rs
 - [ ] oauth-authorization-request-jar.ts -> oauth_authorization_request_jar.rs
 - [ ] oauth-authorization-request-par.ts -> oauth_authorization_request_par.rs
 - [ ] oauth-authorization-request-parameters.ts -> oauth_authorization_request_parameters.rs
@@ -14,15 +14,15 @@
 - [ ] oauth-client-credentials.ts -> oauth_client_credentials.rs
 - [ ] oauth-client-id-discoverable.ts -> oauth_client_id_discoverable.rs
 - [ ] oauth-client-id-loopback.ts -> oauth_client_id_loopback.rs
-- [ ] oauth-client-id.ts -> oauth_client_id.rs
+- [x] oauth-client-id.ts -> oauth_client_id.rs
 - [ ] oauth-client-metadata.ts -> oauth_client_metadata.rs
 - [x] oauth-code-challenge-method.ts -> oauth_code_challenge_method.rs
 - [x] oauth-endpoint-auth-method.ts -> oauth_endpoint_auth_method.rs
 - [x] oauth-endpoint-name.ts -> oauth_endpoint_name.rs
 - [x] oauth-grant-type.ts -> oauth_grant_type.rs
 - [ ] oauth-introspection-response.ts -> oauth_introspection_response.rs
-- [ ] oauth-issuer-identifier.ts -> oauth_issuer_identifier.rs
-- [ ] oauth-par-response.ts -> oauth_par_response.rs
+- [x] oauth-issuer-identifier.ts -> oauth_issuer_identifier.rs
+- [x] oauth-par-response.ts -> oauth_par_response.rs
 - [ ] oauth-password-grant-token-request.ts -> oauth_password_grant_token_request.rs
 - [ ] oauth-protected-resource-metadata.ts -> oauth_protected_resource_metadata.rs
 - [ ] oauth-redirect-uri.ts -> oauth_redirect_uri.rs
@@ -32,13 +32,13 @@
 - [x] oauth-response-mode.ts -> oauth_response_mode.rs
 - [x] oauth-response-type.ts -> oauth_response_type.rs
 - [x] oauth-scope.ts -> oauth_scope.rs
-- [ ] oauth-token-identification.ts -> oauth_token_identification.rs
+- [x] oauth-token-identification.ts -> oauth_token_identification.rs
 - [ ] oauth-token-request.ts -> oauth_token_request.rs
 - [ ] oauth-token-response.ts -> oauth_token_response.rs
 - [x] oauth-token-type.ts -> oauth_token_type.rs
-- [ ] oidc-claims-parameter.ts -> oidc_claims_parameter.rs
-- [ ] oidc-claims-properties.ts -> oidc_claims_properties.rs
-- [ ] oidc-entity-type.ts -> oidc_entity_type.rs
+- [x] oidc-claims-parameter.ts -> oidc_claims_parameter.rs
+- [x] oidc-claims-properties.ts -> oidc_claims_properties.rs
+- [x] oidc-entity-type.ts -> oidc_entity_type.rs
 - [ ] output.txt -> output.trs
 - [ ] uri.ts -> uri.rs
 - [x] util.ts -> util.rs

@@ -38,7 +38,7 @@ impl fmt::Display for OAuthAccessToken {
 }
 
 /// Errors that can occur when creating an OAuthAccessToken.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AccessTokenError {
     #[error("Access token cannot be empty")]
     Empty,
