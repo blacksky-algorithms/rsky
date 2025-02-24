@@ -5,6 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
+  PDS_EMAIL_FROM_NAME: "noreply"
+  PDS_MODERATION_EMAIL_FROM_NAME: "noreply"
+  PDS_MODERATION_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
+  PDS_HOSTNAME: "localho.st"
+  PDS_SERVICE_DID: "did:web:localho.st"
+  PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
+  PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_MAILGUN_API_KEY: ${{ secrets.PDS_MAILGUN_API_KEY }}
+  PDS_MAILGUN_DOMAIN: ${{ secrets.PDS_MAILGUN_DOMAIN }}
+  PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
