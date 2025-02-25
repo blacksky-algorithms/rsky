@@ -23,3 +23,5 @@ Rocket.toml
 /venv/
 rustc-*.txt
 /botenv/
+
+.idea/
