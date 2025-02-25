@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::oauth_types::{
-    OAuthAuthorizationRequestJar, OAuthAuthorizationRequestParameters, OAuthClientId,
-    OAuthRedirectUri, OAuthResponseType, OAuthScope,
-};
+use crate::oauth_types::{OAuthAuthorizationRequestJar, OAuthAuthorizationRequestParameters};
 
 /// A Pushed Authorization Request (PAR).
 ///
