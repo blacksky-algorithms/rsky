@@ -296,11 +296,7 @@ pub async fn get_account_by_email_v2(
     Ok(found)
 }
 
-pub async fn register_actor(
-    did: String,
-    handle: String,
-    deactivated: Option<bool>
-) -> Result<()> {
+pub async fn register_actor(did: String, handle: String, deactivated: Option<bool>) -> Result<()> {
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
     let created_at = format!("{}", dt.format(RFC3339_VARIANT));

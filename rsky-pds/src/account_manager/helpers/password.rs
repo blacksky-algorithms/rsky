@@ -85,7 +85,7 @@ pub async fn verify_app_password_v2(
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
 
     let did = did.clone();
-    let password= password.clone();
+    let password = password.clone();
     let password_encrypted = hash_app_password(&did, &password).await?;
     let found = db
         .run(move |conn| {

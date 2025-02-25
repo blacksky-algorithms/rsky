@@ -10,8 +10,9 @@ env:
   PDS_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
-  PDS_HOSTNAME: "localho.st"
+  PDS_HOSTNAME: "rsky.com"
   PDS_SERVICE_DID: "did:web:localho.st"
+  PDS_SERVICE_HANDLE_DOMAINS: ".rsky.com"
   PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
   PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
   PDS_MAILGUN_API_KEY: ${{ secrets.PDS_MAILGUN_API_KEY }}

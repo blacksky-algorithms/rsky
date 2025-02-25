@@ -3,19 +3,19 @@ use diesel::{Connection, PgConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use dotenvy::dotenv;
 use http_auth_basic::Credentials;
+use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
+use rocket::serde::json::json;
 use rsky_common::env::env_str;
+use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
 use rsky_pds::{build_rocket, RocketConfig};
 use std::env;
-use rocket::http::{ContentType, Header, Status};
-use rocket::serde::json::json;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, Image, ImageExt};
 use testcontainers_modules::postgres;
 use testcontainers_modules::postgres::Postgres;
 use tokio::sync::OnceCell;
-use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
 // static CLIENT: OnceCell<Client> = OnceCell::const_new();
 // static POSTGRES: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 
@@ -33,28 +33,28 @@ pub fn establish_connection(database_url: &str) -> Result<PgConnection> {
 }
 
 // pub async fn setup() -> &'static Client {
-    // POSTGRES
-    //     .get_or_init(|| async {
-    //         let postgres = postgres::Postgres::default()
-    //             .with_mapped_port(5432, 5432.tcp())
-    //             .start()
-    //             .await
-    //             .expect("Valid postgres instance");
-    //         let host_port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    //         let connection_string =
-    //             format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres",);
-    //         let mut conn = establish_connection(connection_string.as_str()).unwrap();
-    //         conn.run_pending_migrations(MIGRATIONS).unwrap();
-    //         postgres
-    //     })
-    //     .await;
-    // CLIENT
-    //     .get_or_init(|| async {
-    //         Client::untracked(build_rocket().await)
-    //             .await
-    //             .expect("Valid Rocket instance")
-    //     })
-    //     .await
+// POSTGRES
+//     .get_or_init(|| async {
+//         let postgres = postgres::Postgres::default()
+//             .with_mapped_port(5432, 5432.tcp())
+//             .start()
+//             .await
+//             .expect("Valid postgres instance");
+//         let host_port = postgres.get_host_port_ipv4(5432).await.unwrap();
+//         let connection_string =
+//             format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres",);
+//         let mut conn = establish_connection(connection_string.as_str()).unwrap();
+//         conn.run_pending_migrations(MIGRATIONS).unwrap();
+//         postgres
+//     })
+//     .await;
+// CLIENT
+//     .get_or_init(|| async {
+//         Client::untracked(build_rocket().await)
+//             .await
+//             .expect("Valid Rocket instance")
+//     })
+//     .await
 // }
 
 pub fn get_admin_token() -> String {
@@ -67,10 +67,15 @@ pub async fn get_postgres() -> ContainerAsync<Postgres> {
         .start()
         .await
         .expect("Valid postgres instance");
-    let ip_address = postgres.get_bridge_ip_address().await.expect("get bridged Ip").to_string();
+    let ip_address = postgres
+        .get_bridge_ip_address()
+        .await
+        .expect("get bridged Ip")
+        .to_string();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
-    let mut conn = establish_connection(connection_string.as_str()).expect("Connection  Established");
+    let mut conn =
+        establish_connection(connection_string.as_str()).expect("Connection  Established");
     conn.run_pending_migrations(MIGRATIONS).unwrap();
     postgres
 }
@@ -115,7 +120,8 @@ pub async fn create_account(client: &Client) -> (String, String) {
         "inviteCode": invite_code
     });
 
-    client.post("/xrpc/com.atproto.server.createAccount")
+    client
+        .post("/xrpc/com.atproto.server.createAccount")
         .header(ContentType::JSON)
         .header(Header::new("Authorization", get_admin_token()))
         .body(account_input.to_string())

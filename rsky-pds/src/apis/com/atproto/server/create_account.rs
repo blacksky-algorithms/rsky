@@ -70,7 +70,10 @@ pub async fn server_create_account(
     // Create new actor repo TODO: Proper rollback
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store.create_repo_v2(signing_key, Vec::new(), &blob_db).await {
+    let commit = match actor_store
+        .create_repo_v2(signing_key, Vec::new(), &blob_db)
+        .await
+    {
         Ok(commit) => commit,
         Err(error) => {
             tracing::error!("Failed to create repo\n{:?}", error);
@@ -113,16 +116,19 @@ pub async fn server_create_account(
 
     // Create Account
     let (access_jwt, refresh_jwt);
-    match AccountManager::create_account(CreateAccountOpts {
-        did: did.clone(),
-        handle: handle.clone(),
-        email: Some(email),
-        password: Some(password),
-        repo_cid: commit.cid,
-        repo_rev: commit.rev.clone(),
-        invite_code,
-        deactivated: Some(deactivated),
-    }, &blob_db)
+    match AccountManager::create_account(
+        CreateAccountOpts {
+            did: did.clone(),
+            handle: handle.clone(),
+            email: Some(email),
+            password: Some(password),
+            repo_cid: commit.cid,
+            repo_rev: commit.rev.clone(),
+            invite_code,
+            deactivated: Some(deactivated),
+        },
+        &blob_db,
+    )
     .await
     {
         Ok(res) => {

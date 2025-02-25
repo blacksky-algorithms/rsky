@@ -1,5 +1,5 @@
-use diesel::row::NamedRow;
 use crate::common::{create_account, get_admin_token};
+use diesel::row::NamedRow;
 use rocket::http::{ContentType, Header, Status};
 use rsky_lexicon::com::atproto::server::{CreateInviteCodeOutput, CreateSessionOutput};
 use serde_json::json;
@@ -107,7 +107,8 @@ async fn test_create_session() {
         "password": password,
     });
 
-    let response = client.post("/xrpc/com.atproto.server.createSession")
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
         .header(ContentType::JSON)
         .body(session_input.to_string())
         .dispatch()
@@ -121,7 +122,8 @@ async fn test_create_session() {
         "password": password + "1",
     });
 
-    let response = client.post("/xrpc/com.atproto.server.createSession")
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
         .header(ContentType::JSON)
         .body(session_input.to_string())
         .dispatch()

@@ -94,7 +94,7 @@ impl ActorStore {
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
-        db: &DbConn
+        db: &DbConn,
     ) -> Result<CommitData> {
         let write_ops = writes
             .clone()

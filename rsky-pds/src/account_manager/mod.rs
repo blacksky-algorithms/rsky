@@ -8,6 +8,7 @@ use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
+use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
@@ -24,7 +25,6 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
 use std::time::SystemTime;
-use crate::db::DbConn;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -77,7 +77,7 @@ impl AccountManager {
     pub async fn get_account_v2(
         handle_or_did: &String,
         flags: Option<AvailabilityFlags>,
-        db: &DbConn
+        db: &DbConn,
     ) -> Result<Option<ActorAccount>> {
         account::get_account_v2(handle_or_did, flags, db).await
     }
@@ -92,7 +92,7 @@ impl AccountManager {
     pub async fn get_account_by_email_v2(
         email: &String,
         flags: Option<AvailabilityFlags>,
-        db: &DbConn
+        db: &DbConn,
     ) -> Result<Option<ActorAccount>> {
         account::get_account_by_email_v2(email, flags, db).await
     }
@@ -178,7 +178,12 @@ impl AccountManager {
         Ok(repo::update_root(did, cid, rev)?)
     }
 
-    pub async fn update_repo_root_v2(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
+    pub async fn update_repo_root_v2(
+        did: String,
+        cid: Cid,
+        rev: String,
+        db: &DbConn,
+    ) -> Result<()> {
         Ok(repo::update_root_v2(did, cid, rev, db).await?)
     }
 
@@ -255,7 +260,7 @@ impl AccountManager {
     pub async fn create_session_v2(
         did: String,
         app_password_name: Option<String>,
-        db: &DbConn
+        db: &DbConn,
     ) -> Result<(String, String)> {
         let secp = Secp256k1::new();
         let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
@@ -364,7 +369,11 @@ impl AccountManager {
         invite::ensure_invite_is_available(code).await
     }
 
-    pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32, db: &DbConn) -> Result<()> {
+    pub async fn create_invite_codes(
+        to_create: Vec<AccountCodes>,
+        use_count: i32,
+        db: &DbConn,
+    ) -> Result<()> {
         invite::create_invite_codes(to_create, use_count, db).await
     }
 
@@ -416,7 +425,11 @@ impl AccountManager {
         password::verify_account_password(did, password_str).await
     }
 
-    pub async fn verify_account_password_v2(did: &String, password_str: &String, db: &DbConn) -> Result<bool> {
+    pub async fn verify_account_password_v2(
+        did: &String,
+        password_str: &String,
+        db: &DbConn,
+    ) -> Result<bool> {
         password::verify_account_password_v2(did, password_str, db).await
     }
 
@@ -430,7 +443,7 @@ impl AccountManager {
     pub async fn verify_app_password_v2(
         did: &String,
         password_str: &String,
-        db: &DbConn
+        db: &DbConn,
     ) -> Result<Option<String>> {
         password::verify_app_password_v2(did, password_str, db).await
     }

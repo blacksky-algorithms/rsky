@@ -1,10 +1,10 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::db::DbConn;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
-use crate::db::DbConn;
 
 #[tracing::instrument(skip_all)]
 async fn inner_create_session(
@@ -25,7 +25,7 @@ async fn inner_create_session(
                     include_deactivated: Some(true),
                     include_taken_down: Some(true),
                 }),
-                &db
+                &db,
             )
             .await
         }
@@ -36,7 +36,7 @@ async fn inner_create_session(
                     include_deactivated: Some(true),
                     include_taken_down: Some(true),
                 }),
-                &db
+                &db,
             )
             .await
         }
