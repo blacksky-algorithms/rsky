@@ -29,10 +29,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up nightly-2024-10-11
+      - name: Set up nightly-2025-01-03
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-11
+          toolchain: nightly-2025-01-03
           override: true
           components: rustfmt, clippy
 
@@ -47,17 +47,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Set up nightly-2024-10-11
+
+      - name: Set up nightly-2025-01-03
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-11
+          toolchain: nightly-2025-01-03
           override: true
           components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-      
+
       - name: Run cargo build
         run: cargo build --release
 
@@ -67,17 +67,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Set up nightly-2024-10-11
+
+      - name: Set up nightly-2025-01-03
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-11
+          toolchain: nightly-2025-01-03
           override: true
           components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-      
+
       - name: Run cargo test
         run: cargo test
 
@@ -87,16 +87,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Set up nightly-2024-10-11
+
+      - name: Set up nightly-2025-01-03
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-11
+          toolchain: nightly-2025-01-03
           override: true
           components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-      
+
       - name: Run cargo fmt
         run: cargo fmt -- --check
