@@ -6,15 +6,12 @@ on:
   pull_request:
 
 env:
-  # Non-secret environment variables
   PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
   PDS_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
   PDS_HOSTNAME: "localho.st"
   PDS_SERVICE_DID: "did:web:localho.st"
-
-  # Secrets (make sure these are defined in your repository's Secrets settings)
   PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
   PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
   PDS_MAILGUN_API_KEY: ${{ secrets.PDS_MAILGUN_API_KEY }}
@@ -26,77 +23,52 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up nightly-2025-01-03
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly-2025-01-03
-          override: true
-          components: rustfmt, clippy
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run cargo check
-        run: cargo check
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo check
+      run: cargo check
 
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up nightly-2025-01-03
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly-2025-01-03
-          override: true
-          components: rustfmt, clippy
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run cargo build
-        run: cargo build --release
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo build
+      run: cargo build --release
 
   test:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo test
+      run: cargo test 
 
-      - name: Set up nightly-2025-01-03
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly-2025-01-03
-          override: true
-          components: rustfmt, clippy
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run cargo test
-        run: cargo test
+  # clippy:
+  #   runs-on: ubuntu-latest
+  #   needs: test
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+  #   - name: Rust Cache
+  #     uses: Swatinem/rust-cache@v2
+  #   - name: Run Clippy
+  #     run: cargo clippy  -- -D warnings
 
   formatting:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up nightly-2025-01-03
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly-2025-01-03
-          override: true
-          components: rustfmt, clippy
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run cargo fmt
-        run: cargo fmt -- --check
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+    - name: Run cargo fmt
+      run: cargo fmt -- --check
