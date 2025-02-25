@@ -3,10 +3,12 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// A validated OAuth client ID.
-/// 
+///
 /// This is a newtype wrapper around String that ensures the client ID is not empty.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthClientId(String);
 
 impl OAuthClientId {
@@ -49,7 +51,7 @@ impl FromStr for OAuthClientId {
 }
 
 /// Errors that can occur when creating an OAuthClientId.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OAuthClientIdError {
     #[error("Client ID cannot be empty")]
     Empty,
@@ -89,7 +91,7 @@ mod tests {
     fn test_from_str() {
         let id: OAuthClientId = "client123".parse().unwrap();
         assert_eq!(id.as_ref(), "client123");
-        
+
         let result: Result<OAuthClientId, _> = "".parse();
         assert!(result.is_err());
     }

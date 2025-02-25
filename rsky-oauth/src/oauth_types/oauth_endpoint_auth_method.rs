@@ -1,8 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Authentication methods supported at OAuth endpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthEndpointAuthMethod {
     /// Client credentials in the Authorization header using HTTP Basic auth
     ClientSecretBasic,
@@ -101,34 +103,48 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(OAuthEndpointAuthMethod::ClientSecretBasic.to_string(), "client_secret_basic");
+        assert_eq!(
+            OAuthEndpointAuthMethod::ClientSecretBasic.to_string(),
+            "client_secret_basic"
+        );
         assert_eq!(OAuthEndpointAuthMethod::None.to_string(), "none");
-        assert_eq!(OAuthEndpointAuthMethod::TlsClientAuth.to_string(), "tls_client_auth");
+        assert_eq!(
+            OAuthEndpointAuthMethod::TlsClientAuth.to_string(),
+            "tls_client_auth"
+        );
     }
 
     #[test]
     fn test_from_str() {
         assert_eq!(
-            "client_secret_basic".parse::<OAuthEndpointAuthMethod>().unwrap(),
+            "client_secret_basic"
+                .parse::<OAuthEndpointAuthMethod>()
+                .unwrap(),
             OAuthEndpointAuthMethod::ClientSecretBasic
         );
         assert_eq!(
             "none".parse::<OAuthEndpointAuthMethod>().unwrap(),
             OAuthEndpointAuthMethod::None
         );
-        
+
         assert!("invalid".parse::<OAuthEndpointAuthMethod>().is_err());
     }
 
     #[test]
     fn test_as_ref() {
-        assert_eq!(OAuthEndpointAuthMethod::ClientSecretBasic.as_ref(), "client_secret_basic");
+        assert_eq!(
+            OAuthEndpointAuthMethod::ClientSecretBasic.as_ref(),
+            "client_secret_basic"
+        );
         assert_eq!(OAuthEndpointAuthMethod::None.as_ref(), "none");
     }
 
     #[test]
     fn test_default() {
-        assert_eq!(OAuthEndpointAuthMethod::default(), OAuthEndpointAuthMethod::None);
+        assert_eq!(
+            OAuthEndpointAuthMethod::default(),
+            OAuthEndpointAuthMethod::None
+        );
     }
 
     #[test]
@@ -136,7 +152,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(OAuthEndpointAuthMethod::ClientSecretBasic);
         set.insert(OAuthEndpointAuthMethod::None);
-        
+
         assert!(set.contains(&OAuthEndpointAuthMethod::ClientSecretBasic));
         assert!(!set.contains(&OAuthEndpointAuthMethod::TlsClientAuth));
     }
@@ -146,7 +162,7 @@ mod tests {
         let method = OAuthEndpointAuthMethod::None;
         let cloned = method.clone();
         assert_eq!(method, cloned);
-        
+
         let copied = method;
         assert_eq!(method, copied);
     }

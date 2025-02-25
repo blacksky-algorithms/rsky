@@ -13,10 +13,7 @@ pub enum OidcEntityType {
 impl OidcEntityType {
     /// Get a slice of all possible entity types
     pub fn variants() -> &'static [OidcEntityType] {
-        &[
-            OidcEntityType::IdToken,
-            OidcEntityType::UserInfo,
-        ]
+        &[OidcEntityType::IdToken, OidcEntityType::UserInfo]
     }
 }
 
@@ -77,8 +74,8 @@ impl<'de> serde::Deserialize<'de> for OidcEntityType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn test_variants() {
@@ -96,9 +93,15 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!("id_token".parse::<OidcEntityType>().unwrap(), OidcEntityType::IdToken);
-        assert_eq!("userinfo".parse::<OidcEntityType>().unwrap(), OidcEntityType::UserInfo);
-        
+        assert_eq!(
+            "id_token".parse::<OidcEntityType>().unwrap(),
+            OidcEntityType::IdToken
+        );
+        assert_eq!(
+            "userinfo".parse::<OidcEntityType>().unwrap(),
+            OidcEntityType::UserInfo
+        );
+
         assert!("invalid".parse::<OidcEntityType>().is_err());
     }
 
@@ -112,7 +115,7 @@ mod tests {
     fn test_hash() {
         let mut set = HashSet::new();
         set.insert(OidcEntityType::IdToken);
-        
+
         assert!(set.contains(&OidcEntityType::IdToken));
         assert!(!set.contains(&OidcEntityType::UserInfo));
     }
@@ -127,7 +130,7 @@ mod tests {
     fn test_deserialize() {
         let deserialized: OidcEntityType = serde_json::from_str("\"id_token\"").unwrap();
         assert_eq!(deserialized, OidcEntityType::IdToken);
-        
+
         let result: Result<OidcEntityType, _> = serde_json::from_str("\"invalid\"");
         assert!(result.is_err());
     }
@@ -138,13 +141,15 @@ mod tests {
         struct TestStruct {
             entity_type: OidcEntityType,
         }
-        
-        let test = TestStruct { entity_type: OidcEntityType::UserInfo };
+
+        let test = TestStruct {
+            entity_type: OidcEntityType::UserInfo,
+        };
         let json = json!({ "entity_type": "userinfo" });
-        
+
         let serialized = serde_json::to_value(&test).unwrap();
         assert_eq!(serialized, json);
-        
+
         let deserialized: TestStruct = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized, test);
     }

@@ -1,8 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// OAuth grant types, including standard grants and extension grants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthGrantType {
     /// Authorization code grant
     AuthorizationCode,
@@ -102,7 +104,10 @@ mod tests {
 
     #[test]
     fn test_display() {
-        assert_eq!(OAuthGrantType::AuthorizationCode.to_string(), "authorization_code");
+        assert_eq!(
+            OAuthGrantType::AuthorizationCode.to_string(),
+            "authorization_code"
+        );
         assert_eq!(
             OAuthGrantType::JwtBearer.to_string(),
             "urn:ietf:params:oauth:grant-type:jwt-bearer"
@@ -116,16 +121,21 @@ mod tests {
             OAuthGrantType::AuthorizationCode
         );
         assert_eq!(
-            "urn:ietf:params:oauth:grant-type:jwt-bearer".parse::<OAuthGrantType>().unwrap(),
+            "urn:ietf:params:oauth:grant-type:jwt-bearer"
+                .parse::<OAuthGrantType>()
+                .unwrap(),
             OAuthGrantType::JwtBearer
         );
-        
+
         assert!("invalid".parse::<OAuthGrantType>().is_err());
     }
 
     #[test]
     fn test_as_ref() {
-        assert_eq!(OAuthGrantType::AuthorizationCode.as_ref(), "authorization_code");
+        assert_eq!(
+            OAuthGrantType::AuthorizationCode.as_ref(),
+            "authorization_code"
+        );
         assert_eq!(
             OAuthGrantType::JwtBearer.as_ref(),
             "urn:ietf:params:oauth:grant-type:jwt-bearer"
@@ -145,7 +155,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(OAuthGrantType::AuthorizationCode);
         set.insert(OAuthGrantType::ClientCredentials);
-        
+
         assert!(set.contains(&OAuthGrantType::AuthorizationCode));
         assert!(!set.contains(&OAuthGrantType::Password));
     }
@@ -155,7 +165,7 @@ mod tests {
         let grant_type = OAuthGrantType::AuthorizationCode;
         let cloned = grant_type.clone();
         assert_eq!(grant_type, cloned);
-        
+
         let copied = grant_type;
         assert_eq!(grant_type, copied);
     }

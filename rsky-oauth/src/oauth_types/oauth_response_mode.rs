@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// The response mode for an OAuth authorization request.
-/// 
+///
 /// Specifies how the authorization response parameters should be returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthResponseMode {
@@ -86,11 +86,23 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!("query".parse::<OAuthResponseMode>().unwrap(), OAuthResponseMode::Query);
-        assert_eq!("QUERY".parse::<OAuthResponseMode>().unwrap(), OAuthResponseMode::Query);
-        assert_eq!("fragment".parse::<OAuthResponseMode>().unwrap(), OAuthResponseMode::Fragment);
-        assert_eq!("form_post".parse::<OAuthResponseMode>().unwrap(), OAuthResponseMode::FormPost);
-        
+        assert_eq!(
+            "query".parse::<OAuthResponseMode>().unwrap(),
+            OAuthResponseMode::Query
+        );
+        assert_eq!(
+            "QUERY".parse::<OAuthResponseMode>().unwrap(),
+            OAuthResponseMode::Query
+        );
+        assert_eq!(
+            "fragment".parse::<OAuthResponseMode>().unwrap(),
+            OAuthResponseMode::Fragment
+        );
+        assert_eq!(
+            "form_post".parse::<OAuthResponseMode>().unwrap(),
+            OAuthResponseMode::FormPost
+        );
+
         assert!("invalid".parse::<OAuthResponseMode>().is_err());
     }
 
@@ -106,7 +118,7 @@ mod tests {
         let mode = OAuthResponseMode::Query;
         let cloned = mode.clone();
         assert_eq!(mode, cloned);
-        
+
         let copied = mode;
         assert_eq!(mode, copied);
     }

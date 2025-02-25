@@ -1,11 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use url::Url;
 
 /// A validated OAuth request URI.
-/// 
+///
 /// This type ensures that the URI is a valid URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthRequestUri(String);
 
 impl OAuthRequestUri {
@@ -18,10 +19,10 @@ impl OAuthRequestUri {
         if uri.is_empty() {
             return Err(OAuthRequestUriError::Empty);
         }
-        
+
         // Validate that it's a proper URL
         Url::parse(&uri).map_err(|_| OAuthRequestUriError::InvalidUrl)?;
-        
+
         Ok(Self(uri))
     }
 

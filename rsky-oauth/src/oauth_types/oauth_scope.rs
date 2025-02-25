@@ -1,15 +1,17 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// A validated OAuth scope string.
-/// 
+///
 /// From OAuth 2.1 spec section 1.4.1:
 /// scope = scope-token *( SP scope-token )
 /// scope-token = 1*( %x21 / %x23-5B / %x5D-7E )
-/// 
+///
 /// This means a space-separated list of tokens where each token can contain
 /// most non-control ASCII characters except backslash and double quote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthScope(String);
 
 impl OAuthScope {
@@ -22,20 +24,21 @@ impl OAuthScope {
         if scope.is_empty() {
             return Err(OAuthScopeError::Empty);
         }
-        
+
         // Validate each scope token
         for token in scope.split(' ') {
             if token.is_empty() {
                 return Err(OAuthScopeError::EmptyToken);
             }
-            
-            if !token.chars().all(|c| {
-                matches!(c as u32, 0x21 | 0x23..=0x5B | 0x5D..=0x7E)
-            }) {
+
+            if !token
+                .chars()
+                .all(|c| matches!(c as u32, 0x21 | 0x23..=0x5B | 0x5D..=0x7E))
+            {
                 return Err(OAuthScopeError::InvalidCharacters(token.to_string()));
             }
         }
-        
+
         Ok(Self(scope))
     }
 
@@ -95,7 +98,11 @@ mod tests {
         ];
 
         for scope in valid_scopes {
-            assert!(OAuthScope::new(scope).is_ok(), "Scope should be valid: {}", scope);
+            assert!(
+                OAuthScope::new(scope).is_ok(),
+                "Scope should be valid: {}",
+                scope
+            );
         }
     }
 
@@ -103,8 +110,14 @@ mod tests {
     fn test_invalid_scopes() {
         let test_cases = [
             ("", OAuthScopeError::Empty),
-            ("read\\write", OAuthScopeError::InvalidCharacters("read\\write".to_string())),
-            ("read\"write", OAuthScopeError::InvalidCharacters("read\"write".to_string())),
+            (
+                "read\\write",
+                OAuthScopeError::InvalidCharacters("read\\write".to_string()),
+            ),
+            (
+                "read\"write",
+                OAuthScopeError::InvalidCharacters("read\"write".to_string()),
+            ),
             ("read  write", OAuthScopeError::EmptyToken),
         ];
 

@@ -1,8 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Represents the type of OAuth token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OAuthTokenType {
     /// DPoP token type
     DPoP,
@@ -57,11 +59,23 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!("dpop".parse::<OAuthTokenType>().unwrap(), OAuthTokenType::DPoP);
-        assert_eq!("DPoP".parse::<OAuthTokenType>().unwrap(), OAuthTokenType::DPoP);
-        assert_eq!("bearer".parse::<OAuthTokenType>().unwrap(), OAuthTokenType::Bearer);
-        assert_eq!("Bearer".parse::<OAuthTokenType>().unwrap(), OAuthTokenType::Bearer);
-        
+        assert_eq!(
+            "dpop".parse::<OAuthTokenType>().unwrap(),
+            OAuthTokenType::DPoP
+        );
+        assert_eq!(
+            "DPoP".parse::<OAuthTokenType>().unwrap(),
+            OAuthTokenType::DPoP
+        );
+        assert_eq!(
+            "bearer".parse::<OAuthTokenType>().unwrap(),
+            OAuthTokenType::Bearer
+        );
+        assert_eq!(
+            "Bearer".parse::<OAuthTokenType>().unwrap(),
+            OAuthTokenType::Bearer
+        );
+
         assert!("invalid".parse::<OAuthTokenType>().is_err());
     }
 

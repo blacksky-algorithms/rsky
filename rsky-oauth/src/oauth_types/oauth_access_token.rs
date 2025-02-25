@@ -1,9 +1,11 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A validated OAuth access token.
-/// 
+///
 /// This is a newtype wrapper around String that ensures the token is not empty.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthAccessToken(String);
 
 impl OAuthAccessToken {

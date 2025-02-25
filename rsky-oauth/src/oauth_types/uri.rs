@@ -1,9 +1,13 @@
-use crate::oauth_types::utils::{is_loopback_host, is_hostname_ip};
+use crate::oauth_types::util::{is_hostname_ip, is_loopback_host};
 use http::Uri;
-use std::{fmt::{self, Display, Formatter}, str::FromStr};
+use serde::{Deserialize, Serialize};
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum UriError {
     #[error("Invalid URL")]
     InvalidUrl,
@@ -50,16 +54,16 @@ impl ValidUri for DangerousUri {
         if !uri_str.contains(':') {
             return Err(UriError::InvalidUrl);
         }
-        
+
         // Try parsing as URI to validate
         Uri::from_str(uri_str).map_err(|_| UriError::InvalidUrl)?;
-        
+
         Ok(DangerousUri(uri_str.to_string()))
     }
 }
 
 /// Loopback URI (http://localhost, http://127.0.0.1, http://[::1])
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopbackUri(String);
 
 impl LoopbackUri {
@@ -82,10 +86,8 @@ impl ValidUri for LoopbackUri {
         }
 
         let uri = Uri::from_str(uri_str).map_err(|_| UriError::InvalidUrl)?;
-        
-        let hostname = uri.authority()
-            .ok_or(UriError::InvalidUrl)?
-            .host();
+
+        let hostname = uri.authority().ok_or(UriError::InvalidUrl)?.host();
 
         if !is_loopback_host(hostname) {
             return Err(UriError::InvalidLoopbackHost);
@@ -96,7 +98,7 @@ impl ValidUri for LoopbackUri {
 }
 
 /// HTTPS URI
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpsUri(String);
 
 impl HttpsUri {
@@ -119,10 +121,8 @@ impl ValidUri for HttpsUri {
         }
 
         let uri = Uri::from_str(uri_str).map_err(|_| UriError::InvalidUrl)?;
-        
-        let hostname = uri.authority()
-            .ok_or(UriError::InvalidUrl)?
-            .host();
+
+        let hostname = uri.authority().ok_or(UriError::InvalidUrl)?.host();
 
         // Disallow loopback URLs with https:
         if is_loopback_host(hostname) {
@@ -147,7 +147,7 @@ impl ValidUri for HttpsUri {
 }
 
 /// Web URI (either LoopbackUri or HttpsUri)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebUri {
     Loopback(LoopbackUri),
     Https(HttpsUri),
@@ -168,14 +168,14 @@ impl ValidUri for WebUri {
 impl Display for WebUri {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Loopback(uri) => write!(f, "{}", uri.0), 
-            Self::Https(uri) => write!(f, "{}", uri.0), 
+            Self::Loopback(uri) => write!(f, "{}", uri.0),
+            Self::Https(uri) => write!(f, "{}", uri.0),
         }
     }
 }
 
 /// Private-use URI (custom scheme with dot)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateUseUri(String);
 
 impl PrivateUseUri {
@@ -205,10 +205,7 @@ impl ValidUri for PrivateUseUri {
         let uri = Uri::from_str(uri_str).map_err(|_| UriError::InvalidUrl)?;
 
         // Should be covered by the check before, but let's be extra sure
-        if !uri.scheme_str()
-            .ok_or(UriError::InvalidUrl)?
-            .contains('.')
-        {
+        if !uri.scheme_str().ok_or(UriError::InvalidUrl)?.contains('.') {
             return Err(UriError::InvalidPrivateUseScheme);
         }
 
@@ -238,7 +235,6 @@ mod tests {
         assert_eq!(web_https.to_string(), String::from("https://example.com"));
     }
 
-
     use super::*;
 
     #[test]
@@ -254,7 +250,11 @@ mod tests {
             "https://resource.local/other",
         ];
         for uri in valid_uris {
-            assert!(DangerousUri::validate(uri).is_ok(), "URI should be valid: {}", uri);
+            assert!(
+                DangerousUri::validate(uri).is_ok(),
+                "URI should be valid: {}",
+                uri
+            );
         }
     }
 
@@ -264,35 +264,32 @@ mod tests {
             // Missing scheme
             "example.com/payments",
             "//example.com/accounts",
-            
             // Invalid characters
             "https://example.com/pay ments",
             "https://exam ple.com/accounts",
-            
             // Empty strings
             "",
             " ",
-            
             // Malformed URLs
             "http://",
             "https://",
             "http:///example.com",
-            
             // Invalid schemes
             "file:/etc/passwd",
-            
             // Non-ASCII characters in hostname
             "https://exämple.com/path",
-            
             // Missing host
             "https:///path",
-            
             // Backslashes instead of forward slashes
             "https://example.com\\path",
         ];
 
         for uri in invalid_uris {
-            assert!(DangerousUri::validate(uri).is_err(), "URI should be invalid: {}", uri);
+            assert!(
+                DangerousUri::validate(uri).is_err(),
+                "URI should be invalid: {}",
+                uri
+            );
         }
     }
 
@@ -332,13 +329,37 @@ mod tests {
         // Invalid cases with expected errors
         let invalid_cases = vec![
             // (URI string, Expected error, Description)
-            ("example:path", UriError::InvalidPrivateUseScheme, "no dot in protocol"),
-            ("example:path.test", UriError::InvalidPrivateUseScheme, "dot after colon"),
-            ("com.example://path", UriError::PrivateUseHostnameNotAllowed, "hostname not allowed"),
-            ("com.example://localhost/path", UriError::PrivateUseHostnameNotAllowed, "hostname with path not allowed"),
+            (
+                "example:path",
+                UriError::InvalidPrivateUseScheme,
+                "no dot in protocol",
+            ),
+            (
+                "example:path.test",
+                UriError::InvalidPrivateUseScheme,
+                "dot after colon",
+            ),
+            (
+                "com.example://path",
+                UriError::PrivateUseHostnameNotAllowed,
+                "hostname not allowed",
+            ),
+            (
+                "com.example://localhost/path",
+                UriError::PrivateUseHostnameNotAllowed,
+                "hostname with path not allowed",
+            ),
             ("", UriError::InvalidPrivateUseScheme, "empty string"),
-            ("not a url", UriError::InvalidPrivateUseScheme, "invalid URL format"),
-            (".example:path", UriError::InvalidUrl, "leading dot in protocol")
+            (
+                "not a url",
+                UriError::InvalidPrivateUseScheme,
+                "invalid URL format",
+            ),
+            (
+                ".example:path",
+                UriError::InvalidUrl,
+                "leading dot in protocol",
+            ),
         ];
 
         for (uri, expected_error, description) in invalid_cases {

@@ -1,12 +1,14 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Code challenge methods for PKCE (Proof Key for Code Exchange).
-/// 
+///
 /// RFC 7636 defines two methods:
 /// - S256: SHA256 hash of the code verifier
 /// - plain: The code verifier itself (less secure, not recommended)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthCodeChallengeMethod {
     /// SHA256 hash of the code verifier (recommended)
     S256,
@@ -85,7 +87,10 @@ mod tests {
 
     #[test]
     fn test_default() {
-        assert_eq!(OAuthCodeChallengeMethod::default(), OAuthCodeChallengeMethod::S256);
+        assert_eq!(
+            OAuthCodeChallengeMethod::default(),
+            OAuthCodeChallengeMethod::S256
+        );
     }
 
     #[test]
@@ -96,9 +101,15 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!("S256".parse::<OAuthCodeChallengeMethod>().unwrap(), OAuthCodeChallengeMethod::S256);
-        assert_eq!("plain".parse::<OAuthCodeChallengeMethod>().unwrap(), OAuthCodeChallengeMethod::Plain);
-        
+        assert_eq!(
+            "S256".parse::<OAuthCodeChallengeMethod>().unwrap(),
+            OAuthCodeChallengeMethod::S256
+        );
+        assert_eq!(
+            "plain".parse::<OAuthCodeChallengeMethod>().unwrap(),
+            OAuthCodeChallengeMethod::Plain
+        );
+
         assert!("invalid".parse::<OAuthCodeChallengeMethod>().is_err());
         assert!("s256".parse::<OAuthCodeChallengeMethod>().is_err()); // Case sensitive
     }
@@ -119,7 +130,7 @@ mod tests {
     fn test_hash() {
         let mut set = HashSet::new();
         set.insert(OAuthCodeChallengeMethod::S256);
-        
+
         assert!(set.contains(&OAuthCodeChallengeMethod::S256));
         assert!(!set.contains(&OAuthCodeChallengeMethod::Plain));
     }
@@ -129,7 +140,7 @@ mod tests {
         let method = OAuthCodeChallengeMethod::S256;
         let cloned = method.clone();
         assert_eq!(method, cloned);
-        
+
         let copied = method;
         assert_eq!(method, copied);
     }

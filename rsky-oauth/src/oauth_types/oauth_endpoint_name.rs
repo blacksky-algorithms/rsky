@@ -86,7 +86,10 @@ mod tests {
     fn test_display() {
         assert_eq!(OAuthEndpointName::Token.to_string(), "token");
         assert_eq!(OAuthEndpointName::Revocation.to_string(), "revocation");
-        assert_eq!(OAuthEndpointName::Introspection.to_string(), "introspection");
+        assert_eq!(
+            OAuthEndpointName::Introspection.to_string(),
+            "introspection"
+        );
         assert_eq!(
             OAuthEndpointName::PushedAuthorizationRequest.to_string(),
             "pushed_authorization_request"
@@ -95,15 +98,29 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!("token".parse::<OAuthEndpointName>().unwrap(), OAuthEndpointName::Token);
-        assert_eq!("TOKEN".parse::<OAuthEndpointName>().unwrap(), OAuthEndpointName::Token);
-        assert_eq!("revocation".parse::<OAuthEndpointName>().unwrap(), OAuthEndpointName::Revocation);
-        assert_eq!("introspection".parse::<OAuthEndpointName>().unwrap(), OAuthEndpointName::Introspection);
         assert_eq!(
-            "pushed_authorization_request".parse::<OAuthEndpointName>().unwrap(),
+            "token".parse::<OAuthEndpointName>().unwrap(),
+            OAuthEndpointName::Token
+        );
+        assert_eq!(
+            "TOKEN".parse::<OAuthEndpointName>().unwrap(),
+            OAuthEndpointName::Token
+        );
+        assert_eq!(
+            "revocation".parse::<OAuthEndpointName>().unwrap(),
+            OAuthEndpointName::Revocation
+        );
+        assert_eq!(
+            "introspection".parse::<OAuthEndpointName>().unwrap(),
+            OAuthEndpointName::Introspection
+        );
+        assert_eq!(
+            "pushed_authorization_request"
+                .parse::<OAuthEndpointName>()
+                .unwrap(),
             OAuthEndpointName::PushedAuthorizationRequest
         );
-        
+
         assert!("invalid".parse::<OAuthEndpointName>().is_err());
     }
 
@@ -123,7 +140,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(OAuthEndpointName::Token);
         set.insert(OAuthEndpointName::Revocation);
-        
+
         assert!(set.contains(&OAuthEndpointName::Token));
         assert!(!set.contains(&OAuthEndpointName::Introspection));
     }

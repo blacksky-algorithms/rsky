@@ -1,10 +1,12 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// The response type for an OAuth authorization request.
-/// 
+///
 /// This includes OAuth2 standard response types and OpenID Connect composite response types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthResponseType {
     /// Authorization Code Grant type (OAuth2)
     Code,
@@ -141,15 +143,24 @@ mod tests {
     #[test]
     fn test_display() {
         assert_eq!(OAuthResponseType::Code.to_string(), "code");
-        assert_eq!(OAuthResponseType::CodeIdTokenToken.to_string(), "code id_token token");
+        assert_eq!(
+            OAuthResponseType::CodeIdTokenToken.to_string(),
+            "code id_token token"
+        );
     }
 
     #[test]
     fn test_from_str() {
         // Test standard formats
-        assert_eq!("code".parse::<OAuthResponseType>().unwrap(), OAuthResponseType::Code);
-        assert_eq!("token".parse::<OAuthResponseType>().unwrap(), OAuthResponseType::Token);
-        
+        assert_eq!(
+            "code".parse::<OAuthResponseType>().unwrap(),
+            OAuthResponseType::Code
+        );
+        assert_eq!(
+            "token".parse::<OAuthResponseType>().unwrap(),
+            OAuthResponseType::Token
+        );
+
         // Test order-independent parsing
         assert_eq!(
             "token id_token code".parse::<OAuthResponseType>().unwrap(),
@@ -159,7 +170,7 @@ mod tests {
             "id_token code".parse::<OAuthResponseType>().unwrap(),
             OAuthResponseType::CodeIdToken
         );
-        
+
         // Test invalid
         assert!("invalid".parse::<OAuthResponseType>().is_err());
     }
@@ -180,7 +191,10 @@ mod tests {
     #[test]
     fn test_as_ref() {
         assert_eq!(OAuthResponseType::Code.as_ref(), "code");
-        assert_eq!(OAuthResponseType::CodeIdTokenToken.as_ref(), "code id_token token");
+        assert_eq!(
+            OAuthResponseType::CodeIdTokenToken.as_ref(),
+            "code id_token token"
+        );
     }
 
     #[test]
@@ -188,7 +202,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(OAuthResponseType::Code);
         set.insert(OAuthResponseType::Token);
-        
+
         assert!(set.contains(&OAuthResponseType::Code));
         assert!(!set.contains(&OAuthResponseType::IdToken));
     }
@@ -198,7 +212,7 @@ mod tests {
         let response_type = OAuthResponseType::Code;
         let cloned = response_type.clone();
         assert_eq!(response_type, cloned);
-        
+
         let copied = response_type;
         assert_eq!(response_type, copied);
     }
