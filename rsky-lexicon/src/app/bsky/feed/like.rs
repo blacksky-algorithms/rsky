@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
 use crate::com::atproto::repo::StrongRef;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "$type")]
