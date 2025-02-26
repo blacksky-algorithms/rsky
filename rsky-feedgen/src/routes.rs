@@ -189,7 +189,8 @@ pub async fn index(
             }
         }
         _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && !is_banned => {
-            match crate::apis::get_blacksky_trending(limit, cursor, connection, config, None).await
+            match crate::apis::get_blacksky_trending_cached(limit, cursor, connection, config, None)
+                .await
             {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
@@ -206,7 +207,7 @@ pub async fn index(
             }
         }
         _blacksky_videos if _blacksky_videos == BLACKSKY_VIDEOS && !is_banned => {
-            match crate::apis::get_blacksky_trending(
+            match crate::apis::get_blacksky_trending_cached(
                 limit,
                 cursor,
                 connection,
@@ -230,7 +231,7 @@ pub async fn index(
             }
         }
         _blacksky_photos if _blacksky_photos == BLACKSKY_PHOTOS && !is_banned => {
-            match crate::apis::get_blacksky_trending(
+            match crate::apis::get_blacksky_trending_cached(
                 limit,
                 cursor,
                 connection,

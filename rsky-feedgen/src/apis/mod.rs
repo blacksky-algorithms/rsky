@@ -9,6 +9,7 @@ use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Array, Bool, Nullable, Text};
+use moka::future::Cache;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
@@ -18,7 +19,7 @@ use rsky_common::explicit_slurs::contains_explicit_slurs;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::PostLabels;
 use std::collections::HashSet;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[allow(deprecated)]
 pub async fn get_posts_by_membership(
@@ -157,6 +158,7 @@ pub async fn get_posts_by_membership(
     result
 }
 
+#[derive(Clone)]
 pub enum TrendingMedia {
     OnlyVideo,
     OnlyImage,
@@ -299,6 +301,56 @@ pub async fn get_blacksky_trending(
         .await;
 
     result
+}
+
+// Global cache using Moka. Keys are strings (derived from query parameters) and
+// values are AlgoResponse.
+static TRENDING_CACHE: Lazy<Cache<String, AlgoResponse>> = Lazy::new(|| {
+    Cache::builder()
+        .max_capacity(env_int("FEEDGEN_TRENDING_CACHE_CAPACITY").unwrap_or(100) as u64)
+        .time_to_live(Duration::from_secs(
+            env_int("FEEDGEN_TRENDING_CACHE_TTL").unwrap_or(2) as u64,
+        ))
+        .build()
+});
+
+// Build a cache key from the parameters.
+fn build_trending_cache_key(
+    limit: Option<i64>,
+    params_cursor: Option<&str>,
+    media: Option<TrendingMedia>,
+) -> String {
+    let media_str = match media {
+        Some(TrendingMedia::OnlyImage) => "OnlyImage",
+        Some(TrendingMedia::OnlyVideo) => "OnlyVideo",
+        None => "None",
+    };
+    format!(
+        "limit:{}|cursor:{}|media:{}",
+        limit.unwrap_or(30),
+        params_cursor.unwrap_or(""),
+        media_str
+    )
+}
+
+// Cached version of get_blacksky_trending.
+pub async fn get_blacksky_trending_cached(
+    limit: Option<i64>,
+    params_cursor: Option<&str>,
+    connection: ReadReplicaConn,
+    config: &FeedGenConfig,
+    media: Option<TrendingMedia>,
+) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    let cache_key = build_trending_cache_key(limit, params_cursor, media.clone());
+    // Try to retrieve the result from the cache.
+    if let Some(cached_response) = TRENDING_CACHE.get(&cache_key).await {
+        return Ok(cached_response);
+    }
+    // If not found, compute the result.
+    let result = get_blacksky_trending(limit, params_cursor, connection, config, media).await?;
+    // Insert the computed result into the cache.
+    TRENDING_CACHE.insert(cache_key, result.clone()).await;
+    Ok(result)
 }
 
 #[allow(deprecated)]

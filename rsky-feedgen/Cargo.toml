@@ -27,6 +27,7 @@ regex = "1.8.4"
 base64 = "0.21.2"
 rand = "0.8.5"
 once_cell = "1.19.0"
+moka = { version = "0.12", features = ["future"] }
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"
