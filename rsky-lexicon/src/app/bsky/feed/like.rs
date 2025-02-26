@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use crate::com::atproto::repo::StrongRef;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -5,6 +6,6 @@ use crate::com::atproto::repo::StrongRef;
 #[serde(rename = "app.bsky.feed.like")]
 #[serde(rename_all = "camelCase")]
 pub struct Like {
-    pub created_at: String,
+    pub created_at: DateTime<Utc>,
     pub subject: StrongRef,
 }
