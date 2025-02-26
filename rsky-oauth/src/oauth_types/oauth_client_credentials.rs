@@ -151,7 +151,7 @@ mod tests {
 
     // Helper function to create a test client ID
     fn test_client_id() -> OAuthClientId {
-        unimplemented!("Need OAuthClientId implementation")
+        OAuthClientId::new("client123").unwrap()
     }
 
     #[test]
