@@ -115,7 +115,7 @@ impl ActorStore {
             keypair,
             Some(write_ops),
         )
-            .await?;
+        .await?;
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         let writes = writes
