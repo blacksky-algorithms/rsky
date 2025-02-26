@@ -175,13 +175,104 @@ impl JwtToken {
         Ok(Self(token))
     }
 
-    /// Verify token signature and decode claims
+    /// Verify token signature and decode claims with default validation
     pub fn verify(&self, key: &[u8]) -> Result<(JwtHeader, JwtClaims), JwtError> {
-        let token_data = jsonwebtoken::decode::<JwtClaims>(
-            &self.0,
-            &DecodingKey::from_secret(key),
-            &Validation::default(),
-        )?;
+        self.verify_with_options(key, &Validation::default())
+    }
+
+    /// Verify token signature and decode claims with custom validation options.
+    ///
+    /// This method allows customizing the validation criteria for JWT verification,
+    /// which is particularly useful for validating client assertion JWTs as described
+    /// in the OAuth 2.0 specification.
+    ///
+    /// # Arguments
+    /// * `key` - The key bytes used to verify the signature
+    /// * `validation` - Custom validation parameters
+    ///
+    /// # Returns
+    /// A tuple containing the decoded header and claims on success
+    ///
+    /// # Errors
+    /// Returns a `JwtError` if verification fails
+    ///
+    /// # Examples
+    ///
+    /// ## Basic JWT verification with audience validation (for client assertions)
+    /// ```
+    /// use jsonwebtoken::Validation;
+    ///
+    /// // Create validation for client assertion JWT
+    /// let mut validation = Validation::default();
+    /// 
+    /// // Set the expected audience (authorization server URL or token endpoint)
+    /// validation.set_audience(&["https://auth-server.example.com/token"]);
+    /// 
+    /// // Verify the client assertion token
+    /// let jwt = "..."; // Client assertion JWT
+    /// let token = JwtToken::new(jwt).unwrap();
+    /// let (header, claims) = token.verify_with_options(&secret_key, &validation)?;
+    ///
+    /// // Verify that the subject is the client_id
+    /// assert_eq!(claims.sub.unwrap(), "client_123");
+    /// ```
+    ///
+    /// ## Complete client assertion validation according to OAuth spec
+    /// ```
+    /// use jsonwebtoken::{Validation, Algorithm};
+    /// use std::time::{SystemTime, UNIX_EPOCH};
+    ///
+    /// // Create validation for client assertion JWT
+    /// let mut validation = Validation::default();
+    /// 
+    /// // Set algorithm expectations (OAuth spec recommends ES256)
+    /// validation.algorithms = vec![Algorithm::ES256];
+    /// 
+    /// // Set the expected audience (authorization server identifier)
+    /// validation.set_audience(&["https://auth-server.example.com"]);
+    /// 
+    /// // Set issuer validation if needed
+    /// validation.set_issuer(&["https://client.example.org"]);
+    /// 
+    /// // Get current timestamp for iat validation
+    /// let now = SystemTime::now()
+    ///     .duration_since(UNIX_EPOCH)
+    ///     .unwrap()
+    ///     .as_secs() as i64;
+    ///
+    /// // Verify the token
+    /// let token = JwtToken::new(jwt_string).unwrap();
+    /// let (header, claims) = token.verify_with_options(&public_key, &validation)?;
+    ///
+    /// // Verify claims according to OAuth spec
+    /// 
+    /// // 1. Verify 'sub' matches client_id
+    /// if claims.sub.as_deref() != Some("client_123") {
+    ///     return Err(JwtError::InvalidClaims("invalid subject claim".to_string()));
+    /// }
+    /// 
+    /// // 2. Verify 'iat' is recent (less than one minute old)
+    /// if let Some(iat) = claims.iat {
+    ///     if now - iat > 60 { // more than 60 seconds old
+    ///         return Err(JwtError::InvalidClaims("iat claim too old".to_string()));
+    ///     }
+    /// } else {
+    ///     return Err(JwtError::InvalidClaims("missing iat claim".to_string()));
+    /// }
+    /// 
+    /// // 3. Check for jti (optional but recommended)
+    /// if claims.jti.is_none() {
+    ///     println!("Warning: Missing jti claim in client assertion");
+    /// }
+    /// ```
+    pub fn verify_with_options(
+        &self,
+        key: &[u8],
+        validation: &Validation,
+    ) -> Result<(JwtHeader, JwtClaims), JwtError> {
+        let token_data =
+            jsonwebtoken::decode::<JwtClaims>(&self.0, &DecodingKey::from_secret(key), validation)?;
+
         let alg = algorithm_as_string(token_data.header.alg);
         Ok((
             JwtHeader {
@@ -527,7 +618,54 @@ mod tests {
 
         let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
 
-        let (_header, decoded_claims) = token.verify(key).unwrap();
+        // Create a custom validation that matches our test JWT
+        let mut validation = Validation::default();
+        validation.set_audience(&["test-audience"]);
+
+        // Verify with our specific validation
+        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
+        assert_eq!(decoded_claims.iss, claims.iss);
+        assert_eq!(decoded_claims.sub, claims.sub);
+        assert_eq!(
+            decoded_claims.additional_claims["custom"],
+            serde_json::json!("value")
+        );
+    }
+
+    #[test]
+    fn test_jwt_verify_no_validation() {
+        let key = b"secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut claims = JwtClaims {
+            iss: Some("test-issuer".to_string()),
+            sub: Some("test-subject".to_string()),
+            aud: Some(Audience::Single("test-audience".to_string())),
+            exp: Some(now + 3600),
+            nbf: None,
+            iat: Some(now),
+            jti: None,
+            additional_claims: std::collections::HashMap::new(),
+        };
+
+        claims.additional_claims.insert(
+            "custom".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
+
+        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
+
+        // Create a validation with all checks disabled for testing
+        let mut validation = Validation::default();
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.validate_aud = false;
+
+        // Verify with relaxed validation
+        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
         assert_eq!(decoded_claims.iss, claims.iss);
         assert_eq!(decoded_claims.sub, claims.sub);
         assert_eq!(

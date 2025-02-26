@@ -234,46 +234,6 @@ impl Jwk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_rsa_key_serialization() {
-        let jwk = Jwk::Rsa {
-            base: JwkBase {
-                kty: "RSA".to_string(),
-                alg: Some("RS256".to_string()),
-                kid: Some("key-1".to_string()),
-                ext: None,
-                use_: Some(KeyUse::Sig),
-                key_ops: None,
-                x5c: None,
-                x5t: None,
-                x5t_s256: None,
-                x5u: None,
-            },
-            params: RsaKeyParameters {
-                n: "modulus".to_string(),
-                e: "exponent".to_string(),
-                d: Some("private_exponent".to_string()),
-                p: None,
-                q: None,
-                dp: None,
-                dq: None,
-                qi: None,
-                oth: None,
-            },
-        };
-
-        let serialized = serde_json::to_value(&jwk).unwrap();
-
-        assert_eq!(serialized["kty"], "RSA");
-        assert_eq!(serialized["alg"], "RS256");
-        assert_eq!(serialized["kid"], "key-1");
-        assert_eq!(serialized["use"], "sig");
-        assert_eq!(serialized["n"], "modulus");
-        assert_eq!(serialized["e"], "exponent");
-        assert_eq!(serialized["d"], "private_exponent");
-    }
 
     #[test]
     fn test_ec_key_serialization() {

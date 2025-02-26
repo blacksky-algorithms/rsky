@@ -79,8 +79,10 @@ pub enum ParRequestError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_types::{OAuthClientId, RequestClaims};
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use crate::oauth_types::{
+        OAuthClientId, OAuthRedirectUri, OAuthResponseType, OAuthScope, RequestClaims,
+    };
+    use jsonwebtoken::Algorithm;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Helper function to create test parameters
