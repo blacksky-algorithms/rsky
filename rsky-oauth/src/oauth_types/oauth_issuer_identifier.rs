@@ -1,5 +1,3 @@
-//! OAuth issuer identifier types and validation.
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -34,7 +32,7 @@ impl OAuthIssuerIdentifier {
         }
 
         // Check if URL has credentials (username/password)
-        if url.username() != "" || url.password().is_some() {
+        if !url.username().is_empty() || url.password().is_some() {
             return Err(OAuthIssuerIdentifierError::ContainsCredentials);
         }
 
@@ -45,7 +43,7 @@ impl OAuthIssuerIdentifier {
 
         // Ensure canonical form
         let canonical_value = if url.path() == "/" {
-            format!("{}//{}", url.scheme(), url.host_str().unwrap())
+            url.origin().ascii_serialization()
         } else {
             url.as_str().to_string()
         };
@@ -116,6 +114,12 @@ pub enum OAuthIssuerIdentifierError {
 mod tests {
     use super::*;
 
+    /// Helper function to create a valid issuer for tests
+    fn test_issuer() -> OAuthIssuerIdentifier {
+        // Make sure we have a properly formatted URL with colon
+        OAuthIssuerIdentifier::new("https://example.com").unwrap()
+    }
+
     #[test]
     fn test_valid_issuer() {
         let valid = OAuthIssuerIdentifier::new("https://example.com").unwrap();
@@ -173,13 +177,13 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let issuer = OAuthIssuerIdentifier::new("https://example.com").unwrap();
+        let issuer = test_issuer();
         assert_eq!(issuer.to_string(), "https://example.com");
     }
 
     #[test]
     fn test_into_inner() {
-        let issuer = OAuthIssuerIdentifier::new("https://example.com").unwrap();
+        let issuer = test_issuer();
         assert_eq!(issuer.into_inner(), "https://example.com");
     }
 
@@ -194,8 +198,10 @@ mod tests {
 
     #[test]
     fn test_as_url() {
-        let issuer = OAuthIssuerIdentifier::new("https://example.com").unwrap();
+        let issuer = test_issuer();
         let url = issuer.as_url().unwrap();
-        assert_eq!(url.as_str(), "https://example.com/");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str().unwrap(), "example.com");
+        assert_eq!(url.path(), "/");
     }
 }

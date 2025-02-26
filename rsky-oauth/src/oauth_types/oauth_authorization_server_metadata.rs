@@ -243,15 +243,16 @@ pub enum MetadataError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::oauth_types::uri::ValidUri;
+    
     // Helper function to create test issuer
     fn test_issuer() -> OAuthIssuerIdentifier {
-        unimplemented!("Need OAuthIssuerIdentifier implementation")
+        OAuthIssuerIdentifier::new("https://example.com").unwrap()
     }
 
     // Helper function to create test URI
     fn test_uri() -> WebUri {
-        unimplemented!("Need WebUri implementation")
+        WebUri::validate("https://example.com").unwrap()
     }
 
     #[test]
