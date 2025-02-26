@@ -122,10 +122,8 @@ pub struct RequestClaims {
 impl OAuthAuthorizationRequestJar {
     /// Create a new authorization request JAR with the specified algorithm and key.
     ///
-    /// This function replaces both `new_signed` and `new_unsigned` by allowing the caller
-    /// to specify the algorithm and key to use. If the algorithm is `None`, an unsigned
-    /// JWT will be created. Otherwise, a signed JWT will be created using the specified
-    /// algorithm and key.
+    /// If the algorithm is `None`, an unsigned JWT will be created. 
+    /// Otherwise, a signed JWT will be created using the specified algorithm and key.
     ///
     /// # Arguments
     /// * `claims` - The claims to include in the JWT
