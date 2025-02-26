@@ -1,16 +1,12 @@
 use crate::auth_verifier::AccessStandard;
 use crate::handle;
 use crate::handle::errors::ErrorKind;
-use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::pipethrough::{pipethrough_procedure, pipethrough_procedure_post, ProxyRequest};
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::FromParam;
-use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::{response, Data, Request, Responder};
-use rsky_lexicon::chat::bsky::convo::MuteConvoInput;
-use std::collections::HashMap;
 
 #[derive(Responder)]
 #[response(status = 200)]
