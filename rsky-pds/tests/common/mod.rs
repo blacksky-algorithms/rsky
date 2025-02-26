@@ -19,6 +19,9 @@ use tokio::sync::OnceCell;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
+/**
+    Establish connection to the testcontainer postgres
+*/
 #[tracing::instrument(skip_all)]
 pub fn establish_connection(database_url: &str) -> Result<PgConnection> {
     tracing::debug!("Establishing database connection");
@@ -30,11 +33,17 @@ pub fn establish_connection(database_url: &str) -> Result<PgConnection> {
     Ok(result)
 }
 
+/**
+    Fetch PDS_ADMIN_PASS to be used for creating initial accounts
+*/
 pub fn get_admin_token() -> String {
     let credentials = Credentials::new("admin", env_str("PDS_ADMIN_PASS").unwrap().as_str());
     credentials.as_http_header()
 }
 
+/**
+    Starts a testcontainer for a postgres instance, and runs migrations from rsky-pds
+*/
 pub async fn get_postgres() -> ContainerAsync<Postgres> {
     let postgres = postgres::Postgres::default()
         .start()
@@ -53,6 +62,9 @@ pub async fn get_postgres() -> ContainerAsync<Postgres> {
     postgres
 }
 
+/**
+    Start Client for the RSky-PDS and have it use the provided postgres container
+*/
 pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
     let ip_address = postgres.get_bridge_ip_address().await.unwrap().to_string();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
@@ -67,6 +79,9 @@ pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
     .expect("Valid Rocket instance")
 }
 
+/**
+    Creates a dummy account for testing purposes
+*/
 pub async fn create_account(client: &Client) -> (String, String) {
     let input = json!({
         "useCount": 1
