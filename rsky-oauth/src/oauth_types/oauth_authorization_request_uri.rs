@@ -62,48 +62,48 @@ mod tests {
     use super::*;
 
     // Helper function to create a test request URI
-    fn test_request_uri() -> OAuthRequestUri {
-        unimplemented!("Need OAuthRequestUri implementation")
+    fn get_request_uri() -> OAuthRequestUri {
+        OAuthRequestUri::new("https://example.com/oauth/request").unwrap()
     }
 
     #[test]
     fn test_new() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request = OAuthAuthorizationRequestUri::new(uri.clone());
         assert_eq!(request.request_uri(), &uri);
     }
 
     #[test]
     fn test_from() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request: OAuthAuthorizationRequestUri = uri.clone().into();
         assert_eq!(request.request_uri(), &uri);
     }
 
     #[test]
     fn test_into_inner() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request = OAuthAuthorizationRequestUri::new(uri.clone());
         assert_eq!(request.into_inner(), uri);
     }
 
     #[test]
     fn test_as_ref() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request = OAuthAuthorizationRequestUri::new(uri.clone());
         assert_eq!(request.as_ref(), &uri);
     }
 
     #[test]
     fn test_display() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request = OAuthAuthorizationRequestUri::new(uri.clone());
         assert_eq!(request.to_string(), uri.to_string());
     }
 
     #[test]
     fn test_serialization() {
-        let uri = test_request_uri();
+        let uri = get_request_uri();
         let request = OAuthAuthorizationRequestUri::new(uri);
 
         let serialized = serde_json::to_string(&request).unwrap();
