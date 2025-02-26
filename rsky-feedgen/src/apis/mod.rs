@@ -273,8 +273,6 @@ pub async fn get_blacksky_trending(
         limit_val = limit.unwrap_or(30)
     );
 
-    println!("Query: {}", query_str);
-
     let result = connection
         .run(move |conn| {
             let results = sql_query(query_str)

@@ -119,6 +119,10 @@ mod tests {
     fn test_read_commit_create_like() {
         let data = "{\"did\":\"did:plc:uhtptnlcrj4wrxfjfcanf34q\",\"time_us\":1731539977109649,\"kind\":\"commit\",\"commit\":{\"rev\":\"3lauicnwejh2f\",\"operation\":\"create\",\"collection\":\"app.bsky.feed.like\",\"rkey\":\"3lauicnw5op2f\",\"record\":{\"$type\":\"app.bsky.feed.like\",\"createdAt\":\"2024-11-13T23:19:36.449Z\",\"subject\":{\"cid\":\"bafyreigw5ufnkavdzcczl2dusa3bcnkckhi4tscp6qsrsmg76s3ckseney\",\"uri\":\"at://did:plc:6wthaiuqiys3y7eztkpsdam2/app.bsky.feed.post/3latjcehsho2n\"}},\"cid\":\"bafyreifsdaip3s5nm3hcz4fbgkxodnils75oi3rmqhipwtom34rxw4vwdi\"}}";
         let response = read(data).unwrap();
+        let created_at = {
+            let dt = DateTime::parse_from_rfc3339("2024-11-13T23:19:36.449Z").unwrap();
+            dt.with_timezone(&Utc)
+        };
         let expected_response = JetstreamRepoCommitMessage {
             did: "did:plc:uhtptnlcrj4wrxfjfcanf34q".to_string(),
             time_us: 1731539977109649,
@@ -129,7 +133,7 @@ mod tests {
                 collection: "app.bsky.feed.like".to_string(),
                 rkey: "3lauicnw5op2f".to_string(),
                 record: Some(Lexicon::AppBskyFeedLike(Like {
-                    created_at: "2024-11-13T23:19:36.449Z".to_string(),
+                    created_at,
                     subject: StrongRef {
                         uri:
                             "at://did:plc:6wthaiuqiys3y7eztkpsdam2/app.bsky.feed.post/3latjcehsho2n"
