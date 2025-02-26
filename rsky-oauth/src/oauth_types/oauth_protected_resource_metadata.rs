@@ -151,16 +151,18 @@ impl fmt::Display for OAuthProtectedResourceMetadata {
 
 #[cfg(test)]
 mod tests {
+    use crate::oauth_types::ValidUri;
+
     use super::*;
 
     // Helper function to create a test WebUri
     fn test_uri() -> WebUri {
-        unimplemented!("Need WebUri implementation")
+        WebUri::validate("https://example.com").unwrap()
     }
 
     // Helper function to create a test IssuerIdentifier
     fn test_issuer() -> OAuthIssuerIdentifier {
-        unimplemented!("Need OAuthIssuerIdentifier implementation")
+        OAuthIssuerIdentifier::new("https://example.com").unwrap()
     }
 
     #[test]
