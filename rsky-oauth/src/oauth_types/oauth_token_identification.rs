@@ -186,51 +186,6 @@ impl OAuthTokenIdentification {
     pub fn into_token(self) -> Result<Token, TokenIdentificationError> {
         Token::new(self.token, self.token_type_hint)
     }
-
-    /// Parse from form-encoded body.
-    pub fn from_form(form: &str) -> Result<Self, TokenIdentificationError> {
-        let mut token = None;
-        let mut token_type_hint = None;
-
-        for pair in form.split('&') {
-            let mut parts = pair.split('=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                let key = decode(key).map_err(|_| TokenIdentificationError::InvalidFormEncoding)?;
-                let value =
-                    decode(value).map_err(|_| TokenIdentificationError::InvalidFormEncoding)?;
-
-                match key.as_ref() {
-                    "token" => token = Some(value.into_owned()),
-                    "token_type_hint" => {
-                        token_type_hint = Some(value.parse().map_err(|_| {
-                            TokenIdentificationError::InvalidTokenTypeHint(value.into_owned())
-                        })?);
-                    }
-                    _ => {} // Ignore unknown parameters
-                }
-            }
-        }
-
-        let token = token.ok_or(TokenIdentificationError::MissingToken)?;
-
-        Self::new(token, token_type_hint)
-    }
-
-    /// Convert to form-encoded body.
-    pub fn to_form(&self) -> String {
-        let mut parts = Vec::new();
-
-        parts.push(format!("token={}", urlencoding::encode(&self.token)));
-
-        if let Some(hint) = &self.token_type_hint {
-            parts.push(format!(
-                "token_type_hint={}",
-                urlencoding::encode(hint.as_ref())
-            ));
-        }
-
-        parts.join("&")
-    }
 }
 
 /// Errors that can occur when working with token identification.
@@ -350,53 +305,6 @@ mod tests {
         let token = id.into_token().unwrap();
         assert!(token.is_access_token());
         assert_eq!(token.token_value(), "example_token");
-    }
-
-    #[test]
-    fn test_token_identification_from_form() {
-        let form = "token=example_token&token_type_hint=access_token";
-        let id = OAuthTokenIdentification::from_form(form).unwrap();
-        assert_eq!(id.token, "example_token");
-        assert_eq!(id.token_type_hint, Some(TokenTypeHint::AccessToken));
-
-        // URL encoded form
-        let form = "token=example%20token&token_type_hint=refresh_token";
-        let id = OAuthTokenIdentification::from_form(form).unwrap();
-        assert_eq!(id.token, "example token");
-        assert_eq!(id.token_type_hint, Some(TokenTypeHint::RefreshToken));
-
-        // Missing token
-        let form = "token_type_hint=access_token";
-        assert!(matches!(
-            OAuthTokenIdentification::from_form(form),
-            Err(TokenIdentificationError::MissingToken)
-        ));
-
-        // Invalid token type hint
-        let form = "token=example_token&token_type_hint=invalid";
-        assert!(matches!(
-            OAuthTokenIdentification::from_form(form),
-            Err(TokenIdentificationError::InvalidTokenTypeHint(_))
-        ));
-
-        // Invalid form encoding
-        let form = "token=%invalid";
-        assert!(matches!(
-            OAuthTokenIdentification::from_form(form),
-            Err(TokenIdentificationError::InvalidFormEncoding)
-        ));
-    }
-
-    #[test]
-    fn test_token_identification_to_form() {
-        let id = OAuthTokenIdentification::new("example token", Some(TokenTypeHint::AccessToken))
-            .unwrap();
-        let form = id.to_form();
-        assert_eq!(form, "token=example%20token&token_type_hint=access_token");
-
-        let id = OAuthTokenIdentification::new("example_token", None).unwrap();
-        let form = id.to_form();
-        assert_eq!(form, "token=example_token");
     }
 
     #[test]
