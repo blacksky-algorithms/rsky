@@ -137,14 +137,28 @@ pub enum RedirectUriError {
 
 /// Validate a private-use URI according to RFC 8252.
 fn validate_private_use_uri(uri_str: &str) -> Result<(), RedirectUriError> {
-    let url = Url::parse(uri_str).map_err(|_| UriError::InvalidUrl)?;
-
-    // Must have exactly one slash after scheme
-    let path = url.path();
-    if !path.starts_with('/') || path[1..].contains('/') {
+    // Check for colon, which separates scheme from path
+    let colon_idx = uri_str.find(':').ok_or(UriError::InvalidUrl)?;
+    let scheme = &uri_str[..colon_idx];
+    
+    // Protocol (scheme) must contain a dot per RFC 7595
+    if !scheme.contains('.') {
+        return Err(RedirectUriError::InvalidUri(UriError::InvalidPrivateUseScheme));
+    }
+    
+    // Check path part (after the colon)
+    let path_part = &uri_str[colon_idx + 1..];
+    
+    // According to RFC 8252, there must be exactly one slash after the scheme
+    if !path_part.starts_with('/') {
+        return Err(RedirectUriError::InvalidUri(UriError::InvalidUrl));
+    }
+    
+    // Check if there's more than one slash (which would indicate a hostname)
+    if path_part.len() > 1 && path_part[1..].contains('/') {
         return Err(RedirectUriError::InvalidPrivateUsePath);
     }
-
+    
     Ok(())
 }
 

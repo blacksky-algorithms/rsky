@@ -193,24 +193,30 @@ impl Display for PrivateUseUri {
 
 impl ValidUri for PrivateUseUri {
     fn validate(uri_str: &str) -> Result<Self, UriError> {
-        let dot_idx = uri_str.find('.');
-        let colon_idx = uri_str.find(':');
+        // Check for colon, which separates scheme from path
+        let colon_idx = uri_str.find(':').ok_or(UriError::InvalidUrl)?;
+        let scheme = &uri_str[..colon_idx];
 
-        // Protocol must contain a dot
-        match (dot_idx, colon_idx) {
-            (Some(dot), Some(colon)) if dot < colon => (),
-            _ => return Err(UriError::InvalidPrivateUseScheme),
-        }
-
-        let uri = Uri::from_str(uri_str).map_err(|_| UriError::InvalidUrl)?;
-
-        // Should be covered by the check before, but let's be extra sure
-        if !uri.scheme_str().ok_or(UriError::InvalidUrl)?.contains('.') {
+        // Protocol (scheme) must contain a dot per RFC 7595
+        if !scheme.contains('.') {
             return Err(UriError::InvalidPrivateUseScheme);
         }
 
-        // RFC 8252 requires no hostname
-        if uri.authority().is_some() {
+        // Check for scheme validity (shouldn't start or end with dot, etc.)
+        if scheme.starts_with('.') || scheme.ends_with('.') || scheme.contains("..") {
+            return Err(UriError::InvalidPrivateUseScheme);
+        }
+
+        // Check path part (after the colon)
+        let path_part = &uri_str[colon_idx + 1..];
+
+        // According to RFC 8252, there must be exactly one slash after the scheme
+        if !path_part.starts_with('/') {
+            return Err(UriError::InvalidUrl);
+        }
+
+        // Check if there's more than one slash (which would indicate a hostname)
+        if path_part.len() > 1 && path_part[1..].contains('/') {
             return Err(UriError::PrivateUseHostnameNotAllowed);
         }
 
@@ -326,6 +332,22 @@ mod tests {
 
     #[test]
     fn test_private_use_uri() {
+        // Valid cases
+        let valid_cases = vec![
+            "com.example.app:/callback",
+            "org.example.myapp:/oauth",
+            "io.github.project:/redirect",
+            "net.example.service:/oauth2callback",
+        ];
+
+        for uri in valid_cases {
+            assert!(
+                PrivateUseUri::validate(uri).is_ok(),
+                "URI should be valid: {}",
+                uri
+            );
+        }
+
         // Invalid cases with expected errors
         let invalid_cases = vec![
             // (URI string, Expected error, Description)
@@ -335,30 +357,31 @@ mod tests {
                 "no dot in protocol",
             ),
             (
-                "example:path.test",
+                "example:/path.test",
                 UriError::InvalidPrivateUseScheme,
-                "dot after colon",
+                "no dot in protocol",
             ),
             (
                 "com.example://path",
                 UriError::PrivateUseHostnameNotAllowed,
-                "hostname not allowed",
+                "more than one slash (indicates hostname)",
             ),
             (
-                "com.example://localhost/path",
+                "com.example:/path/subpath",
                 UriError::PrivateUseHostnameNotAllowed,
-                "hostname with path not allowed",
+                "multiple path segments not allowed",
             ),
-            ("", UriError::InvalidPrivateUseScheme, "empty string"),
+            ("", UriError::InvalidUrl, "empty string"),
+            ("not a url", UriError::InvalidUrl, "invalid URL format"),
             (
-                "not a url",
+                ".example:/path",
                 UriError::InvalidPrivateUseScheme,
-                "invalid URL format",
+                "leading dot in protocol",
             ),
             (
-                ".example:path",
+                "com.example.app:callback",
                 UriError::InvalidUrl,
-                "leading dot in protocol",
+                "missing slash after colon",
             ),
         ];
 
