@@ -204,10 +204,10 @@ impl JwtToken {
     ///
     /// // Create validation for client assertion JWT
     /// let mut validation = Validation::default();
-    /// 
+    ///
     /// // Set the expected audience (authorization server URL or token endpoint)
     /// validation.set_audience(&["https://auth-server.example.com/token"]);
-    /// 
+    ///
     /// // Verify the client assertion token
     /// let jwt = "..."; // Client assertion JWT
     /// let token = JwtToken::new(jwt).unwrap();
@@ -224,16 +224,16 @@ impl JwtToken {
     ///
     /// // Create validation for client assertion JWT
     /// let mut validation = Validation::default();
-    /// 
+    ///
     /// // Set algorithm expectations (OAuth spec recommends ES256)
     /// validation.algorithms = vec![Algorithm::ES256];
-    /// 
+    ///
     /// // Set the expected audience (authorization server identifier)
     /// validation.set_audience(&["https://auth-server.example.com"]);
-    /// 
+    ///
     /// // Set issuer validation if needed
     /// validation.set_issuer(&["https://client.example.org"]);
-    /// 
+    ///
     /// // Get current timestamp for iat validation
     /// let now = SystemTime::now()
     ///     .duration_since(UNIX_EPOCH)
@@ -245,12 +245,12 @@ impl JwtToken {
     /// let (header, claims) = token.verify_with_options(&public_key, &validation)?;
     ///
     /// // Verify claims according to OAuth spec
-    /// 
+    ///
     /// // 1. Verify 'sub' matches client_id
     /// if claims.sub.as_deref() != Some("client_123") {
     ///     return Err(JwtError::InvalidClaims("invalid subject claim".to_string()));
     /// }
-    /// 
+    ///
     /// // 2. Verify 'iat' is recent (less than one minute old)
     /// if let Some(iat) = claims.iat {
     ///     if now - iat > 60 { // more than 60 seconds old
@@ -259,7 +259,7 @@ impl JwtToken {
     /// } else {
     ///     return Err(JwtError::InvalidClaims("missing iat claim".to_string()));
     /// }
-    /// 
+    ///
     /// // 3. Check for jti (optional but recommended)
     /// if claims.jti.is_none() {
     ///     println!("Warning: Missing jti claim in client assertion");

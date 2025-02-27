@@ -92,29 +92,39 @@ impl fmt::Display for OAuthAuthorizationRequestQuery {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::oauth_types::{OAuthClientId, OAuthRequestUri, OAuthResponseType, OAuthScope, RequestClaims, ResponseMode};
+    use crate::oauth_types::{
+        OAuthClientId, OAuthRequestUri, OAuthResponseType, OAuthScope, RequestClaims, ResponseMode,
+    };
 
     use super::*;
 
     // ROT13 decode function
     fn rot13_decode(encoded: &str) -> Vec<u8> {
-        encoded.chars().map(|c| {
-            if c >= 'A' && c <= 'Z' {
-                let mut code = c as u8 + 13;
-                if code > b'Z' { code -= 26; }
-                code as char
-            } else if c >= 'a' && c <= 'z' {
-                let mut code = c as u8 + 13;
-                if code > b'z' { code -= 26; }
-                code as char
-            } else {
-                c
-            }
-        }).collect::<String>().into_bytes()
+        encoded
+            .chars()
+            .map(|c| {
+                if c >= 'A' && c <= 'Z' {
+                    let mut code = c as u8 + 13;
+                    if code > b'Z' {
+                        code -= 26;
+                    }
+                    code as char
+                } else if c >= 'a' && c <= 'z' {
+                    let mut code = c as u8 + 13;
+                    if code > b'z' {
+                        code -= 26;
+                    }
+                    code as char
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .into_bytes()
     }
 
     fn get_es256_key() -> Vec<u8> {
-         // Please don't use this key for anything
+        // Please don't use this key for anything
         let encoded_key = r#"-----ORTVA CEVINGR XRL-----
         ZVTUNtRNZOZTOldTFZ49NtRTPPdTFZ49NjRUOT0jnjVONDDtKS0dxv6bEKcdGeHd
         L/Rb9hBBIuOS7ftobTz3V6t7Oe6uENAPNNE38eqJJL/rpIWviZUQNW0MP5iHWYUR
@@ -154,7 +164,12 @@ mod tests {
     fn test_jar() -> OAuthAuthorizationRequestJar {
         let claims = create_test_claims();
         let key = get_es256_key();
-        OAuthAuthorizationRequestJar::new(claims.clone(), Some(jsonwebtoken::Algorithm::ES256), Some(&key)).unwrap()
+        OAuthAuthorizationRequestJar::new(
+            claims.clone(),
+            Some(jsonwebtoken::Algorithm::ES256),
+            Some(&key),
+        )
+        .unwrap()
     }
 
     fn get_request_uri() -> OAuthRequestUri {

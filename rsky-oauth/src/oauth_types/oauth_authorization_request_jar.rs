@@ -1,10 +1,10 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::de::{self, Visitor};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 /// A JWT value that can be either signed or unsigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,14 +67,14 @@ impl<'de> Visitor<'de> for JwtVisitor {
                                 }
                                 // If we couldn't determine the algorithm, default to Signed
                                 Ok(Jwt::Signed(value.to_string()))
-                            },
-                            Err(_) => Err(E::custom("Invalid JWT header JSON"))
+                            }
+                            Err(_) => Err(E::custom("Invalid JWT header JSON")),
                         }
-                    },
-                    Err(_) => Err(E::custom("Invalid JWT header encoding"))
+                    }
+                    Err(_) => Err(E::custom("Invalid JWT header encoding")),
                 }
-            },
-            Err(_) => Err(E::custom("Invalid JWT header base64 encoding"))
+            }
+            Err(_) => Err(E::custom("Invalid JWT header base64 encoding")),
         }
     }
 }
@@ -88,7 +88,6 @@ impl<'de> Deserialize<'de> for Jwt {
         deserializer.deserialize_str(JwtVisitor)
     }
 }
-
 
 /// A JWT used as an Authorization Request.
 ///
@@ -118,11 +117,10 @@ pub struct RequestClaims {
     pub additional_claims: serde_json::Map<String, serde_json::Value>,
 }
 
-
 impl OAuthAuthorizationRequestJar {
     /// Create a new authorization request JAR with the specified algorithm and key.
     ///
-    /// If the algorithm is `None`, an unsigned JWT will be created. 
+    /// If the algorithm is `None`, an unsigned JWT will be created.
     /// Otherwise, a signed JWT will be created using the specified algorithm and key.
     ///
     /// # Arguments
@@ -290,17 +288,13 @@ impl OAuthAuthorizationRequestJar {
                 validation.validate_nbf = false;
                 validation.validate_aud = false;
                 validation.insecure_disable_signature_validation();
-                
-                let token_data = decode::<RequestClaims>(
-                    token, 
-                    &DecodingKey::from_secret(&[]), 
-                    &validation
-                ).map_err(|e| {
-                    JarError::JwtDecoding(e)
-                })?;
-                
+
+                let token_data =
+                    decode::<RequestClaims>(token, &DecodingKey::from_secret(&[]), &validation)
+                        .map_err(|e| JarError::JwtDecoding(e))?;
+
                 Ok(token_data.claims)
-            },
+            }
             Jwt::Unsigned(token) => {
                 // For unsigned tokens, manually decode
                 let parts: Vec<&str> = token.split('.').collect();
@@ -309,26 +303,29 @@ impl OAuthAuthorizationRequestJar {
                         jsonwebtoken::errors::ErrorKind::InvalidToken,
                     )));
                 }
-                
+
                 let claims_b64 = parts[1];
-                
+
                 // Decode the claims part
                 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-                let claims_json = URL_SAFE_NO_PAD.decode(claims_b64)
-                    .map_err(|_| JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
+                let claims_json = URL_SAFE_NO_PAD.decode(claims_b64).map_err(|_| {
+                    JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
                         jsonwebtoken::errors::ErrorKind::InvalidToken,
-                    )))?;
-                
-                let claims_str = String::from_utf8(claims_json)
-                    .map_err(|_| JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
+                    ))
+                })?;
+
+                let claims_str = String::from_utf8(claims_json).map_err(|_| {
+                    JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
                         jsonwebtoken::errors::ErrorKind::InvalidToken,
-                    )))?;
-                
-                let claims: RequestClaims = serde_json::from_str(&claims_str)
-                    .map_err(|e| JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
+                    ))
+                })?;
+
+                let claims: RequestClaims = serde_json::from_str(&claims_str).map_err(|e| {
+                    JarError::JwtDecoding(jsonwebtoken::errors::Error::from(
                         jsonwebtoken::errors::ErrorKind::Json(Arc::new(e)),
-                    )))?;
-                
+                    ))
+                })?;
+
                 validate_claims(&claims)?;
                 Ok(claims)
             }
@@ -340,12 +337,10 @@ impl OAuthAuthorizationRequestJar {
         let token = self.jwt();
 
         let validation = Validation::new(Algorithm::ES256);
-        let decoding_key = DecodingKey::from_ec_pem(key).map_err(|e| {
-            JarError::SigningKeyDecoding(e)
-        })?;
-        let token_data =
-            decode::<RequestClaims>(token, &decoding_key, &validation)
-                .map_err(JarError::JwtDecoding)?;
+        let decoding_key =
+            DecodingKey::from_ec_pem(key).map_err(|e| JarError::SigningKeyDecoding(e))?;
+        let token_data = decode::<RequestClaims>(token, &decoding_key, &validation)
+            .map_err(JarError::JwtDecoding)?;
 
         validate_claims(&token_data.claims)?;
         Ok(token_data.claims)
@@ -417,7 +412,7 @@ pub enum JarError {
     Expired,
 
     #[error("signing key decoding error: {0}")]
-    SigningKeyDecoding(#[source] jsonwebtoken::errors::Error)
+    SigningKeyDecoding(#[source] jsonwebtoken::errors::Error),
 }
 
 #[cfg(test)]
@@ -427,23 +422,31 @@ mod tests {
 
     // ROT13 decode function
     fn rot13_decode(encoded: &str) -> Vec<u8> {
-        encoded.chars().map(|c| {
-            if c >= 'A' && c <= 'Z' {
-                let mut code = c as u8 + 13;
-                if code > b'Z' { code -= 26; }
-                code as char
-            } else if c >= 'a' && c <= 'z' {
-                let mut code = c as u8 + 13;
-                if code > b'z' { code -= 26; }
-                code as char
-            } else {
-                c
-            }
-        }).collect::<String>().into_bytes()
+        encoded
+            .chars()
+            .map(|c| {
+                if c >= 'A' && c <= 'Z' {
+                    let mut code = c as u8 + 13;
+                    if code > b'Z' {
+                        code -= 26;
+                    }
+                    code as char
+                } else if c >= 'a' && c <= 'z' {
+                    let mut code = c as u8 + 13;
+                    if code > b'z' {
+                        code -= 26;
+                    }
+                    code as char
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .into_bytes()
     }
 
     fn get_es256_key() -> Vec<u8> {
-         // Please don't use this key for anything
+        // Please don't use this key for anything
         let encoded_key = r#"-----ORTVA CEVINGR XRL-----
         ZVTUNtRNZOZTOldTFZ49NtRTPPdTFZ49NjRUOT0jnjVONDDtKS0dxv6bEKcdGeHd
         L/Rb9hBBIuOS7ftobTz3V6t7Oe6uENAPNNE38eqJJL/rpIWviZUQNW0MP5iHWYUR
@@ -478,9 +481,12 @@ xKz2u6mSGed5IVUwKftM0Ix0T9eNObHO3gMc3ShJ0jRg8VWvvaGEdBajxA==
     fn test_new_signed_valid() {
         let claims = create_test_claims();
         let private_key = &get_es256_key();
-        let jar =
-            OAuthAuthorizationRequestJar::new(claims.clone(), Some(Algorithm::ES256), Some(private_key))
-                .unwrap();
+        let jar = OAuthAuthorizationRequestJar::new(
+            claims.clone(),
+            Some(Algorithm::ES256),
+            Some(private_key),
+        )
+        .unwrap();
 
         assert!(jar.is_signed());
 
@@ -560,90 +566,91 @@ xKz2u6mSGed5IVUwKftM0Ix0T9eNObHO3gMc3ShJ0jRg8VWvvaGEdBajxA==
     }
 
     #[test]
-fn test_serialization_unsigned() {
-    // Create a valid unsigned JWT
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    fn test_serialization_unsigned() {
+        // Create a valid unsigned JWT
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
-    let claims = RequestClaims {
-        iat: now,
-        exp: Some(now + 300),
-        jti: Some("test-id".to_string()),
-        additional_claims: serde_json::Map::new(),
-    };
+        let claims = RequestClaims {
+            iat: now,
+            exp: Some(now + 300),
+            jti: Some("test-id".to_string()),
+            additional_claims: serde_json::Map::new(),
+        };
 
-    // Create an unsigned JWT
-    let jar = OAuthAuthorizationRequestJar::new(claims, None, None).unwrap();
-    
-    // Ensure it's properly identified as unsigned
-    assert!(!jar.is_signed());
-    
-    // Serialize and deserialize
-    let serialized = serde_json::to_string(&jar).unwrap();
-    let deserialized: OAuthAuthorizationRequestJar = serde_json::from_str(&serialized).unwrap();
-    
-    // Verify the token type is preserved
-    assert!(!deserialized.is_signed());
-    
-    // Get the tokens as strings for comparison
-    let original_token = match &jar.request {
-        Jwt::Unsigned(token) => token,
-        _ => panic!("Expected unsigned token"),
-    };
-    
-    let deserialized_token = match &deserialized.request {
-        Jwt::Unsigned(token) => token,
-        _ => panic!("Deserialized token should be unsigned"),
-    };
-    
-    // Compare the token strings
-    assert_eq!(original_token, deserialized_token);
-}
+        // Create an unsigned JWT
+        let jar = OAuthAuthorizationRequestJar::new(claims, None, None).unwrap();
 
-#[test]
-fn test_serialization_signed() {
-    // Create a valid signed JWT
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+        // Ensure it's properly identified as unsigned
+        assert!(!jar.is_signed());
 
-    let claims = RequestClaims {
-        iat: now,
-        exp: Some(now + 300),
-        jti: Some("test-id".to_string()),
-        additional_claims: serde_json::Map::new(),
-    };
+        // Serialize and deserialize
+        let serialized = serde_json::to_string(&jar).unwrap();
+        let deserialized: OAuthAuthorizationRequestJar = serde_json::from_str(&serialized).unwrap();
 
-    let key = get_es256_key();
-    let jar = OAuthAuthorizationRequestJar::new(claims, Some(Algorithm::HS256), Some(&key)).unwrap();
-    
-    // Ensure it's properly identified as signed
-    assert!(jar.is_signed());
-    
-    // Serialize and deserialize
-    let serialized = serde_json::to_string(&jar).unwrap();
-    let deserialized: OAuthAuthorizationRequestJar = serde_json::from_str(&serialized).unwrap();
-    
-    // Verify the token type is preserved
-    assert!(deserialized.is_signed());
-    
-    // Get the tokens as strings for comparison
-    let original_token = match &jar.request {
-        Jwt::Signed(token) => token,
-        _ => panic!("Expected signed token"),
-    };
-    
-    let deserialized_token = match &deserialized.request {
-        Jwt::Signed(token) => token,
-        _ => panic!("Deserialized token should be signed"),
-    };
-    
-    // Compare the token strings
-    assert_eq!(original_token, deserialized_token);
-}
+        // Verify the token type is preserved
+        assert!(!deserialized.is_signed());
+
+        // Get the tokens as strings for comparison
+        let original_token = match &jar.request {
+            Jwt::Unsigned(token) => token,
+            _ => panic!("Expected unsigned token"),
+        };
+
+        let deserialized_token = match &deserialized.request {
+            Jwt::Unsigned(token) => token,
+            _ => panic!("Deserialized token should be unsigned"),
+        };
+
+        // Compare the token strings
+        assert_eq!(original_token, deserialized_token);
+    }
+
+    #[test]
+    fn test_serialization_signed() {
+        // Create a valid signed JWT
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let claims = RequestClaims {
+            iat: now,
+            exp: Some(now + 300),
+            jti: Some("test-id".to_string()),
+            additional_claims: serde_json::Map::new(),
+        };
+
+        let key = get_es256_key();
+        let jar =
+            OAuthAuthorizationRequestJar::new(claims, Some(Algorithm::HS256), Some(&key)).unwrap();
+
+        // Ensure it's properly identified as signed
+        assert!(jar.is_signed());
+
+        // Serialize and deserialize
+        let serialized = serde_json::to_string(&jar).unwrap();
+        let deserialized: OAuthAuthorizationRequestJar = serde_json::from_str(&serialized).unwrap();
+
+        // Verify the token type is preserved
+        assert!(deserialized.is_signed());
+
+        // Get the tokens as strings for comparison
+        let original_token = match &jar.request {
+            Jwt::Signed(token) => token,
+            _ => panic!("Expected signed token"),
+        };
+
+        let deserialized_token = match &deserialized.request {
+            Jwt::Signed(token) => token,
+            _ => panic!("Deserialized token should be signed"),
+        };
+
+        // Compare the token strings
+        assert_eq!(original_token, deserialized_token);
+    }
 
     #[test]
     fn test_different_algorithms() {

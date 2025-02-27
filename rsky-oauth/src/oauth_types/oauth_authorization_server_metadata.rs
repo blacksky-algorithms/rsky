@@ -244,7 +244,7 @@ pub enum MetadataError {
 mod tests {
     use super::*;
     use crate::oauth_types::uri::ValidUri;
-    
+
     // Helper function to create test issuer
     fn test_issuer() -> OAuthIssuerIdentifier {
         OAuthIssuerIdentifier::new("https://example.com").unwrap()
