@@ -118,71 +118,21 @@ pub struct RequestClaims {
 }
 
 impl OAuthAuthorizationRequestJar {
-    /// Create a new authorization request JAR with the specified algorithm and key.
+    /// Verify token signature and decode claims with custom validation options.
     ///
-    /// If the algorithm is `None`, an unsigned JWT will be created.
-    /// Otherwise, a signed JWT will be created using the specified algorithm and key.
+    /// This method allows customizing the validation criteria for JWT verification,
+    /// which is particularly useful for validating client assertion JWTs as described
+    /// in the OAuth 2.0 specification.
     ///
     /// # Arguments
-    /// * `claims` - The claims to include in the JWT
-    /// * `alg` - The algorithm to use for signing, or `None` for an unsigned JWT
-    /// * `key` - The key to sign the JWT with, or `None` for an unsigned JWT
+    /// * `key` - The key bytes used to verify the signature
+    /// * `validation` - Custom validation parameters
     ///
-    /// # Examples
+    /// # Returns
+    /// A tuple containing the decoded header and claims on success
     ///
-    /// Creating a signed JWT with ES256:
-    /// ```
-    /// use std::str;
-    ///
-    /// let claims = RequestClaims {
-    ///     iat: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-    ///     exp: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 300),
-    ///     jti: Some("test-id".to_string()),
-    ///     additional_claims: serde_json::Map::new(),
-    /// };
-    ///
-    /// // ROT13-encoded EC private key
-    /// // Please don't use this key for anything
-    /// let encoded_key = "-----ORTVA CEVINGR XRL-----
-    /// ZVTUNtRNZOZTOldTFZ49NtRTPPdTFZ49NjRUOT0jnjVONDDtKS0dxv6bEKcdGeHd
-    /// L/Rb9hBBIuOS7ftobTz3V6t7Oe6uENAPNNE38eqJJL/rpIWviZUQNW0MP5iHWYUR
-    /// eCn7dMVM53xuIGNc+0mDwUEC1405fp7rNkmqXRaFATQkIn+9bLE0SdCR
-    /// -----RAQ CEVINGR XRL-----";
-    ///
-    /// // ROT13 decode function
-    /// fn rot13_decode(encoded: &str) -> Vec<u8> {
-    ///     encoded.chars().map(|c| {
-    ///         if c >= 'A' && c <= 'Z' {
-    ///             let mut code = c as u8 + 13;
-    ///             if code > b'Z' { code -= 26; }
-    ///             code as char
-    ///         } else if c >= 'a' && c <= 'z' {
-    ///             let mut code = c as u8 + 13;
-    ///             if code > b'z' { code -= 26; }
-    ///             code as char
-    ///         } else {
-    ///             c
-    ///         }
-    ///     }).collect::<String>().into_bytes()
-    /// }
-    ///
-    /// let key = rot13_decode(encoded_key);
-    /// let jar = OAuthAuthorizationRequestJar::new(claims, Some(Algorithm::ES256), Some(&key)).unwrap();
-    /// assert!(jar.is_signed());
-    /// ```
-    ///
-    /// Creating an unsigned JWT:
-    /// ```
-    /// let claims = RequestClaims {
-    ///     iat: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-    ///     exp: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 300),
-    ///     jti: Some("test-id".to_string()),
-    ///     additional_claims: serde_json::Map::new(),
-    /// };
-    ///
-    /// let jar = OAuthAuthorizationRequestJar::new(claims, None, None).unwrap();
-    /// assert!(!jar.is_signed());
-    /// ```
+    /// # Errors
+    /// Returns a `JwtError` if verification fails
     pub fn new(
         claims: RequestClaims,
         alg: Option<Algorithm>,

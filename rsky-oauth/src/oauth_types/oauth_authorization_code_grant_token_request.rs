@@ -3,18 +3,15 @@
 //! Contains types and validation for authorization code grant token requests,
 //! including PKCE code verifier validation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// The grant type for authorization code requests
 const AUTHORIZATION_CODE_GRANT_TYPE: &str = "authorization_code";
 
 /// An authorization code grant token request with PKCE support.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthAuthorizationCodeGrantTokenRequest {
-    /// Must be "authorization_code"
-    grant_type: String,
-
     /// The authorization code received from the authorization server
     code: String,
 
@@ -23,8 +20,78 @@ pub struct OAuthAuthorizationCodeGrantTokenRequest {
 
     /// Optional PKCE code verifier
     /// See RFC 7636 Section 4.1
-    #[serde(skip_serializing_if = "Option::is_none")]
     code_verifier: Option<String>,
+}
+
+// Custom serialization to flatten the structure
+impl Serialize for OAuthAuthorizationCodeGrantTokenRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        use std::collections::HashMap;
+
+        // Create a HashMap to store all entries
+        // this might seem redundant but not doing causes a bug
+        let mut entries = HashMap::new();
+
+        // Add all fields to the HashMap
+        entries.insert(
+            "grant_type",
+            serde_json::Value::String(AUTHORIZATION_CODE_GRANT_TYPE.to_string()),
+        );
+        entries.insert("code", serde_json::Value::String(self.code.clone()));
+        entries.insert(
+            "redirect_uri",
+            serde_json::Value::String(self.redirect_uri.clone()),
+        );
+
+        // Add optional code_verifier if present
+        if let Some(verifier) = &self.code_verifier {
+            entries.insert("code_verifier", serde_json::Value::String(verifier.clone()));
+        }
+
+        // Serialize from the HashMap
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, value) in entries {
+            map.serialize_entry(key, &value)?;
+        }
+
+        map.end()
+    }
+}
+
+// Custom deserialization to handle the flattened structure
+impl<'de> Deserialize<'de> for OAuthAuthorizationCodeGrantTokenRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            grant_type: String,
+            code: String,
+            redirect_uri: String,
+            #[serde(default)]
+            code_verifier: Option<String>,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+
+        if helper.grant_type != AUTHORIZATION_CODE_GRANT_TYPE {
+            return Err(serde::de::Error::custom(format!(
+                "Invalid grant_type: expected '{}', got '{}'",
+                AUTHORIZATION_CODE_GRANT_TYPE, helper.grant_type
+            )));
+        }
+
+        Ok(OAuthAuthorizationCodeGrantTokenRequest {
+            code: helper.code,
+            redirect_uri: helper.redirect_uri,
+            code_verifier: helper.code_verifier,
+        })
+    }
 }
 
 impl OAuthAuthorizationCodeGrantTokenRequest {
@@ -61,7 +128,6 @@ impl OAuthAuthorizationCodeGrantTokenRequest {
         };
 
         Ok(Self {
-            grant_type: AUTHORIZATION_CODE_GRANT_TYPE.to_string(),
             code,
             redirect_uri,
             code_verifier,
@@ -136,12 +202,18 @@ pub enum AuthorizationCodeGrantError {
 mod tests {
     use super::*;
 
+    // Helper function to create a valid code verifier for tests
+    fn create_valid_code_verifier() -> String {
+        // Create a code verifier that meets the minimum length requirement of 43 characters
+        "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJ-".to_string()
+    }
+
     #[test]
     fn test_new_valid_request() {
         let request = OAuthAuthorizationCodeGrantTokenRequest::new(
             "valid_code",
             "https://example.com/callback",
-            Some("valid_code_verifier_thats_long_enough_to_meet_the_minimum_length_requirement"),
+            Some(create_valid_code_verifier()),
         )
         .unwrap();
 
@@ -215,7 +287,7 @@ mod tests {
         let result = OAuthAuthorizationCodeGrantTokenRequest::new(
             "valid_code",
             "https://example.com/callback",
-            Some("invalid!characters@in#this$long%enough^code&verifier*string"),
+            Some("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJ!@#"),
         );
         assert_eq!(
             result.unwrap_err(),
@@ -228,15 +300,24 @@ mod tests {
         let request = OAuthAuthorizationCodeGrantTokenRequest::new(
             "valid_code",
             "https://example.com/callback",
-            Some("valid_code_verifier_thats_long_enough_to_meet_the_minimum_length_requirement"),
+            Some(create_valid_code_verifier()),
         )
         .unwrap();
 
         let serialized = serde_json::to_string(&request).unwrap();
+        println!("Serialized JSON: {}", serialized);
+
         let deserialized: OAuthAuthorizationCodeGrantTokenRequest =
             serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(request, deserialized);
+
+        // Verify the serialized structure
+        let json_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(json_value["grant_type"], "authorization_code");
+        assert_eq!(json_value["code"], "valid_code");
+        assert_eq!(json_value["redirect_uri"], "https://example.com/callback");
+        assert!(json_value["code_verifier"].is_string());
     }
 
     #[test]
@@ -244,7 +325,7 @@ mod tests {
         let request = OAuthAuthorizationCodeGrantTokenRequest::new(
             "valid_code",
             "https://example.com/callback",
-            Some("valid_code_verifier_thats_long_enough_to_meet_the_minimum_length_requirement"),
+            Some(create_valid_code_verifier()),
         )
         .unwrap();
 
@@ -252,5 +333,19 @@ mod tests {
             request.to_string(),
             "AuthorizationCodeGrant(code=valid_code, redirect_uri=https://example.com/callback, has_verifier=true)"
         );
+    }
+
+    #[test]
+    fn test_deserialize_invalid_grant_type() {
+        let json = r#"
+        {
+            "grant_type": "invalid_type",
+            "code": "valid_code",
+            "redirect_uri": "https://example.com/callback"
+        }
+        "#;
+
+        let result = serde_json::from_str::<OAuthAuthorizationCodeGrantTokenRequest>(json);
+        assert!(result.is_err());
     }
 }

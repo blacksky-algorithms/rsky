@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use url::form_urlencoded;
 
@@ -8,7 +8,7 @@ use crate::oauth_types::{GrantType, OAuthRefreshToken};
 ///
 /// Used to obtain a new access token (and optionally a new refresh token)
 /// using a refresh token from a previous authorization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthRefreshTokenGrantTokenRequest {
     /// Must be "refresh_token"
     grant_type: GrantType,
@@ -70,6 +70,52 @@ impl OAuthRefreshTokenGrantTokenRequest {
         let refresh_token = refresh_token.ok_or(RefreshTokenGrantError::MissingRefreshToken)?;
 
         Ok(Self::new(refresh_token))
+    }
+}
+
+// Custom serialization to output the correct JSON structure
+impl Serialize for OAuthRefreshTokenGrantTokenRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("grant_type", "refresh_token")?;
+        map.serialize_entry("refresh_token", self.refresh_token.as_ref())?;
+        map.end()
+    }
+}
+
+// Custom deserialization to verify the grant_type value
+impl<'de> Deserialize<'de> for OAuthRefreshTokenGrantTokenRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            grant_type: String,
+            refresh_token: String,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+
+        if helper.grant_type != "refresh_token" {
+            return Err(serde::de::Error::custom(format!(
+                "Invalid grant_type: expected 'refresh_token', got '{}'",
+                helper.grant_type
+            )));
+        }
+
+        let refresh_token = OAuthRefreshToken::new(helper.refresh_token)
+            .map_err(|e| serde::de::Error::custom(format!("Invalid refresh token: {}", e)))?;
+
+        Ok(OAuthRefreshTokenGrantTokenRequest {
+            grant_type: GrantType::RefreshToken,
+            refresh_token,
+        })
     }
 }
 

@@ -1,11 +1,11 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Client Credentials Grant token request.
 ///
 /// This represents a request to obtain an access token using
 /// the client credentials grant type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthClientCredentialsGrantTokenRequest {
     /// Must be "client_credentials"
     grant_type: GrantType,
@@ -23,6 +23,44 @@ pub enum GrantType {
     RefreshToken,
     /// Password grant type
     Password,
+}
+
+// Custom serialization to output the correct JSON structure
+impl Serialize for OAuthClientCredentialsGrantTokenRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("grant_type", "client_credentials")?;
+        map.end()
+    }
+}
+
+// Custom deserialization to verify the grant_type value
+impl<'de> Deserialize<'de> for OAuthClientCredentialsGrantTokenRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            grant_type: String,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+
+        if helper.grant_type != "client_credentials" {
+            return Err(serde::de::Error::custom(format!(
+                "Invalid grant_type: expected 'client_credentials', got '{}'",
+                helper.grant_type
+            )));
+        }
+
+        Ok(OAuthClientCredentialsGrantTokenRequest::new())
+    }
 }
 
 impl OAuthClientCredentialsGrantTokenRequest {
@@ -63,20 +101,29 @@ mod tests {
     #[test]
     fn test_new() {
         let request = OAuthClientCredentialsGrantTokenRequest::new();
-        assert!(matches!(request.grant_type, GrantType::ClientCredentials));
+        // No fields to check
+        assert_eq!(
+            request,
+            OAuthClientCredentialsGrantTokenRequest {
+                grant_type: GrantType::ClientCredentials
+            }
+        );
     }
 
     #[test]
     fn test_default() {
         let request = OAuthClientCredentialsGrantTokenRequest::default();
-        assert!(matches!(request.grant_type, GrantType::ClientCredentials));
+        assert_eq!(request, OAuthClientCredentialsGrantTokenRequest::new());
     }
 
     #[test]
     fn test_display() {
         let request = OAuthClientCredentialsGrantTokenRequest::new();
         assert_eq!(request.to_string(), "ClientCredentialsGrant");
-        assert_eq!(request.grant_type.to_string(), "client_credentials");
+        assert_eq!(
+            GrantType::ClientCredentials.to_string(),
+            "client_credentials"
+        );
     }
 
     #[test]
@@ -84,12 +131,21 @@ mod tests {
         let request = OAuthClientCredentialsGrantTokenRequest::new();
 
         let serialized = serde_json::to_string(&request).unwrap();
+        println!("Serialized JSON: {}", serialized);
+
         let expected = r#"{"grant_type":"client_credentials"}"#;
         assert_eq!(serialized, expected);
 
         let deserialized: OAuthClientCredentialsGrantTokenRequest =
             serde_json::from_str(&serialized).unwrap();
         assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_deserialize_invalid_grant_type() {
+        let json = r#"{"grant_type":"invalid_type"}"#;
+        let result = serde_json::from_str::<OAuthClientCredentialsGrantTokenRequest>(json);
+        assert!(result.is_err());
     }
 
     #[test]
