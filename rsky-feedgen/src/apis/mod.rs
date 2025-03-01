@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
 use rocket::State;
-use rsky_common::env::env_int;
+use rsky_common::env::{env_bool, env_int};
 use rsky_common::explicit_slurs::contains_explicit_slurs;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::PostLabels;
@@ -363,15 +363,16 @@ pub async fn get_all_posts(
     config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl as PostSchema;
+    use chrono::Timelike;
+    use chrono_tz::America::New_York;
 
     let show_sponsored_post = config.show_sponsored_post.clone();
     let sponsored_post_uri = config.sponsored_post_uri.clone();
     let sponsored_post_probability = config.sponsored_post_probability.clone();
-
-    let params_cursor = match params_cursor {
-        None => None,
-        Some(params_cursor) => Some(params_cursor.to_string()),
-    };
+    let blackout_enabled = env_bool("FEEDGEN_MEDIA_BLACKOUT_ENABLED").unwrap_or(false);
+    let blackout_start_hour = env_int("FEEDGEN_MEDIA_BLACKOUT_START").unwrap_or(22) as u32;
+    let blackout_end_hour = env_int("FEEDGEN_MEDIA_BLACKOUT_END").unwrap_or(4) as u32;
+    let params_cursor = params_cursor.map(|s| s.to_string());
 
     let result = connection
         .run(move |conn| {
@@ -382,12 +383,34 @@ pub async fn get_all_posts(
                 .filter(sql::<Bool>("COALESCE(array_length(labels, 1), 0) = 0"))
                 .into_boxed();
 
+            // Apply the media exclusion filters only if blackout is enabled, and we're within the blackout period.
+            if blackout_enabled {
+                let now_et = Utc::now().with_timezone(&New_York);
+                let now_hour = now_et.hour();
+
+                let in_blackout = if blackout_start_hour < blackout_end_hour {
+                    now_hour >= blackout_start_hour && now_hour < blackout_end_hour
+                } else {
+                    // For periods spanning midnight, e.g. 22:00 to 04:00.
+                    now_hour >= blackout_start_hour || now_hour < blackout_end_hour
+                };
+
+                if in_blackout {
+                    query = query
+                        .filter(sql::<Bool>(
+                            "NOT EXISTS (SELECT 1 FROM image WHERE image.\"postUri\" = post.uri)",
+                        ))
+                        .filter(sql::<Bool>(
+                            "NOT EXISTS (SELECT 1 FROM video WHERE video.\"postUri\" = post.uri)",
+                        ));
+                }
+            }
+
             if let Some(lang) = lang {
                 query = query.filter(PostSchema::lang.like(format!("%{}%", lang)));
             }
 
-            if params_cursor.is_some() {
-                let cursor_str = params_cursor.unwrap();
+            if let Some(cursor_str) = params_cursor {
                 let v = cursor_str
                     .split("::")
                     .take(2)
@@ -431,13 +454,9 @@ pub async fn get_all_posts(
                 cursor = Some(format!("{}::{}", timestamp_millis, last_post.cid));
             }
 
-            results
-                .into_iter()
-                .map(|result| {
-                    let post_result = PostResult { post: result.uri };
-                    post_results.push(post_result);
-                })
-                .for_each(drop);
+            for result in results {
+                post_results.push(PostResult { post: result.uri });
+            }
 
             // Insert the sponsored post if the conditions are met
             if show_sponsored_post && post_results.len() >= 3 && !sponsored_post_uri.is_empty() {
