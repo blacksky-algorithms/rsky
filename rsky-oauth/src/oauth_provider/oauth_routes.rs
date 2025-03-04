@@ -1,4 +1,8 @@
-use rocket::{get, post, routes, Route};
+use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::oauth_provider::OAuthProvider;
+use crate::oauth_types::OAuthAuthorizationServerMetadata;
+use rocket::serde::json::Json;
+use rocket::{get, post, routes, Route, State};
 
 pub fn get_routes() -> Vec<Route> {
     routes![
@@ -16,8 +20,10 @@ pub fn get_routes() -> Vec<Route> {
 }
 
 #[get("/.well-known/oauth-authorization-server")]
-pub async fn oauth_well_known() {
-    unimplemented!()
+pub async fn oauth_well_known(
+    oauth_provider: &State<OAuthProvider>,
+) -> Result<Json<OAuthAuthorizationServerMetadata>, OAuthError> {
+    Ok(Json(oauth_provider.metadata.clone()))
 }
 
 #[get("/oauth/jwks")]

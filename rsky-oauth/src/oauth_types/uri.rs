@@ -106,6 +106,10 @@ impl HttpsUri {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn new(val: String) -> Self {
+        Self(val)
+    }
 }
 
 impl Display for HttpsUri {

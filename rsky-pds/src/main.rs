@@ -20,6 +20,9 @@ use rocket::{Request, Response, Route};
 use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
+use rsky_oauth::oauth_provider::metadata::build_metadata::{build_metadata, CustomMetadata};
+use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderOptions};
+use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use rsky_pds::account_manager::AccountManager;
 use rsky_pds::apis::*;
 use rsky_pds::config::env_to_cfg;
@@ -218,6 +221,12 @@ async fn rocket() -> _ {
             },
         })),
     };
+    let issuer = OAuthIssuerIdentifier::new("https://rsky.com").expect("Valid Issuer");
+    let oauth_options = OAuthProviderOptions {
+        metadata: None,
+        issuer,
+    };
+    let oauth_provider = OAuthProvider::new(oauth_options);
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -237,6 +246,7 @@ async fn rocket() -> _ {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
+        .manage(oauth_provider)
 }
 
 fn pds_routes() -> Vec<Route> {

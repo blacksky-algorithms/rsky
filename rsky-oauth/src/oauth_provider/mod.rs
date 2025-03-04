@@ -1,6 +1,9 @@
 use std::time::SystemTime;
 
+pub mod client;
 pub mod errors;
+pub mod lib;
+pub mod metadata;
 pub mod oauth_provider;
 pub mod oauth_routes;
 
