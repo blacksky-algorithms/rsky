@@ -8,6 +8,7 @@ use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
+use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
@@ -73,11 +74,27 @@ impl AccountManager {
         account::get_account(handle_or_did, flags).await
     }
 
+    pub async fn get_account_v2(
+        handle_or_did: &String,
+        flags: Option<AvailabilityFlags>,
+        db: &DbConn,
+    ) -> Result<Option<ActorAccount>> {
+        account::get_account_v2(handle_or_did, flags, db).await
+    }
+
     pub async fn get_account_by_email(
         email: &String,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<ActorAccount>> {
         account::get_account_by_email(email, flags).await
+    }
+
+    pub async fn get_account_by_email_v2(
+        email: &String,
+        flags: Option<AvailabilityFlags>,
+        db: &DbConn,
+    ) -> Result<Option<ActorAccount>> {
+        account::get_account_by_email_v2(email, flags, db).await
     }
 
     pub async fn is_account_activated(did: &String) -> Result<bool> {
@@ -106,7 +123,7 @@ impl AccountManager {
         }
     }
 
-    pub async fn create_account(opts: CreateAccountOpts) -> Result<(String, String)> {
+    pub async fn create_account(opts: CreateAccountOpts, db: &DbConn) -> Result<(String, String)> {
         let CreateAccountOpts {
             did,
             handle,
@@ -139,15 +156,15 @@ impl AccountManager {
         let now = rsky_common::now();
 
         if let Some(invite_code) = invite_code.clone() {
-            invite::ensure_invite_is_available(invite_code).await?;
+            invite::ensure_invite_is_available_v2(invite_code, db).await?;
         }
-        account::register_actor(did.clone(), handle, deactivated)?;
+        account::register_actor_v2(did.clone(), handle, deactivated, db).await?;
         if let (Some(email), Some(password_encrypted)) = (email, password_encrypted) {
-            account::register_account(did.clone(), email, password_encrypted)?;
+            account::register_account_v2(did.clone(), email, password_encrypted, db).await?;
         }
-        invite::record_invite_use(did.clone(), invite_code, now)?;
-        auth::store_refresh_token(refresh_payload, None).await?;
-        repo::update_root(did, repo_cid, repo_rev)?;
+        invite::record_invite_use_v2(did.clone(), invite_code, now, db).await?;
+        auth::store_refresh_token_v2(refresh_payload, None, db).await?;
+        repo::update_root_v2(did, repo_cid, repo_rev, db).await?;
         Ok((access_jwt, refresh_jwt))
     }
 
@@ -159,6 +176,15 @@ impl AccountManager {
 
     pub fn update_repo_root(did: String, cid: Cid, rev: String) -> Result<()> {
         Ok(repo::update_root(did, cid, rev)?)
+    }
+
+    pub async fn update_repo_root_v2(
+        did: String,
+        cid: Cid,
+        rev: String,
+        db: &DbConn,
+    ) -> Result<()> {
+        Ok(repo::update_root_v2(did, cid, rev, db).await?)
     }
 
     pub async fn delete_account(did: &String) -> Result<()> {
@@ -228,6 +254,34 @@ impl AccountManager {
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
         auth::store_refresh_token(refresh_payload, app_password_name).await?;
+        Ok((access_jwt, refresh_jwt))
+    }
+
+    pub async fn create_session_v2(
+        did: String,
+        app_password_name: Option<String>,
+        db: &DbConn,
+    ) -> Result<(String, String)> {
+        let secp = Secp256k1::new();
+        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+        let secret_key =
+            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+        let scope = if app_password_name.is_none() {
+            AuthScope::Access
+        } else {
+            AuthScope::AppPass
+        };
+        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
+            did,
+            jwt_key,
+            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            scope: Some(scope),
+            jti: None,
+            expires_in: None,
+        })?;
+        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+        auth::store_refresh_token_v2(refresh_payload, app_password_name, db).await?;
         Ok((access_jwt, refresh_jwt))
     }
 
@@ -315,8 +369,12 @@ impl AccountManager {
         invite::ensure_invite_is_available(code).await
     }
 
-    pub async fn create_invite_codes(to_create: Vec<AccountCodes>, use_count: i32) -> Result<()> {
-        invite::create_invite_codes(to_create, use_count).await
+    pub async fn create_invite_codes(
+        to_create: Vec<AccountCodes>,
+        use_count: i32,
+        db: &DbConn,
+    ) -> Result<()> {
+        invite::create_invite_codes(to_create, use_count, db).await
     }
 
     pub async fn create_account_invite_codes(
@@ -367,11 +425,27 @@ impl AccountManager {
         password::verify_account_password(did, password_str).await
     }
 
+    pub async fn verify_account_password_v2(
+        did: &String,
+        password_str: &String,
+        db: &DbConn,
+    ) -> Result<bool> {
+        password::verify_account_password_v2(did, password_str, db).await
+    }
+
     pub async fn verify_app_password(
         did: &String,
         password_str: &String,
     ) -> Result<Option<String>> {
         password::verify_app_password(did, password_str).await
+    }
+
+    pub async fn verify_app_password_v2(
+        did: &String,
+        password_str: &String,
+        db: &DbConn,
+    ) -> Result<Option<String>> {
+        password::verify_app_password_v2(did, password_str, db).await
     }
 
     pub async fn reset_password(opts: ResetPasswordOpts) -> Result<()> {
