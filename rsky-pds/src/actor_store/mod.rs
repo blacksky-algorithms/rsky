@@ -6,6 +6,7 @@ use crate::actor_store::blob::BlobReader;
 use crate::actor_store::preference::PreferenceReader;
 use crate::actor_store::record::RecordReader;
 use crate::actor_store::repo::sql_repo::SqlRepoReader;
+use crate::actor_store::repo::types::SyncEvtData;
 use crate::db::DbConn;
 use anyhow::{bail, Result};
 use diesel::*;
@@ -170,6 +171,17 @@ impl ActorStore {
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
+    }
+
+    pub async fn get_sync_event_data(&mut self) -> Result<SyncEvtData> {
+        let storage_guard = self.storage.read().await;
+        let current_root = storage_guard.get_root_detailed().await?;
+        let blocks_and_missing = storage_guard.get_blocks(vec![current_root.cid]).await?;
+        Ok(SyncEvtData {
+            cid: current_root.cid,
+            rev: current_root.rev,
+            blocks: blocks_and_missing.blocks,
+        })
     }
 
     pub async fn format_commit(

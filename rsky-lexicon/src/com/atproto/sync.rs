@@ -106,6 +106,15 @@ pub struct SubscribeReposIdentity {
     pub time: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposSync {
+    pub seq: i64,
+    pub did: String,
+    pub blocks: Vec<u8>,
+    pub rev: String,
+    pub time: DateTime<Utc>,
+}
+
 /// Represents a change to an account's identity. Could be an updated handle, signing key, or
 /// pds hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
 #[derive(Debug, Serialize, Deserialize)]

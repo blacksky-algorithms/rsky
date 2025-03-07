@@ -1,4 +1,5 @@
 use crate::account_manager::helpers::account::AccountStatus;
+use crate::actor_store::repo::types::SyncEvtData;
 use crate::models::models;
 use anyhow::Result;
 use lexicon_cid::Cid;
@@ -78,8 +79,18 @@ pub struct AccountEvt {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct TombstoneEvt {
+pub struct SyncEvt {
     pub did: String,
+    pub blocks: Vec<u8>,
+    pub rev: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedSyncEvt {
+    pub r#type: String, // 'commit'
+    pub seq: i64,
+    pub time: String,
+    pub evt: SyncEvt,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -150,22 +161,15 @@ pub struct TypedAccountEvt {
     pub evt: AccountEvt,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct TypedTombstoneEvt {
-    pub r#type: String, // 'tombstone'
-    pub seq: i64,
-    pub time: String,
-    pub evt: TombstoneEvt,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum SeqEvt {
     TypedCommitEvt(TypedCommitEvt),
-    TypedHandleEvt(TypedHandleEvt),
+    // TypedHandleEvt(TypedHandleEvt),
     TypedIdentityEvt(TypedIdentityEvt),
     TypedAccountEvt(TypedAccountEvt),
-    TypedTombstoneEvt(TypedTombstoneEvt),
+    // TypedTombstoneEvt(TypedTombstoneEvt),
+    TypedSyncEvt(TypedSyncEvt),
 }
 
 impl<'de> Deserialize<'de> for SeqEvt {
@@ -183,16 +187,13 @@ impl<'de> Deserialize<'de> for SeqEvt {
                 Some("commit") => Ok(SeqEvt::TypedCommitEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
-                Some("handle") => Ok(SeqEvt::TypedHandleEvt(
+                Some("sync") => Ok(SeqEvt::TypedSyncEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 Some("identity") => Ok(SeqEvt::TypedIdentityEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 Some("account") => Ok(SeqEvt::TypedAccountEvt(
-                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
-                )),
-                Some("tombstone") => Ok(SeqEvt::TypedTombstoneEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 _ => Err(DeserializerError::custom("Unknown event type")),
@@ -207,10 +208,9 @@ impl SeqEvt {
     pub fn seq(&self) -> i64 {
         match self {
             SeqEvt::TypedCommitEvt(this) => this.seq,
-            SeqEvt::TypedHandleEvt(this) => this.seq,
             SeqEvt::TypedIdentityEvt(this) => this.seq,
             SeqEvt::TypedAccountEvt(this) => this.seq,
-            SeqEvt::TypedTombstoneEvt(this) => this.seq,
+            SeqEvt::TypedSyncEvt(this) => this.seq,
         }
     }
 }
@@ -342,11 +342,16 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
     ))
 }
 
-pub async fn format_seq_tombstone(did: String) -> Result<models::RepoSeq> {
-    let evt = TombstoneEvt { did: did.clone() };
-    Ok(models::RepoSeq::new(
+pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<models::RepoSeq> {
+    let blocks = blocks_to_car_file(Some(&data.cid), data.blocks).await?;
+    let evt = SyncEvt {
         did,
-        "tombstone".to_string(),
+        rev: data.rev,
+        blocks,
+    };
+    Ok(models::RepoSeq::new(
+        evt.did.clone(),
+        "sync".to_string(),
         struct_to_cbor(&evt)?,
         rsky_common::now(),
     ))

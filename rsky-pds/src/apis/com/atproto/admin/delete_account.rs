@@ -26,12 +26,11 @@ async fn inner_delete_account(
     actor_store.destroy().await?;
     account_manager.delete_account(&did).await?;
     let mut lock = sequencer.sequencer.write().await;
-    let tombstone_seq = lock.sequence_tombstone(did.clone()).await?;
     let account_seq = lock
         .sequence_account_evt(did.clone(), AccountStatus::Deleted)
         .await?;
 
-    sequencer::delete_all_for_user(&did, Some(vec![account_seq, tombstone_seq])).await?;
+    sequencer::delete_all_for_user(&did, Some(vec![account_seq])).await?;
     Ok(())
 }
 

@@ -1,15 +1,16 @@
 use crate::account_manager::helpers::account::AccountStatus;
+use crate::actor_store::repo::types::SyncEvtData;
 use crate::crawlers::Crawlers;
 use crate::db::establish_connection_for_sequencer;
 use crate::models;
 use crate::sequencer::events::{
     format_seq_account_evt, format_seq_commit, format_seq_handle_update, format_seq_identity_evt,
-    format_seq_tombstone, SeqEvt, TypedAccountEvt, TypedCommitEvt, TypedHandleEvt,
-    TypedIdentityEvt, TypedTombstoneEvt,
+    SeqEvt, TypedAccountEvt, TypedCommitEvt, TypedIdentityEvt, TypedSyncEvt,
 };
 use crate::EVENT_EMITTER;
 use anyhow::Result;
 use diesel::*;
+use events::format_seq_sync_evt;
 use futures::{Stream, StreamExt};
 use rsky_common::time::SECOND;
 use rsky_common::{cbor_to_struct, wait};
@@ -141,46 +142,46 @@ impl Sequencer {
 
         let mut seq_evts: Vec<SeqEvt> = Vec::new();
         for row in rows {
+            let time = row.sequenced_at;
             match row.seq {
                 None => continue, // should never hit this because of WHERE clause
-                Some(seq) => {
-                    if row.event_type == "append" || row.event_type == "rebase" {
+                Some(seq) => match row.event_type.as_str() {
+                    "append" | "rebase" => {
                         seq_evts.push(SeqEvt::TypedCommitEvt(TypedCommitEvt {
                             r#type: "commit".to_string(),
                             seq,
-                            time: row.sequenced_at,
-                            evt: cbor_to_struct(row.event)?,
-                        }));
-                    } else if row.event_type == "handle" {
-                        seq_evts.push(SeqEvt::TypedHandleEvt(TypedHandleEvt {
-                            r#type: "handle".to_string(),
-                            seq,
-                            time: row.sequenced_at,
-                            evt: cbor_to_struct(row.event)?,
-                        }));
-                    } else if row.event_type == "identity" {
-                        seq_evts.push(SeqEvt::TypedIdentityEvt(TypedIdentityEvt {
-                            r#type: "identity".to_string(),
-                            seq,
-                            time: row.sequenced_at,
-                            evt: cbor_to_struct(row.event)?,
-                        }));
-                    } else if row.event_type == "account" {
-                        seq_evts.push(SeqEvt::TypedAccountEvt(TypedAccountEvt {
-                            r#type: "account".to_string(),
-                            seq,
-                            time: row.sequenced_at,
-                            evt: cbor_to_struct(row.event)?,
-                        }));
-                    } else if row.event_type == "tombstone" {
-                        seq_evts.push(SeqEvt::TypedTombstoneEvt(TypedTombstoneEvt {
-                            r#type: "tombstone".to_string(),
-                            seq,
-                            time: row.sequenced_at,
+                            time,
                             evt: cbor_to_struct(row.event)?,
                         }));
                     }
-                }
+                    "sync" => {
+                        seq_evts.push(SeqEvt::TypedSyncEvt(TypedSyncEvt {
+                            r#type: "sync".to_string(),
+                            seq,
+                            time,
+                            evt: cbor_to_struct(row.event)?,
+                        }));
+                    }
+                    "identity" => {
+                        seq_evts.push(SeqEvt::TypedIdentityEvt(TypedIdentityEvt {
+                            r#type: "identity".to_string(),
+                            seq,
+                            time,
+                            evt: cbor_to_struct(row.event)?,
+                        }));
+                    }
+                    "account" => {
+                        seq_evts.push(SeqEvt::TypedAccountEvt(TypedAccountEvt {
+                            r#type: "account".to_string(),
+                            seq,
+                            time,
+                            evt: cbor_to_struct(row.event)?,
+                        }));
+                    }
+                    _ => {
+                        eprintln!("ERROR: request_seq_range invalid event type");
+                    }
+                },
             }
         }
 
@@ -248,8 +249,8 @@ impl Sequencer {
         self.sequence_evt(evt).await
     }
 
-    pub async fn sequence_tombstone(&mut self, did: String) -> Result<i64> {
-        let evt = format_seq_tombstone(did).await?;
+    pub async fn sequence_sync_evt(&mut self, did: String, data: SyncEvtData) -> Result<i64> {
+        let evt = format_seq_sync_evt(did, data).await?;
         self.sequence_evt(evt).await
     }
 }

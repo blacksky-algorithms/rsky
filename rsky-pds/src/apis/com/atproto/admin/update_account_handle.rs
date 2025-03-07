@@ -45,6 +45,7 @@ async fn inner_update_account_handle(
 
     match account {
         Some(account) if account.did != did => bail!("Handle already taken: {handle}"),
+        // @TODO: needs to finish this branch
         Some(_) => (),
         None => {
             let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
@@ -59,8 +60,6 @@ async fn inner_update_account_handle(
     }
     let mut lock = sequencer.sequencer.write().await;
     lock.sequence_identity_evt(did.clone(), Some(handle.clone()))
-        .await?;
-    lock.sequence_handle_update(did.clone(), handle.clone())
         .await?;
     Ok(())
 }
