@@ -1,8 +1,8 @@
 use crate::config::ServerConfig;
 use crate::crawlers::Crawlers;
 use crate::sequencer::events::{
-    AccountEvt, CommitEvt, HandleEvt, IdentityEvt, SeqEvt, TombstoneEvt, TypedAccountEvt,
-    TypedCommitEvt, TypedHandleEvt, TypedIdentityEvt, TypedTombstoneEvt,
+    AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
+    TypedIdentityEvt, TypedSyncEvt,
 };
 use crate::sequencer::outbox::{Outbox, OutboxOpts};
 use crate::sequencer::Sequencer;
@@ -17,7 +17,7 @@ use rsky_common::time::from_str_to_utc;
 use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::sync::{
     SubscribeReposAccount, SubscribeReposCommit, SubscribeReposCommitOperation,
-    SubscribeReposHandle, SubscribeReposIdentity, SubscribeReposTombstone,
+    SubscribeReposIdentity, SubscribeReposSync,
 };
 use serde_json::json;
 use std::time::SystemTime;
@@ -184,29 +184,6 @@ pub async fn subscribe_repos<'a>(
                             };
                             yield Message::Binary(binary);
                         },
-                        SeqEvt::TypedHandleEvt(handle) => {
-                            let TypedHandleEvt { r#type, seq, time, evt } = handle;
-                            let HandleEvt { did, handle } = evt;
-                            let subscribe_handle_evt = SubscribeReposHandle {
-                                did,
-                                handle,
-                                seq,
-                                time: from_str_to_utc(&time),
-                            };
-                            let message_frame = MessageFrame::new(subscribe_handle_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
-                            let binary = match message_frame.to_bytes() {
-                                Ok(binary) => binary,
-                                Err(_) => {
-                                    let error_frame = ErrorFrame::new(ErrorFrameBody {
-                                        error: "SerializationError".to_string(),
-                                        message: Some("Failed to serialize event to message frame.".to_string()),
-                                    });
-                                    yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
-                                    return;
-                                }
-                            };
-                            yield Message::Binary(binary);
-                        },
                         SeqEvt::TypedIdentityEvt(identity) => {
                             let TypedIdentityEvt { r#type, seq, time, evt } = identity;
                             let IdentityEvt { did, handle } = evt;
@@ -254,15 +231,17 @@ pub async fn subscribe_repos<'a>(
                             };
                             yield Message::Binary(binary);
                         },
-                        SeqEvt::TypedTombstoneEvt(tombstone) => {
-                            let TypedTombstoneEvt { r#type, seq, time, evt } = tombstone;
-                            let TombstoneEvt { did } = evt;
-                            let subscribe_tombstone_evt = SubscribeReposTombstone {
-                                did,
+                        SeqEvt::TypedSyncEvt(sync) => {
+                            let TypedSyncEvt { r#type, seq, time, evt } = sync;
+                            let SyncEvt { did, blocks, rev } = evt;
+                            let subscribe_sync_evt = SubscribeReposSync {
                                 seq,
+                                did,
+                                blocks,
+                                rev,
                                 time: from_str_to_utc(&time),
                             };
-                            let message_frame = MessageFrame::new(subscribe_tombstone_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
+                            let message_frame = MessageFrame::new(subscribe_sync_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
                             let binary = match message_frame.to_bytes() {
                                 Ok(binary) => binary,
                                 Err(_) => {
@@ -274,7 +253,6 @@ pub async fn subscribe_repos<'a>(
                                     return;
                                 }
                             };
-                            yield Message::Binary(binary);
                         }
                     }
                 }
