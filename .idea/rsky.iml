@@ -20,6 +20,7 @@
       <sourceFolder url="file://$MODULE_DIR$/rsky-labeler/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-jetstream-subscriber/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/rsky-repo/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/rsky-oauth/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/venv" />
     </content>

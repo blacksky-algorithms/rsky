@@ -57,6 +57,7 @@ pub mod image;
 pub mod lexicon;
 pub mod mailer;
 pub mod models;
+pub mod oauth;
 pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;

@@ -4,7 +4,7 @@ use rocket::serde::json::Json;
 use rocket::{response, Request};
 use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum OAuthError {
     InvalidGrantError(String),
     InvalidRequestError(String),

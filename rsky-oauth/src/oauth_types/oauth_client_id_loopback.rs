@@ -185,8 +185,8 @@ pub enum LoopbackClientIdError {
 }
 
 /// Check if a client ID is a loopback client ID.
-pub fn is_oauth_client_id_loopback(client_id: &str) -> bool {
-    OAuthClientIdLoopback::new(client_id).is_ok()
+pub fn is_oauth_client_id_loopback(client_id: &OAuthClientId) -> bool {
+    OAuthClientIdLoopback::new(client_id.to_string().as_str()).is_ok()
 }
 
 /// Assert that a client ID is a loopback client ID.

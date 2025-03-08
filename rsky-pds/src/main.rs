@@ -20,14 +20,17 @@ use rocket::{Request, Response, Route};
 use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
+use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::metadata::build_metadata::{build_metadata, CustomMetadata};
 use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderOptions};
+use rsky_oauth::oauth_provider::oauth_routes::SharedOAuthProvider;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use rsky_pds::account_manager::AccountManager;
 use rsky_pds::apis::*;
 use rsky_pds::config::env_to_cfg;
 use rsky_pds::crawlers::Crawlers;
 use rsky_pds::db::DbConn;
+use rsky_pds::oauth::provider::build_oauth_provider;
 use rsky_pds::read_after_write::viewer::{LocalViewer, LocalViewerCreatorParams};
 use rsky_pds::sequencer::Sequencer;
 use rsky_pds::well_known::well_known;
@@ -221,12 +224,10 @@ async fn rocket() -> _ {
             },
         })),
     };
-    let issuer = OAuthIssuerIdentifier::new("https://rsky.com").expect("Valid Issuer");
-    let oauth_options = OAuthProviderOptions {
-        metadata: None,
-        issuer,
+
+    let oauth_provider = SharedOAuthProvider {
+        oauth_provider: RwLock::new(build_oauth_provider()),
     };
-    let oauth_provider = OAuthProvider::new(oauth_options);
 
     let shield = Shield::default().enable(NoSniff::Enable);
 

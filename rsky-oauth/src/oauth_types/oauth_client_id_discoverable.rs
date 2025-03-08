@@ -1,10 +1,10 @@
+use crate::oauth_provider::client::client_id::ClientId;
+use crate::oauth_types::{extract_url_path, is_hostname_ip, OAuthClientId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 use url::Url;
-
-use crate::oauth_types::{extract_url_path, is_hostname_ip, OAuthClientId};
 
 /// A discoverable OAuth client ID that is also a valid HTTPS URL.
 ///
@@ -132,8 +132,8 @@ impl From<OAuthClientIdDiscoverable> for OAuthClientId {
 }
 
 /// Check if a client ID is a discoverable client ID.
-pub fn is_oauth_client_id_discoverable(client_id: &str) -> bool {
-    OAuthClientIdDiscoverable::new(client_id).is_ok()
+pub fn is_oauth_client_id_discoverable(client_id: &OAuthClientId) -> bool {
+    OAuthClientIdDiscoverable::new(client_id.to_string().as_str()).is_ok()
 }
 
 /// Assert that a client ID is a discoverable client ID.

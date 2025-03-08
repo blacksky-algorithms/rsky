@@ -1,25 +1,23 @@
 // Re-export components so they can be used from the top level of the jwk module
 // mod alg;
-// mod errors;
 mod jwk_base;
 // mod jwks;
+mod errors;
 mod jwt;
-// mod jwt_decode;
-// mod jwt_verify;
-// mod key;
-// mod keyset;
+mod jwt_decode;
+mod jwt_verify;
+mod keyset;
 mod util;
 
 // Re-export public types and traits
 // pub use alg::*;
-// pub use errors::*;
 pub use jwk_base::*;
 // pub use jwks::*;
+pub use errors::*;
 pub use jwt::*;
-// pub use jwt_decode::*;
-// pub use jwt_verify::*;
-// pub use key::*;
-// pub use keyset::*;
+pub use jwt_decode::*;
+pub use jwt_verify::*;
+pub use keyset::*;
 pub use util::*;
 
 // Re-export Zod's validation error as our own (this was in TypeScript original)

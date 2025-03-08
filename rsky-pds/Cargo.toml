@@ -70,6 +70,7 @@ lexicon_cid = { workspace = true }
 once_cell = "1.19.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+jsonwebtoken = "9.3.1"
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"
