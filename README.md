@@ -46,6 +46,7 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 - `rsky-firehose`: Firehose consumer.
 - `rsky-jetstream-subscriber`: Firehose consumer for Jetstream.
 - `rsky-labeler`: Firehose consumer that labels content.
+- `Constellation`: An AT Protocol app-view designed for local-only posting and global views.
 
 ## About AT Protocol
 
@@ -60,7 +61,7 @@ The Authenticated Transfer Protocol ("ATP" or "atproto") is a decentralized soci
 
 -   [x] Feedgen and firehose consumer
 -   [x] PDS implementation
--   [ ] Frontend bluesky client
+-   [x] Frontend bluesky client
 -   [ ] Feedgen admin client
 
 ## Backers
