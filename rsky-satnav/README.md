@@ -18,6 +18,25 @@ rsky-satnav lets you load a CAR file (Content-Addressable Archive) and visually 
 - **MST-Based Grouping:**  
   Automatically groups repository records by collection, making it easier to navigate complex data structures.
 
+
+## Getting a CAR File
+
+CAR files contain all public records from an AT Protocol repository and can be used as part of the "credible exit" path for users exporting their data. To obtain a CAR file:
+
+1. **From the Bluesky app**
+  - Go to **Settings > Account > Export My Data**
+  - Click **Download CAR file**
+
+2. **Using the Bluesky API & Scripts**
+  - Follow the [official guide](https://docs.bsky.app/blog/repo-export#the-repository-car-file) to export via API.
+  - Use the provided scripts to fetch your repository archive.
+
+3. **With boat**
+  - The tool [boat](https://boat.kelinci.net/repo-export) provides a browser-based interface for exporting CAR files from a given DID.
+
+Once you have a CAR file, you can load it into **rsky-satnav** for structured exploration.
+
+
 ## Roadmap
 
 - **CAR Diffing:**  
