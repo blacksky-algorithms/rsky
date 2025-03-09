@@ -47,6 +47,7 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 - `rsky-jetstream-subscriber`: Firehose consumer for Jetstream.
 - `rsky-labeler`: Firehose consumer that labels content.
 - `Cypher`: An AT Protocol app-view designed for local-only posting and global views.
+- `rsky-satnav`: "Structured Archive Traversal, Navigation & Verification", a DASL CAR and AT Protocol repository explorer.
 
 ## About AT Protocol
 

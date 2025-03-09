@@ -1,0 +1,69 @@
+body {
+    background-color: #f1ecec;
+    color: #000;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 20px;
+}
+
+#hero {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: left;
+    align-items: start;
+}
+
+#header {
+    max-width: 1200px;
+}
+
+details.folder > summary::before {
+    content: "📁 ";
+    margin-right: 0.25em;
+}
+
+details.file > summary::before {
+    content: "📄 ";
+    margin-right: 0.25em;
+}
+
+details > summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+ul {
+    list-style: none;
+    padding-left: 1em;
+    margin: 0.25em 0;
+}
+
+li {
+    margin-left: 0.5em;
+}
+
+h1, h2 {
+    color: #3642e3;
+}
+.car-content {
+    margin-top: 20px;
+}
+.car-block {
+    margin-bottom: 1em;
+    padding: 0.5em;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+}
+.repo-structure {
+    margin-top: 2em;
+    padding: 1em;
+    background: #f3f3f3;
+    border-radius: 6px;
+}
+.collection-group {
+    margin-bottom: 1em;
+    padding: 0.5em;
+    border: 1px solid #aaa;
+    border-radius: 4px;
+    background: #fff;
+}

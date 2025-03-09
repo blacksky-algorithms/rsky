@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1007 200">
+    <defs>
+        <style>
+            @keyframes pulse {
+            0%, 100% { opacity: 0.7; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.1); }
+            }
+            .satellite { animation: pulse 3s infinite ease-in-out; transform-origin: center; }
+            .path { stroke-dasharray: 5; animation: dash 6s linear infinite; }
+            @keyframes dash {
+            to { stroke-dashoffset: -300; }
+            }
+        </style>
+    </defs>
+
+    <!-- Background -->
+    <rect width="840" height="200" fill="#f1ecec"/>
+
+    <!-- Orbit Paths (shifted right to better frame satellite) -->
+    <g fill="none" stroke="#3642e3" stroke-width="1.5" class="path">
+        <ellipse cx="220" cy="100" rx="210" ry="55"/>
+        <ellipse cx="220" cy="100" rx="165" ry="25" transform="rotate(35 220 100)"/>
+    </g>
+
+    <!-- Satellite (positioned within frame clearly) -->
+    <g class="satellite" transform="translate(100,80)">
+        <g transform="scale(1.5)">
+            <path fill="#d0cfce" d="M24.28 24.4c3.63-3.63 3.93-9.41.87-13.4-.37-.48-1.08-.53-1.51-.1L11 23.54c-.42.42-.38 1.11.07 1.49 3.86 3.21 9.57 3.01 13.21-.63z"/>
+            <path fill="#3f3f3f" d="M15.73 67.73 4.41 56.41c-.39-.39-.39-1.02 0-1.41l15.1-15.1c.39-.39 1.02-.39 1.41 0l11.32 11.32c.39.39.39 1.02 0 1.41L17.14 67.73c-.39.39-1.02.39-1.41 0zM51.21 32.24 39.9 20.93c-.39-.39-.39-1.02 0-1.41L55 4.41c.39-.39 1.02-.39 1.41 0l11.32 11.32c.39.39.39 1.02 0 1.41L52.63 32.24c-.39.39-1.02.39-1.41 0z"/>
+            <path fill="#d0cfce" d="m51.92 39.19-12.73 12.73c-.39.39-1.02.39-1.41 0L23.64 37.78c-.39-.39-.39-1.02 0-1.41l12.73-12.73c.39-.39 1.02-.39 1.41 0l14.14 14.14c.39.39.39 1.02 0 1.41z"/>
+            <path fill="#9b9b9a" d="M36.36 23.64 23.64 36.36c-.39.39-1.02.39-1.41 0l-4.24-4.24c-.39-.39-.39-1.02 0-1.41l12.73-12.73c.39-.39 1.02-.39 1.41 0l4.24 4.24c.39.39.39 1.02 0 1.41zm16.97 21.21-8.49 8.49c-.39.39-1.02.39-1.41 0l-2.12-2.12c-.39-.39-.39-1.02 0-1.41l8.49-8.49c.39-.39 1.02-.39 1.41 0l2.12 2.12c.39.39.39 1.02 0 1.41z"/>
+            <circle fill="#3f3f3f" cx="12.32" cy="12.32" r="2" transform="rotate(-45 12.32 12.32)"/>
+        </g>
+    </g>
+
+    <!-- Main Text -->
+    <text x="320" y="110" fill="#000" font-size="32" font-family="monospace" font-weight="bold">
+        rsky-satnav
+    </text>
+
+    <!-- Subtext (clearly visible below main text) -->
+    <text x="320" y="135" fill="#000" font-size="12" font-family="monospace">
+        Structured Archive Traversal, Navigation &amp; Verification
+    </text>
+</svg>
