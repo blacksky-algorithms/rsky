@@ -5,7 +5,7 @@ rsky-satnav is a prototype tool for visually exploring DASL CAR and AT Protocol 
 
 ## Overview
 
-rsky-satnav lets you load a CAR file (Content-Addressable Archive) and visually inspect its contents using a collapsible, directory-style UI. It leverages MST (Merkle Sorted Tree) logic to group records by collection for an intuitive file-directory-like experience.
+rsky-satnav lets you load a CAR file (Content-Addressable Archive) and visually inspect its contents using a collapsible, directory-style UI. It leverages MST (Merkle Search Tree) logic to group records by collection for an intuitive file-directory-like experience.
 
 ## Features
 
