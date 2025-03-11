@@ -2751,7 +2751,6 @@ description = "The last known event seq number to backfill from."
 type = "union"
 refs = [
     "lex:com.atproto.sync.subscribeRepos#commit",
-    "lex:com.atproto.sync.subscribeRepos#commit",
     "lex:com.atproto.sync.subscribeRepos#identity",
     "lex:com.atproto.sync.subscribeRepos#handle",
     "lex:com.atproto.sync.subscribeRepos#migrate",
