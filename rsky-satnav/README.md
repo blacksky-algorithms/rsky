@@ -68,7 +68,7 @@ rsky-satnav is built with [Dioxus](https://github.com/DioxusLabs/dioxus) for the
 
 1. Install npm: https://docs.npmjs.com/downloading-and-installing-node-js-and-npm
 2. Install the Tailwind CSS CLI: https://tailwindcss.com/docs/installation
-3. To serve the app locally, you will also need to install [dx](), e.g. `sudo apt install dx` and [dioxus-cli](https://crates.io/crates/dioxus-cli), e.g. `cargo install dioxus-cli`.
+3. To serve the app locally, you will also need to install [openDX](https://ubuntu.pkgs.org/22.04/ubuntu-universe-amd64/dx_4.4.4-15_amd64.deb.html), e.g. `sudo apt install dx` and [dioxus-cli](https://crates.io/crates/dioxus-cli), e.g. `cargo install dioxus-cli`.
 4. Run the following command in the root of the project to start the Tailwind CSS compiler:
 
 ```bash
