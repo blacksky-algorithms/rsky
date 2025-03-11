@@ -2755,6 +2755,7 @@ refs = [
     "lex:com.atproto.sync.subscribeRepos#identity",
     "lex:com.atproto.sync.subscribeRepos#handle",
     "lex:com.atproto.sync.subscribeRepos#migrate",
+    "lex:com.atproto.sync.subscribeRepos#sync",
     "lex:com.atproto.sync.subscribeRepos#tombstone",
     "lex:com.atproto.sync.subscribeRepos#info"
 ]
