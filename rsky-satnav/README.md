@@ -71,7 +71,7 @@ rsky-satnav is built with [Dioxus](https://github.com/DioxusLabs/dioxus) for the
 3. Run the following command in the root of the project to start the Tailwind CSS compiler:
 
 ```bash
-npx tailwindcss -i ./input.css -o ./assets/tailwind.css --watch
+npx @tailwindcss/cli -i ./input.css -o ./assets/tailwind.css --watch
 ```
 
 ### Serving The App
