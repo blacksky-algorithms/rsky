@@ -1,0 +1,54 @@
+[package]
+name = "backend"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8.1",features = ["macros"] }
+tokio = { workspace = true }
+surrealdb = { version = "2.2.1", features = ["kv-rocksdb"] }
+rsky-lexicon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_cbor = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+tower-http = { version = "0.6.2", features = ["fs", "cors"] }
+chrono = "0.4.40"
+atrium-identity = "0.1.0"
+thiserror = "2.0.12"
+sha2 = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+atrium-api = { version = "0.25.0", default-features = false }
+atrium-common = "0.1.0"
+atrium-xrpc = "0.12.1"
+base64 = "0.22.1"
+ecdsa = { version = "0.16.9",features = ["signing"] }
+elliptic-curve = "0.13.8"
+jose-jwa = "0.1.2"
+jose-jwk = { version = "0.1.2",  features = ["p256"] }
+p256 = { version = "0.13.2",features = ["ecdsa"] }
+reqwest = { version = "0.12.12", optional = true }
+serde_html_form = "0.2.7"
+trait-variant = "0.1.2"
+hickory-resolver = "0.24.1"
+anyhow = "1.0.97"
+tokio-tungstenite = "0.23.1"
+futures = "0.3.31"
+rsky-firehose = { workspace = true }
+tracing = "0.1.41"
+tokio-stream = { version = "0.1.17",features = ["sync"] }
+axum-extra = { version = "0.10.0", features = ["typed-header"] }
+headers = "0.4"
+tower = "0.5.2"
+
+[dev-dependencies]
+p256 = { version = "0.13.2",features = ["pem"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
+[features]
+default = ["default-client"]
+default-client = ["reqwest/default-tls"]
