@@ -312,6 +312,37 @@ pub struct CommitData {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum CommitAction {
+    Create,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CommitOp {
+    pub action: CommitAction,
+    pub path: String,
+    pub cid: Option<Cid>,
+    pub prev: Option<Cid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CommitDataWithOps {
+    #[serde(flatten)]
+    pub commit_data: CommitData,
+    
+    pub ops: Vec<CommitOp>,
+    pub prev_data: Option<Cid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct SyncEvtData {
+    pub cid: Cid,
+    pub rev: String,
+    pub blocks: BlockMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RepoUpdate {
     pub cid: Cid,
     pub rev: String,
