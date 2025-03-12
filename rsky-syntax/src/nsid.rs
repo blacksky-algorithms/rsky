@@ -65,7 +65,7 @@ pub fn ensure_valid_nsid<S: Into<String>>(nsid: S) -> Result<(), InvalidNsidErro
         }
 
         let is_last_segment = i == labels.len() - 1;
-        
+
         // Apply rules for domain authority segments (all but the last segment)
         if !is_last_segment {
             if label.ends_with('-') || label.starts_with('-') {
@@ -81,14 +81,14 @@ pub fn ensure_valid_nsid<S: Into<String>>(nsid: S) -> Result<(), InvalidNsidErro
             }
         } else {
             // Validate the final name segment according to updated spec
-            
+
             // Check if the name starts with a letter
             if !label.starts_with(|c: char| c.is_ascii_alphabetic()) {
                 return Err(InvalidNsidError(
                     "NSID name must start with a letter".into(),
                 ));
             }
-            
+
             // Check if the name contains only alphanumeric characters (no hyphens)
             if !label.chars().all(|c| c.is_ascii_alphanumeric()) {
                 return Err(InvalidNsidError(
@@ -264,8 +264,8 @@ mod tests {
         expect_invalid("com.atproto.feed.po#t");
         expect_invalid("com.atproto.feed.p!ot");
         expect_invalid("com.example-.foo");
-        expect_invalid("com.example.3");  // Name starts with digit
-        expect_invalid("com.example.foo-bar");  // Name with hyphen
+        expect_invalid("com.example.3"); // Name starts with digit
+        expect_invalid("com.example.foo-bar"); // Name with hyphen
 
         // Test segments too long
         let too_long_nsid = format!("com.{}.foo", "o".repeat(64));
