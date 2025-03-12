@@ -330,6 +330,8 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
             AccountStatus::Suspended => LexiconAccountStatus::Suspended,
             AccountStatus::Deleted => LexiconAccountStatus::Deleted,
             AccountStatus::Deactivated => LexiconAccountStatus::Deactivated,
+            AccountStatus::Desynchronized => LexiconAccountStatus::Desynchronized,
+            AccountStatus::Throttled => LexiconAccountStatus::Throttled,
             _ => panic!("Conditional failed and allowed an invalid account status."),
         });
     }

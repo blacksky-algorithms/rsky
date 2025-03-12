@@ -21,7 +21,6 @@ async fn inner_update_account_handle(
     account_manager: AccountManager,
 ) -> Result<()> {
     let UpdateAccountHandleInput { did, handle } = body.into_inner();
-
     let opts = HandleValidationOpts {
         handle,
         did: Some(did.clone()),

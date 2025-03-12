@@ -157,6 +157,12 @@ impl ActorStore {
         writes: Vec<PreparedWrite>,
         swap_commit_cid: Option<Cid>,
     ) -> Result<CommitData> {
+        // NOTE: In the typescript PR on sync v1.1
+        // there are some safeguards added for adding
+        // very large commits and very many commits
+        // for which I'm sure we could safeguard on
+        // but may not be necessary.
+        // https://github.com/bluesky-social/atproto/pull/3585/files#diff-7627844a4a6b50190014e947d1331a96df3c64d4c5273fa0ce544f85c3c1265f
         let commit = self.format_commit(writes.clone(), swap_commit_cid).await?;
         {
             let immutable_borrow = &self;
