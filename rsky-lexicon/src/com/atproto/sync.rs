@@ -137,6 +137,8 @@ pub enum AccountStatus {
     Suspended,
     Deleted,
     Deactivated,
+    Desynchronized,
+    Throttled,
 }
 
 impl fmt::Display for AccountStatus {
