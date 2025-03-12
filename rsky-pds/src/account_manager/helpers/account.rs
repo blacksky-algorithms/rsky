@@ -38,6 +38,8 @@ pub enum AccountStatus {
     Suspended,
     Deleted,
     Deactivated,
+    Desynchronized,
+    Throttled,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

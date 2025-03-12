@@ -40,6 +40,8 @@ async fn inner_get_repo(
                 AccountStatus::Suspended => Some(RepoStatus::Suspended),
                 AccountStatus::Deleted => None,
                 AccountStatus::Deactivated => Some(RepoStatus::Deactivated),
+                AccountStatus::Desynchronized => Some(RepoStatus::Desynchronized),
+                AccountStatus::Throttled => Some(RepoStatus::Throttled),
             },
         },
         rev,

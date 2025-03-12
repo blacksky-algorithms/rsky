@@ -85,6 +85,9 @@ pub enum RepoStatus {
     Takedown,
     Suspended,
     Deactivated,
+    Deleted,
+    Desynchronized,
+    Throttled,
 }
 
 /// DEPRECATED -- Use #identity event instead
