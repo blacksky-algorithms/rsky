@@ -71,7 +71,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.package }}-check
+          shared-key: ${{ matrix.package }}-check
       - name: Run cargo check for ${{ matrix.package }}
         run: cargo check -p ${{ matrix.package }}
 
@@ -89,7 +89,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.package }}-build
+          shared-key: ${{ matrix.package }}-build
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
 
@@ -107,7 +107,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.package }}-test
+          shared-key: ${{ matrix.package }}-test
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test -p ${{ matrix.package }}
 
