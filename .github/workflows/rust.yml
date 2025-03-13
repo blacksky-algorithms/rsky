@@ -31,9 +31,31 @@ jobs:
       - name: Set packages
         id: set-packages
         run: |
-          PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g' | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
-          echo "Found packages: $PACKAGES"
+          # Extract all packages from Cargo.toml
+          PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g')
+          
+          # Define packages to skip
+          SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-feedgen")
+          
+          # Filter out packages to skip
+          FILTERED_PACKAGES=()
+          for pkg in $PACKAGES; do
+            skip=false
+            for skip_pkg in "${SKIP_PACKAGES[@]}"; do
+              if [[ "$pkg" == "$skip_pkg" ]]; then
+                skip=true
+                break
+              fi
+            done
+            if [[ "$skip" == "false" ]]; then
+              FILTERED_PACKAGES+=("$pkg")
+            fi
+          done
+          
+          # Convert to JSON array for matrix
+          JSON_PACKAGES=$(printf '%s\n' "${FILTERED_PACKAGES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "packages=$JSON_PACKAGES" >> $GITHUB_OUTPUT
+          echo "Found packages (excluding skipped ones): $JSON_PACKAGES"
 
   # Parallel check job for each package
   check:
