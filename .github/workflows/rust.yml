@@ -77,7 +77,7 @@ jobs:
 
   # Parallel build job for each package
   build:
-    needs: check
+    needs: [determine-packages, check]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -95,7 +95,7 @@ jobs:
 
   # Parallel test job for each package
   test:
-    needs: check
+    needs: [determine-packages, check, build]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
