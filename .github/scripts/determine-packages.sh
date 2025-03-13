@@ -7,8 +7,12 @@ PR_BASE_SHA="${PR_BASE_SHA:-}"
 PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/stdout}"
 
-# Extract all packages from Cargo.toml
-PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g')
+# Extract all packages from Cargo.toml - improved parsing
+# This uses a more robust approach to extract package names
+PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | 
+           sed -e 's/.*\[\s*//' -e 's/\s*\].*//' | 
+           grep -o '"[^"]*"' | 
+           tr -d '"')
 
 # Define packages to skip
 SKIP_PACKAGES=("cypher/frontend" "cypher/backend")
@@ -35,9 +39,9 @@ CHANGED_PACKAGES=()
 if [[ "$GITHUB_CHANGES" == "true" ]]; then
     # If .github has changes, include all packages (except skipped ones)
     echo "Changes detected in .github directory, including all packages"
-    for pkg in $PACKAGES; do
+    while IFS= read -r pkg; do
         CHANGED_PACKAGES+=("$pkg")
-    done
+    done <<< "$PACKAGES"
 else
     # Otherwise, only include packages with changes
     if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -51,12 +55,12 @@ else
     echo "Changed files:"
     echo "$DIFF_FILES"
 
-    for pkg in $PACKAGES; do
+    while IFS= read -r pkg; do
         if echo "$DIFF_FILES" | grep -q "^$pkg/"; then
             CHANGED_PACKAGES+=("$pkg")
             echo "Package with changes: $pkg"
         fi
-    done
+    done <<< "$PACKAGES"
 fi
 
 # Filter out packages to skip
