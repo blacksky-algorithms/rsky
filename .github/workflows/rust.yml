@@ -35,7 +35,7 @@ jobs:
           PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g')
           
           # Define packages to skip
-          SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-feedgen")
+          SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-cryptorsky-feedgen")
           
           # Filter out packages to skip
           FILTERED_PACKAGES=()
