@@ -55,6 +55,7 @@ pub async fn server_create_account(
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
         _ => None,
     };
+    // @TODO: Evaluate if we need to validate for entryway PDS
     let TransformedCreateAccountInput {
         email,
         handle,
