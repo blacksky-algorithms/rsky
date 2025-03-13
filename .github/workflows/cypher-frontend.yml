@@ -1,0 +1,95 @@
+name: Cypher Frontend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cypher/frontend/**'
+      - '.github/workflows/cypher-frontend.yml'
+  pull_request:
+    paths:
+      - 'cypher/frontend/**'
+      - '.github/workflows/cypher-frontend.yml'
+
+env:
+  PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
+  PDS_EMAIL_FROM_NAME: "noreply"
+  PDS_MODERATION_EMAIL_FROM_NAME: "noreply"
+  PDS_MODERATION_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
+  PDS_HOSTNAME: "localho.st"
+  PDS_SERVICE_DID: "did:web:localho.st"
+  PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
+  PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_MAILGUN_API_KEY: ${{ secrets.PDS_MAILGUN_API_KEY }}
+  PDS_MAILGUN_DOMAIN: ${{ secrets.PDS_MAILGUN_DOMAIN }}
+  PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        working-directory: cypher/frontend
+    - name: Run cargo check
+      working-directory: cypher/frontend
+      run: cargo check
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        working-directory: cypher/frontend
+    - name: Run cargo build
+      working-directory: cypher/frontend
+      run: cargo build --release
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        working-directory: cypher/frontend
+    - name: Run cargo test
+      working-directory: cypher/frontend
+      run: cargo test 
+
+  formatting:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        working-directory: cypher/frontend
+    - name: Run cargo fmt
+      working-directory: cypher/frontend
+      run: cargo fmt -- --check
+
+  ci-success:
+    runs-on: ubuntu-latest
+    needs: [check, build, test, formatting]
+    if: always()
+    steps:
+      - name: CI Success
+        if: ${{ !contains(needs.*.result, 'failure') }}
+        run: echo "All Cypher Frontend CI jobs passed!"
+      - name: CI Failed
+        if: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          echo "Some Cypher Frontend CI jobs failed!"
+          exit 1
