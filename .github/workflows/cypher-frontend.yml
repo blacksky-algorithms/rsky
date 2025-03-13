@@ -34,7 +34,7 @@ jobs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
-        working-directory: cypher/frontend
+        shared-key: cypher-frontend
     - name: Run cargo check
       working-directory: cypher/frontend
       run: cargo check
@@ -47,7 +47,7 @@ jobs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
-        working-directory: cypher/frontend
+        shared-key: cypher-frontend
     - name: Run cargo build
       working-directory: cypher/frontend
       run: cargo build --release
@@ -61,7 +61,7 @@ jobs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
-        working-directory: cypher/frontend
+        shared-key: cypher-frontend
     - name: Run cargo test
       working-directory: cypher/frontend
       run: cargo test 
@@ -75,7 +75,7 @@ jobs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
-        working-directory: cypher/frontend
+        shared-key: cypher-frontend
     - name: Run cargo fmt
       working-directory: cypher/frontend
       run: cargo fmt -- --check
