@@ -28,39 +28,26 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to properly check changes
+      
+      - name: Make script executable
+        run: chmod +x .github/scripts/determine-packages.sh
+      
       - name: Set packages
         id: set-packages
-        run: |
-          # Extract all packages from Cargo.toml
-          PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g')
-          
-          # Define packages to skip
-          SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-cryptorsky-feedgen")
-          
-          # Filter out packages to skip
-          FILTERED_PACKAGES=()
-          for pkg in $PACKAGES; do
-            skip=false
-            for skip_pkg in "${SKIP_PACKAGES[@]}"; do
-              if [[ "$pkg" == "$skip_pkg" ]]; then
-                skip=true
-                break
-              fi
-            done
-            if [[ "$skip" == "false" ]]; then
-              FILTERED_PACKAGES+=("$pkg")
-            fi
-          done
-          
-          # Convert to JSON array for matrix
-          JSON_PACKAGES=$(printf '%s\n' "${FILTERED_PACKAGES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "packages=$JSON_PACKAGES" >> $GITHUB_OUTPUT
-          echo "Found packages (excluding skipped ones): $JSON_PACKAGES"
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: .github/scripts/determine-packages.sh
+        shell: bash
 
   # Parallel check job for each package
   check:
     needs: determine-packages
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +66,7 @@ jobs:
   build:
     needs: [determine-packages, check]
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -97,6 +85,7 @@ jobs:
   test:
     needs: [determine-packages, check, build]
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -114,7 +103,6 @@ jobs:
   # Run formatting check on the entire workspace
   formatting:
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -127,6 +115,13 @@ jobs:
   ci-success:
     runs-on: ubuntu-latest
     needs: [check, build, test, formatting]
+    if: always()
     steps:
       - name: CI Success
+        if: ${{ !contains(needs.*.result, 'failure') }}
         run: echo "All CI jobs passed!"
+      - name: CI Failed
+        if: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          echo "Some CI jobs failed!"
+          exit 1
