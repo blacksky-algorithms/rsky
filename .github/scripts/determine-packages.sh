@@ -11,7 +11,7 @@ GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/stdout}"
 PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | sed -e 's/.*\[\s*//' -e 's/\s*\].*//' -e 's/,//g' | tr -d '"' | sed 's/\s\+/\n/g')
 
 # Define packages to skip
-SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-cryptorsky-feedgen")
+SKIP_PACKAGES=("cypher/frontend" "cypher/backend")
 
 # Check if .github directory has changes
 GITHUB_CHANGES=false
