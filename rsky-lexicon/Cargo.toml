@@ -1,6 +1,6 @@
 [package]
 name = "rsky-lexicon"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 publish = true
 description = "Bluesky API library"

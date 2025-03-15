@@ -1,3 +1,4 @@
+use crate::apis::TrendingMedia;
 use crate::models::JwtParts;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use rocket::http::Status;
@@ -84,6 +85,10 @@ pub(crate) const BLACKSKY_OG: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-op";
 pub(crate) const BLACKSKY_TREND: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-trend";
+pub(crate) const BLACKSKY_PHOTOS: &str =
+    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-photos";
+pub(crate) const BLACKSKY_VIDEOS: &str =
+    "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-videos";
 pub(crate) const BLACKSKY_EDU: &str =
     "at://did:plc:w4xbfzo7kqfes5zb7r6qv3rw/app.bsky.feed.generator/blacksky-edu";
 pub(crate) const BLACKSKY_TRAVEL: &str =
@@ -184,7 +189,57 @@ pub async fn index(
             }
         }
         _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && !is_banned => {
-            match crate::apis::get_blacksky_trending(limit, cursor, connection, config).await {
+            match crate::apis::get_blacksky_trending_cached(limit, cursor, connection, config, None)
+                .await
+            {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = crate::models::InternalErrorMessageResponse {
+                        code: Some(crate::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
+        _blacksky_videos if _blacksky_videos == BLACKSKY_VIDEOS && !is_banned => {
+            match crate::apis::get_blacksky_trending_cached(
+                limit,
+                cursor,
+                connection,
+                config,
+                Some(TrendingMedia::OnlyVideo),
+            )
+            .await
+            {
+                Ok(response) => Ok(Json(response)),
+                Err(error) => {
+                    eprintln!("Internal Error: {error}");
+                    let internal_error = crate::models::InternalErrorMessageResponse {
+                        code: Some(crate::models::InternalErrorCode::InternalError),
+                        message: Some(error.to_string()),
+                    };
+                    Err(status::Custom(
+                        Status::InternalServerError,
+                        Json(internal_error),
+                    ))
+                }
+            }
+        }
+        _blacksky_photos if _blacksky_photos == BLACKSKY_PHOTOS && !is_banned => {
+            match crate::apis::get_blacksky_trending_cached(
+                limit,
+                cursor,
+                connection,
+                config,
+                Some(TrendingMedia::OnlyImage),
+            )
+            .await
+            {
                 Ok(response) => Ok(Json(response)),
                 Err(error) => {
                     eprintln!("Internal Error: {error}");
@@ -316,6 +371,14 @@ pub async fn index(
             Ok(Json(banned_response))
         }
         _blacksky_trend if _blacksky_trend == BLACKSKY_TREND && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_videos if _blacksky_videos == BLACKSKY_VIDEOS && is_banned => {
+            let banned_response = get_banned_response();
+            Ok(Json(banned_response))
+        }
+        _blacksky_photos if _blacksky_photos == BLACKSKY_PHOTOS && is_banned => {
             let banned_response = get_banned_response();
             Ok(Json(banned_response))
         }

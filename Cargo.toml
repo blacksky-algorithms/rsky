@@ -1,5 +1,5 @@
 [workspace]
-members = [ "rsky-common", "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo"]
+members = [ "rsky-common", "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo", "cypher/backend", "cypher/frontend", "rsky-satnav"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -17,12 +17,23 @@ rand = "0.8.5"
 rand_core = "0.6.4"
 secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes","rand-std"] }
 serde_json = { version = "1.0.96",features = ["preserve_order"] }
-rsky-lexicon = {path = "rsky-lexicon", version = "0.2.5"}
+rsky-lexicon = {path = "rsky-lexicon", version = "0.2.7"}
 rsky-identity = {path = "rsky-identity", version = "0.1.0"}
 rsky-crypto = {path = "rsky-crypto", version = "0.1.1"}
 rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
 rsky-common = {path = "rsky-common", version = "0.1.1"}
 rsky-repo = {path = "rsky-repo", version = "0.0.1"}
+rsky-firehose = {path = "rsky-firehose", version = "0.2.0"}
 
 [profile.release]
 debug = 2  # Or any level from 0 to 2
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

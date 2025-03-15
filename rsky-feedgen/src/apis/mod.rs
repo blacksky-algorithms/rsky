@@ -4,22 +4,22 @@ use crate::models::Lexicon::{AppBskyFeedFollow, AppBskyFeedLike, AppBskyFeedPost
 use crate::models::*;
 use crate::{FeedGenConfig, ReadReplicaConn, WriteDbConn};
 use chrono::offset::Utc as UtcOffset;
-use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Array, Bool, Nullable, Text};
+use moka::future::Cache;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
 use rocket::State;
-use rsky_common::env::env_int;
+use rsky_common::env::{env_bool, env_int};
 use rsky_common::explicit_slurs::contains_explicit_slurs;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::PostLabels;
 use std::collections::HashSet;
-use std::fmt::Write;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[allow(deprecated)]
 pub async fn get_posts_by_membership(
@@ -75,19 +75,11 @@ pub async fn get_posts_by_membership(
                             NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
                             Utc,
                         );
-                        let mut timestr = String::new();
-                        match write!(timestr, "{}", datetime.format("%+")) {
-                            Ok(_) => {
-                                query = query.filter(
-                                    PostSchema::createdAt.lt(timestr.to_owned()).or(
-                                        PostSchema::createdAt
-                                            .eq(timestr.to_owned())
-                                            .and(PostSchema::cid.lt(cid_c.to_owned())),
-                                    ),
-                                );
-                            }
-                            Err(error) => eprintln!("Error formatting: {error:?}"),
-                        }
+                        query = query.filter(
+                            PostSchema::createdAt.lt(datetime).or(PostSchema::createdAt
+                                .eq(datetime)
+                                .and(PostSchema::cid.lt(cid_c.to_owned()))),
+                        );
                     }
                 } else {
                     let validation_error = ValidationErrorMessageResponse {
@@ -124,16 +116,9 @@ pub async fn get_posts_by_membership(
             let mut post_results = Vec::new();
             let mut cursor: Option<String> = None;
 
-            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.created_at, "%+")
-                {
-                    cursor = Some(format!(
-                        "{}::{}",
-                        parsed_time.timestamp_millis(),
-                        last_post.cid
-                    ));
-                }
+                let timestamp_millis = last_post.indexed_at.timestamp_millis();
+                cursor = Some(format!("{}::{}", timestamp_millis, last_post.cid));
             }
 
             results
@@ -173,152 +158,199 @@ pub async fn get_posts_by_membership(
     result
 }
 
+#[derive(Clone)]
+pub enum TrendingMedia {
+    OnlyVideo,
+    OnlyImage,
+}
+
 #[allow(deprecated)]
 pub async fn get_blacksky_trending(
     limit: Option<i64>,
     params_cursor: Option<&str>,
     connection: ReadReplicaConn,
-    config: &State<FeedGenConfig>,
+    config: &FeedGenConfig,
+    media: Option<TrendingMedia>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
-    let trending_percentile_min = config.trending_percentile_min.clone();
+    // Get the minimum trending percentile from config (e.g. 0.95)
+    let trending_percentile_min = config.trending_percentile_min;
+    let mut base_time_clause = "CURRENT_TIMESTAMP".to_string();
+    let mut cursor_filter = String::new();
 
-    let params_cursor = match params_cursor {
-        None => None,
-        Some(params_cursor) => Some(params_cursor.to_string()),
+    // If a cursor is provided, extract its timestamp and cid parts.
+    // We assume the cursor format is "<timestamp_millis>::<cid>".
+    let params_cursor = params_cursor.map(|s| s.to_string());
+    if let Some(ref cursor_str) = params_cursor {
+        let parts: Vec<&str> = cursor_str.split("::").take(2).collect();
+        if parts.len() == 2 {
+            let timestamp_str = parts[0];
+            let cid_cursor = parts[1];
+            if let Ok(timestamp) = timestamp_str.parse::<i64>() {
+                // Convert milliseconds to a proper timestamp.
+                let nanoseconds = 230 * 1_000_000;
+                let datetime = DateTime::<Utc>::from_utc(
+                    NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
+                    Utc,
+                );
+                // Format the timestamp in a SQL-friendly format.
+                let timestr = datetime.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                base_time_clause = format!("'{}'", timestr);
+                // Build the cursor filter clause.
+                cursor_filter = format!(
+                    " AND ((\"indexedAt\" < {base_time_clause}) OR (\"indexedAt\" = {base_time_clause} AND cid < '{cid}'))",
+                    base_time_clause = base_time_clause,
+                    cid = cid_cursor
+                );
+            }
+        } else {
+            return Err(ValidationErrorMessageResponse {
+                code: Some(ErrorCode::ValidationError),
+                message: Some("malformed cursor".into()),
+            });
+        }
+    }
+
+    // Compute a random percentile threshold between trending_percentile_min and 1.0.
+    let random_percentile: f64 = rand::thread_rng().gen_range(trending_percentile_min..=1.0);
+
+    // Build the media join clause.
+    let media_join = match media {
+        Some(TrendingMedia::OnlyImage) => "JOIN image i ON p.uri = i.\"postUri\"",
+        Some(TrendingMedia::OnlyVideo) => "JOIN video v ON p.uri = v.\"postUri\"",
+        None => "",
     };
+
+    // Construct the final SQL query string.
+    // We add an extra CTE "filtered_posts" that discards rows where like_count is <= 1.
+    let query_str = format!(
+        "WITH recent_posts AS (
+            SELECT p.*
+            FROM post p
+            {media_join}
+            WHERE p.\"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '1 days')
+              AND COALESCE(array_length(p.labels, 1), 0) = 0
+        ), recent_likes AS (
+            SELECT \"subjectUri\", COUNT(*) AS like_count
+            FROM public.like
+            WHERE \"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '12 hours')
+            GROUP BY \"subjectUri\"
+            HAVING COUNT(*) > 1
+        ), posts_with_likes AS (
+            SELECT p.*, COALESCE(l.like_count, 0) AS like_count
+            FROM recent_posts p
+            JOIN recent_likes l ON l.\"subjectUri\" = p.uri
+        ), ranked_posts AS (
+            SELECT *,
+                   PERCENT_RANK() OVER (ORDER BY like_count) AS percentile_rank
+            FROM posts_with_likes
+        )
+        SELECT
+            uri,
+            cid,
+            \"replyParent\",
+            \"replyRoot\",
+            \"indexedAt\",
+            prev,
+            \"sequence\",
+            text,
+            lang,
+            author,
+            \"externalUri\",
+            \"externalTitle\",
+            \"externalDescription\",
+            \"externalThumb\",
+            \"quoteCid\",
+            \"quoteUri\",
+            \"createdAt\",
+            labels
+        FROM ranked_posts
+        WHERE percentile_rank >= {random_percentile:.4}
+          {cursor_filter}
+        ORDER BY \"indexedAt\" DESC, cid DESC
+        LIMIT {limit_val};",
+        media_join = media_join,
+        base_time_clause = base_time_clause,
+        random_percentile = random_percentile,
+        cursor_filter = cursor_filter,
+        limit_val = limit.unwrap_or(30)
+    );
+
     let result = connection
         .run(move |conn| {
-            let random_percentile = rand::thread_rng().gen_range(trending_percentile_min..=1.0);
-            let mut query_str = format!(
-                "WITH recent_posts AS (
-                SELECT
-                    *
-                FROM post
-                WHERE post.\"indexedAt\" >= (CURRENT_TIMESTAMP - INTERVAL '2 days')::text
-                    AND COALESCE(array_length(labels, 1), 0) = 0
-            ), recent_likes AS (
-                SELECT
-                    \"subjectUri\",
-                    COUNT(*) AS like_count
-                FROM public.like
-                WHERE public.like.\"indexedAt\" >= (CURRENT_TIMESTAMP - INTERVAL '24 hours')::text
-                GROUP BY \"subjectUri\"
-            ), posts_with_likes AS (
-                SELECT
-                    p.*,
-                    COALESCE(l.like_count, 0) AS like_count
-                FROM recent_posts p
-                LEFT JOIN recent_likes l ON l.\"subjectUri\" = p.uri
-            ), ranked_posts AS (
-                SELECT
-                    *,
-                    PERCENT_RANK() OVER (ORDER BY like_count) AS percentile_rank
-                FROM posts_with_likes
-            )
-            SELECT
-                uri,
-                cid,
-                \"replyParent\",
-                \"replyRoot\",
-                \"indexedAt\",
-                prev,
-                \"sequence\",
-                \"text\",
-                lang,
-                author,
-                \"externalUri\",
-                \"externalTitle\",
-                \"externalDescription\",
-                \"externalThumb\",
-                \"quoteCid\",
-                \"quoteUri\",
-                \"createdAt\",
-                labels
-            FROM ranked_posts
-            WHERE percentile_rank >= {:.4}",
-                random_percentile
-            );
-
-            if params_cursor.is_some() {
-                let cursor_str = params_cursor.unwrap();
-                let v = cursor_str
-                    .split("::")
-                    .take(2)
-                    .map(String::from)
-                    .collect::<Vec<_>>();
-                if let [indexed_at_c, cid_c] = &v[..] {
-                    if let Ok(timestamp) = indexed_at_c.parse::<i64>() {
-                        let nanoseconds = 230 * 1000000;
-                        let datetime = DateTime::<Utc>::from_utc(
-                            NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
-                            Utc,
-                        );
-                        let mut timestr = String::new();
-                        match write!(timestr, "{}", datetime.format("%+")) {
-                            Ok(_) => {
-                                let cursor_filter_str = format!(
-                                    " AND (
-                                  (\"indexedAt\" < '{0}') OR
-                                  (\"indexedAt\" = '{0}' AND cid < '{1}')
-                              )",
-                                    timestr.to_owned(),
-                                    cid_c.to_owned()
-                                );
-                                query_str = format!("{}{}", query_str, cursor_filter_str);
-                            }
-                            Err(error) => eprintln!("Error formatting: {error:?}"),
-                        }
-                    }
-                } else {
-                    let validation_error = ValidationErrorMessageResponse {
-                        code: Some(ErrorCode::ValidationError),
-                        message: Some("malformed cursor".into()),
-                    };
-                    return Err(validation_error);
-                }
-            }
-            let order_str = format!(
-                " ORDER BY \"indexedAt\" DESC, cid DESC LIMIT {} ",
-                limit.unwrap_or(30)
-            );
-            let query_str = format!("{}{};", &query_str, &order_str);
-
             let results = sql_query(query_str)
                 .load::<Post>(conn)
                 .expect("Error loading post records");
 
             let mut post_results = Vec::new();
-            let mut cursor: Option<String> = None;
+            let mut new_cursor: Option<String> = None;
 
-            // https://docs.rs/chrono/0.4.26/chrono/format/strftime/index.html
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.indexed_at, "%+")
-                {
-                    cursor = Some(format!(
-                        "{}::{}",
-                        parsed_time.timestamp_millis(),
-                        last_post.cid
-                    ));
-                }
+                let timestamp_millis = last_post.indexed_at.timestamp_millis();
+                new_cursor = Some(format!("{}::{}", timestamp_millis, last_post.cid));
             }
 
-            results
-                .into_iter()
-                .map(|result| {
-                    let post_result = PostResult { post: result.uri };
-                    post_results.push(post_result);
-                })
-                .for_each(drop);
+            for post in results {
+                post_results.push(PostResult { post: post.uri });
+            }
 
-            let new_response = AlgoResponse {
-                cursor,
+            Ok(AlgoResponse {
+                cursor: new_cursor,
                 feed: post_results,
-            };
-            Ok(new_response)
+            })
         })
         .await;
 
     result
+}
+
+// Global cache using Moka. Keys are strings (derived from query parameters) and
+// values are AlgoResponse.
+static TRENDING_CACHE: Lazy<Cache<String, AlgoResponse>> = Lazy::new(|| {
+    Cache::builder()
+        .max_capacity(env_int("FEEDGEN_TRENDING_CACHE_CAPACITY").unwrap_or(100) as u64)
+        .time_to_live(Duration::from_secs(
+            env_int("FEEDGEN_TRENDING_CACHE_TTL").unwrap_or(2) as u64,
+        ))
+        .build()
+});
+
+// Build a cache key from the parameters.
+fn build_trending_cache_key(
+    limit: Option<i64>,
+    params_cursor: Option<&str>,
+    media: Option<TrendingMedia>,
+) -> String {
+    let media_str = match media {
+        Some(TrendingMedia::OnlyImage) => "OnlyImage",
+        Some(TrendingMedia::OnlyVideo) => "OnlyVideo",
+        None => "None",
+    };
+    format!(
+        "limit:{}|cursor:{}|media:{}",
+        limit.unwrap_or(30),
+        params_cursor.unwrap_or(""),
+        media_str
+    )
+}
+
+// Cached version of get_blacksky_trending.
+pub async fn get_blacksky_trending_cached(
+    limit: Option<i64>,
+    params_cursor: Option<&str>,
+    connection: ReadReplicaConn,
+    config: &FeedGenConfig,
+    media: Option<TrendingMedia>,
+) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
+    let cache_key = build_trending_cache_key(limit, params_cursor, media.clone());
+    // Try to retrieve the result from the cache.
+    if let Some(cached_response) = TRENDING_CACHE.get(&cache_key).await {
+        return Ok(cached_response);
+    }
+    // If not found, compute the result.
+    let result = get_blacksky_trending(limit, params_cursor, connection, config, media).await?;
+    // Insert the computed result into the cache.
+    TRENDING_CACHE.insert(cache_key, result.clone()).await;
+    Ok(result)
 }
 
 #[allow(deprecated)]
@@ -331,15 +363,16 @@ pub async fn get_all_posts(
     config: &State<FeedGenConfig>,
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::post::dsl as PostSchema;
+    use chrono::Timelike;
+    use chrono_tz::America::New_York;
 
     let show_sponsored_post = config.show_sponsored_post.clone();
     let sponsored_post_uri = config.sponsored_post_uri.clone();
     let sponsored_post_probability = config.sponsored_post_probability.clone();
-
-    let params_cursor = match params_cursor {
-        None => None,
-        Some(params_cursor) => Some(params_cursor.to_string()),
-    };
+    let blackout_enabled = env_bool("FEEDGEN_MEDIA_BLACKOUT_ENABLED").unwrap_or(false);
+    let blackout_start_hour = env_int("FEEDGEN_MEDIA_BLACKOUT_START").unwrap_or(22) as u32;
+    let blackout_end_hour = env_int("FEEDGEN_MEDIA_BLACKOUT_END").unwrap_or(4) as u32;
+    let params_cursor = params_cursor.map(|s| s.to_string());
 
     let result = connection
         .run(move |conn| {
@@ -350,12 +383,34 @@ pub async fn get_all_posts(
                 .filter(sql::<Bool>("COALESCE(array_length(labels, 1), 0) = 0"))
                 .into_boxed();
 
+            // Apply the media exclusion filters only if blackout is enabled, and we're within the blackout period.
+            if blackout_enabled {
+                let now_et = Utc::now().with_timezone(&New_York);
+                let now_hour = now_et.hour();
+
+                let in_blackout = if blackout_start_hour < blackout_end_hour {
+                    now_hour >= blackout_start_hour && now_hour < blackout_end_hour
+                } else {
+                    // For periods spanning midnight, e.g. 22:00 to 04:00.
+                    now_hour >= blackout_start_hour || now_hour < blackout_end_hour
+                };
+
+                if in_blackout {
+                    query = query
+                        .filter(sql::<Bool>(
+                            "NOT EXISTS (SELECT 1 FROM image WHERE image.\"postUri\" = post.uri)",
+                        ))
+                        .filter(sql::<Bool>(
+                            "NOT EXISTS (SELECT 1 FROM video WHERE video.\"postUri\" = post.uri)",
+                        ));
+                }
+            }
+
             if let Some(lang) = lang {
                 query = query.filter(PostSchema::lang.like(format!("%{}%", lang)));
             }
 
-            if params_cursor.is_some() {
-                let cursor_str = params_cursor.unwrap();
+            if let Some(cursor_str) = params_cursor {
                 let v = cursor_str
                     .split("::")
                     .take(2)
@@ -368,19 +423,11 @@ pub async fn get_all_posts(
                             NaiveDateTime::from_timestamp(timestamp / 1000, nanoseconds),
                             Utc,
                         );
-                        let mut timestr = String::new();
-                        match write!(timestr, "{}", datetime.format("%+")) {
-                            Ok(_) => {
-                                query = query.filter(
-                                    PostSchema::createdAt.lt(timestr.to_owned()).or(
-                                        PostSchema::createdAt
-                                            .eq(timestr.to_owned())
-                                            .and(PostSchema::cid.lt(cid_c.to_owned())),
-                                    ),
-                                );
-                            }
-                            Err(error) => eprintln!("Error formatting: {error:?}"),
-                        }
+                        query = query.filter(
+                            PostSchema::createdAt.lt(datetime).or(PostSchema::createdAt
+                                .eq(datetime)
+                                .and(PostSchema::cid.lt(cid_c.to_owned()))),
+                        );
                     }
                 } else {
                     let validation_error = ValidationErrorMessageResponse {
@@ -389,15 +436,8 @@ pub async fn get_all_posts(
                     };
                     return Err(validation_error);
                 }
-            } else {
-                // Add a buffer for posts to be deleted; Current time and n minutes ago
-                let buffer_num = env_int("QUERY_BUFFER_MINS").unwrap_or(2) as i64;
-                let now = Utc::now();
-                let n_mins_ago = now - Duration::minutes(buffer_num);
-                // Format `buffer_num` as a string to compare with `character varying`
-                let n_mins_ago_str = n_mins_ago.to_rfc3339(); // Example: "2024-12-12T11:03:27.660+00:00"
-                query = query.filter(PostSchema::createdAt.le(n_mins_ago_str));
             }
+
             if only_posts {
                 query = query
                     .filter(PostSchema::replyParent.is_null())
@@ -410,23 +450,13 @@ pub async fn get_all_posts(
 
             // Set the cursor
             if let Some(last_post) = results.last() {
-                if let Ok(parsed_time) = NaiveDateTime::parse_from_str(&last_post.created_at, "%+")
-                {
-                    cursor = Some(format!(
-                        "{}::{}",
-                        parsed_time.timestamp_millis(),
-                        last_post.cid
-                    ));
-                }
+                let timestamp_millis = last_post.indexed_at.timestamp_millis();
+                cursor = Some(format!("{}::{}", timestamp_millis, last_post.cid));
             }
 
-            results
-                .into_iter()
-                .map(|result| {
-                    let post_result = PostResult { post: result.uri };
-                    post_results.push(post_result);
-                })
-                .for_each(drop);
+            for result in results {
+                post_results.push(PostResult { post: result.uri });
+            }
 
             // Insert the sponsored post if the conditions are met
             if show_sponsored_post && post_results.len() >= 3 && !sponsored_post_uri.is_empty() {
@@ -537,7 +567,7 @@ pub async fn queue_creation(
                         cid: req.cid,
                         reply_parent: None,
                         reply_root: None,
-                        indexed_at: format!("{}", dt.format("%+")),
+                        indexed_at: dt,
                         prev: req.prev,
                         sequence: req.sequence,
                         text: None,
@@ -549,15 +579,14 @@ pub async fn queue_creation(
                         external_thumb: None,
                         quote_cid: None,
                         quote_uri: None,
-                        created_at: format!("{}", dt.format("%+")), // use now() as a default
+                        created_at: dt, // use now() as a default
                         labels: vec![]
                     };
 
                     if let CreateRecord::Lexicon(AppBskyFeedPost(post_record)) = req.record {
                         post_text_original = post_record.text.clone();
                         post_text = post_record.text.to_lowercase();
-                        let post_created_at = format!("{}", post_record.created_at.format("%+"));
-                        new_post.created_at = post_created_at.clone();
+                        new_post.created_at = post_record.created_at.clone();
                         // If posts are received out of order, use indexed_at
                         // mainly capturing created_at for back_dated posts
                         if new_post.created_at > new_post.indexed_at {
@@ -579,20 +608,33 @@ pub async fn queue_creation(
                                 Embeds::Images(e) => {
                                     for image in e.images {
                                         let labels: Vec<Option<String>> = vec![];
-                                        if let Some(image_cid) = image.image.cid {
-                                            let new_image = (
-                                                ImageSchema::cid.eq(image_cid),
-                                                ImageSchema::alt.eq(image.alt),
-                                                ImageSchema::postCid.eq(new_post.cid.clone()),
-                                                ImageSchema::postUri.eq(new_post.uri.clone()),
-                                                ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                ImageSchema::createdAt.eq(post_created_at.clone()),
-                                                ImageSchema::labels.eq(labels),
-                                            );
-                                            post_images.push(new_image);
-                                        } else {
-                                            println!("Legacy image: {image:?}")
-                                        };
+                                        match (&image.image.cid, image.image.r#ref) {
+                                            (Some(image_cid), _) => {
+                                                let new_image = (
+                                                    ImageSchema::cid.eq(image_cid.clone()),
+                                                    ImageSchema::alt.eq(image.alt),
+                                                    ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                    ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                    ImageSchema::createdAt.eq(new_post.created_at.clone()),
+                                                    ImageSchema::labels.eq(labels),
+                                                );
+                                                post_images.push(new_image);
+                                            },
+                                            (_, Some(image_ref)) => {
+                                                let new_image = (
+                                                    ImageSchema::cid.eq(image_ref.to_string()),
+                                                    ImageSchema::alt.eq(image.alt),
+                                                    ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                    ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                    ImageSchema::createdAt.eq(new_post.created_at.clone()),
+                                                    ImageSchema::labels.eq(labels),
+                                                );
+                                                post_images.push(new_image);
+                                            },
+                                            _ => eprintln!("Unknown image type: {image:?}")
+                                        }
                                     }
                                 },
                                 Embeds::Video(ref e) => {
@@ -605,7 +647,7 @@ pub async fn queue_creation(
                                                 VideoSchema::postCid.eq(new_post.cid.clone()),
                                                 VideoSchema::postUri.eq(new_post.uri.clone()),
                                                 VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                VideoSchema::createdAt.eq(new_post.created_at.clone()),
                                                 VideoSchema::labels.eq(labels),
                                             );
                                             post_videos.push(new_video);
@@ -617,7 +659,7 @@ pub async fn queue_creation(
                                                 VideoSchema::postCid.eq(new_post.cid.clone()),
                                                 VideoSchema::postUri.eq(new_post.uri.clone()),
                                                 VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                VideoSchema::createdAt.eq(new_post.created_at.clone()),
                                                 VideoSchema::labels.eq(labels),
                                             );
                                             post_videos.push(new_video);
@@ -632,20 +674,33 @@ pub async fn queue_creation(
                                         MediaUnion::Images(m) => {
                                             for image in m.images {
                                                 let labels: Vec<Option<String>> = vec![];
-                                                if let Some(image_cid) = image.image.cid {
-                                                    let new_image = (
-                                                        ImageSchema::cid.eq(image_cid),
-                                                        ImageSchema::alt.eq(image.alt),
-                                                        ImageSchema::postCid.eq(new_post.cid.clone()),
-                                                        ImageSchema::postUri.eq(new_post.uri.clone()),
-                                                        ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                        ImageSchema::createdAt.eq(post_created_at.clone()),
-                                                        ImageSchema::labels.eq(labels),
-                                                    );
-                                                    post_images.push(new_image);
-                                                } else {
-                                                    println!("Legacy image: {image:?}")
-                                                };
+                                                match (&image.image.cid, image.image.r#ref) {
+                                                    (Some(image_cid), _) => {
+                                                        let new_image = (
+                                                            ImageSchema::cid.eq(image_cid.clone()),
+                                                            ImageSchema::alt.eq(image.alt),
+                                                            ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                            ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                            ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                            ImageSchema::createdAt.eq(new_post.created_at.clone()),
+                                                            ImageSchema::labels.eq(labels),
+                                                        );
+                                                        post_images.push(new_image);
+                                                    },
+                                                    (_, Some(image_ref)) => {
+                                                        let new_image = (
+                                                            ImageSchema::cid.eq(image_ref.to_string()),
+                                                            ImageSchema::alt.eq(image.alt),
+                                                            ImageSchema::postCid.eq(new_post.cid.clone()),
+                                                            ImageSchema::postUri.eq(new_post.uri.clone()),
+                                                            ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                                            ImageSchema::createdAt.eq(new_post.created_at.clone()),
+                                                            ImageSchema::labels.eq(labels),
+                                                        );
+                                                        post_images.push(new_image);
+                                                    },
+                                                    _ => eprintln!("Unknown image type: {image:?}")
+                                                }
                                             }
                                         },
                                         MediaUnion::Video(ref v) => {
@@ -658,7 +713,7 @@ pub async fn queue_creation(
                                                         VideoSchema::postCid.eq(new_post.cid.clone()),
                                                         VideoSchema::postUri.eq(new_post.uri.clone()),
                                                         VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                        VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                        VideoSchema::createdAt.eq(new_post.created_at.clone()),
                                                         VideoSchema::labels.eq(labels),
                                                     );
                                                     post_videos.push(new_video);
@@ -670,7 +725,7 @@ pub async fn queue_creation(
                                                         VideoSchema::postCid.eq(new_post.cid.clone()),
                                                         VideoSchema::postUri.eq(new_post.uri.clone()),
                                                         VideoSchema::indexedAt.eq(new_post.indexed_at.clone()),
-                                                        VideoSchema::createdAt.eq(post_created_at.clone()),
+                                                        VideoSchema::createdAt.eq(new_post.created_at.clone()),
                                                         VideoSchema::labels.eq(labels),
                                                     );
                                                     post_videos.push(new_video);
@@ -818,14 +873,6 @@ pub async fn queue_creation(
                         println!("Removing member: {:?}", &req.author);
                         members_to_rm.push(req.author.clone());
                     }
-                    // @TODO: Report to Ozone
-                    if contains_explicit_slurs(post_text_original.as_str()) {
-                        println!(
-                            "@LOG: EXPLICIT SLUR DETECTED: text:`{}`; uri:`{}`;",
-                            post_text_original,
-                            req.uri
-                        );
-                    }
                 })
                 .for_each(drop);
 
@@ -887,7 +934,7 @@ pub async fn queue_creation(
                                 LikeSchema::subjectCid.eq(like_record.subject.cid),
                                 LikeSchema::subjectUri.eq(like_record.subject.uri),
                                 LikeSchema::createdAt.eq(like_record.created_at),
-                                LikeSchema::indexedAt.eq(format!("{}", dt.format("%+"))),
+                                LikeSchema::indexedAt.eq(dt),
                                 LikeSchema::prev.eq(req.prev),
                                 LikeSchema::sequence.eq(req.sequence)
                             );
