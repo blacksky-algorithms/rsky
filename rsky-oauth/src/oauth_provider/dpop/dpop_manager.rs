@@ -54,52 +54,52 @@ impl DpopManager {
         htu: &str, // HTTP URL
         access_token: Option<String>,
     ) -> Result<(), OAuthError> {
-        let decoding_key: DecodingKey;
-        let mut validation = Validation::new(Algorithm::HS256);
-        let token_data = decode::<TokenClaims>(proof.as_str(), &decoding_key, &validation).unwrap();
-        //TODO Change proof to unknown and validate
-
-        let payload = token_data.claims;
-        let header = token_data.header;
-
-        if payload.jti.is_none() {
-            return Err(OAuthError::InvalidDpopProofError(
-                "Invalid or missing jti property".to_string(),
-            ));
-        }
-
-        // Note rfc9110#section-9.1 states that the method name is case-sensitive
-        if let Some(payload_htm) = payload.htm {
-            if payload_htm != htm {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "DPoP htm mismatch".to_string(),
-                ));
-            }
-        }
-
-        if payload.nonce.is_none() && self.dpop_nonce.is_some() {
-            return Err(OAuthError::InvalidDpopProofError(
-                "DPoP htm mismatch".to_string(),
-            )); //DPoP Nonce Error
-        }
-
-        if let Some(payload_nonce) = payload.nonce {
-            if !self.dpop_nonce.clone().unwrap().check(payload_nonce) {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "DPoP htm mismatch".to_string(),
-                )); //DPoP Nonce Error
-            }
-        }
-
-        //htu norms
-
-        if let Some(access_token) = access_token {
-            // let ath_buffer = create_hash
-        } else if payload.ath.is_some() {
-            return Err(OAuthError::InvalidDpopProofError(
-                "DPoP ath not allowed".to_string(),
-            )); //DPoP Nonce Error
-        }
+        // let decoding_key: DecodingKey;
+        // let mut validation = Validation::new(Algorithm::HS256);
+        // let token_data = decode::<TokenClaims>(proof.as_str(), &decoding_key, &validation).unwrap();
+        // //TODO Change proof to unknown and validate
+        //
+        // let payload = token_data.claims;
+        // let header = token_data.header;
+        //
+        // if payload.jti.is_none() {
+        //     return Err(OAuthError::InvalidDpopProofError(
+        //         "Invalid or missing jti property".to_string(),
+        //     ));
+        // }
+        //
+        // // Note rfc9110#section-9.1 states that the method name is case-sensitive
+        // if let Some(payload_htm) = payload.htm {
+        //     if payload_htm != htm {
+        //         return Err(OAuthError::InvalidDpopProofError(
+        //             "DPoP htm mismatch".to_string(),
+        //         ));
+        //     }
+        // }
+        //
+        // if payload.nonce.is_none() && self.dpop_nonce.is_some() {
+        //     return Err(OAuthError::InvalidDpopProofError(
+        //         "DPoP htm mismatch".to_string(),
+        //     )); //DPoP Nonce Error
+        // }
+        //
+        // if let Some(payload_nonce) = payload.nonce {
+        //     if !self.dpop_nonce.clone().unwrap().check(payload_nonce) {
+        //         return Err(OAuthError::InvalidDpopProofError(
+        //             "DPoP htm mismatch".to_string(),
+        //         )); //DPoP Nonce Error
+        //     }
+        // }
+        //
+        // //htu norms
+        //
+        // if let Some(access_token) = access_token {
+        //     // let ath_buffer = create_hash
+        // } else if payload.ath.is_some() {
+        //     return Err(OAuthError::InvalidDpopProofError(
+        //         "DPoP ath not allowed".to_string(),
+        //     )); //DPoP Nonce Error
+        // }
 
         unimplemented!()
     }

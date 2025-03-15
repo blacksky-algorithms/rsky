@@ -1,3 +1,4 @@
+use rocket::Responder;
 use serde::{Deserialize, Serialize};
 
 /// Response from a Pushed Authorization Request (PAR) endpoint.

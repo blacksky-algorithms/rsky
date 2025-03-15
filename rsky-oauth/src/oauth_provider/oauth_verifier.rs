@@ -80,10 +80,11 @@ impl OAuthVerifier {
         htu: &str, // HTTP URL
         access_token: Option<OAuthAccessToken>,
     ) -> Option<String> {
-        let res = self
-            .dpop_manager
-            .check_proof(proof, htm, htu, access_token)
-            .await;
+        unimplemented!()
+        // let res = self
+        //     .dpop_manager
+        //     .check_proof(proof, htm, htu, access_token)
+        //     .await;
     }
 
     pub fn assert_token_type_allowed(

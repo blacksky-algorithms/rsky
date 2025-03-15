@@ -236,16 +236,17 @@ impl OAuthProvider {
     }
 
     fn login_required(&self, info: &DeviceAccountInfo) -> bool {
-        /** in seconds */
-        let now = now_as_secs();
-        let auth_age = now - info.authenticated_at;
-
-        // Fool-proof (invalid date, or suspiciously in the future)
-        if auth_age < 0 {
-            return true;
-        }
-
-        auth_age >= self.authentication_max_age
+        unimplemented!()
+        // /* in seconds */
+        // let now = now_as_secs();
+        // let auth_age = now - info.authenticated_at;
+        //
+        // // Fool-proof (invalid date, or suspiciously in the future)
+        // if auth_age < 0 {
+        //     return true;
+        // }
+        //
+        // auth_age >= self.authentication_max_age
     }
 
     //Done
@@ -339,7 +340,7 @@ impl OAuthProvider {
     }
 
     /**
-     * @see {@link https://datatracker.ietf.org/doc/html/rfc9126}
+     * @see {@link https://datatracker.ietf.org/doc/html/rfc9126 }
      */
     pub async fn pushed_authorization_request(
         &mut self,
@@ -753,6 +754,9 @@ impl OAuthProvider {
         Ok(())
     }
 
+    /**
+     * @see {@link https://datatracker.ietf.org/doc/html/rfc7662#section-2.1 rfc7662}
+     */
     pub async fn introspect(
         &mut self,
         credentials: OAuthClientCredentials,

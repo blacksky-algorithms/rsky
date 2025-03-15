@@ -1,4 +1,3 @@
-use rocket::http::Status;
 use rocket::{Request, Response};
 
 pub fn validate_header_value(
@@ -33,13 +32,7 @@ pub fn validate_fetch_site(req: &Request, allowed_values: Vec<&str>) -> Result<(
     validate_header_value(req, "sec-fetch-site", allowed_values)
 }
 
-pub fn validate_csrf_token(
-    req: &Request,
-    mut res: &Response,
-    csrf_token: &str,
-    cookie_name: &str,
-    clear_cookie: bool,
-) {
+pub fn validate_csrf_token(req: &Request, csrf_token: &str, cookie_name: &str, clear_cookie: bool) {
     let cookies = req.cookies();
     if cookies.get(cookie_name).is_none() {
         // No Cookie
@@ -50,4 +43,13 @@ pub fn validate_csrf_token(
     }
 
     if clear_cookie {}
+}
+
+pub fn validate_referer(req: &Request) {
+    let headers = req.headers().clone();
+    let referer = headers.get("referer").next();
+    match referer {
+        None => {}
+        Some(referer) => {}
+    }
 }
