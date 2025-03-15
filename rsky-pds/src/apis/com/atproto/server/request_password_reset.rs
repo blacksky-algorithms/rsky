@@ -13,7 +13,7 @@ async fn inner_request_password_reset(body: Json<RequestPasswordResetInput>) -> 
     let RequestPasswordResetInput { email } = body.into_inner();
     let email = email.to_lowercase();
 
-    let account = AccountManager::get_account_by_email(
+    let account = AccountManager::get_account_by_email_legacy(
         &email,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

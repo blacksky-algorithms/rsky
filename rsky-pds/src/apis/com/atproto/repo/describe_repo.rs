@@ -18,7 +18,7 @@ async fn inner_describe_repo(
     s3_config: &State<SdkConfig>,
     db: DbConn,
 ) -> Result<DescribeRepoOutput> {
-    let account = AccountManager::get_account(&repo, None).await?;
+    let account = AccountManager::get_account_legacy(&repo, None).await?;
     match account {
         None => bail!("Cound not find user: `{repo}`"),
         Some(account) => {

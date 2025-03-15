@@ -215,7 +215,7 @@ pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToke
 }
 
 #[allow(deprecated)]
-pub async fn store_refresh_token(
+pub async fn store_refresh_token_legacy(
     payload: RefreshToken,
     app_password_name: Option<String>,
 ) -> Result<()> {
@@ -238,8 +238,7 @@ pub async fn store_refresh_token(
     Ok(())
 }
 
-#[allow(deprecated)]
-pub async fn store_refresh_token_v2(
+pub async fn store_refresh_token(
     payload: RefreshToken,
     app_password_name: Option<String>,
     db: &DbConn,

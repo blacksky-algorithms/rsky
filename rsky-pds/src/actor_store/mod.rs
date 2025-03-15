@@ -55,7 +55,8 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    pub async fn create_repo(
+    #[deprecated]
+    pub async fn create_repo_legacy(
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
@@ -86,11 +87,11 @@ impl ActorStore {
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
         Ok(commit)
     }
 
-    pub async fn create_repo_v2(
+    pub async fn create_repo(
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
@@ -122,7 +123,7 @@ impl ActorStore {
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs_v2(writes, db).await?;
+        self.blob.process_write_blobs(writes, db).await?;
         Ok(commit)
     }
 
@@ -142,7 +143,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
         Ok(())
     }
 
@@ -163,7 +164,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
         Ok(commit)
     }
 

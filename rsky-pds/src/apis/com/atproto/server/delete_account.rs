@@ -25,7 +25,7 @@ async fn inner_delete_account(
         password,
         token,
     } = body.into_inner();
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
@@ -34,7 +34,7 @@ async fn inner_delete_account(
     )
     .await?;
     if let Some(_) = account {
-        let valid_pass = AccountManager::verify_account_password(&did, &password).await?;
+        let valid_pass = AccountManager::verify_account_password_legacy(&did, &password).await?;
         if !valid_pass {
             return Err(ApiError::InvalidLogin);
         }

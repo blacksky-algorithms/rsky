@@ -208,56 +208,25 @@ impl BlobReader {
         Ok(BlobRef::new(cid, mime_type, size, None))
     }
 
-    pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        self.delete_dereferenced_blobs(writes.clone()).await?;
-        let _ = stream::iter(writes)
-            .then(|write| async move {
-                Ok::<(), anyhow::Error>(match write {
-                    PreparedWrite::Create(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone()).await?;
-                            self.associate_blob(blob, w.uri.clone()).await?;
-                        }
-                    }
-                    PreparedWrite::Update(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone()).await?;
-                            self.associate_blob(blob, w.uri.clone()).await?;
-                        }
-                    }
-                    _ => (),
-                })
-            })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(())
-    }
-
-    pub async fn process_write_blobs_v2(
-        &self,
-        writes: Vec<PreparedWrite>,
-        _db: &DbConn,
-    ) -> Result<()> {
-        let db = _db.clone();
-        self.delete_dereferenced_blobs_v2(writes.clone(), db)
+    #[deprecated]
+    pub async fn process_write_blobs_legacy(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+        self.delete_dereferenced_blobs_legacy(writes.clone())
             .await?;
         let _ = stream::iter(writes)
             .then(|write| async move {
                 Ok::<(), anyhow::Error>(match write {
                     PreparedWrite::Create(w) => {
                         for blob in w.blobs {
-                            self.verify_blob_and_make_permanent_v2(blob.clone(), db)
+                            self.verify_blob_and_make_permanent_legacy(blob.clone())
                                 .await?;
-                            self.associate_blob_v2(blob, w.uri.clone(), db).await?;
+                            self.associate_blob_legacy(blob, w.uri.clone()).await?;
                         }
                     }
                     PreparedWrite::Update(w) => {
                         for blob in w.blobs {
-                            self.verify_blob_and_make_permanent_v2(blob.clone(), db)
+                            self.verify_blob_and_make_permanent_legacy(blob.clone())
                                 .await?;
-                            self.associate_blob_v2(blob, w.uri.clone(), db).await?;
+                            self.associate_blob_legacy(blob, w.uri.clone()).await?;
                         }
                     }
                     _ => (),
@@ -270,7 +239,42 @@ impl BlobReader {
         Ok(())
     }
 
-    pub async fn delete_dereferenced_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+    pub async fn process_write_blobs(
+        &self,
+        writes: Vec<PreparedWrite>,
+        _db: &DbConn,
+    ) -> Result<()> {
+        let db = _db.clone();
+        self.delete_dereferenced_blobs(writes.clone(), db).await?;
+        let _ = stream::iter(writes)
+            .then(|write| async move {
+                Ok::<(), anyhow::Error>(match write {
+                    PreparedWrite::Create(w) => {
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone(), db)
+                                .await?;
+                            self.associate_blob(blob, w.uri.clone(), db).await?;
+                        }
+                    }
+                    PreparedWrite::Update(w) => {
+                        for blob in w.blobs {
+                            self.verify_blob_and_make_permanent(blob.clone(), db)
+                                .await?;
+                            self.associate_blob(blob, w.uri.clone(), db).await?;
+                        }
+                    }
+                    _ => (),
+                })
+            })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(())
+    }
+
+    #[deprecated]
+    pub async fn delete_dereferenced_blobs_legacy(&self, writes: Vec<PreparedWrite>) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
         let conn = &mut establish_connection()?;
@@ -348,7 +352,7 @@ impl BlobReader {
         Ok(())
     }
 
-    pub async fn delete_dereferenced_blobs_v2(
+    pub async fn delete_dereferenced_blobs(
         &self,
         writes: Vec<PreparedWrite>,
         db: &DbConn,
@@ -443,7 +447,8 @@ impl BlobReader {
         Ok(())
     }
 
-    pub async fn verify_blob_and_make_permanent(&self, blob: PreparedBlobRef) -> Result<()> {
+    #[deprecated]
+    pub async fn verify_blob_and_make_permanent_legacy(&self, blob: PreparedBlobRef) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         let conn = &mut establish_connection()?;
 
@@ -473,7 +478,7 @@ impl BlobReader {
         }
     }
 
-    pub async fn verify_blob_and_make_permanent_v2(
+    pub async fn verify_blob_and_make_permanent(
         &self,
         blob: PreparedBlobRef,
         db: &DbConn,
@@ -513,7 +518,12 @@ impl BlobReader {
         }
     }
 
-    pub async fn associate_blob(&self, blob: PreparedBlobRef, record_uri: String) -> Result<()> {
+    #[deprecated]
+    pub async fn associate_blob_legacy(
+        &self,
+        blob: PreparedBlobRef,
+        record_uri: String,
+    ) -> Result<()> {
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
         let conn = &mut establish_connection()?;
 
@@ -528,7 +538,7 @@ impl BlobReader {
         Ok(())
     }
 
-    pub async fn associate_blob_v2(
+    pub async fn associate_blob(
         &self,
         blob: PreparedBlobRef,
         _record_uri: String,

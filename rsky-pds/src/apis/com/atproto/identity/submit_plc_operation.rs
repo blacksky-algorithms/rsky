@@ -131,7 +131,7 @@ async fn validate_plc_request(
         }
     }
 
-    let account = match AccountManager::get_account(
+    let account = match AccountManager::get_account_legacy(
         &did.to_string(),
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

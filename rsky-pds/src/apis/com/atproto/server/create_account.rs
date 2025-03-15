@@ -71,7 +71,7 @@ pub async fn server_create_account(
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let commit = match actor_store
-        .create_repo_v2(signing_key, Vec::new(), &blob_db)
+        .create_repo(signing_key, Vec::new(), &blob_db)
         .await
     {
         Ok(commit) => commit,
@@ -180,7 +180,7 @@ pub async fn server_create_account(
             }
         }
     }
-    match AccountManager::update_repo_root_v2(did.clone(), commit.cid, commit.rev, &blob_db).await {
+    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev, &blob_db).await {
         Ok(_) => {
             tracing::debug!("Successfully updated repo root");
         }
@@ -272,8 +272,8 @@ pub async fn validate_inputs_for_local_pds(
     };
 
     // Check Handle and Email are still available
-    let handle_accnt = AccountManager::get_account_v2(&handle, None, db).await?;
-    let email_accnt = AccountManager::get_account_by_email_v2(&email, None, db).await?;
+    let handle_accnt = AccountManager::get_account(&handle, None, db).await?;
+    let email_accnt = AccountManager::get_account_by_email(&email, None, db).await?;
     if handle_accnt.is_some() {
         return Err(ApiError::HandleNotAvailable);
     } else if email_accnt.is_some() {

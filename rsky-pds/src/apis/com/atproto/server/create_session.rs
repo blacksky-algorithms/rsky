@@ -19,7 +19,7 @@ async fn inner_create_session(
 
     let user = match identifier.contains("@") {
         true => {
-            AccountManager::get_account_by_email_v2(
+            AccountManager::get_account_by_email(
                 &identifier,
                 Some(AvailabilityFlags {
                     include_deactivated: Some(true),
@@ -30,7 +30,7 @@ async fn inner_create_session(
             .await
         }
         false => {
-            AccountManager::get_account_v2(
+            AccountManager::get_account(
                 &identifier,
                 Some(AvailabilityFlags {
                     include_deactivated: Some(true),
@@ -44,7 +44,7 @@ async fn inner_create_session(
     if let Ok(Some(user)) = user {
         let mut app_password_name: Option<String> = None;
         let valid_account_pass;
-        match AccountManager::verify_account_password_v2(&user.did, &password, &db).await {
+        match AccountManager::verify_account_password(&user.did, &password, &db).await {
             Ok(res) => {
                 valid_account_pass = res;
             }
@@ -54,7 +54,7 @@ async fn inner_create_session(
             }
         }
         if !valid_account_pass {
-            match AccountManager::verify_app_password_v2(&user.did, &password, &db).await {
+            match AccountManager::verify_app_password(&user.did, &password, &db).await {
                 Ok(res) => {
                     app_password_name = res;
                 }
@@ -71,7 +71,7 @@ async fn inner_create_session(
             return Err(ApiError::AccountTakendown);
         }
         let (access_jwt, refresh_jwt);
-        match AccountManager::create_session_v2(user.did.clone(), app_password_name, &db).await {
+        match AccountManager::create_session(user.did.clone(), app_password_name, &db).await {
             Ok(res) => {
                 (access_jwt, refresh_jwt) = res;
             }

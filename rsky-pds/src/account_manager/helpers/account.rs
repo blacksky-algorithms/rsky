@@ -98,7 +98,8 @@ pub fn select_account_qb(flags: Option<AvailabilityFlags>) -> BoxedQuery<'static
     builder
 }
 
-pub async fn get_account(
+#[deprecated]
+pub async fn get_account_legacy(
     handle_or_did: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
@@ -147,7 +148,7 @@ pub async fn get_account(
     Ok(found)
 }
 
-pub async fn get_account_v2(
+pub async fn get_account(
     _handle_or_did: &String,
     flags: Option<AvailabilityFlags>,
     db: &DbConn,
@@ -202,7 +203,8 @@ pub async fn get_account_v2(
     Ok(found)
 }
 
-pub async fn get_account_by_email(
+#[deprecated]
+pub async fn get_account_by_email_legacy(
     email: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
@@ -247,7 +249,7 @@ pub async fn get_account_by_email(
     Ok(found)
 }
 
-pub async fn get_account_by_email_v2(
+pub async fn get_account_by_email(
     _email: &String,
     flags: Option<AvailabilityFlags>,
     db: &DbConn,
@@ -296,7 +298,12 @@ pub async fn get_account_by_email_v2(
     Ok(found)
 }
 
-pub async fn register_actor(did: String, handle: String, deactivated: Option<bool>) -> Result<()> {
+#[deprecated]
+pub async fn register_actor_legacy(
+    did: String,
+    handle: String,
+    deactivated: Option<bool>,
+) -> Result<()> {
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
     let created_at = format!("{}", dt.format(RFC3339_VARIANT));
@@ -328,7 +335,7 @@ pub async fn register_actor(did: String, handle: String, deactivated: Option<boo
     Ok(())
 }
 
-pub async fn register_actor_v2(
+pub async fn register_actor(
     did: String,
     handle: String,
     deactivated: Option<bool>,
@@ -367,7 +374,8 @@ pub async fn register_actor_v2(
     Ok(())
 }
 
-pub async fn register_account(did: String, email: String, password: String) -> Result<()> {
+#[deprecated]
+pub async fn register_account_legacy(did: String, email: String, password: String) -> Result<()> {
     let created_at = rsky_common::now();
 
     let conn = &mut establish_connection()?;
@@ -386,7 +394,7 @@ pub async fn register_account(did: String, email: String, password: String) -> R
     Ok(())
 }
 
-pub async fn register_account_v2(
+pub async fn register_account(
     did: String,
     email: String,
     password: String,

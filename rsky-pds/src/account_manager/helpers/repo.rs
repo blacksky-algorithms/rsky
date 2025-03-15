@@ -4,7 +4,8 @@ use diesel::*;
 use libipld::Cid;
 use rsky_common;
 
-pub fn update_root(did: String, cid: Cid, rev: String) -> Result<()> {
+#[deprecated]
+pub fn update_root_legacy(did: String, cid: Cid, rev: String) -> Result<()> {
     // @TODO balance risk of a race in the case of a long retry
     use crate::schema::pds::repo_root::dsl as RepoRootSchema;
     let conn = &mut establish_connection()?;
@@ -28,7 +29,7 @@ pub fn update_root(did: String, cid: Cid, rev: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn update_root_v2(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
+pub async fn update_root(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
     // @TODO balance risk of a race in the case of a long retry
     use crate::schema::pds::repo_root::dsl as RepoRootSchema;
 

@@ -14,7 +14,8 @@ use std::mem;
 pub type CodeUse = LexiconInviteCodeUse;
 pub type CodeDetail = LexiconInviteCode;
 
-pub async fn ensure_invite_is_available(invite_code: String) -> Result<()> {
+#[deprecated]
+pub async fn ensure_invite_is_available_legacy(invite_code: String) -> Result<()> {
     use crate::schema::pds::actor::dsl as ActorSchema;
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     use crate::schema::pds::invite_code_use::dsl as InviteCodeUseSchema;
@@ -47,7 +48,7 @@ pub async fn ensure_invite_is_available(invite_code: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn ensure_invite_is_available_v2(invite_code: String, db: &DbConn) -> Result<()> {
+pub async fn ensure_invite_is_available(invite_code: String, db: &DbConn) -> Result<()> {
     use crate::schema::pds::actor::dsl as ActorSchema;
     use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
     use crate::schema::pds::invite_code_use::dsl as InviteCodeUseSchema;
@@ -82,7 +83,8 @@ pub async fn ensure_invite_is_available_v2(invite_code: String, db: &DbConn) -> 
     Ok(())
 }
 
-pub async fn record_invite_use(
+#[deprecated]
+pub async fn record_invite_use_legacy(
     did: String,
     invite_code: Option<String>,
     now: String,
@@ -103,7 +105,7 @@ pub async fn record_invite_use(
     Ok(())
 }
 
-pub async fn record_invite_use_v2(
+pub async fn record_invite_use(
     did: String,
     invite_code: Option<String>,
     now: String,

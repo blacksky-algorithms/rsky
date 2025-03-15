@@ -17,7 +17,8 @@ pub struct UpdateUserPasswordOpts {
     pub password_encrypted: String,
 }
 
-pub async fn verify_account_password(did: &String, password: &String) -> Result<bool> {
+#[deprecated]
+pub async fn verify_account_password_legacy(did: &String, password: &String) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
     let conn = &mut establish_connection()?;
 
@@ -33,11 +34,7 @@ pub async fn verify_account_password(did: &String, password: &String) -> Result<
     }
 }
 
-pub async fn verify_account_password_v2(
-    did: &String,
-    password: &String,
-    db: &DbConn,
-) -> Result<bool> {
+pub async fn verify_account_password(did: &String, password: &String, db: &DbConn) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
 
     let did = did.clone();
@@ -57,7 +54,8 @@ pub async fn verify_account_password_v2(
     }
 }
 
-pub async fn verify_app_password(did: &String, password: &String) -> Result<Option<String>> {
+#[deprecated]
+pub async fn verify_app_password_legacy(did: &String, password: &String) -> Result<Option<String>> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
     let conn = &mut establish_connection()?;
 
@@ -77,7 +75,7 @@ pub async fn verify_app_password(did: &String, password: &String) -> Result<Opti
     }
 }
 
-pub async fn verify_app_password_v2(
+pub async fn verify_app_password(
     did: &String,
     password: &String,
     db: &DbConn,

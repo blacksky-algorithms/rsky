@@ -806,7 +806,7 @@ pub async fn validate_access_token<'r>(
     let check_takedown = check_takedown.unwrap_or(false);
     let check_deactivated = check_deactivated.unwrap_or(false);
     if check_takedown || check_deactivated {
-        let found: ActorAccount = match AccountManager::get_account(
+        let found: ActorAccount = match AccountManager::get_account_legacy(
             &did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
