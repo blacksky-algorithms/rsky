@@ -34,7 +34,7 @@ async fn inner_put_record(
         swap_record,
         swap_commit,
     } = body.into_inner();
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &repo,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
@@ -109,7 +109,7 @@ async fn inner_put_record(
             let mut lock = sequencer.sequencer.write().await;
             lock.sequence_commit(did.clone(), commit.clone(), vec![write.clone()])
                 .await?;
-            AccountManager::update_repo_root(did, commit.cid, commit.rev)?;
+            AccountManager::update_repo_root_legacy(did, commit.cid, commit.rev)?;
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),

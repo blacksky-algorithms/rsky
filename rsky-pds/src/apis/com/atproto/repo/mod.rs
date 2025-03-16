@@ -6,7 +6,7 @@ pub async fn assert_repo_availability(
     did: &String,
     is_admin_of_self: bool,
 ) -> Result<ActorAccount> {
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
