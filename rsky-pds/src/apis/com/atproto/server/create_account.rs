@@ -49,6 +49,7 @@ pub async fn server_create_account(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     db: DbConn,
+    blob_db: DbConn,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -64,12 +65,15 @@ pub async fn server_create_account(
         deactivated,
         plc_op,
         signing_key,
-    } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester).await?;
+    } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester, &db).await?;
 
     // Create new actor repo TODO: Proper rollback
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
+    let commit = match actor_store
+        .create_repo(signing_key, Vec::new(), &blob_db)
+        .await
+    {
         Ok(commit) => commit,
         Err(error) => {
             tracing::error!("Failed to create repo\n{:?}", error);
@@ -112,16 +116,19 @@ pub async fn server_create_account(
 
     // Create Account
     let (access_jwt, refresh_jwt);
-    match AccountManager::create_account(CreateAccountOpts {
-        did: did.clone(),
-        handle: handle.clone(),
-        email: Some(email),
-        password: Some(password),
-        repo_cid: commit.cid,
-        repo_rev: commit.rev.clone(),
-        invite_code,
-        deactivated: Some(deactivated),
-    })
+    match AccountManager::create_account(
+        CreateAccountOpts {
+            did: did.clone(),
+            handle: handle.clone(),
+            email: Some(email),
+            password: Some(password),
+            repo_cid: commit.cid,
+            repo_rev: commit.rev.clone(),
+            invite_code,
+            deactivated: Some(deactivated),
+        },
+        &blob_db,
+    )
     .await
     {
         Ok(res) => {
@@ -173,7 +180,7 @@ pub async fn server_create_account(
             }
         }
     }
-    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev) {
+    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev, &blob_db).await {
         Ok(_) => {
             tracing::debug!("Successfully updated repo root");
         }
@@ -210,6 +217,7 @@ pub async fn validate_inputs_for_local_pds(
     id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
     requester: Option<String>,
+    db: &DbConn,
 ) -> Result<TransformedCreateAccountInput, ApiError> {
     let did: String;
     let plc_op;
@@ -264,8 +272,8 @@ pub async fn validate_inputs_for_local_pds(
     };
 
     // Check Handle and Email are still available
-    let handle_accnt = AccountManager::get_account(&handle, None).await?;
-    let email_accnt = AccountManager::get_account_by_email(&email, None).await?;
+    let handle_accnt = AccountManager::get_account(&handle, None, db).await?;
+    let email_accnt = AccountManager::get_account_by_email(&email, None, db).await?;
     if handle_accnt.is_some() {
         return Err(ApiError::HandleNotAvailable);
     } else if email_accnt.is_some() {

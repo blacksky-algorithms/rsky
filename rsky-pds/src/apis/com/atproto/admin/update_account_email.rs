@@ -7,7 +7,7 @@ use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::UpdateAccountEmailInput;
 
 async fn inner_update_account_email(body: Json<UpdateAccountEmailInput>) -> Result<()> {
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &body.account,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

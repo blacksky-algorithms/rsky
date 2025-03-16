@@ -55,7 +55,8 @@ impl ActorStore {
     // Transactors
     // -------------------
 
-    pub async fn create_repo(
+    #[deprecated]
+    pub async fn create_repo_legacy(
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
@@ -86,7 +87,43 @@ impl ActorStore {
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
+        Ok(commit)
+    }
+
+    pub async fn create_repo(
+        &self,
+        keypair: Keypair,
+        writes: Vec<PreparedCreateOrUpdate>,
+        db: &DbConn,
+    ) -> Result<CommitData> {
+        let write_ops = writes
+            .clone()
+            .into_iter()
+            .map(|prepare| {
+                let at_uri: AtUri = prepare.uri.try_into()?;
+                Ok(RecordCreateOrUpdateOp {
+                    action: WriteOpAction::Create,
+                    collection: at_uri.get_collection(),
+                    rkey: at_uri.get_rkey(),
+                    record: prepare.record,
+                })
+            })
+            .collect::<Result<Vec<RecordCreateOrUpdateOp>>>()?;
+        let commit = Repo::format_init_commit(
+            self.storage.clone(),
+            self.did.clone(),
+            keypair,
+            Some(write_ops),
+        )
+        .await?;
+        let storage_guard = self.storage.read().await;
+        storage_guard.apply_commit(commit.clone(), None).await?;
+        let writes = writes
+            .into_iter()
+            .map(|w| PreparedWrite::Create(w))
+            .collect::<Vec<PreparedWrite>>();
+        self.blob.process_write_blobs(writes, db).await?;
         Ok(commit)
     }
 
@@ -106,7 +143,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
         Ok(())
     }
 
@@ -127,7 +164,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_write_blobs_legacy(writes).await?;
         Ok(commit)
     }
 

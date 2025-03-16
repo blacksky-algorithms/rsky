@@ -176,7 +176,7 @@ impl LocalViewer {
             .filter(RecordSchema::rkey.eq("self"))
             .first(conn)
             .optional()?;
-        let account_res = AccountManager::get_account(&self.did, None).await?;
+        let account_res = AccountManager::get_account_legacy(&self.did, None).await?;
         match account_res {
             None => Ok(None),
             Some(account_res) => {
