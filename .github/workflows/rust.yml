@@ -23,33 +23,55 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo check
-      run: cargo check
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo check
+        run: cargo check
 
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo build
-      run: cargo build --release
+      - name: Show disk usage (before cleanup)
+        run: df -h
+
+      - name: Clean up large directories
+        run: |
+          sudo rm -rf /usr/local/share/boost \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc
+
+      - name: Show disk usage (after cleanup)
+        run: df -h
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo build
+        run: |
+          # Optional: You can do a `cargo clean` here if you want a fresh build each time:
+          # cargo clean
+          cargo build --release
 
   test:
     runs-on: ubuntu-latest
     needs: build
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo test
-      run: cargo test 
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo test
+        run: cargo test
 
   # clippy:
   #   runs-on: ubuntu-latest
@@ -60,15 +82,17 @@ jobs:
   #   - name: Rust Cache
   #     uses: Swatinem/rust-cache@v2
   #   - name: Run Clippy
-  #     run: cargo clippy  -- -D warnings
+  #     run: cargo clippy -- -D warnings
 
   formatting:
     runs-on: ubuntu-latest
     needs: test
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo fmt
-      run: cargo fmt -- --check
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo fmt
+        run: cargo fmt -- --check
