@@ -42,7 +42,7 @@ async fn inner_resolve_handle(
 ) -> Result<ResolveHandleOutput> {
     // @TODO: Implement normalizeAndEnsureValidHandle()
     let mut did: Option<String> = None;
-    let user: Option<ActorAccount> = AccountManager::get_account(&handle, None).await?;
+    let user: Option<ActorAccount> = AccountManager::get_account_legacy(&handle, None).await?;
 
     match user {
         Some(user) => did = Some(user.did),

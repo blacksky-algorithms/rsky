@@ -1,4 +1,4 @@
-use crate::db::establish_connection;
+use crate::db::{establish_connection, DbConn};
 use crate::schema::pds::account::dsl as AccountSchema;
 use crate::schema::pds::account::table as AccountTable;
 use crate::schema::pds::actor::dsl as ActorSchema;
@@ -98,7 +98,8 @@ pub fn select_account_qb(flags: Option<AvailabilityFlags>) -> BoxedQuery<'static
     builder
 }
 
-pub async fn get_account(
+#[deprecated]
+pub async fn get_account_legacy(
     handle_or_did: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
@@ -147,7 +148,63 @@ pub async fn get_account(
     Ok(found)
 }
 
-pub async fn get_account_by_email(
+pub async fn get_account(
+    _handle_or_did: &String,
+    flags: Option<AvailabilityFlags>,
+    db: &DbConn,
+) -> Result<Option<ActorAccount>> {
+    let handle_or_did = _handle_or_did.clone();
+    let found = db
+        .run(move |conn| {
+            let mut builder = select_account_qb(flags);
+            if handle_or_did.starts_with("did:") {
+                builder = builder.filter(ActorSchema::did.eq(handle_or_did));
+            } else {
+                builder = builder.filter(ActorSchema::handle.eq(handle_or_did));
+            }
+
+            builder
+                .select((
+                    ActorSchema::did,
+                    ActorSchema::handle,
+                    ActorSchema::createdAt,
+                    ActorSchema::takedownRef,
+                    ActorSchema::deactivatedAt,
+                    ActorSchema::deleteAfter,
+                    AccountSchema::email.nullable(),
+                    AccountSchema::emailConfirmedAt.nullable(),
+                    AccountSchema::invitesDisabled.nullable(),
+                ))
+                .first::<(
+                    String,
+                    Option<String>,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<i16>,
+                )>(conn)
+                .map(|res| ActorAccount {
+                    did: res.0,
+                    handle: res.1,
+                    created_at: res.2,
+                    takedown_ref: res.3,
+                    deactivated_at: res.4,
+                    delete_after: res.5,
+                    email: res.6,
+                    email_confirmed_at: res.7,
+                    invites_disabled: res.8,
+                })
+                .optional()
+        })
+        .await?;
+    Ok(found)
+}
+
+#[deprecated]
+pub async fn get_account_by_email_legacy(
     email: &String,
     flags: Option<AvailabilityFlags>,
 ) -> Result<Option<ActorAccount>> {
@@ -192,9 +249,61 @@ pub async fn get_account_by_email(
     Ok(found)
 }
 
-pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) -> Result<()> {
-    let conn = &mut establish_connection()?;
+pub async fn get_account_by_email(
+    _email: &String,
+    flags: Option<AvailabilityFlags>,
+    db: &DbConn,
+) -> Result<Option<ActorAccount>> {
+    let email = _email.clone();
+    let found = db
+        .run(move |conn| {
+            select_account_qb(flags)
+                .select((
+                    ActorSchema::did,
+                    ActorSchema::handle,
+                    ActorSchema::createdAt,
+                    ActorSchema::takedownRef,
+                    ActorSchema::deactivatedAt,
+                    ActorSchema::deleteAfter,
+                    AccountSchema::email.nullable(),
+                    AccountSchema::emailConfirmedAt.nullable(),
+                    AccountSchema::invitesDisabled.nullable(),
+                ))
+                .filter(AccountSchema::email.eq(email.to_lowercase()))
+                .first::<(
+                    String,
+                    Option<String>,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<i16>,
+                )>(conn)
+                .map(|res| ActorAccount {
+                    did: res.0,
+                    handle: res.1,
+                    created_at: res.2,
+                    takedown_ref: res.3,
+                    deactivated_at: res.4,
+                    delete_after: res.5,
+                    email: res.6,
+                    email_confirmed_at: res.7,
+                    invites_disabled: res.8,
+                })
+                .optional()
+        })
+        .await?;
+    Ok(found)
+}
 
+#[deprecated]
+pub async fn register_actor_legacy(
+    did: String,
+    handle: String,
+    deactivated: Option<bool>,
+) -> Result<()> {
     let system_time = SystemTime::now();
     let dt: DateTime<UtcOffset> = system_time.into();
     let created_at = format!("{}", dt.format(RFC3339_VARIANT));
@@ -210,6 +319,8 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
         _ => None,
     };
 
+    let conn = &mut establish_connection()?;
+
     let _: String = insert_into(ActorSchema::actor)
         .values((
             ActorSchema::did.eq(did),
@@ -224,10 +335,50 @@ pub fn register_actor(did: String, handle: String, deactivated: Option<bool>) ->
     Ok(())
 }
 
-pub fn register_account(did: String, email: String, password: String) -> Result<()> {
-    let conn = &mut establish_connection()?;
+pub async fn register_actor(
+    did: String,
+    handle: String,
+    deactivated: Option<bool>,
+    db: &DbConn,
+) -> Result<()> {
+    let system_time = SystemTime::now();
+    let dt: DateTime<UtcOffset> = system_time.into();
+    let created_at = format!("{}", dt.format(RFC3339_VARIANT));
+    let deactivate_at = match deactivated {
+        Some(true) => Some(created_at.clone()),
+        _ => None,
+    };
+    let deactivate_after = match deactivated {
+        Some(true) => {
+            let exp = dt.add(chrono::Duration::days(3));
+            Some(format!("{}", exp.format(RFC3339_VARIANT)))
+        }
+        _ => None,
+    };
 
+    let _: String = db
+        .run(move |conn| {
+            insert_into(ActorSchema::actor)
+                .values((
+                    ActorSchema::did.eq(did),
+                    ActorSchema::handle.eq(handle),
+                    ActorSchema::createdAt.eq(created_at),
+                    ActorSchema::deactivatedAt.eq(deactivate_at),
+                    ActorSchema::deleteAfter.eq(deactivate_after),
+                ))
+                .on_conflict_do_nothing()
+                .returning(ActorSchema::did)
+                .get_result(conn)
+        })
+        .await?;
+    Ok(())
+}
+
+#[deprecated]
+pub async fn register_account_legacy(did: String, email: String, password: String) -> Result<()> {
     let created_at = rsky_common::now();
+
+    let conn = &mut establish_connection()?;
 
     // @TODO record recovery key for bring your own recovery key
     let _: String = insert_into(AccountSchema::account)
@@ -240,6 +391,32 @@ pub fn register_account(did: String, email: String, password: String) -> Result<
         .on_conflict_do_nothing()
         .returning(AccountSchema::did)
         .get_result(conn)?;
+    Ok(())
+}
+
+pub async fn register_account(
+    did: String,
+    email: String,
+    password: String,
+    db: &DbConn,
+) -> Result<()> {
+    let created_at = rsky_common::now();
+
+    // @TODO record recovery key for bring your own recovery key
+    let _: String = db
+        .run(move |conn| {
+            insert_into(AccountSchema::account)
+                .values((
+                    AccountSchema::did.eq(did),
+                    AccountSchema::email.eq(email),
+                    AccountSchema::password.eq(password),
+                    AccountSchema::createdAt.eq(created_at),
+                ))
+                .on_conflict_do_nothing()
+                .returning(AccountSchema::did)
+                .get_result(conn)
+        })
+        .await?;
     Ok(())
 }
 

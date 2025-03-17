@@ -16,7 +16,7 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
     } = body.into_inner();
     let subject = subject.unwrap_or("Message via your PDS".to_string());
 
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &recipient_did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

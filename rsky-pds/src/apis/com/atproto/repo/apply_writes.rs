@@ -34,7 +34,7 @@ async fn inner_apply_writes(
         swap_commit,
         ..
     } = tx;
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &repo,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
@@ -111,7 +111,7 @@ async fn inner_apply_writes(
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_commit(did.clone(), commit.clone(), writes)
             .await?;
-        AccountManager::update_repo_root(did.to_string(), commit.cid, commit.rev)?;
+        AccountManager::update_repo_root_legacy(did.to_string(), commit.cid, commit.rev)?;
         Ok(())
     } else {
         bail!("Could not find repo: `{repo}`")

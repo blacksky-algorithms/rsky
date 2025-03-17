@@ -28,7 +28,9 @@ async fn get_account(requester_did: &str) -> Result<ActorAccount, ApiError> {
         include_taken_down: Some(true),
         include_deactivated: Some(true),
     };
-    match AccountManager::get_account(&requester_did.to_string(), Some(availability_flags)).await {
+    match AccountManager::get_account_legacy(&requester_did.to_string(), Some(availability_flags))
+        .await
+    {
         Ok(account) => match account {
             None => {
                 tracing::error!("Account not found despite valid credentials");

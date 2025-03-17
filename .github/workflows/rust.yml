@@ -80,6 +80,16 @@ jobs:
       matrix:
         package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
     steps:
+      - name: Show disk usage (before cleanup)
+        run: df -h
+      - name: Clean up large directories
+        run: |
+          sudo rm -rf /usr/local/share/boost \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc
+      - name: Show disk usage (after cleanup)
+        run: df -h
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Rust Cache
