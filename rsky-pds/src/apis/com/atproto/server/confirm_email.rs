@@ -13,7 +13,7 @@ async fn inner_confirm_email(
     let did = auth.access.credentials.unwrap().did.unwrap();
 
     let user;
-    match AccountManager::get_account(
+    match AccountManager::get_account_legacy(
         &did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

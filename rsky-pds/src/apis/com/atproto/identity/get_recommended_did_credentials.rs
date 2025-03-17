@@ -22,7 +22,7 @@ pub async fn get_recommended_did_credentials(
         include_taken_down: Some(true),
         include_deactivated: Some(true),
     };
-    let account = AccountManager::get_account(&requester, Some(availability_flags))
+    let account = AccountManager::get_account_legacy(&requester, Some(availability_flags))
         .await?
         .expect("Account not found despite valid access");
 

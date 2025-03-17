@@ -13,7 +13,7 @@ async fn inner_update_email(body: Json<UpdateEmailInput>, auth: AccessFull) -> R
     if !mailchecker::is_valid(&email) {
         bail!("This email address is not supported, please use a different email.")
     }
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
