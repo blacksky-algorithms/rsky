@@ -7,6 +7,11 @@ on:
     paths:
       - '.github/scripts/determine-packages.sh'
       - '.github/workflows/rust.yml'
+      - 'rsky*/**'         # Matches any directory starting with "rsky"
+      - 'Cargo.toml'       # Base workspace configuration
+      - 'Cargo.lock'       # Dependency lock file
+      - 'rust-toolchain
+      # Add other important base paths as needed
 
 env:
   PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
