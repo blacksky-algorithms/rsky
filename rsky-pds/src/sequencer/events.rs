@@ -10,9 +10,7 @@ use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::car::blocks_to_car_file;
 use rsky_repo::cid_set::CidSet;
-use rsky_repo::types::{
-    CommitAction, CommitData, CommitDataWithOps, CommitDataWithOps, CommitOp, PreparedWrite,
-};
+use rsky_repo::types::{CommitAction, CommitData, CommitDataWithOps, CommitOp, PreparedWrite};
 use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use serde::de::Error as DeserializerError;
