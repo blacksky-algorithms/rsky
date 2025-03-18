@@ -33,26 +33,24 @@ async fn inner_activate_account(
     )
     .await?;
 
-if let Some(account) = account {
+    if let Some(account) = account {
         AccountManager::activate_account(&requester).await?;
-        
+
         let mut actor_store = ActorStore::new(
             requester.clone(),
             S3BlobStore::new(requester.clone(), s3_config),
             db,
         );
         let sync_data = actor_store.get_sync_event_data().await?;
-        
+
         // @NOTE: we're over-emitting for now for backwards compatibility, can reduce this in the future
         let status = AccountManager::get_account_status(&requester).await?;
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_account_evt(requester.clone(), status).await?;
-        
+
         let handle = account.handle.unwrap_or(INVALID_HANDLE.to_string());
-        lock.sequence_identity_evt(
-            requester.clone(),
-            Some(handle),
-        ).await?;
+        lock.sequence_identity_evt(requester.clone(), Some(handle))
+            .await?;
         lock.sequence_sync_evt(requester, sync_data).await?;
         Ok(())
     } else {

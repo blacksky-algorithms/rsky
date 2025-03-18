@@ -363,18 +363,14 @@ pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<model
 pub async fn sync_evt_data_from_commit(mut commit_data: CommitDataWithOps) -> Result<SyncEvtData> {
     let cid = vec![commit_data.commit_data.cid.clone()];
     match commit_data.commit_data.relevant_blocks.get_many(cid) {
-        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => {
-            Err(anyhow::anyhow!("commit block was not found, could not build sync event"))
-        },
-        Ok(blocks_and_missing) => {
-            Ok(SyncEvtData{
-                rev: commit_data.commit_data.rev,
-                cid: commit_data.commit_data.cid.clone(),
-                blocks: blocks_and_missing.blocks
-            })
-        },
-        Err(e) => {
-            Err(e.into())
-        },
+        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => Err(anyhow::anyhow!(
+            "commit block was not found, could not build sync event"
+        )),
+        Ok(blocks_and_missing) => Ok(SyncEvtData {
+            rev: commit_data.commit_data.rev,
+            cid: commit_data.commit_data.cid.clone(),
+            blocks: blocks_and_missing.blocks,
+        }),
+        Err(e) => Err(e.into()),
     }
 }

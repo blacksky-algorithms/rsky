@@ -86,7 +86,11 @@ async fn inner_delete_record(
                 vec![PreparedWrite::Delete(write)],
             )
             .await?;
-            AccountManager::update_repo_root_legacy(did, commit.commit_data.cid, commit.commit_data.rev)?;
+            AccountManager::update_repo_root_legacy(
+                did,
+                commit.commit_data.cid,
+                commit.commit_data.rev,
+            )?;
 
             Ok(())
         }

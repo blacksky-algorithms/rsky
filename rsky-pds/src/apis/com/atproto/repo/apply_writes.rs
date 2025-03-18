@@ -111,7 +111,11 @@ async fn inner_apply_writes(
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_commit(did.clone(), commit.clone(), writes)
             .await?;
-        AccountManager::update_repo_root_legacy(did.to_string(), commit.commit_data.cid, commit.commit_data.rev)?;
+        AccountManager::update_repo_root_legacy(
+            did.to_string(),
+            commit.commit_data.cid,
+            commit.commit_data.rev,
+        )?;
         Ok(())
     } else {
         bail!("Could not find repo: `{repo}`")

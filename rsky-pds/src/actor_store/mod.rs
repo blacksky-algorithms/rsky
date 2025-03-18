@@ -17,15 +17,16 @@ use rsky_repo::repo::Repo;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::types::{
-    write_to_op, CommitAction, CommitData, CommitDataWithOps, CommitOp, PreparedCreateOrUpdate, PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp, WriteOpAction
+    write_to_op, CommitAction, CommitData, CommitDataWithOps, CommitOp, PreparedCreateOrUpdate,
+    PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp, WriteOpAction,
 };
 use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
-use std::{any, env};
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::fmt;
+use std::{any, env};
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
@@ -40,7 +41,9 @@ impl fmt::Display for FormatCommitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BadRecordSwap(record) => write!(f, "BadRecordSwapError: `{:?}`", record),
-            Self::RecordSwapMismatch(record) => write!(f, "BadRecordSwapError: current record is `{:?}`", record),
+            Self::RecordSwapMismatch(record) => {
+                write!(f, "BadRecordSwapError: current record is `{:?}`", record)
+            }
             Self::BadCommitSwap(cid) => write!(f, "BadCommitSwapError: {}", cid),
             Self::MissingRepoRoot(did) => write!(f, "No repo root found for `{}`", did),
         }
@@ -142,8 +145,9 @@ impl ActorStore {
         .await?;
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
-        let write_commit_ops = writes.iter()
-            .try_fold(Vec::with_capacity(writes.len()), |mut acc, w| -> Result<Vec<CommitOp>> {
+        let write_commit_ops = writes.iter().try_fold(
+            Vec::with_capacity(writes.len()),
+            |mut acc, w| -> Result<Vec<CommitOp>> {
                 let aturi: AtUri = w.uri.clone().try_into()?;
                 acc.push(CommitOp {
                     action: CommitAction::Create,
@@ -152,14 +156,19 @@ impl ActorStore {
                     prev: None,
                 });
                 Ok(acc)
-            })?;
+            },
+        )?;
         let writes = writes
             .into_iter()
             .map(|w| PreparedWrite::Create(w))
             .collect::<Vec<PreparedWrite>>();
         self.blob.process_write_blobs(writes, db).await?;
 
-        Ok(CommitDataWithOps { commit_data: commit, ops: write_commit_ops, prev_data: None })
+        Ok(CommitDataWithOps {
+            commit_data: commit,
+            ops: write_commit_ops,
+            prev_data: None,
+        })
     }
 
     pub async fn process_import_repo(
@@ -203,7 +212,9 @@ impl ActorStore {
         }
         // persist the commit to repo storage
         let storage_guard = self.storage.read().await;
-        storage_guard.apply_commit(commit.commit_data.clone(), None).await?;
+        storage_guard
+            .apply_commit(commit.commit_data.clone(), None)
+            .await?;
         // process blobs
         self.blob.process_write_blobs_legacy(writes).await?;
         Ok(commit)
@@ -232,7 +243,9 @@ impl ActorStore {
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
                 if !current_root.cid.eq(&swap_commit) {
-                    return Err(FormatCommitError::BadCommitSwap(current_root.cid.to_string()).into());
+                    return Err(
+                        FormatCommitError::BadCommitSwap(current_root.cid.to_string()).into(),
+                    );
                 }
             }
             {
@@ -270,9 +283,7 @@ impl ActorStore {
                 };
                 let cid = match &write {
                     &PreparedWrite::Delete(_) => None,
-                    &PreparedWrite::Create(w)| &PreparedWrite::Update(w) => {
-                        Some(w.cid)
-                    }
+                    &PreparedWrite::Create(w) | &PreparedWrite::Update(w) => Some(w.cid),
                 };
                 let mut op = CommitOp {
                     action: commit_action,
@@ -287,15 +298,24 @@ impl ActorStore {
                 match write {
                     // There should be no current record for a create
                     PreparedWrite::Create(_) if write.swap_cid().is_some() => {
-                        Err::<(), anyhow::Error>(FormatCommitError::BadRecordSwap(format!("{:?}", current_record)).into())
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     // There should be a current record for an update
                     PreparedWrite::Update(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(FormatCommitError::BadRecordSwap(format!("{:?}", current_record)).into())
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     // There should be a current record for a delete
                     PreparedWrite::Delete(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(FormatCommitError::BadRecordSwap(format!("{:?}", current_record)).into())
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     _ => Ok::<(), anyhow::Error>(()),
                 }?;
@@ -303,7 +323,10 @@ impl ActorStore {
                     (Some(current_record), Some(swap_cid)) if current_record.eq(swap_cid) => {
                         Ok::<(), anyhow::Error>(())
                     }
-                    _ => Err::<(), anyhow::Error>(FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record)).into()),
+                    _ => Err::<(), anyhow::Error>(
+                        FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record))
+                            .into(),
+                    ),
                 }?;
             }
             let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;

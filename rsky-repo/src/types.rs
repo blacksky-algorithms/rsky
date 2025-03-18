@@ -171,7 +171,6 @@ impl From<&PreparedWrite> for CommitAction {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WriteOpAction {
@@ -369,7 +368,7 @@ pub struct CommitOp {
 pub struct CommitDataWithOps {
     #[serde(flatten)]
     pub commit_data: CommitData,
-    
+
     pub ops: Vec<CommitOp>,
     pub prev_data: Option<Cid>,
 }
