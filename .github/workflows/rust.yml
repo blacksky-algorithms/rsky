@@ -10,7 +10,7 @@ on:
       - 'rsky*/**'         # Matches any directory starting with "rsky"
       - 'Cargo.toml'       # Base workspace configuration
       - 'Cargo.lock'       # Dependency lock file
-      - 'rust-toolchain
+      - 'rust-toolchain'
       # Add other important base paths as needed
 
 env:
