@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AccountStatus;
 use crate::actor_store::repo::types::SyncEvtData;
 use crate::models::models;
 use anyhow::Result;
+use atrium_api::app::bsky::graph::block;
 use lexicon_cid::Cid;
 use rsky_common;
 use rsky_common::struct_to_cbor;
@@ -9,7 +10,7 @@ use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::car::blocks_to_car_file;
 use rsky_repo::cid_set::CidSet;
-use rsky_repo::types::{CommitData, PreparedWrite};
+use rsky_repo::types::{CommitData, CommitDataWithOps, PreparedWrite};
 use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use serde::de::Error as DeserializerError;
@@ -217,7 +218,7 @@ impl SeqEvt {
 
 pub async fn format_seq_commit(
     did: String,
-    commit_data: CommitData,
+    commit_data: CommitDataWithOps,
     writes: Vec<PreparedWrite>,
 ) -> Result<models::RepoSeq> {
     let too_big: bool;
@@ -226,14 +227,14 @@ pub async fn format_seq_commit(
     let car_slice: Vec<u8>;
 
     let mut blocks_to_send = BlockMap::new();
-    blocks_to_send.add_map(commit_data.new_blocks)?;
-    blocks_to_send.add_map(commit_data.relevant_blocks)?;
+    blocks_to_send.add_map(commit_data.commit_data.new_blocks)?;
+    blocks_to_send.add_map(commit_data.commit_data.relevant_blocks)?;
 
     if writes.len() > 200 || blocks_to_send.byte_size()? > 1000000 {
         too_big = true;
         let mut just_root = BlockMap::new();
-        just_root.add(blocks_to_send.get(commit_data.cid))?;
-        car_slice = blocks_to_car_file(Some(&commit_data.cid), just_root).await?;
+        just_root.add(blocks_to_send.get(commit_data.commit_data.cid))?;
+        car_slice = blocks_to_car_file(Some(&commit_data.commit_data.cid), just_root).await?;
     } else {
         too_big = false;
         for w in writes {
@@ -263,17 +264,17 @@ pub async fn format_seq_commit(
             }
             ops.push(CommitEvtOp { action, path, cid });
         }
-        car_slice = blocks_to_car_file(Some(&commit_data.cid), blocks_to_send).await?;
+        car_slice = blocks_to_car_file(Some(&commit_data.commit_data.cid), blocks_to_send).await?;
     }
 
     let evt = CommitEvt {
         rebase: false,
         too_big,
         repo: did.clone(),
-        commit: commit_data.cid,
-        prev: commit_data.prev,
-        rev: commit_data.rev,
-        since: commit_data.since,
+        commit: commit_data.commit_data.cid,
+        prev: commit_data.commit_data.prev,
+        rev: commit_data.commit_data.rev,
+        since: commit_data.commit_data.since,
         ops,
         blocks: car_slice,
         blobs: blobs.to_list(),
@@ -357,4 +358,23 @@ pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<model
         struct_to_cbor(&evt)?,
         rsky_common::now(),
     ))
+}
+
+pub async fn sync_evt_data_from_commit(mut commit_data: CommitDataWithOps) -> Result<SyncEvtData> {
+    let cid = vec![commit_data.commit_data.cid.clone()];
+    match commit_data.commit_data.relevant_blocks.get_many(cid) {
+        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => {
+            Err(anyhow::anyhow!("commit block was not found, could not build sync event"))
+        },
+        Ok(blocks_and_missing) => {
+            Ok(SyncEvtData{
+                rev: commit_data.commit_data.rev,
+                cid: commit_data.commit_data.cid.clone(),
+                blocks: blocks_and_missing.blocks
+            })
+        },
+        Err(e) => {
+            Err(e.into())
+        },
+    }
 }

@@ -100,7 +100,7 @@ async fn inner_create_record(
         lock.sequence_commit(did.clone(), commit.clone(), writes)
             .await?;
         account_manager
-            .update_repo_root(did, commit.cid, commit.rev)
+            .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
             .await?;
 
         Ok(CreateRecordOutput {

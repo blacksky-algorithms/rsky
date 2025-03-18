@@ -89,7 +89,7 @@ async fn inner_delete_record(
             )
             .await?;
             account_manager
-                .update_repo_root(did, commit.cid, commit.rev)
+                .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
                 .await?;
 
             Ok(())

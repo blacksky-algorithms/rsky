@@ -114,7 +114,7 @@ async fn inner_apply_writes(
         lock.sequence_commit(did.clone(), commit.clone(), writes)
             .await?;
         account_manager
-            .update_repo_root(did.to_string(), commit.cid, commit.rev)
+            .update_repo_root(did.to_string(), commit.commit_data.cid, commit.commit_data.rev)
             .await?;
         Ok(())
     } else {
