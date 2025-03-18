@@ -167,7 +167,6 @@ impl ActorStore {
             .map(PreparedWrite::Create)
             .collect::<Vec<PreparedWrite>>();
         self.blob.process_write_blobs(writes).await?;
-
         Ok(CommitDataWithOps {
             commit_data: commit,
             ops: write_commit_ops,
