@@ -151,7 +151,26 @@ impl PreparedWrite {
             PreparedWrite::Delete(w) => &w.swap_cid,
         }
     }
+
+    pub fn action(&self) -> &WriteOpAction {
+        match self {
+            PreparedWrite::Create(w) => &w.action,
+            PreparedWrite::Update(w) => &w.action,
+            PreparedWrite::Delete(w) => &w.action,
+        }
+    }
 }
+
+impl From<&PreparedWrite> for CommitAction {
+    fn from(value: &PreparedWrite) -> Self {
+        match value {
+            &PreparedWrite::Create(_) => CommitAction::Create,
+            &PreparedWrite::Update(_) => CommitAction::Update,
+            &PreparedWrite::Delete(_) => CommitAction::Delete,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -168,6 +187,26 @@ impl fmt::Display for WriteOpAction {
             WriteOpAction::Create => write!(f, "create"),
             WriteOpAction::Update => write!(f, "update"),
             WriteOpAction::Delete => write!(f, "delete"),
+        }
+    }
+}
+
+impl From<WriteOpAction> for CommitAction {
+    fn from(value: WriteOpAction) -> Self {
+        match value {
+            WriteOpAction::Create => CommitAction::Create,
+            WriteOpAction::Update => CommitAction::Update,
+            WriteOpAction::Delete => CommitAction::Delete,
+        }
+    }
+}
+
+impl From<&WriteOpAction> for CommitAction {
+    fn from(value: &WriteOpAction) -> Self {
+        match value {
+            &WriteOpAction::Create => CommitAction::Create,
+            &WriteOpAction::Update => CommitAction::Update,
+            &WriteOpAction::Delete => CommitAction::Delete,
         }
     }
 }

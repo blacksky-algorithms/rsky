@@ -13,7 +13,7 @@ use libipld::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{PutRecordInput, PutRecordOutput};
-use rsky_repo::types::{CommitData, PreparedWrite};
+use rsky_repo::types::{CommitData, CommitDataWithOps, PreparedWrite};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 
@@ -59,7 +59,7 @@ async fn inner_put_record(
             Some(swap_record) => Some(Cid::from_str(&swap_record)?),
             None => None,
         };
-        let (commit, write): (Option<CommitData>, PreparedWrite) = {
+        let (commit, write): (Option<CommitDataWithOps>, PreparedWrite) = {
             let mut actor_store =
                 ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
 
@@ -109,7 +109,7 @@ async fn inner_put_record(
             let mut lock = sequencer.sequencer.write().await;
             lock.sequence_commit(did.clone(), commit.clone(), vec![write.clone()])
                 .await?;
-            AccountManager::update_repo_root_legacy(did, commit.cid, commit.rev)?;
+            AccountManager::update_repo_root_legacy(did, commit.commit_data.cid, commit.commit_data.rev)?;
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),
