@@ -170,7 +170,7 @@ pub async fn server_create_account(
             }
         }
         match lock
-            .sequence_commit(did.clone(), commit.clone(), vec![])
+            .sequence_commit(did.clone(), commit.clone())
             .await
         {
             Ok(_) => {

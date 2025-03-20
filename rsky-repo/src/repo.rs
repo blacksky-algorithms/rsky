@@ -20,6 +20,44 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// pub fn validate_commit_via_inversion(
+//     commit_data: &CommitDataWithOps, 
+//     prev_data: &Cid
+// ) -> Result<bool> {
+//     // 1. Start with the current state in blocks
+//     let mut mst = MST::load_from_blocks(&commit_data.blocks)?;
+//
+//     // 2. Invert all operations
+//     for op in &commit_data.ops {
+//         match op.action {
+//             CommitEvtOpAction::Create => {
+//                 // Invert create -> delete
+//                 mst.delete(&op.path)?;
+//             },
+//             CommitEvtOpAction::Update => {
+//                 // Invert update -> update to previous value
+//                 if let Some(prev) = &op.prev {
+//                     mst.update(&op.path, prev)?;
+//                 } else {
+//                     return Err(anyhow::anyhow!("Missing prev CID for update operation"));
+//                 }
+//             },
+//             CommitEvtOpAction::Delete => {
+//                 // Invert delete -> create with previous value
+//                 if let Some(prev) = &op.prev {
+//                     mst.create(&op.path, prev)?;
+//                 } else {
+//                     return Err(anyhow::anyhow!("Missing prev CID for delete operation"));
+//                 }
+//             }
+//         }
+//     }
+//
+//     // 3. After inverting all operations, the tree root should match prevData
+//     let final_root = mst.get_root_cid()?;
+//     Ok(final_root == *prev_data)
+// }
+
 pub struct CommitRecord {
     collection: String,
     rkey: String,

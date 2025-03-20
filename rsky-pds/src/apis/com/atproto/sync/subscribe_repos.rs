@@ -148,7 +148,7 @@ pub async fn subscribe_repos<'a>(
                     match evt {
                         SeqEvt::TypedCommitEvt(commit) => {
                             let TypedCommitEvt { r#type, seq, time, evt } = commit;
-                            let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs } = evt;
+                            let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs, prev_data} = evt;
                             let subscribe_commit_evt = SubscribeReposCommit {
                                 seq,
                                 time: from_str_to_utc(&time),
