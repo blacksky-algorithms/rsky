@@ -4,71 +4,147 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths:
+      - '.github/scripts/determine-packages.sh'
+      - '.github/workflows/rust.yml'
+      - 'rsky*/**'         # Matches any directory starting with "rsky"
+      - 'Cargo.toml'       # Base workspace configuration
+      - 'Cargo.lock'       # Dependency lock file
+      - 'rust-toolchain'
+      # Add other important base paths as needed
 
 env:
   PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
   PDS_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_NAME: "noreply"
   PDS_MODERATION_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
-  PDS_HOSTNAME: "localho.st"
+  PDS_HOSTNAME: "rsky.com"
   PDS_SERVICE_DID: "did:web:localho.st"
-  PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
-  PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_SERVICE_HANDLE_DOMAINS: ".rsky.com"
+  PDS_ADMIN_PASS: 3ed1c7b568d3328c44430add531a099f
+  PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: 9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd
+  #  PDS_ADMIN_PASS: ${{ secrets.PDS_ADMIN_PASS }}
+  #  PDS_JWT_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_JWT_KEY_K256_PRIVATE_KEY_HEX }}
   PDS_MAILGUN_API_KEY: ${{ secrets.PDS_MAILGUN_API_KEY }}
   PDS_MAILGUN_DOMAIN: ${{ secrets.PDS_MAILGUN_DOMAIN }}
-  PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX }}
-  PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX }}
+  #PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX }}
+  #PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX }}
+  PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: fb478b39dd2ddf84bef135dd60f90381903eefadbb9df4b18a2b9b174ae72582
+  PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: 71cfcf4882a6cff494c3d0affadd3858eb3a5838e7b5e15170e696a590a4fa01
 
 jobs:
+  # First determine which workspace packages need to be processed
+  determine-packages:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.set-packages.outputs.packages }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to properly check changes
+      
+      - name: Make script executable
+        run: chmod +x .github/scripts/determine-packages.sh
+      
+      - name: Set packages
+        id: set-packages
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: .github/scripts/determine-packages.sh
+        shell: bash
+
+  # Parallel check job for each package
   check:
+    needs: determine-packages
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo check
-      run: cargo check
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.package }}
+      - name: Run cargo check for ${{ matrix.package }}
+        run: cargo check -p ${{ matrix.package }}
 
+  # Parallel build job for each package
   build:
+    needs: [determine-packages, check]
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo build
-      run: cargo build --release
+      - name: Show disk usage (before cleanup)
+        run: df -h
+      - name: Clean up large directories
+        run: |
+          sudo rm -rf /usr/local/share/boost \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc
+      - name: Show disk usage (after cleanup)
+        run: df -h
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.package }}
+      - name: Run cargo build for ${{ matrix.package }}
+        run: cargo build --release -p ${{ matrix.package }}
 
+  # Parallel test job for each package
   test:
+    needs: [determine-packages, check, build]
     runs-on: ubuntu-latest
-    needs: build
+    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo test
-      run: cargo test 
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.package }}
+      - name: Run cargo test for ${{ matrix.package }}
+        run: cargo test -p ${{ matrix.package }}
 
-  # clippy:
-  #   runs-on: ubuntu-latest
-  #   needs: test
-  #   steps:
-  #   - name: Checkout code
-  #     uses: actions/checkout@v4
-  #   - name: Rust Cache
-  #     uses: Swatinem/rust-cache@v2
-  #   - name: Run Clippy
-  #     run: cargo clippy  -- -D warnings
-
+  # Run formatting check on the entire workspace
   formatting:
     runs-on: ubuntu-latest
-    needs: test
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-    - name: Run cargo fmt
-      run: cargo fmt -- --check
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo fmt
+        run: cargo fmt -- --check
+
+  # Optional: Add a final job that depends on all tests to signal success
+  ci-success:
+    runs-on: ubuntu-latest
+    needs: [check, build, test, formatting]
+    if: always()
+    steps:
+      - name: CI Success
+        if: ${{ !contains(needs.*.result, 'failure') }}
+        run: echo "All CI jobs passed!"
+      - name: CI Failed
+        if: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          echo "Some CI jobs failed!"
+          exit 1

@@ -38,7 +38,7 @@ pub async fn well_known(
             "User not found".to_string(),
         ));
     }
-    match AccountManager::get_account(&handle, None).await {
+    match AccountManager::get_account_legacy(&handle, None).await {
         Ok(user) => {
             let did: Option<String> = match user {
                 Some(user) => Some(user.did),

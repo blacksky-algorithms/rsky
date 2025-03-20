@@ -35,7 +35,7 @@ async fn inner_update_handle(
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
 
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &handle,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

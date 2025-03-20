@@ -25,6 +25,7 @@ Rocket.toml
 rustc-*.txt
 /botenv/
 
+.idea/
 # Node.gitignore
 
 # Logs
