@@ -109,7 +109,7 @@ async fn inner_put_record(
 
         if let Some(commit) = commit {
             let mut lock = sequencer.sequencer.write().await;
-            lock.sequence_commit(did.clone(), commit.clone(), vec![write.clone()])
+            lock.sequence_commit(did.clone(), commit.clone())
                 .await?;
             account_manager
                 .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)

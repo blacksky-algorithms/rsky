@@ -220,9 +220,8 @@ impl Sequencer {
         &mut self,
         did: String,
         commit_data: CommitDataWithOps,
-        writes: Vec<PreparedWrite>,
     ) -> Result<i64> {
-        let evt = format_seq_commit(did, commit_data, writes).await?;
+        let evt = format_seq_commit(did, commit_data).await?;
         self.sequence_evt(evt).await
     }
 

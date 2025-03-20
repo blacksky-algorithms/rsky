@@ -85,7 +85,6 @@ async fn inner_delete_record(
             lock.sequence_commit(
                 did.clone(),
                 commit.clone(),
-                vec![PreparedWrite::Delete(write)],
             )
             .await?;
             account_manager
