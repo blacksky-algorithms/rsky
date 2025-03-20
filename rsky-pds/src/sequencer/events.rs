@@ -223,15 +223,23 @@ pub async fn format_seq_commit(
     let mut blocks_to_send = BlockMap::new();
     blocks_to_send.add_map(commit_data.commit_data.new_blocks)?;
     blocks_to_send.add_map(commit_data.commit_data.relevant_blocks)?;
-    let ops = commit_data.ops.iter().map(|op| {
-        let action = match op.action {
-            CommitAction::Create => CommitEvtOpAction::Create,
-            CommitAction::Update => CommitEvtOpAction::Update,
-            CommitAction::Delete => CommitEvtOpAction::Delete,
-        };
-        CommitEvtOp { action, path: op.path.clone(), cid: op.cid, prev: op.prev }
-    })
-    .collect::<Vec<_>>();
+    let ops = commit_data
+        .ops
+        .iter()
+        .map(|op| {
+            let action = match op.action {
+                CommitAction::Create => CommitEvtOpAction::Create,
+                CommitAction::Update => CommitEvtOpAction::Update,
+                CommitAction::Delete => CommitEvtOpAction::Delete,
+            };
+            CommitEvtOp {
+                action,
+                path: op.path.clone(),
+                cid: op.cid,
+                prev: op.prev,
+            }
+        })
+        .collect::<Vec<_>>();
     // Create the CAR file with all blocks
     let car_slice = blocks_to_car_file(Some(&commit_data.commit_data.cid), blocks_to_send).await?;
 

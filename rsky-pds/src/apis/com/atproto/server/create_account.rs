@@ -169,10 +169,7 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
-        match lock
-            .sequence_commit(did.clone(), commit.clone())
-            .await
-        {
+        match lock.sequence_commit(did.clone(), commit.clone()).await {
             Ok(_) => {
                 tracing::debug!("Sequence commit succeeded");
             }

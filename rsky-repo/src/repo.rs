@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // pub fn validate_commit_via_inversion(
-//     commit_data: &CommitDataWithOps, 
+//     commit_data: &CommitDataWithOps,
 //     prev_data: &Cid
 // ) -> Result<bool> {
 //     // 1. Start with the current state in blocks
