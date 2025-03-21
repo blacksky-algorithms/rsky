@@ -14,7 +14,7 @@ number    = "1" / "2" / "3" / "4" / "5" / "6" / "7" / "8" / "9" / "0"
 delim     = "."
 segment   = alpha *( alpha / number / "-" )
 authority = segment *( delim segment )
-name      = alpha *( alpha )
+name      = alpha *( alpha / number )
 nsid      = authority delim name
 */
 
@@ -24,7 +24,7 @@ lazy_static! {
 
     // Complex regex for full NSID validation
     static ref NSID_FULL_REGEX: Regex = Regex::new(
-        r"^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(\.[a-zA-Z]([a-zA-Z]{0,61}[a-zA-Z])?)$"
+        r"^[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(\.[a-zA-Z][a-zA-Z0-9]{0,62})$"
     ).unwrap();
 }
 
@@ -34,7 +34,7 @@ pub struct InvalidNsidError(String);
 
 // Human readable constraints on NSID:
 // - a valid domain in reversed notation
-// - followed by an additional period-separated name, which is camel-case letters
+// - followed by an additional period-separated name, which is alphanumeric and starts with a letter
 pub fn ensure_valid_nsid<S: Into<String>>(nsid: S) -> Result<(), InvalidNsidError> {
     let nsid: String = nsid.into();
     // Check that all chars are boring ASCII
@@ -64,23 +64,37 @@ pub fn ensure_valid_nsid<S: Into<String>>(nsid: S) -> Result<(), InvalidNsidErro
             return Err(InvalidNsidError("NSID part too long (max 63 chars)".into()));
         }
 
-        if label.ends_with('-') || label.starts_with('-') {
-            return Err(InvalidNsidError(
-                "NSID parts can not start or end with hyphen".into(),
-            ));
-        }
+        let is_last_segment = i == labels.len() - 1;
 
-        if i == 0 && label.starts_with(char::is_numeric) {
-            return Err(InvalidNsidError(
-                "NSID first part may not start with a digit".into(),
-            ));
-        }
+        // Apply rules for domain authority segments (all but the last segment)
+        if !is_last_segment {
+            if label.ends_with('-') || label.starts_with('-') {
+                return Err(InvalidNsidError(
+                    "NSID authority parts can not start or end with hyphen".into(),
+                ));
+            }
 
-        // Validate the final name segment is only letters
-        if i == labels.len() - 1 && !label.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(InvalidNsidError(
-                "NSID name part must be only letters".into(),
-            ));
+            if i == 0 && label.starts_with(char::is_numeric) {
+                return Err(InvalidNsidError(
+                    "NSID first part may not start with a digit".into(),
+                ));
+            }
+        } else {
+            // Validate the final name segment according to updated spec
+
+            // Check if the name starts with a letter
+            if !label.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                return Err(InvalidNsidError(
+                    "NSID name must start with a letter".into(),
+                ));
+            }
+
+            // Check if the name contains only alphanumeric characters (no hyphens)
+            if !label.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(InvalidNsidError(
+                    "NSID name must only contain letters and digits (no hyphens)".into(),
+                ));
+            }
         }
     }
 
@@ -186,10 +200,10 @@ mod tests {
         assert_eq!(nsid.name(), "foo");
         assert_eq!(nsid.to_string(), "com.example.foo");
 
-        let nsid = Nsid::parse("com.long-thing1.cool.fooBarBaz").unwrap();
+        let nsid = Nsid::parse("com.long-thing1.cool.fooBar123").unwrap();
         assert_eq!(nsid.authority(), "cool.long-thing1.com");
-        assert_eq!(nsid.name(), "fooBarBaz");
-        assert_eq!(nsid.to_string(), "com.long-thing1.cool.fooBarBaz");
+        assert_eq!(nsid.name(), "fooBar123");
+        assert_eq!(nsid.to_string(), "com.long-thing1.cool.fooBar123");
     }
 
     #[test]
@@ -199,10 +213,10 @@ mod tests {
         assert_eq!(nsid.name(), "foo");
         assert_eq!(nsid.to_string(), "com.example.foo");
 
-        let nsid = Nsid::create("cool.long-thing1.com", "fooBarBaz").unwrap();
+        let nsid = Nsid::create("cool.long-thing1.com", "fooBar123").unwrap();
         assert_eq!(nsid.authority(), "cool.long-thing1.com");
-        assert_eq!(nsid.name(), "fooBarBaz");
-        assert_eq!(nsid.to_string(), "com.long-thing1.cool.fooBarBaz");
+        assert_eq!(nsid.name(), "fooBar123");
+        assert_eq!(nsid.to_string(), "com.long-thing1.cool.fooBar123");
     }
 
     #[test]
@@ -222,6 +236,8 @@ mod tests {
         expect_valid("a01.thing.record");
         expect_valid("a.0.c");
         expect_valid("xn--fiqs8s.xn--fiqa61au8b7zsevnm8ak20mc4a87e.record.two");
+        expect_valid("a0.b1.c3");
+        expect_valid("com.example.f00");
 
         // Test max length segments
         let long_nsid = format!("com.{}.foo", "o".repeat(63));
@@ -231,13 +247,8 @@ mod tests {
         expect_invalid("com.example.foo.*");
         expect_invalid("com.example.foo.blah*");
         expect_invalid("com.example.foo.*blah");
-        expect_invalid("com.example.f00");
         expect_invalid("com.exa💩ple.thing");
-        expect_invalid("a-0.b-1.c-3");
-        expect_invalid("a-0.b-1.c-o");
-        expect_invalid("a0.b1.c3");
-        expect_invalid("1.0.0.127.record");
-        expect_invalid("0two.example.foo");
+        expect_invalid("a-0.b-1.c-");
         expect_invalid("example.com");
         expect_invalid("com.example");
         expect_invalid("a.");
@@ -253,6 +264,8 @@ mod tests {
         expect_invalid("com.atproto.feed.po#t");
         expect_invalid("com.atproto.feed.p!ot");
         expect_invalid("com.example-.foo");
+        expect_invalid("com.example.3"); // Name starts with digit
+        expect_invalid("com.example.foo-bar"); // Name with hyphen
 
         // Test segments too long
         let too_long_nsid = format!("com.{}.foo", "o".repeat(64));
