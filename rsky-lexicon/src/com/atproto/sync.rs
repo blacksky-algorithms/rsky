@@ -85,6 +85,9 @@ pub enum RepoStatus {
     Takedown,
     Suspended,
     Deactivated,
+    Deleted,
+    Desynchronized,
+    Throttled,
 }
 
 /// DEPRECATED -- Use #identity event instead
@@ -103,6 +106,15 @@ pub struct SubscribeReposIdentity {
     pub did: String,
     pub handle: Option<String>,
     pub seq: i64,
+    pub time: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposSync {
+    pub seq: i64,
+    pub did: String,
+    pub blocks: Vec<u8>,
+    pub rev: String,
     pub time: DateTime<Utc>,
 }
 
@@ -125,6 +137,8 @@ pub enum AccountStatus {
     Suspended,
     Deleted,
     Deactivated,
+    Desynchronized,
+    Throttled,
 }
 
 impl fmt::Display for AccountStatus {

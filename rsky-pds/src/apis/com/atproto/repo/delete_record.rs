@@ -80,13 +80,12 @@ async fn inner_delete_record(
             };
 
             let mut lock = sequencer.sequencer.write().await;
-            lock.sequence_commit(
-                did.clone(),
-                commit.clone(),
-                vec![PreparedWrite::Delete(write)],
-            )
-            .await?;
-            AccountManager::update_repo_root_legacy(did, commit.cid, commit.rev)?;
+            lock.sequence_commit(did.clone(), commit.clone()).await?;
+            AccountManager::update_repo_root_legacy(
+                did,
+                commit.commit_data.cid,
+                commit.commit_data.rev,
+            )?;
 
             Ok(())
         }
