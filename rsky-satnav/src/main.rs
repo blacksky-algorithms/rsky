@@ -1,5 +1,6 @@
 #![allow(clippy::unused_io_amount)]
 use anyhow::{anyhow, bail, Result};
+use cid::Cid;
 use dioxus::prelude::*;
 use dioxus_web::WebEventExt;
 use gloo_file::{futures::read_as_bytes, Blob};
@@ -17,10 +18,10 @@ use hex::encode as hex_encode;
 
 // For converting Ipld -> JSON for a readable display.
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 // Use iroh-car's asynchronous CarReader.
-use iroh_car::CarReader;
+use iroh_car::{CarHeader, CarReader, CarWriter};
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -33,7 +34,7 @@ mod components;
 // ----------------------------------------------------------
 // Data structures
 // ----------------------------------------------------------
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 struct CarTree {
     /// The root CIDs declared in the CAR header.
     roots: Vec<String>,
@@ -48,6 +49,8 @@ struct CarTree {
 #[derive(Props, PartialEq, Clone, Debug)]
 struct BlockView {
     cid: String,
+    data: Vec<u8>,
+    refs: HashSet<String>,
     cli_ipld_json: Option<String>,
     raw_hex: Option<String>,
 }
@@ -63,6 +66,26 @@ struct MstEntry {
 // ----------------------------------------------------------
 // MST/Commit logic (unchanged from the table version)
 // ----------------------------------------------------------
+fn extract_cids(ipld: &Ipld, refs: &mut HashSet<String>) {
+    match ipld {
+        Ipld::Bytes(bytes) => {}
+        Ipld::Link(cid) => {
+            refs.insert(cid.to_string());
+        }
+        Ipld::Map(obj) => {
+            for (_, v) in obj {
+                extract_cids(v, refs);
+            }
+        }
+        Ipld::List(list) => {
+            for v in list {
+                extract_cids(v, refs);
+            }
+        }
+        other => {}
+    }
+}
+
 fn convert_ipld_cli_style(ipld: &Ipld) -> serde_json::Value {
     match ipld {
         Ipld::Bytes(bytes) => {
@@ -366,6 +389,351 @@ fn MstRepoView(mst_entries: Vec<MstEntry>) -> Element {
 }
 
 // ----------------------------------------------------------
+// Collapsible diffing component
+// ----------------------------------------------------------
+#[component]
+fn MstDiffView(tree1: CarTree, tree2: CarTree) -> Element {
+    if tree1.roots[0] == tree2.roots[0] {
+        return rsx! {
+            p { "Identical files." }
+            MstRepoView { mst_entries: tree1.mst_entries.clone() }
+        };
+    }
+
+    let map1 = tree1
+        .mst_entries
+        .iter()
+        .enumerate()
+        .map(|(idx, ent)| (&ent.record_cid, idx))
+        .collect::<HashMap<_, _>>();
+    let map2 = tree2
+        .mst_entries
+        .iter()
+        .enumerate()
+        .map(|(idx, ent)| (&ent.record_cid, idx))
+        .collect::<HashMap<_, _>>();
+    let mut added_cids = HashSet::new();
+    let mut added_records = HashMap::<_, BTreeSet<_>>::new();
+    for (entry, idx) in &map2 {
+        if let Some(idx1) = map1.get(entry) {
+            assert_eq!(tree1.mst_entries[*idx1], tree2.mst_entries[*idx]);
+        } else {
+            let entry = &tree2.mst_entries[*idx];
+            added_cids.insert(entry.record_cid.clone());
+            added_records
+                .entry(entry.collection.clone())
+                .or_default()
+                .insert(*idx);
+        }
+    }
+    let mut added_records = added_records
+        .into_iter()
+        .map(|(coll, entries)| {
+            (
+                coll,
+                entries
+                    .into_iter()
+                    .map(|idx| tree2.mst_entries[idx].clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    added_records.sort_by_key(|(coll, _)| coll.clone());
+    let mut removed_cids = HashSet::new();
+    let mut removed_records = HashMap::<_, BTreeSet<_>>::new();
+    for (entry, idx) in &map1 {
+        if let Some(idx2) = map2.get(entry) {
+            assert_eq!(tree1.mst_entries[*idx], tree2.mst_entries[*idx2]);
+        } else {
+            let entry = &tree1.mst_entries[*idx];
+            removed_cids.insert(entry.record_cid.clone());
+            removed_records
+                .entry(entry.collection.clone())
+                .or_default()
+                .insert(*idx);
+        }
+    }
+    let mut removed_records = removed_records
+        .into_iter()
+        .map(|(coll, entries)| {
+            (
+                coll,
+                entries
+                    .into_iter()
+                    .map(|idx| tree1.mst_entries[idx].clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    removed_records.sort_by_key(|(coll, _)| coll.clone());
+
+    let map1 = tree1
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(idx, blk)| (&blk.cid, idx))
+        .collect::<HashMap<_, _>>();
+    let map2 = tree2
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(idx, blk)| (&blk.cid, idx))
+        .collect::<HashMap<_, _>>();
+    let mut added_blocks = BTreeSet::new();
+    for (block, idx) in &map2 {
+        if !map1.contains_key(block) {
+            added_blocks.insert(*idx);
+        }
+    }
+    let added_blocks = added_blocks
+        .into_iter()
+        .map(|idx| (idx, tree2.blocks[idx].clone()))
+        .collect::<Vec<_>>();
+    let mut removed_blocks = BTreeSet::new();
+    for (block, idx) in &map1 {
+        if !map2.contains_key(block) {
+            removed_blocks.insert(*idx);
+        }
+    }
+    let removed_blocks = removed_blocks
+        .into_iter()
+        .map(|idx| (idx, tree1.blocks[idx].clone()))
+        .collect::<Vec<_>>();
+
+    let mut from_map = HashMap::<_, HashSet<_>>::new();
+    for (_, block) in added_blocks.iter().chain(removed_blocks.iter()) {
+        for cid in &block.refs {
+            from_map
+                .entry(cid.clone())
+                .or_default()
+                .insert(block.cid.clone());
+        }
+    }
+
+    let curr = use_signal(|| String::new());
+    let froms = use_signal(|| HashSet::new());
+    let intos = use_signal(|| HashSet::new());
+    let onhover = |cid: String, into: HashSet<String>| {
+        let mut curr = curr.clone();
+        let mut froms = froms.clone();
+        let mut intos = intos.clone();
+        let from = from_map.get(&cid).cloned().unwrap_or_default();
+        move |_| {
+            curr.set(cid.clone());
+            froms.set(from.clone());
+            intos.set(into.clone());
+        }
+    };
+
+    let view = rsx! {
+        // Root container
+        ul {
+            li {
+                details {
+                    open: "true", // keep the root open by default
+                    summary {
+                        class: "cursor-pointer font-semibold text-blue-700",
+                        "Root"
+                    }
+                    ul {
+                        li {
+                            onmouseover: onhover(String::new(), [tree1.roots[0].clone()].into()),
+                            if tree1.roots[0] == *curr.read() {
+                                span { class: "cursor-pointer flex items-center font-bold", style: "color: blue", "old: {tree1.roots[0]}" }
+                            } else {
+                                span { class: "cursor-pointer flex items-center font-bold", "old: {tree1.roots[0]}" }
+                            }
+                        }
+                        li {
+                            onmouseover: onhover(String::new(), [tree2.roots[0].clone()].into()),
+                            if tree2.roots[0] == *curr.read() {
+                                span { class: "cursor-pointer flex items-center font-bold", style: "color: blue", "new: {tree2.roots[0]}" }
+                            } else {
+                                span { class: "cursor-pointer flex items-center font-bold", "new: {tree2.roots[0]}" }
+                            }
+                        }
+                    }
+                }
+            }
+            li {
+                details {
+                    open: "true", // keep the root open by default
+                    summary {
+                        class: "cursor-pointer font-semibold text-blue-700",
+                        "Blocks"
+                    }
+                    ul {
+                        class: "ml-6 list-none", // indent the child items
+                        for (collection, items) in [("added", &added_blocks), ("removed", &removed_blocks)] {
+                            li {
+                                details {
+                                    summary {
+                                        class: "cursor-pointer flex items-center",
+                                        // A simple folder icon, tweak or remove as you like:
+                                        span { class: "mr-1", "📁" }
+                                        span { "{collection}" }
+                                    }
+                                    ul {
+                                        class: "ml-6 list-none",
+                                        for (idx, entry) in items {
+                                            li {
+                                                onmouseover: onhover(entry.cid.clone(), entry.refs.clone()),
+                                                details {
+                                                    summary {
+                                                        class: "cursor-pointer flex items-center",
+                                                        // A simple file icon:
+                                                        // Show rkey as the “filename”
+                                                        if entry.cid == tree1.roots[0] || entry.cid == tree2.roots[0] {
+                                                            span { class: "mr-1", "🏁" }
+                                                        } else if added_cids.contains(&entry.cid) || removed_cids.contains(&entry.cid) {
+                                                            span { class: "mr-1", "📀" }
+                                                        } else {
+                                                            span { class: "mr-1", "📦" }
+                                                        }
+                                                        if froms.read().contains(&entry.cid) {
+                                                            span { style: "color: blue", "{idx}: {entry.cid}.json" }
+                                                        } else if intos.read().contains(&entry.cid) {
+                                                            span { style: "color: red", "{idx}: {entry.cid}.json" }
+                                                        } else {
+                                                            span { "{idx}: {entry.cid}.json" }
+                                                        }
+                                                    }
+                                                    if let Some(json) = entry.cli_ipld_json.as_ref() {
+                                                        // The record JSON is revealed upon expansion
+                                                        pre {
+                                                            class: "ml-6 mt-1 whitespace-pre-wrap text-sm bg-gray-100 p-2 rounded",
+                                                            "{json}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            li {
+                details {
+                    open: "true", // keep the root open by default
+                    summary {
+                        class: "cursor-pointer font-semibold text-blue-700",
+                        "Added Records"
+                    }
+                    ul {
+                        class: "ml-6 list-none", // indent the child items
+                        for (collection, items) in added_records {
+                            li {
+                                details {
+                                    summary {
+                                        class: "cursor-pointer flex items-center",
+                                        // A simple folder icon, tweak or remove as you like:
+                                        span { class: "mr-1", "📁" }
+                                        span { "{collection}" }
+                                    }
+                                    ul {
+                                        class: "ml-6 list-none",
+                                        for entry in items {
+                                            li {
+                                                details {
+                                                    onmouseover: onhover(entry.record_cid.clone(), HashSet::new()),
+                                                    summary {
+                                                        class: "cursor-pointer flex items-center",
+                                                        // A simple file icon:
+                                                        span { class: "mr-1", "📀" }
+                                                        // Show rkey as the “filename”
+                                                        if froms.read().contains(&entry.record_cid) {
+                                                            span { style: "color: blue", "{entry.rkey}.json ({entry.record_cid})" }
+                                                        } else if intos.read().contains(&entry.record_cid) {
+                                                            span { style: "color: red", "{entry.rkey}.json ({entry.record_cid})" }
+                                                        } else {
+                                                            span { "{entry.rkey}.json ({entry.record_cid})" }
+                                                        }
+                                                    }
+                                                    // The record JSON is revealed upon expansion
+                                                    pre {
+                                                        class: "ml-6 mt-1 whitespace-pre-wrap text-sm bg-gray-100 p-2 rounded",
+                                                        "{entry.record_cli_json}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            li {
+                details {
+                    open: "true", // keep the root open by default
+                    summary {
+                        class: "cursor-pointer font-semibold text-blue-700",
+                        "Removed Records"
+                    }
+                    ul {
+                        class: "ml-6 list-none", // indent the child items
+                        for (collection, items) in removed_records {
+                            li {
+                                details {
+                                    summary {
+                                        class: "cursor-pointer flex items-center",
+                                        // A simple folder icon, tweak or remove as you like:
+                                        span { class: "mr-1", "📁" }
+                                        span { "{collection}" }
+                                    }
+                                    ul {
+                                        class: "ml-6 list-none",
+                                        for entry in items {
+                                            li {
+                                                onmouseover: onhover(entry.record_cid.clone(), HashSet::new()),
+                                                details {
+                                                    summary {
+                                                        class: "cursor-pointer flex items-center",
+                                                        // A simple file icon:
+                                                        span { class: "mr-1", "📀" }
+                                                        // Show rkey as the “filename”
+                                                        if froms.read().contains(&entry.record_cid) {
+                                                            span { style: "color: blue", "{entry.rkey}.json ({entry.record_cid})" }
+                                                        } else if intos.read().contains(&entry.record_cid) {
+                                                            span { style: "color: red", "{entry.rkey}.json ({entry.record_cid})" }
+                                                        } else {
+                                                            span { "{entry.rkey}.json ({entry.record_cid})" }
+                                                        }
+                                                    }
+                                                    // The record JSON is revealed upon expansion
+                                                    pre {
+                                                        class: "ml-6 mt-1 whitespace-pre-wrap text-sm bg-gray-100 p-2 rounded",
+                                                        "{entry.record_cli_json}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    spawn_local(async move {
+        match write_car(tree2.roots[0].clone(), added_blocks).await {
+            Ok(()) => (),
+            Err(err) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!("{err:?}")));
+            }
+        }
+    });
+
+    view
+}
+
+// ----------------------------------------------------------
 // Main app: only shows the MST directory listing
 // ----------------------------------------------------------
 fn main() {
@@ -374,10 +742,10 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    let car_data = use_signal(|| None::<CarTree>);
+    let car_data1 = use_signal(|| None::<CarTree>);
+    let car_data2 = use_signal(|| None::<CarTree>);
 
-    let on_file_change = {
-        let car_data = car_data.clone();
+    let on_file_change = |car_data: Signal<Option<CarTree>>| {
         move |evt: Event<FormData>| {
             if let Some(target) = evt.try_as_web_event().unwrap().target() {
                 if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
@@ -401,11 +769,16 @@ fn App() -> Element {
         }
     };
 
-    let content = match car_data.as_ref() {
-        Some(tree) => rsx! {
+    let content = match (car_data1.as_ref(), car_data2.as_ref()) {
+        (Some(tree1), Some(tree2)) => rsx! {
+            p { "Diff:" }
+            MstDiffView { tree1: tree1.clone(), tree2: tree2.clone() }
+        },
+        (Some(tree), None) | (None, Some(tree)) => rsx! {
+            p { "Select 2nd file to diff." }
             MstRepoView { mst_entries: tree.mst_entries.clone() }
         },
-        None => rsx! {
+        (None, None) => rsx! {
             p { "No CAR file loaded yet." }
         },
     };
@@ -426,7 +799,14 @@ fn App() -> Element {
             input {
                 r#type: "file",
                 accept: ".car",
-                onchange: on_file_change,
+                onchange: on_file_change(car_data1.clone()),
+                class: "bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
+            }
+            span { " " }
+            input {
+                r#type: "file",
+                accept: ".car",
+                onchange: on_file_change(car_data2.clone()),
                 class: "bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
             }
             {content}
@@ -460,17 +840,23 @@ async fn load_car(file: web_sys::File) -> Result<CarTree> {
                 let cid_str = block.0.to_string();
                 let data = block.1;
 
+                let mut refs = HashSet::new();
                 let result = dagcbor::from_slice::<Ipld>(data.as_slice());
                 let (cli_ipld_json, raw_hex) = match result {
-                    Ok(ipld) => (Some(ipld_to_json_cli_style(&ipld)), None),
+                    Ok(ipld) => {
+                        extract_cids(&ipld, &mut refs);
+                        (Some(ipld_to_json_cli_style(&ipld)), None)
+                    }
                     Err(_) => (None, Some(hex_encode(&data))),
                 };
 
                 // Insert into block map for MST logic
-                block_map.insert(cid_str.clone(), data);
+                block_map.insert(cid_str.clone(), data.clone());
 
                 blocks.push(BlockView {
                     cid: cid_str,
+                    data,
+                    refs,
                     cli_ipld_json,
                     raw_hex,
                 });
@@ -509,4 +895,15 @@ async fn load_car(file: web_sys::File) -> Result<CarTree> {
         blocks,
         mst_entries,
     })
+}
+
+async fn write_car(root: String, blocks: Vec<(usize, BlockView)>) -> Result<()> {
+    let header = CarHeader::new_v1(vec![Cid::try_from(root)?]);
+    let mut writer = CarWriter::new(header, vec![]);
+    for (_, block) in blocks {
+        let cid = Cid::try_from(block.cid.as_str())?;
+        writer.write(cid, block.data).await?;
+    }
+    let _buffer = writer.finish().await?;
+    Ok(())
 }
