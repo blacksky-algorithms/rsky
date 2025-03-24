@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -166,15 +167,17 @@ impl<'r> FromRequest<'r> for Refresh {
                 match payload.jti {
                     Some(_) => result,
                     None => {
-                        return Outcome::Error((
-                            Status::BadRequest,
-                            AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
-                        ));
+                        let error =
+                            AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
+                        req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                        return Outcome::Error((Status::BadRequest, error));
                     }
                 }
             }
             Err(error) => {
-                return Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())));
+                let error = AuthError::BadJwt(error.to_string());
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                return Outcome::Error((Status::BadRequest, error));
             }
         };
         Outcome::Success(Refresh {
@@ -220,6 +223,27 @@ pub async fn access_check<'r>(
     }
 }
 
+pub struct AccessFullImport {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessFullImport {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let opts = ValidateAccessTokenOpts {
+            check_takedown: Some(true),
+            check_deactivated: Some(false),
+        };
+        match access_check(req, vec![AuthScope::Access], Some(opts)).await {
+            Outcome::Success(access) => Outcome::Success(AccessFullImport { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+        }
+    }
+}
+
 pub struct AccessFull {
     pub access: AccessOutput,
 }
@@ -231,7 +255,10 @@ impl<'r> FromRequest<'r> for AccessFull {
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         match access_check(req, vec![AuthScope::Access], None).await {
             Outcome::Success(access) => Outcome::Success(AccessFull { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -254,7 +281,10 @@ impl<'r> FromRequest<'r> for AccessPrivileged {
         .await
         {
             Outcome::Success(access) => Outcome::Success(Self { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -281,7 +311,10 @@ impl<'r> FromRequest<'r> for AccessStandard {
         .await
         {
             Outcome::Success(access) => Outcome::Success(AccessStandard { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -312,7 +345,10 @@ impl<'r> FromRequest<'r> for AccessStandardIncludeChecks {
         .await
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardIncludeChecks { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -343,7 +379,10 @@ impl<'r> FromRequest<'r> for AccessStandardCheckTakedown {
         .await
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardCheckTakedown { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -371,7 +410,10 @@ impl<'r> FromRequest<'r> for AccessStandardSignupQueued {
         .await
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardSignupQueued { access }),
-            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -391,12 +433,14 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
         match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
             Ok(result) => match result.payload.jti {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
-                None => Outcome::Error((
-                    Status::BadRequest,
-                    AuthError::BadJwt("Unexpected missing refresh token id".to_owned()),
-                )),
+                None => {
+                    let error = AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    Outcome::Error((Status::BadRequest, error))
+                }
             },
             Err(error) => {
+                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                 Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
@@ -439,6 +483,11 @@ impl<'r> FromRequest<'r> for UserDidAuth {
                 },
             }),
             Err(error) => {
+                req.local_cache(|| {
+                    Some(ApiError::InvalidRequest(
+                        AuthError::BadJwt(error.to_string()).to_string(),
+                    ))
+                });
                 Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
             }
         }
@@ -459,7 +508,10 @@ impl<'r> FromRequest<'r> for UserDidAuthOptional {
                 Outcome::Success(output) => Outcome::Success(UserDidAuthOptional {
                     access: Some(output.access),
                 }),
-                Outcome::Error(err) => Outcome::Error(err),
+                Outcome::Error(err) => {
+                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    Outcome::Error(err)
+                }
                 _ => panic!("Unexpected outcome during UserDidAuthOptional"),
             }
         } else {
@@ -497,12 +549,11 @@ impl<'r> FromRequest<'r> for ModService {
                         && (env_str("PDS_ENTRYWAY_DID").is_none()
                             || Some(payload.aud.clone()) != env_str("PDS_ENTRYWAY_DID")) =>
                 {
-                    Outcome::Error((
-                        Status::BadRequest,
-                        AuthError::BadJwtAudience(
-                            "jwt audience does not match service did".to_string(),
-                        ),
-                    ))
+                    let error = AuthError::BadJwtAudience(
+                        "jwt audience does not match service did".to_string(),
+                    );
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    Outcome::Error((Status::BadRequest, error))
                 }
                 Ok(payload) => Outcome::Success(ModService {
                     access: AccessOutput {
@@ -520,14 +571,15 @@ impl<'r> FromRequest<'r> for ModService {
                     },
                 }),
                 Err(error) => {
+                    let error = AuthError::BadJwt(error.to_string());
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                     Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
                 }
             }
         } else {
-            Outcome::Error((
-                Status::BadRequest,
-                AuthError::UntrustedIss("Untrusted issuer".to_string()),
-            ))
+            let error = AuthError::UntrustedIss("Untrusted issuer".to_string());
+            req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+            Outcome::Error((Status::BadRequest, error))
         }
     }
 }
@@ -546,7 +598,10 @@ impl<'r> FromRequest<'r> for Moderator {
                 Outcome::Success(output) => Outcome::Success(Moderator {
                     access: output.access,
                 }),
-                Outcome::Error(err) => Outcome::Error(err),
+                Outcome::Error(err) => {
+                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    Outcome::Error(err)
+                }
                 _ => panic!("Unexpected outcome during Moderator"),
             }
         } else {
@@ -554,7 +609,10 @@ impl<'r> FromRequest<'r> for Moderator {
                 Outcome::Success(output) => Outcome::Success(Moderator {
                     access: output.access,
                 }),
-                Outcome::Error(err) => Outcome::Error(err),
+                Outcome::Error(err) => {
+                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    Outcome::Error(err)
+                }
                 _ => panic!("Unexpected outcome during Moderator"),
             }
         }
@@ -580,10 +638,9 @@ impl<'r> FromRequest<'r> for AdminToken {
                 let BasicAuth { username, password } = parsed;
 
                 if username != "admin" || password != env::var("PDS_ADMIN_PASS").unwrap() {
-                    Outcome::Error((
-                        Status::BadRequest,
-                        AuthError::AuthRequired("BadAuth".to_string()),
-                    ))
+                    let error = AuthError::AuthRequired("BadAuth".to_string());
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    Outcome::Error((Status::BadRequest, error))
                 } else {
                     Outcome::Success(AdminToken {
                         access: AccessOutput {
@@ -621,7 +678,10 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                 Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
-                Outcome::Error(err) => Outcome::Error(err),
+                Outcome::Error(err) => {
+                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    Outcome::Error(err)
+                }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
             }
         } else if is_basic_token(req) {
@@ -629,7 +689,10 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                 Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
-                Outcome::Error(err) => Outcome::Error(err),
+                Outcome::Error(err) => {
+                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    Outcome::Error(err)
+                }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
             }
         } else {
@@ -743,10 +806,10 @@ pub async fn validate_access_token<'r>(
     let check_takedown = check_takedown.unwrap_or(false);
     let check_deactivated = check_deactivated.unwrap_or(false);
     if check_takedown || check_deactivated {
-        let found: ActorAccount = match AccountManager::get_account(
+        let found: ActorAccount = match AccountManager::get_account_legacy(
             &did,
             Some(AvailabilityFlags {
-                include_deactivated: None,
+                include_deactivated: Some(true),
                 include_taken_down: Some(true),
             }),
         )

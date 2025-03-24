@@ -28,8 +28,8 @@ diesel::table! {
         alt -> Nullable<Varchar>,
         postCid -> Varchar,
         postUri -> Varchar,
-        createdAt -> Varchar,
-        indexedAt -> Varchar,
+        createdAt -> Timestamptz,
+        indexedAt -> Timestamptz,
         labels -> Nullable<Array<Nullable<Text>>>,
     }
 }
@@ -58,8 +58,8 @@ diesel::table! {
         author -> Varchar,
         subjectCid -> Varchar,
         subjectUri -> Varchar,
-        createdAt -> Varchar,
-        indexedAt -> Varchar,
+        createdAt -> Timestamptz,
+        indexedAt -> Timestamptz,
         prev -> Nullable<Varchar>,
         sequence -> Nullable<Int8>,
     }
@@ -80,7 +80,7 @@ diesel::table! {
         cid -> Varchar,
         replyParent -> Nullable<Varchar>,
         replyRoot -> Nullable<Varchar>,
-        indexedAt -> Varchar,
+        indexedAt -> Timestamptz,
         prev -> Nullable<Varchar>,
         sequence -> Nullable<Int8>,
         text -> Nullable<Varchar>,
@@ -92,7 +92,7 @@ diesel::table! {
         externalThumb -> Nullable<Varchar>,
         quoteCid -> Nullable<Varchar>,
         quoteUri -> Nullable<Varchar>,
-        createdAt -> Varchar,
+        createdAt -> Timestamptz,
         labels -> Array<Nullable<Text>>,
     }
 }
@@ -110,8 +110,8 @@ diesel::table! {
         alt -> Nullable<Varchar>,
         postCid -> Varchar,
         postUri -> Varchar,
-        createdAt -> Varchar,
-        indexedAt -> Varchar,
+        createdAt -> Timestamptz,
+        indexedAt -> Timestamptz,
         labels -> Nullable<Array<Nullable<Text>>>,
     }
 }

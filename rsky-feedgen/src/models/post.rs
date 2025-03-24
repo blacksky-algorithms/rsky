@@ -1,4 +1,5 @@
 use crate::schema::post;
+use chrono::{DateTime, Utc};
 use diesel::backend::Backend;
 use diesel::deserialize::FromSql;
 use diesel::deserialize::{self, Queryable, QueryableByName};
@@ -18,7 +19,7 @@ pub struct Post {
     #[serde(rename = "replyRoot", skip_serializing_if = "Option::is_none")]
     pub reply_root: Option<String>,
     #[serde(rename = "indexedAt")]
-    pub indexed_at: String,
+    pub indexed_at: DateTime<Utc>,
     #[serde(rename = "prev", skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
     #[serde(rename = "sequence")]
@@ -45,7 +46,7 @@ pub struct Post {
     #[serde(rename = "quoteUri", skip_serializing_if = "Option::is_none")]
     pub quote_uri: Option<String>,
     #[serde(rename = "createdAt")]
-    pub created_at: String,
+    pub created_at: DateTime<Utc>,
     pub labels: Vec<Option<String>>,
 }
 
@@ -55,7 +56,7 @@ impl Queryable<post::SqlType, DB> for Post {
         String,
         Option<String>,
         Option<String>,
-        String,
+        DateTime<Utc>,
         Option<String>,
         Option<i64>,
         Option<String>,
@@ -67,7 +68,7 @@ impl Queryable<post::SqlType, DB> for Post {
         Option<String>,
         Option<String>,
         Option<String>,
-        String,
+        DateTime<Utc>,
         Vec<Option<String>>,
     );
 
@@ -152,6 +153,7 @@ where
     Option<i64>: FromSql<diesel::dsl::SqlTypeOf<post::sequence>, DB>,
     Vec<Option<String>>:
         FromSql<diesel::sql_types::Array<diesel::sql_types::Nullable<diesel::sql_types::Text>>, DB>,
+    DateTime<Utc>: FromSql<diesel::dsl::SqlTypeOf<post::createdAt>, DB>,
 {
     fn build<'a>(row: &impl NamedRow<'a, DB>) -> deserialize::Result<Self> {
         let uri = NamedRow::get::<diesel::dsl::SqlTypeOf<post::uri>, _>(row, "uri")?;

@@ -11,7 +11,7 @@ use rsky_syntax::handle::INVALID_HANDLE;
 
 async fn inner_get_account_info(did: String) -> Result<AccountView> {
     let (account, invites, invited_by) = try_join!(
-        AccountManager::get_account(
+        AccountManager::get_account_legacy(
             &did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),

@@ -1,5 +1,5 @@
 use crate::auth_verifier::AuthScope;
-use crate::db::establish_connection;
+use crate::db::{establish_connection, DbConn};
 use crate::models;
 use anyhow::Result;
 use diesel::*;
@@ -215,14 +215,15 @@ pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToke
 }
 
 #[allow(deprecated)]
-pub async fn store_refresh_token(
+pub async fn store_refresh_token_legacy(
     payload: RefreshToken,
     app_password_name: Option<String>,
 ) -> Result<()> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
 
     let exp = from_micros_to_utc((payload.exp.as_millis() / 1000) as i64);
+
+    let conn = &mut establish_connection()?;
 
     insert_into(RefreshTokenSchema::refresh_token)
         .values((
@@ -233,6 +234,32 @@ pub async fn store_refresh_token(
         ))
         .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
         .execute(conn)?;
+
+    Ok(())
+}
+
+pub async fn store_refresh_token(
+    payload: RefreshToken,
+    app_password_name: Option<String>,
+    db: &DbConn,
+) -> Result<()> {
+    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
+
+    let exp = from_micros_to_utc((payload.exp.as_millis() / 1000) as i64);
+
+    db.run(move |conn| {
+        insert_into(RefreshTokenSchema::refresh_token)
+            .values((
+                RefreshTokenSchema::id.eq(payload.jti),
+                RefreshTokenSchema::did.eq(payload.sub),
+                RefreshTokenSchema::appPasswordName.eq(app_password_name),
+                RefreshTokenSchema::expiresAt.eq(format!("{}", exp.format(RFC3339_VARIANT))),
+            ))
+            .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
+            .execute(conn)
+    })
+    .await?;
+
     Ok(())
 }
 

@@ -11,7 +11,7 @@ async fn inner_refresh_session(auth: Refresh) -> Result<RefreshSessionOutput, Ap
     let Credentials { did, token_id, .. } = auth.access.credentials.unwrap();
     let did = did.unwrap();
     let token_id = token_id.unwrap();
-    let user = AccountManager::get_account(
+    let user = AccountManager::get_account_legacy(
         &did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

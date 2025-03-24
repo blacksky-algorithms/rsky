@@ -53,7 +53,7 @@ pub struct JetstreamRepoCommit {
 #[serde(tag = "$type")]
 pub enum Lexicon {
     #[serde(rename(deserialize = "app.bsky.feed.post"))]
-    AppBskyFeedPost(Post),
+    AppBskyFeedPost(Box<Post>),
     #[serde(rename(deserialize = "app.bsky.feed.repost"))]
     AppBskyFeedRepost(Repost),
     #[serde(rename(deserialize = "app.bsky.feed.like"))]
@@ -86,13 +86,13 @@ pub struct JetstreamRepoAccount {
 
 #[derive(Debug)]
 pub enum JetstreamRepoMessage {
-    Commit(JetstreamRepoCommitMessage),
+    Commit(Box<JetstreamRepoCommitMessage>),
     Identity(JetstreamRepoIdentityMessage),
     Account(JetstreamRepoAccountMessage),
 }
 
 pub fn read(data: &str) -> Result<JetstreamRepoMessage> {
-    let data_json: serde_json::Value = serde_json::from_str(&data)?;
+    let data_json: serde_json::Value = serde_json::from_str(data)?;
 
     let binding = data_json.clone();
     let kind = binding["kind"].as_str().unwrap();
@@ -119,6 +119,10 @@ mod tests {
     fn test_read_commit_create_like() {
         let data = "{\"did\":\"did:plc:uhtptnlcrj4wrxfjfcanf34q\",\"time_us\":1731539977109649,\"kind\":\"commit\",\"commit\":{\"rev\":\"3lauicnwejh2f\",\"operation\":\"create\",\"collection\":\"app.bsky.feed.like\",\"rkey\":\"3lauicnw5op2f\",\"record\":{\"$type\":\"app.bsky.feed.like\",\"createdAt\":\"2024-11-13T23:19:36.449Z\",\"subject\":{\"cid\":\"bafyreigw5ufnkavdzcczl2dusa3bcnkckhi4tscp6qsrsmg76s3ckseney\",\"uri\":\"at://did:plc:6wthaiuqiys3y7eztkpsdam2/app.bsky.feed.post/3latjcehsho2n\"}},\"cid\":\"bafyreifsdaip3s5nm3hcz4fbgkxodnils75oi3rmqhipwtom34rxw4vwdi\"}}";
         let response = read(data).unwrap();
+        let created_at = {
+            let dt = DateTime::parse_from_rfc3339("2024-11-13T23:19:36.449Z").unwrap();
+            dt.with_timezone(&Utc)
+        };
         let expected_response = JetstreamRepoCommitMessage {
             did: "did:plc:uhtptnlcrj4wrxfjfcanf34q".to_string(),
             time_us: 1731539977109649,
@@ -128,22 +132,25 @@ mod tests {
                 operation: "create".to_string(),
                 collection: "app.bsky.feed.like".to_string(),
                 rkey: "3lauicnw5op2f".to_string(),
-                record: Some(Lexicon::AppBskyFeedLike {
-                    0: Like {
-                        created_at: "2024-11-13T23:19:36.449Z".to_string(),
-                        subject: StrongRef {
-                            uri: "at://did:plc:6wthaiuqiys3y7eztkpsdam2/app.bsky.feed.post/3latjcehsho2n".to_string(),
-                            cid: "bafyreigw5ufnkavdzcczl2dusa3bcnkckhi4tscp6qsrsmg76s3ckseney".to_string(),
-                        },
+                record: Some(Lexicon::AppBskyFeedLike(Like {
+                    created_at,
+                    subject: StrongRef {
+                        uri:
+                            "at://did:plc:6wthaiuqiys3y7eztkpsdam2/app.bsky.feed.post/3latjcehsho2n"
+                                .to_string(),
+                        cid: "bafyreigw5ufnkavdzcczl2dusa3bcnkckhi4tscp6qsrsmg76s3ckseney"
+                            .to_string(),
                     },
-                }),
-                cid: Some("bafyreifsdaip3s5nm3hcz4fbgkxodnils75oi3rmqhipwtom34rxw4vwdi".to_string()),
+                })),
+                cid: Some(
+                    "bafyreifsdaip3s5nm3hcz4fbgkxodnils75oi3rmqhipwtom34rxw4vwdi".to_string(),
+                ),
             },
         };
 
         match response {
             JetstreamRepoMessage::Commit(commit) => {
-                assert_eq!(commit, expected_response);
+                assert_eq!(commit, Box::new(expected_response));
             }
             JetstreamRepoMessage::Identity(_) => {
                 panic!()
@@ -174,7 +181,7 @@ mod tests {
 
         match response {
             JetstreamRepoMessage::Commit(commit) => {
-                assert_eq!(commit, expected_response);
+                assert_eq!(commit, Box::new(expected_response));
             }
             JetstreamRepoMessage::Identity(_) => {
                 panic!()

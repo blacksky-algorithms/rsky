@@ -24,7 +24,7 @@ async fn inner_activate_account(
     let requester = auth.access.credentials.unwrap().did.unwrap();
     assert_valid_did_documents_for_service(requester.clone()).await?;
 
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &requester,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),

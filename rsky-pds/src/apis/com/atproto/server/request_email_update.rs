@@ -13,7 +13,7 @@ async fn inner_request_email_update(
     auth: AccessStandardIncludeChecks,
 ) -> Result<RequestEmailUpdateOutput> {
     let did = auth.access.credentials.unwrap().did.unwrap();
-    let account = AccountManager::get_account(
+    let account = AccountManager::get_account_legacy(
         &did,
         Some(AvailabilityFlags {
             include_deactivated: Some(true),
