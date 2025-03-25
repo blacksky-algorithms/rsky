@@ -35,7 +35,6 @@ A high-throughput relay service that ingests and republishes AT Protocol data ac
 **Milestones:**
 - [ ] **New Crates:**
   - `rsky-carstore`: Efficient storage and indexing of CAR files
-  - Additional crates to manage indexing, subscriptions, and filtering
 - [ ] **Relay Design:**
   - Support full-network ingestion at high bandwidth
   - Prioritize performance, scalability, and observability
@@ -49,7 +48,6 @@ Jetstream is a streaming service that consumes the AT Protocol firehose (`com.at
   - Subscribes to the full firehose stream
   - Parses and decodes CBOR-encoded data structures (including MST blocks)
   - Outputs clean JSON events for easy use in downstream tooling
-- [ ] Consider various developer use cases like backlink filtering
 
 ---
 
