@@ -8,7 +8,7 @@ use crate::oauth_provider::constants::TOKEN_MAX_AGE;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
-use crate::oauth_provider::request::code::{is_code, Code};
+use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_provider::token::refresh_token::{is_refresh_token, RefreshToken};
 use crate::oauth_provider::token::token_claims::TokenClaims;
@@ -163,30 +163,31 @@ impl TokenManager {
      * @see {@link https://datatracker.ietf.org/doc/html/rfc7009#section-2.2 | RFC7009 Section 2.2}
      */
     pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
-        if is_token_id(token.token.as_str()) {
-            let token_id = TokenId::new(token.token.clone());
-            self.store.blocking_write().delete_token(token_id)?;
-        } else if let Ok(signed_jwt) = SignedJwt::new(token.token.as_str()) {
-            let verify_result = self.signer.verify(token.token.as_str()).await;
-            // let token_id = TokenId::new(verify_result.payload)
-            unimplemented!()
-        } else if let Ok(refresh_token) = RefreshToken::new(token.token.as_str()) {
-            let token_info = self
-                .store
-                .blocking_read()
-                .find_token_by_refresh_token(refresh_token)?;
-            if let Some(token_info) = token_info {
-                self.store.blocking_write().delete_token(token_info.id)?;
-            }
-        } else if let Ok(code) = Code::new(token.token.as_str()) {
-            let token_info = self.store.blocking_read().find_token_by_code(code)?;
-            if let Some(token_info) = token_info {
-                self.store.blocking_write().delete_token(token_info.id)?;
-            }
-        } else {
-            // No error should be returned if the token is not valid
-        }
-        Ok(())
+        unimplemented!()
+        // if is_token_id(token.token.as_str()) {
+        //     let token_id = TokenId::new(token.token.clone());
+        //     self.store.blocking_write().delete_token(token_id)?;
+        // } else if let Ok(signed_jwt) = SignedJwt::new(token.token.as_str()) {
+        //     let verify_result = self.signer.verify(token.token.as_str()).await;
+        //     // let token_id = TokenId::new(verify_result.payload)
+        //     unimplemented!()
+        // } else if let Ok(refresh_token) = RefreshToken::new(token.token.as_str()) {
+        //     let token_info = self
+        //         .store
+        //         .blocking_read()
+        //         .find_token_by_refresh_token(refresh_token)?;
+        //     if let Some(token_info) = token_info {
+        //         self.store.blocking_write().delete_token(token_info.id)?;
+        //     }
+        // } else if let Ok(code) = Code::new(token.token.as_str()) {
+        //     let token_info = self.store.blocking_read().find_token_by_code(code)?;
+        //     if let Some(token_info) = token_info {
+        //         self.store.blocking_write().delete_token(token_info.id)?;
+        //     }
+        // } else {
+        //     // No error should be returned if the token is not valid
+        // }
+        // Ok(())
     }
 
     /**
@@ -226,14 +227,15 @@ impl TokenManager {
         &self,
         token: &OAuthTokenIdentification,
     ) -> Result<Option<TokenInfo>, OAuthError> {
-        let token_val = token.token.clone();
-
-        if is_token_id(token_val.as_str()) {
-            return self.store.blocking_read().read_token(token_val.as_str());
-        }
-
-        return Ok(None);
-        // if is_signed_jwt {  }
+        unimplemented!()
+        // let token_val = token.token.clone();
+        //
+        // if is_token_id(token_val.as_str()) {
+        //     return self.store.blocking_read().read_token(token_val.as_str());
+        // }
+        //
+        // return Ok(None);
+        // // if is_signed_jwt {  }
     }
 
     pub async fn get_token_info(
@@ -268,27 +270,28 @@ impl TokenManager {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<AuthenticateTokenIdResult, OAuthError> {
-        let token_info = self.get_token_info(token_type, token).await?;
-        let parameters = token_info.data.clone();
-
-        // Construct a list of claim, as if the token was a JWT.
-        let claims = TokenClaims {
-            aud: Some(token_info.account.aud.clone()),
-            sub: Some(token_info.account.sub.clone()),
-            exp: Some(token_info.data.expires_at.clone()),
-            iat: Some(token_info.data.updated_at.clone()),
-            scope: token_info.data.parameters.scope.clone(),
-            client_id: Some(token_info.data.client_id.clone()),
-            cnf: None,
-            ..Default::default()
-        };
-
-        let result =
-            verify_token_claims(token, token, token_type, dpop_jkt, claims, verify_options)?;
-
-        Ok(AuthenticateTokenIdResult {
-            verify_token_claims_result: result,
-            token_info,
-        })
+        unimplemented!()
+        // let token_info = self.get_token_info(token_type, token).await?;
+        // let parameters = token_info.data.clone();
+        //
+        // // Construct a list of claim, as if the token was a JWT.
+        // let claims = TokenClaims {
+        //     aud: Some(token_info.account.aud.clone()),
+        //     sub: Some(token_info.account.sub.clone()),
+        //     exp: Some(token_info.data.expires_at.clone()),
+        //     iat: Some(token_info.data.updated_at.clone()),
+        //     scope: token_info.data.parameters.scope.clone(),
+        //     client_id: Some(token_info.data.client_id.clone()),
+        //     cnf: None,
+        //     ..Default::default()
+        // };
+        //
+        // let result =
+        //     verify_token_claims(token, token, token_type, dpop_jkt, claims, verify_options)?;
+        //
+        // Ok(AuthenticateTokenIdResult {
+        //     verify_token_claims_result: result,
+        //     token_info,
+        // })
     }
 }

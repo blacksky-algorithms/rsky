@@ -50,13 +50,14 @@ impl ClientManager {
         &self,
         client_id: &OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        if is_oauth_client_id_loopback(client_id) {
-            self.get_loopback_client_metadata(client_id).await
-        } else if is_oauth_client_id_discoverable(client_id) {
-            return self.get_discoverable_client_metadata(client_id).await;
-        } else {
-            return self.get_stored_client_metadata(client_id).await;
-        }
+        unimplemented!()
+        // if is_oauth_client_id_loopback(client_id) {
+        //     self.get_loopback_client_metadata(client_id).await
+        // } else if is_oauth_client_id_discoverable(client_id) {
+        //     return self.get_discoverable_client_metadata(client_id).await;
+        // } else {
+        //     return self.get_stored_client_metadata(client_id).await;
+        // }
     }
 
     async fn get_loopback_client_metadata(

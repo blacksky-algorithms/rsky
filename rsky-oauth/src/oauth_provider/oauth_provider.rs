@@ -26,6 +26,7 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_store::RequestStore;
+use crate::oauth_provider::routes::OAuthProviderCreator;
 use crate::oauth_provider::token::token_id::is_token_id;
 use crate::oauth_provider::token::token_manager::TokenManager;
 use crate::oauth_provider::token::token_store::TokenStore;
@@ -186,6 +187,69 @@ pub struct OAuthProvider {
 }
 
 impl OAuthProvider {
+    pub fn creator(options: OAuthProviderOptions) -> OAuthProviderCreator {
+        let options = options;
+        Box::new(move || -> OAuthProvider {
+            let store = options.store;
+
+            // Requires stores
+            let account_store = store.clone().unwrap();
+            let device_store = store.clone().unwrap();
+            let token_store = store.clone().unwrap();
+
+            // These are optional
+            let client_store = store.clone().unwrap();
+            let replay_store = store.clone().unwrap();
+            let request_store = store.clone().unwrap();
+
+            let verifier_opts = OAuthVerifierOptions {
+                issuer: options.issuer.clone(),
+                keyset: options.keyset.unwrap(),
+                access_token_type: options.access_token_type,
+                redis: Some(options.redis),
+                replay_store,
+            };
+            let oauth_verifier = OAuthVerifier::new(verifier_opts);
+
+            let authentication_max_age = options
+                .authentication_max_age
+                .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
+            let metadata = build_metadata(options.issuer, options.metadata);
+            let customization = options.customization;
+
+            let account_manager = AccountManager::new(account_store);
+            let client_manager = ClientManager::new(
+                metadata.clone(),
+                oauth_verifier.keyset.clone(),
+                client_store,
+            );
+            let request_manager = RequestManager::new(
+                request_store,
+                oauth_verifier.signer.clone(),
+                metadata.clone(),
+                authentication_max_age,
+            );
+            let token_manager = TokenManager::new(
+                token_store,
+                oauth_verifier.signer.clone(),
+                oauth_verifier.access_token_type.clone(),
+                Some(authentication_max_age),
+            );
+
+            OAuthProvider {
+                oauth_verifier,
+                metadata,
+                customization,
+                authentication_max_age,
+                account_manager,
+                client_manager,
+                request_manager,
+                token_manager,
+                device_store,
+            }
+        })
+    }
+
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
         let store = options.store;
 
@@ -266,7 +330,7 @@ impl OAuthProvider {
         let client = self.client_manager.get_client(client_id).await?;
         let (client_auth, nonce) = client
             .verify_credentials(credentials, &self.oauth_verifier.issuer)
-            .await;
+            .await?;
 
         if client.metadata.application_type == ApplicationType::Native
             && client_auth.method == "none"
@@ -512,31 +576,32 @@ impl OAuthProvider {
         client_id: ClientId,
         credentials: SignInCredentials,
     ) -> Result<SignInResponse, OAuthError> {
-        let client = self.client_manager.get_client(&client_id).await?;
-
-        // Ensure the request is still valid (and update the request expiration)
-        // @TODO use the returned scopes to determine if consent is required
-        self.request_manager.get(uri, client_id, device_id).await?;
-
-        let account_info = match self.account_manager.sign_in(credentials, device_id) {
-            Ok(res) => res,
-            Err(error) => return Err(error),
-        };
-        let account = account_info.account;
-        let info = account_info.info;
-        let consent_required = match client.info.is_first_party {
-            true => false,
-            false => {
-                // @TODO: the "authorizedClients" should also include the scopes that
-                // were already authorized for the client. Otherwise a client could
-                // use silent authentication to get additional scopes without consent.
-                !info.authorized_clients.contains(client.id)
-            }
-        };
-        Ok(SignInResponse {
-            account,
-            consent_required,
-        })
+        unimplemented!()
+        // let client = self.client_manager.get_client(&client_id).await?;
+        //
+        // // Ensure the request is still valid (and update the request expiration)
+        // // @TODO use the returned scopes to determine if consent is required
+        // self.request_manager.get(uri, client_id, device_id).await?;
+        //
+        // let account_info = match self.account_manager.sign_in(credentials, device_id) {
+        //     Ok(res) => res,
+        //     Err(error) => return Err(error),
+        // };
+        // let account = account_info.account;
+        // let info = account_info.info;
+        // let consent_required = match client.info.is_first_party {
+        //     true => false,
+        //     false => {
+        //         // @TODO: the "authorizedClients" should also include the scopes that
+        //         // were already authorized for the client. Otherwise a client could
+        //         // use silent authentication to get additional scopes without consent.
+        //         !info.authorized_clients.contains(client.id)
+        //     }
+        // };
+        // Ok(SignInResponse {
+        //     account,
+        //     consent_required,
+        // })
     }
 
     pub async fn accept_request(
@@ -546,52 +611,53 @@ impl OAuthProvider {
         client_id: ClientId,
         sub: Sub,
     ) -> Result<AcceptRequestResponse, OAuthError> {
-        let client = self.client_manager.get_client(&client_id).await?;
-
-        let result = self.request_manager.get(uri, client_id, device_id).await?;
-        let parameters = result.parameters;
-        let client_auth = result.client_auth;
-
-        let result = match self.account_manager.get(&device_id, sub) {
-            Ok(res) => res,
-            Err(e) => {
-                self.delete_request(uri, parameters).await?;
-                return Err(OAuthError::AccessDeniedError("test".to_string()));
-            }
-        };
-        let account = result.account;
-        let info = result.info;
-
-        // The user is trying to authorize without a fresh login
-        if self.login_required(&info) {
-            return Err(OAuthError::LoginRequiredError);
-        }
-
-        let code = match self
-            .request_manager
-            .set_authorized(
-                client.clone(),
-                uri.clone(),
-                device_id.clone(),
-                account.clone(),
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                self.delete_request(uri, parameters).await?;
-                return Err(OAuthError::AccessDeniedError("test".to_string()));
-            }
-        };
-
-        self.account_manager
-            .add_authorized_client(device_id, account, client, client_auth);
-
-        Ok(AcceptRequestResponse {
-            issuer: self.oauth_verifier.issuer.clone(),
-            parameters,
-            redirect_code: code,
-        })
+        unimplemented!()
+        // let client = self.client_manager.get_client(&client_id).await?;
+        //
+        // let result = self.request_manager.get(uri, client_id, device_id).await?;
+        // let parameters = result.parameters;
+        // let client_auth = result.client_auth;
+        //
+        // let result = match self.account_manager.get(&device_id, sub) {
+        //     Ok(res) => res,
+        //     Err(e) => {
+        //         self.delete_request(uri, parameters).await?;
+        //         return Err(OAuthError::AccessDeniedError("test".to_string()));
+        //     }
+        // };
+        // let account = result.account;
+        // let info = result.info;
+        //
+        // // The user is trying to authorize without a fresh login
+        // if self.login_required(&info) {
+        //     return Err(OAuthError::LoginRequiredError);
+        // }
+        //
+        // let code = match self
+        //     .request_manager
+        //     .set_authorized(
+        //         client.clone(),
+        //         uri.clone(),
+        //         device_id.clone(),
+        //         account.clone(),
+        //     )
+        //     .await
+        // {
+        //     Ok(res) => res,
+        //     Err(e) => {
+        //         self.delete_request(uri, parameters).await?;
+        //         return Err(OAuthError::AccessDeniedError("test".to_string()));
+        //     }
+        // };
+        //
+        // self.account_manager
+        //     .add_authorized_client(device_id, account, client, client_auth);
+        //
+        // Ok(AcceptRequestResponse {
+        //     issuer: self.oauth_verifier.issuer.clone(),
+        //     parameters,
+        //     redirect_code: code,
+        // })
     }
 
     pub async fn reject_request(
@@ -600,7 +666,10 @@ impl OAuthProvider {
         uri: OAuthRequestUri,
         client_id: ClientId,
     ) -> Result<RejectRequestResponse, OAuthError> {
-        let request_info = self.request_manager.get(uri, client_id, device_id).await?;
+        let request_info = self
+            .request_manager
+            .get(uri.clone(), client_id, device_id)
+            .await?;
 
         self.delete_request(uri, request_info.parameters.clone())
             .await?;
@@ -734,10 +803,9 @@ impl OAuthProvider {
     /**
      * @see {@link https://datatracker.ietf.org/doc/html/rfc7009#section-2.1 rfc7009}
      */
-    pub async fn revoke(&self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
+    pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
         // @TODO this should also remove the account-device association (or, at least, mark it as expired)
-        self.token_manager.revoke(token).await;
-        Ok(())
+        self.token_manager.revoke(token).await
     }
 
     /**

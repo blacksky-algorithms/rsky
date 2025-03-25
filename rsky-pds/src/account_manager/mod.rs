@@ -7,10 +7,17 @@ use crate::account_manager::helpers::auth::{
 use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
+use crate::actor_store::ActorStore;
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
+use crate::read_after_write::viewer::{
+    Agent, LocalViewer, LocalViewerCreator, LocalViewerCreatorParams,
+};
+use crate::APP_USER_AGENT;
 use anyhow::Result;
+use atrium_api::client::AtpServiceClient;
+use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use futures::try_join;
@@ -43,7 +50,9 @@ use rsky_oauth::oauth_provider::token::token_store::{NewTokenData, TokenInfo, To
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
+use std::sync::Arc;
 use std::time::SystemTime;
+use tokio::sync::RwLock;
 
 /// Helps with readability when calling create_account()
 pub struct CreateAccountOpts {
@@ -82,10 +91,21 @@ pub struct DisableInviteCodesOpts {
     pub accounts: Vec<String>,
 }
 
-#[derive(Clone)]
-pub struct AccountManager {}
+pub type AccountManagerCreator = Box<dyn Fn(DbConn) -> AccountManager + Send + Sync>;
+
+pub struct AccountManager {
+    pub db: DbConn,
+}
 
 impl AccountManager {
+    pub fn new(db: DbConn) -> Self {
+        Self { db }
+    }
+
+    pub fn creator() -> AccountManagerCreator {
+        Box::new(move |db: DbConn| -> AccountManager { AccountManager::new(db) })
+    }
+
     #[deprecated]
     pub async fn get_account_legacy(
         handle_or_did: &String,
@@ -586,7 +606,7 @@ impl RequestStore for AccountManager {
         todo!()
     }
 
-    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<()> {
+    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError> {
         todo!()
     }
 
@@ -627,7 +647,7 @@ impl TokenStore for AccountManager {
         todo!()
     }
 
-    fn read_token(&self, token_id: &str) -> std::result::Result<Option<TokenInfo>, OAuthError> {
+    fn read_token(&self, token_id: TokenId) -> std::result::Result<Option<TokenInfo>, OAuthError> {
         todo!()
     }
 

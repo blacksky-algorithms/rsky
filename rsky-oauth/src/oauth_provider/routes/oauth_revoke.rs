@@ -40,7 +40,7 @@ pub async fn get_oauth_revoke(
     shared_oauth_provider: &State<SharedOAuthProvider>,
     body: OAuthRevokeGetRequestBody,
 ) -> Result<(), OAuthError> {
-    let oauth_provider = shared_oauth_provider.oauth_provider.write().await;
+    let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
     match oauth_provider
         .revoke(&body.oauth_token_identification)
         .await
@@ -176,7 +176,7 @@ pub async fn post_oauth_revoke(
     shared_oauth_provider: &State<SharedOAuthProvider>,
     body: OAuthRevokeRequestBody,
 ) -> Result<(), OAuthError> {
-    let oauth_provider = shared_oauth_provider.oauth_provider.write().await;
+    let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
     match oauth_provider
         .revoke(&body.oauth_token_identification)
         .await

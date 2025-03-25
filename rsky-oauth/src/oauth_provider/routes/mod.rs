@@ -9,11 +9,15 @@ mod oauth_revoke;
 mod oauth_token;
 mod oauth_well_known;
 
+use crate::oauth_provider::account::account_manager::AccountManager;
 use crate::oauth_provider::account::account_store::SignInCredentials;
+use crate::oauth_provider::client::client_manager::ClientManager;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::device::device_manager::DeviceManager;
 use crate::oauth_provider::oauth_provider::OAuthProvider;
+use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_uri::RequestUri;
+use crate::oauth_provider::token::token_manager::TokenManager;
 use crate::oauth_types::{
     OAuthAuthorizationRequestQuery, OAuthClientCredentials, OAuthClientId, OAuthRequestUri,
     OAuthTokenIdentification, OAuthTokenRequest,
@@ -68,12 +72,14 @@ impl<'r> FromRequest<'r> for DpopJkt {
     }
 }
 
-pub struct SharedOAuthProvider {
-    pub oauth_provider: RwLock<OAuthProvider>,
-}
+pub type OAuthProviderCreator = Box<
+    dyn Fn(ClientManager, RequestManager, TokenManager, AccountManager) -> OAuthProvider
+        + Send
+        + Sync,
+>;
 
-pub struct SharedDeviceManager {
-    pub device_manager: RwLock<DeviceManager>,
+pub struct SharedOAuthProvider {
+    pub oauth_provider: RwLock<OAuthProviderCreator>,
 }
 
 pub fn get_routes() -> Vec<Route> {

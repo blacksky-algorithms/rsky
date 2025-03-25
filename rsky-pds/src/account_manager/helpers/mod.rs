@@ -4,3 +4,4 @@ pub mod email_token;
 pub mod invite;
 pub mod password;
 pub mod repo;
+mod token;

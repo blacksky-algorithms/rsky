@@ -2,7 +2,7 @@ use crate::oauth_provider::constants::{CODE_BYTES_LENGTH, CODE_PREFIX};
 use crate::oauth_provider::errors::OAuthError;
 use serde::{Deserialize, Serialize};
 
-const CODE_LENGTH: u64 = CODE_PREFIX.length() + CODE_BYTES_LENGTH * 2; //hex encoding
+const CODE_LENGTH: u64 = (CODE_PREFIX.len() as u64 + CODE_BYTES_LENGTH * 2); //hex encoding
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Code(String);

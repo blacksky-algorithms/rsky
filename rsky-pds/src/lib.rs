@@ -268,7 +268,6 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     };
     let local_viewer = SharedLocalViewer {
         local_viewer: RwLock::new(LocalViewer::creator(LocalViewerCreatorParams {
-            account_manager: AccountManager {},
             pds_hostname: cfg.service.hostname.clone(),
             appview_agent: match cfg.bsky_app_view {
                 None => None,
@@ -286,10 +285,16 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     };
 
     //Setup OAuth Provider
-    // let oauth_provider = build_oauth_provider();
-    // let shared_oauth_provider = SharedOAuthProvider {
-    //     oauth_provider: RwLock::new(oauth_provider),
-    // };
+    let oauth_provider = build_oauth_provider();
+    let shared_oauth_provider = SharedOAuthProvider {
+        oauth_provider: RwLock::new(oauth_provider),
+    };
+
+    //Setup Device Manager
+    let oauth_provider = build_oauth_provider();
+    let shared_oauth_provider = SharedOAuthProvider {
+        oauth_provider: RwLock::new(oauth_provider),
+    };
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -309,7 +314,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
-    // .manage(shared_oauth_provider)
+        .manage(shared_oauth_provider)
 }
 
 fn pds_routes() -> Vec<Route> {

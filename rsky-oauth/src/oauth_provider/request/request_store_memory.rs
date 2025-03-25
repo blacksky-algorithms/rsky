@@ -1,3 +1,4 @@
+use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::RequestData;
 use crate::oauth_provider::request::request_id::RequestId;
@@ -28,11 +29,9 @@ impl RequestStore for RequestStoreMemory {
         self.requests.get(id)
     }
 
-    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> anyhow::Result<()> {
+    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError> {
         let current = match self.requests.get(&id) {
-            None => {
-                bail!("Request not found")
-            }
+            None => return Err(OAuthError::RuntimeError("test".to_string())),
             Some(res) => res,
         };
         let new_data = RequestData {
@@ -40,9 +39,9 @@ impl RequestStore for RequestStoreMemory {
             client_auth: data.client_auth.unwrap_or(current.client_auth.clone()),
             parameters: data.parameters.unwrap_or(current.parameters.clone()),
             expires_at: data.expires_at.unwrap_or(current.expires_at.clone()),
-            device_id: data.device_id.unwrap_or(current.device_id.clone()),
-            sub: data.sub.unwrap_or(current.sub.clone()),
-            code: data.code.unwrap_or(current.code.clone()),
+            device_id: Some(data.device_id.unwrap_or(current.device_id.clone().unwrap())),
+            sub: Some(data.sub.unwrap_or(current.sub.clone().unwrap())),
+            code: Some(data.code.unwrap_or(current.code.clone().unwrap())),
         };
         self.requests.insert(id, new_data);
         Ok(())

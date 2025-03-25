@@ -1,11 +1,8 @@
-use crate::oauth_provider::routes::{SharedDeviceManager, SharedOAuthProvider};
+use crate::oauth_provider::routes::SharedOAuthProvider;
 use rocket::{get, post, State};
 
 #[post("/oauth/authorize/sign-in")]
-pub async fn oauth_authorize_sign_in(
-    shared_oauth_provider: &State<SharedOAuthProvider>,
-    shared_device_manager: &State<SharedDeviceManager>,
-) {
+pub async fn oauth_authorize_sign_in(shared_oauth_provider: &State<SharedOAuthProvider>) {
     //     let oauth_provider = shared_oauth_provider.oauth_provider.write().await;
     //     let device_manager = shared_device_manager.device_manager.read().await;
     //     // device_manager.load()

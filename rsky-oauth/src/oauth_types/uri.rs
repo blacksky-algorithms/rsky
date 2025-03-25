@@ -62,7 +62,7 @@ impl ValidUri for DangerousUri {
     }
 }
 
-/// Loopback URI (http://localhost, http://127.0.0.1, http://[::1])
+/// Loopback URI (http://localhost, http://127.0.0.1, http://::1)
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopbackUri(String);
 

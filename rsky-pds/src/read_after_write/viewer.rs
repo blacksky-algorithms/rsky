@@ -54,7 +54,6 @@ pub type Agent = AtpServiceClient<ReqwestClient>;
 pub type LocalViewerCreator = Box<dyn Fn(ActorStore) -> LocalViewer + Send + Sync>;
 
 pub struct LocalViewerCreatorParams {
-    pub account_manager: AccountManager,
     pub pds_hostname: String,
     pub appview_agent: Option<String>,
     pub appview_did: Option<String>,
