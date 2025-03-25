@@ -73,7 +73,7 @@ Jetstream is a streaming service that consumes the AT Protocol firehose (`com.at
 ### Production Readiness
 
 **Milestones:**
-- [ ] Improved dependency management across rsky workspace members through dependabot, `[cargo machete](https://github.com/bnjbvr/cargo-machete)`, version management, etc.
+- [ ] Improved dependency management across rsky workspace members through dependabot, [cargo machete](https://github.com/bnjbvr/cargo-machete), version management, etc.
 - [ ] Adding telemetry in the services mentioned above to yield observability
 - [ ] Incorporating [12-factor app](https://12factor.net/) principles that will allow rsky users to build scalable, maintainable ATProto services that follow modern cloud-native best practices.
 
