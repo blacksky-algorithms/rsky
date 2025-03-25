@@ -41,13 +41,15 @@ A high-throughput relay service that ingests and republishes AT Protocol data ac
   - Prioritize performance, scalability, and observability
 
 ---
-
 ### rsky-jetstream
-Jetstream is a specialized flavor of AT relays optimized for ephemeral streaming.
+Jetstream is a streaming service that consumes the AT Protocol firehose (`com.atproto.sync.subscribeRepos`) and converts the CBOR-encoded MST blocks into lightweight, developer-friendly JSON.
 
 **Milestones:**
-- [ ] Implement Jetstream-compliant relay as an optional rsky component
-- [ ] Consider use-cases such as real-time dashboards, moderation tooling, or analytics pipelines
+- [ ] Implement a Jetstream-compatible service that:
+  - Subscribes to the full firehose stream
+  - Parses and decodes CBOR-encoded data structures (including MST blocks)
+  - Outputs clean JSON events for easy use in downstream tooling
+- [ ] Consider various developer use cases like backlink filtering
 
 ---
 
@@ -72,6 +74,16 @@ Jetstream is a specialized flavor of AT relays optimized for ephemeral streaming
 
 ## Timeline
 We expect to hit v1.0.0 within **12 months** from now. Progress will be community-driven and will evolve alongside changes to the AT Protocol and the needs of Blacksky-hosted communities.
+
+## Visual Roadmap (Quarterly Breakdown)
+
+| Component        | Q2 2025                        | Q3 2025                             | Q4 2025                          | Q1 2026                        |
+|------------------|--------------------------------|-------------------------------------|----------------------------------|--------------------------------|
+| **rsky-pds**     | Testing, S3/On-Disk Blob Storage | OAuth, Web UI         | Scoped Auth + Private State Impl. | Evaluate E2EE Chat Integration |
+| **rsky-relay**   | Crate Setup (`carstore`, etc)  | High-throughput relay implementation | Indexing, Filtering, Scaling     | Production Stabilization       |
+| **rsky-jetstream** | Exploration | Implementation  | Testing       | Polishing, performance tuning  |
+| **App-View**     | Evaluate Cypher, Plan Aggregators | Build backlink/CDN services         | Testing custom services          | Deploy App-View components     |
+| **Documentation**| Improve READMEs, crate-level docs | Dev guides, architecture docs       | API docs, examples               | Tutorials, onboarding flows    |
 
 ---
 
