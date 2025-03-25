@@ -72,6 +72,15 @@ Jetstream is a streaming service that consumes the AT Protocol firehose (`com.at
 
 ---
 
+### Production Readiness
+
+**Milestones:**
+- [ ] Improved dependency management across rsky workspace members through dependabot, `[cargo machete](https://github.com/bnjbvr/cargo-machete)`, version management, etc.
+- [ ] Adding telemetry in the services mentioned above to yield observability
+- [ ] Incorporating [12-factor app](https://12factor.net/) principles that will allow rsky users to build scalable, maintainable ATProto services that follow modern cloud-native best practices.
+
+---
+
 ## Timeline
 We expect to hit v1.0.0 within **12 months** from now. Progress will be community-driven and will evolve alongside changes to the AT Protocol and the needs of Blacksky-hosted communities.
 
@@ -84,6 +93,7 @@ We expect to hit v1.0.0 within **12 months** from now. Progress will be communit
 | **rsky-jetstream** | Exploration | Implementation  | Testing       | Polishing, performance tuning  |
 | **App-View**     | Evaluate Cypher, Plan Aggregators | Build backlink/CDN services         | Testing custom services          | Deploy App-View components     |
 | **Documentation**| Improve READMEs, crate-level docs | Dev guides, architecture docs       | API docs, examples               | Tutorials, onboarding flows    |
+| **Production Readiness** | Version management, dependency tracking | Telemetry implementation, observability foundation | 12-Factor configuration and environment setup | Complete 12-Factor principles |
 
 ---
 
