@@ -1,4 +1,5 @@
 use crate::oauth_provider::request::request_id::RequestId;
+use crate::oauth_types::OAuthRequestUri;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -7,10 +8,7 @@ use std::str::FromStr;
 pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestUri {
-    uri: String,
-    request_id: RequestId,
-}
+pub struct RequestUri(String);
 
 impl RequestUri {
     /// Create a new RequestUri.
@@ -23,20 +21,13 @@ impl RequestUri {
 
     /// Get the underlying client ID string.
     pub fn into_inner(self) -> String {
-        unimplemented!()
-        // self.0
-    }
-
-    pub fn request_id(&self) -> RequestId {
-        unimplemented!()
-        // self.0[..REQUEST_URI_PREFIX.len()]
+        self.0
     }
 }
 
 impl Display for RequestUri {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        unimplemented!()
-        // self.0.fmt(f)
+        self.0.fmt(f)
     }
 }
 
@@ -52,4 +43,16 @@ impl FromStr for RequestUri {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestUriError {
     Empty,
+}
+
+pub fn decode_request_uri(request_uri: OAuthRequestUri) -> RequestId {
+    unimplemented!()
+}
+
+pub fn encode_request_uri(request_id: RequestId) -> RequestUri {
+    unimplemented!()
+}
+
+pub fn decode_request_id(request_id: RequestId) -> RequestUri {
+    unimplemented!()
 }

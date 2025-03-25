@@ -2,35 +2,33 @@ use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_provider::constants::{
     CLIENT_ASSERTION_MAX_AGE, CODE_CHALLENGE_REPLAY_TIMEFRAME, DPOP_NONCE_MAX_AGE, JAR_MAX_AGE,
 };
-use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
+use crate::oauth_provider::replay::replay_store::ReplayStore;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct ReplayManager {
-    replay_store: ReplayStoreMemory, // get ipld blocks from db
+    replay_store: Arc<RwLock<dyn ReplayStore>>, // get ipld blocks from db
 }
 
 impl ReplayManager {
-    pub fn new(replay_store: ReplayStoreMemory) -> Self {
+    pub fn new(replay_store: Arc<RwLock<dyn ReplayStore>>) -> Self {
         ReplayManager { replay_store }
     }
 
     pub async fn unique_auth(&mut self, jti: String, client_id: &ClientId) -> bool {
-        self.replay_store
-            .unique(
-                format!("Auth@{client_id}").as_str(),
-                jti.as_str(),
-                as_time_frame(CLIENT_ASSERTION_MAX_AGE as f64),
-            )
-            .await
+        self.replay_store.blocking_write().unique(
+            format!("Auth@{client_id}").as_str(),
+            jti.as_str(),
+            as_time_frame(CLIENT_ASSERTION_MAX_AGE as f64),
+        )
     }
 
-    pub async fn unique_jar(&mut self, jti: String, client_id: String) -> bool {
-        self.replay_store
-            .unique(
-                format!("JAR@{client_id}").as_str(),
-                jti.as_str(),
-                as_time_frame(JAR_MAX_AGE as f64),
-            )
-            .await
+    pub async fn unique_jar(&mut self, jti: String, client_id: &ClientId) -> bool {
+        self.replay_store.blocking_write().unique(
+            format!("JAR@{client_id}").as_str(),
+            jti.as_str(),
+            as_time_frame(JAR_MAX_AGE as f64),
+        )
     }
 
     pub async fn unique_dpop(&mut self, jti: String, client_id: Option<String>) -> bool {
@@ -40,23 +38,19 @@ impl ReplayManager {
             }
             None => "DPoP".to_string(),
         };
-        self.replay_store
-            .unique(
-                namespace.as_str(),
-                jti.as_str(),
-                as_time_frame(DPOP_NONCE_MAX_AGE as f64),
-            )
-            .await
+        self.replay_store.blocking_write().unique(
+            namespace.as_str(),
+            jti.as_str(),
+            as_time_frame(DPOP_NONCE_MAX_AGE as f64),
+        )
     }
 
     pub async fn unique_code_challenge(&mut self, challenge: String) -> bool {
-        self.replay_store
-            .unique(
-                "CodeChallenge",
-                challenge.as_str(),
-                as_time_frame(CODE_CHALLENGE_REPLAY_TIMEFRAME as f64),
-            )
-            .await
+        self.replay_store.blocking_write().unique(
+            "CodeChallenge",
+            challenge.as_str(),
+            as_time_frame(CODE_CHALLENGE_REPLAY_TIMEFRAME as f64),
+        )
     }
 }
 

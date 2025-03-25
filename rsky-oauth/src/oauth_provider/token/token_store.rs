@@ -21,46 +21,32 @@ pub struct NewTokenData {
     pub updated_at: u64,
 }
 
-pub struct TokenStore {}
-
-impl TokenStore {
-    pub async fn create_token(
+pub trait TokenStore: Send + Sync {
+    fn create_token(
         &mut self,
         token_id: TokenId,
         data: TokenData,
         refresh_token: Option<RefreshToken>,
-    ) -> Result<(), OAuthError> {
-        unimplemented!()
-    }
-    pub async fn read_token(&self, token_id: &str) -> Result<Option<TokenInfo>, OAuthError> {
-        unimplemented!()
-    }
-    pub async fn delete_token(&mut self, token_id: TokenId) -> Result<(), OAuthError> {
-        unimplemented!()
-    }
-    pub async fn rotate_token(
+    ) -> Result<(), OAuthError>;
+    fn read_token(&self, token_id: TokenId) -> Result<Option<TokenInfo>, OAuthError>;
+    fn delete_token(&mut self, token_id: TokenId) -> Result<(), OAuthError>;
+    fn rotate_token(
         &mut self,
         token_id: TokenId,
         new_token_id: TokenId,
         new_refresh_token: RefreshToken,
         new_data: NewTokenData,
-    ) -> Result<(), OAuthError> {
-        unimplemented!()
-    }
+    ) -> Result<(), OAuthError>;
 
     /**
      * Find a token by its refresh token. Note that previous refresh tokens
      * should also return the token. The data model is responsible for storing
      * old refresh tokens when a new one is issued.
      */
-    pub async fn find_token_by_refresh_token(
+    fn find_token_by_refresh_token(
         &self,
         refresh_token: RefreshToken,
-    ) -> Result<Option<TokenInfo>, OAuthError> {
-        unimplemented!()
-    }
+    ) -> Result<Option<TokenInfo>, OAuthError>;
 
-    pub async fn find_token_by_code(&self, code: Code) -> Result<Option<TokenInfo>, OAuthError> {
-        unimplemented!()
-    }
+    fn find_token_by_code(&self, code: Code) -> Result<Option<TokenInfo>, OAuthError>;
 }

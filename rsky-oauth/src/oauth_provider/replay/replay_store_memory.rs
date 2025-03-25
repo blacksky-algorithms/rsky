@@ -1,25 +1,16 @@
+use crate::oauth_provider::replay::replay_store::ReplayStore;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 pub struct ReplayStoreMemory {
-    last_cleanup: u64,
+    last_cleanup: f64,
     nonces: BTreeMap<String, f64>,
 }
 
 impl ReplayStoreMemory {
-    pub async fn unique(&mut self, namespace: &str, nonce: &str, time_frame: f64) -> bool {
-        self.cleanup();
-        let key = format!("{namespace}:{nonce}");
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("timestamp in micros since UNIX epoch")
-            .as_micros() as f64;
-        self.nonces.insert(key, now + time_frame) == None
-    }
-
     pub fn new() -> Self {
         ReplayStoreMemory {
-            last_cleanup: 0,
+            last_cleanup: 0f64,
             nonces: Default::default(),
         }
     }
@@ -28,15 +19,27 @@ impl ReplayStoreMemory {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("timestamp in micros since UNIX epoch")
-            .as_micros() as u64;
+            .as_micros() as f64;
 
-        if self.last_cleanup < now - 60_000 {
-            // for (key, expires) in self.nonces {
-            //     if expires < now {
-            //         self.nonces.remove(&key);
-            //     }
-            // }
+        if self.last_cleanup < now - 60_000f64 {
+            for (key, expires) in self.nonces.clone() {
+                if expires < now {
+                    self.nonces.remove(&key);
+                }
+            }
             self.last_cleanup = now;
         }
+    }
+}
+
+impl ReplayStore for ReplayStoreMemory {
+    fn unique(&mut self, namespace: &str, nonce: &str, timeframe: f64) -> bool {
+        self.cleanup();
+        let key = format!("{namespace}:{nonce}");
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("timestamp in micros since UNIX epoch")
+            .as_micros() as f64;
+        self.nonces.insert(key, now + timeframe) == None
     }
 }

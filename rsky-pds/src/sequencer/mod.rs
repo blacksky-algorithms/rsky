@@ -50,9 +50,7 @@ impl Sequencer {
         self.last_seen = Some(curr.unwrap_or(0));
         if self.waker.is_none() {
             loop {
-                while let Some(_) = self.next().await {
-                    ()
-                }
+                while let Some(_) = self.next().await {}
             }
         }
         Ok(())
@@ -189,7 +187,7 @@ impl Sequencer {
         Ok(seq_evts)
     }
 
-    async fn exponential_backoff(&mut self) -> () {
+    async fn exponential_backoff(&mut self) {
         self.tries_with_no_results += 1;
         let wait_time = cmp::min(
             2u64.checked_pow(self.tries_with_no_results).unwrap_or(2),

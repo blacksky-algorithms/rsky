@@ -3,13 +3,16 @@ use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::dpop::dpop_manager::DpopManager;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::replay::replay_manager::ReplayManager;
+use crate::oauth_provider::replay::replay_store::ReplayStore;
 use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_provider::token::verify_token_claims::{
-    verify_token_claims, VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
+    VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{OAuthAccessToken, OAuthIssuerIdentifier, OAuthTokenType};
-use std::any::Any;
+use std::clone;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct OAuthVerifierOptions {
     /**
@@ -43,7 +46,7 @@ pub struct OAuthVerifierOptions {
      * protection will use memory storage.
      */
     pub redis: Option<String>,
-    pub replay_store: Option<ReplayStoreMemory>,
+    pub replay_store: Arc<RwLock<dyn ReplayStore>>,
 }
 
 pub struct OAuthVerifier {
@@ -58,12 +61,18 @@ pub struct OAuthVerifier {
 
 impl OAuthVerifier {
     pub fn new(opts: OAuthVerifierOptions) -> Self {
+        let replay_store = match opts.redis {
+            None => Arc::new(RwLock::new(ReplayStoreMemory::new())),
+            Some(redis) => {
+                unimplemented!()
+            }
+        };
         OAuthVerifier {
             issuer: opts.issuer.clone(),
             keyset: opts.keyset.clone(),
             access_token_type: AccessTokenType::JWT,
             dpop_manager: DpopManager::new(None),
-            replay_manager: ReplayManager::new(ReplayStoreMemory::new()),
+            replay_manager: ReplayManager::new(replay_store),
             signer: Signer::new(opts.issuer.clone(), opts.keyset.clone()),
             redis: None,
         }

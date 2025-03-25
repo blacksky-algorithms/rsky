@@ -1,3 +1,4 @@
+use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_types::OAuthScope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,7 +7,7 @@ use serde_json::Value;
 pub struct TokenClaims {
     pub iss: Option<String>,
     pub aud: Option<Vec<String>>,
-    pub sub: Option<String>,
+    pub sub: Option<Sub>,
     pub exp: Option<u64>,
     pub nbf: Option<u64>,
     pub iat: Option<u64>,

@@ -21,15 +21,14 @@ use crate::oauth_provider::oauth_verifier::{OAuthVerifier, OAuthVerifierOptions}
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::output::customization::Customization;
 use crate::oauth_provider::output::send_authorize_redirect::AuthorizationResult;
-use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
-use crate::oauth_provider::request::code::{parse, Code};
+use crate::oauth_provider::replay::replay_store::ReplayStore;
+use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_manager::RequestManager;
-use crate::oauth_provider::request::request_store_memory::RequestStoreMemory;
-use crate::oauth_provider::request::request_uri::RequestUri;
+use crate::oauth_provider::request::request_store::RequestStore;
 use crate::oauth_provider::token::token_id::is_token_id;
 use crate::oauth_provider::token::token_manager::TokenManager;
-use crate::oauth_provider::token::token_store::{TokenInfo, TokenStore};
+use crate::oauth_provider::token::token_store::TokenStore;
 use crate::oauth_provider::token::verify_token_claims::{
     VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
@@ -37,17 +36,21 @@ use crate::oauth_types::{
     ActiveTokenInfo, ApplicationType, OAuthAccessToken, OAuthAuthorizationCodeGrantTokenRequest,
     OAuthAuthorizationRequestJar, OAuthAuthorizationRequestPar,
     OAuthAuthorizationRequestParameters, OAuthAuthorizationRequestQuery,
-    OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientCredentialsNone,
-    OAuthClientMetadata, OAuthIntrospectionResponse, OAuthIssuerIdentifier, OAuthParResponse,
+    OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientMetadata,
+    OAuthIntrospectionResponse, OAuthIssuerIdentifier, OAuthParResponse,
     OAuthRefreshTokenGrantTokenRequest, OAuthRequestUri, OAuthTokenIdentification,
     OAuthTokenRequest, OAuthTokenResponse, OAuthTokenType,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use rocket::form::validate::Contains;
-use rocket::uri;
-use std::any::Any;
 use std::collections::BTreeMap;
-use url::quirks::username;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub trait OAuthProviderStore:
+    ClientStore + AccountStore + DeviceStore + TokenStore + RequestStore + ReplayStore
+{
+}
 
 pub struct OAuthProviderSession {
     account: Account,
@@ -127,13 +130,13 @@ pub struct OAuthProviderOptions {
      * this store implements all the interfaces not provided in the other
      * `<name>Store` options.
      */
-    // pub store: Option<OAuthProviderStore>,
-    pub account_store: AccountStore,
-    pub device_store: DeviceStore,
-    pub client_store: ClientStore,
-    pub replay_store: ReplayStoreMemory,
-    pub request_store: RequestStoreMemory,
-    pub token_store: TokenStore,
+    pub store: Option<Arc<RwLock<dyn OAuthProviderStore>>>,
+    pub account_store: Option<Arc<RwLock<dyn AccountStore>>>,
+    pub device_store: Option<Arc<RwLock<dyn DeviceStore>>>,
+    pub client_store: Option<Arc<RwLock<dyn ClientStore>>>,
+    pub replay_store: Option<Arc<RwLock<dyn ReplayStore>>>,
+    pub request_store: Option<Arc<RwLock<dyn RequestStore>>>,
+    pub token_store: Option<Arc<RwLock<dyn TokenStore>>>,
 
     /**
      * In order to speed up the client fetching process, you can provide a cache
@@ -177,23 +180,33 @@ pub struct OAuthProvider {
     request_manager: RequestManager,
     token_manager: TokenManager,
     pub oauth_verifier: OAuthVerifier,
-    device_store: DeviceStore,
+    device_store: Arc<RwLock<dyn DeviceStore>>,
 
     account_manager: AccountManager,
 }
 
 impl OAuthProvider {
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
+        let store = options.store;
+
+        // Requires stores
+        let account_store = store.clone().unwrap();
+        let device_store = store.clone().unwrap();
+        let token_store = store.clone().unwrap();
+
+        // These are optional
+        let client_store = store.clone().unwrap();
+        let replay_store = store.clone().unwrap();
+        let request_store = store.clone().unwrap();
+
         let verifier_opts = OAuthVerifierOptions {
             issuer: options.issuer.clone(),
             keyset: options.keyset.unwrap(),
             access_token_type: options.access_token_type,
             redis: Some(options.redis),
-            replay_store: Some(options.replay_store),
+            replay_store,
         };
         let oauth_verifier = OAuthVerifier::new(verifier_opts);
-
-        let request_store = RequestStoreMemory::new();
 
         let authentication_max_age = options
             .authentication_max_age
@@ -201,10 +214,12 @@ impl OAuthProvider {
         let metadata = build_metadata(options.issuer, options.metadata);
         let customization = options.customization;
 
-        let device_store = options.device_store;
-
-        let account_manager = AccountManager::new(options.account_store);
-        let client_manager = ClientManager::new();
+        let account_manager = AccountManager::new(account_store);
+        let client_manager = ClientManager::new(
+            metadata.clone(),
+            oauth_verifier.keyset.clone(),
+            client_store,
+        );
         let request_manager = RequestManager::new(
             request_store,
             oauth_verifier.signer.clone(),
@@ -212,7 +227,7 @@ impl OAuthProvider {
             authentication_max_age,
         );
         let token_manager = TokenManager::new(
-            options.token_store,
+            token_store,
             oauth_verifier.signer.clone(),
             oauth_verifier.access_token_type.clone(),
             Some(authentication_max_age),
@@ -236,17 +251,10 @@ impl OAuthProvider {
     }
 
     fn login_required(&self, info: &DeviceAccountInfo) -> bool {
-        unimplemented!()
-        // /* in seconds */
-        // let now = now_as_secs();
-        // let auth_age = now - info.authenticated_at;
-        //
-        // // Fool-proof (invalid date, or suspiciously in the future)
-        // if auth_age < 0 {
-        //     return true;
-        // }
-        //
-        // auth_age >= self.authentication_max_age
+        /* in seconds */
+        let now = now_as_secs();
+        let auth_age = now - info.authenticated_at;
+        auth_age >= self.authentication_max_age
     }
 
     //Done
@@ -296,47 +304,36 @@ impl OAuthProvider {
         client: &Client,
         input: OAuthAuthorizationRequestJar,
     ) -> Result<DecodeJarResponse, OAuthError> {
-        let result = client.decode_request_object(input.jwt()).await?;
+        let request_parameters = client.decode_request_object(input.jwt()).await?;
 
-        //TODO
-        // if payload.jti.is_none() {
-        //     return Err(OAuthError::InvalidParametersError(
-        //         "Request object must contain a jti claim".to_string(),
-        //     ));
-        // }
+        let jti: String = match request_parameters.claims {
+            None => {
+                return Err(OAuthError::InvalidParametersError(
+                    "Request object must contain a jti claim".to_string(),
+                ));
+            }
+            Some(claims) => match claims.claims.get("jti") {
+                None => {
+                    return Err(OAuthError::InvalidParametersError(
+                        "Request object must contain a jti claim".to_string(),
+                    ));
+                }
+                Some(jti) => jti.clone().value.unwrap().to_string(),
+            },
+        };
 
-        // if (!(await this.replayManager.uniqueJar(result.payload.jti, client.id))) {
-        // throw new InvalidParametersError(
-        // payload,
-        // 'Request object jti is not unique',
-        // )
-        // }
-        //
-        // if ('protectedHeader' in result) {
-        //     if (!result.protectedHeader.kid) {
-        //         throw new InvalidParametersError(payload, 'Missing "kid" in header')
-        //     }
-        //
-        //     return {
-        //         jkt: await authJwkThumbprint(result.key),
-        //         payload,
-        //         protectedHeader: result.protectedHeader as {
-        //             alg: string
-        //             kid: string
-        //         },
-        //     }
-        // }
-        //
-        // if ('header' in result) {
-        //     return {
-        //         payload,
-        //     }
-        // }
+        if !self
+            .oauth_verifier
+            .replay_manager
+            .unique_jar(jti, &client.id)
+            .await
+        {
+            return Err(OAuthError::InvalidParametersError(
+                "Request object jti is not unique".to_string(),
+            ));
+        }
 
-        // Should never happen
-        Err(OAuthError::RuntimeError(
-            "Invalid request object".to_string(),
-        ))
+        unimplemented!()
     }
 
     /**
@@ -361,8 +358,8 @@ impl OAuthProvider {
 
         let res = self
             .request_manager
-            .create_authorization_request(&client, &client_auth, &parameters, None, dpop_jkt)
-            .await;
+            .create_authorization_request(client, client_auth, parameters, None, dpop_jkt)
+            .await?;
 
         let response = OAuthParResponse::new(res.uri.into_inner(), res.expires_at).unwrap();
         Ok(response)
@@ -374,31 +371,29 @@ impl OAuthProvider {
         device_id: DeviceId,
         query: OAuthAuthorizationRequestQuery,
     ) -> Result<RequestInfo, OAuthError> {
-        unimplemented!()
-        // match query {
-        //     OAuthAuthorizationRequestQuery::Parameters(query) => {
-        //         let auth = ClientAuth {
-        //             method: "none".to_string(),
-        //             alg: "".to_string(),
-        //             kid: "".to_string(),
-        //             jkt: "".to_string(),
-        //         };
-        //         return Ok(self
-        //             .request_manager
-        //             .create_authorization_request(&client, &auth, &query, Some(device_id), None)
-        //             .await);
-        //     }
-        //     OAuthAuthorizationRequestQuery::Jar(query) => {
-        //         let request_object = self.decode_jar(&client, query).await?;
-        //     }
-        //     OAuthAuthorizationRequestQuery::Uri(query) => {
-        //         let request_uri = query.request_uri().clone();
-        //         return self
-        //             .request_manager
-        //             .get(&request_uri, &client.id, &device_id)
-        //             .await;
-        //     }
-        // }
+        match query {
+            OAuthAuthorizationRequestQuery::Parameters(query) => {
+                let auth = ClientAuth {
+                    method: "none".to_string(),
+                    alg: "".to_string(),
+                    kid: "".to_string(),
+                    jkt: "".to_string(),
+                };
+                self.request_manager
+                    .create_authorization_request(client, auth, query, Some(device_id), None)
+                    .await
+            }
+            OAuthAuthorizationRequestQuery::Jar(query) => {
+                let request_object = self.decode_jar(&client, query).await?;
+                unimplemented!()
+            }
+            OAuthAuthorizationRequestQuery::Uri(query) => {
+                let request_uri = query.request_uri().clone();
+                self.request_manager
+                    .get(request_uri, client.id, device_id)
+                    .await
+            }
+        }
     }
 
     async fn delete_request(
@@ -416,7 +411,6 @@ impl OAuthProvider {
         credentials: &OAuthClientCredentials,
         query: &OAuthAuthorizationRequestQuery,
     ) -> Result<AuthorizationResult, OAuthError> {
-        unimplemented!()
         // let issuer = self.oauth_verifier.issuer.clone();
         //
         // // If there is a chance to redirect the user to the client, let's do
@@ -436,6 +430,7 @@ impl OAuthProvider {
         // let request_info = self
         //     .process_authorization_request(client, device_id, query)
         //     .await?;
+        unimplemented!()
     }
 
     async fn inner_authorize(
@@ -445,35 +440,35 @@ impl OAuthProvider {
         client_auth: &ClientAuth,
         parameters: &OAuthAuthorizationRequestParameters,
     ) -> Result<AuthorizationResult, OAuthError> {
-        unimplemented!()
-        // let sessions = self
-        //     .get_sessions(client, client_auth, device_id, parameters)
-        //     .await?;
-        //
-        // if parameters.prompt.is_none() {
-        //     let sso_sessions: Vec<OAuthProviderSession>;
-        //     if sso_sessions.len() > 1 {
-        //         return Err(OAuthError::AccountSelectionRequiredError);
-        //     }
-        //
-        //     let sso_session = match sso_sessions.get(0) {
-        //         None => return Err(OAuthError::LoginRequiredError),
-        //         Some(session) => session,
-        //     };
-        //
-        //     if sso_session.login_required {
-        //         return Err(OAuthError::LoginRequiredError);
-        //     }
-        //
-        //     if sso_session.consent_required {
-        //         return Err(OAuthError::ConsentRequiredError);
-        //     }
-        //
-        //     let code = self
-        //         .request_manager
-        //         .set_authorized(client, uri, device_id, sso_session.account)
-        //         .await?;
-        // }
+        let sso_sessions = self
+            .get_sessions(client, client_auth, device_id, parameters)
+            .await?;
+
+        if parameters.prompt.is_none() {
+            // let sso_sessions: Vec<OAuthProviderSession>;
+            if sso_sessions.len() > 1 {
+                return Err(OAuthError::AccountSelectionRequiredError);
+            }
+
+            let sso_session = match sso_sessions.get(0) {
+                None => return Err(OAuthError::LoginRequiredError),
+                Some(session) => session,
+            };
+
+            if sso_session.login_required {
+                return Err(OAuthError::LoginRequiredError);
+            }
+
+            if sso_session.consent_required {
+                return Err(OAuthError::ConsentRequiredError);
+            }
+
+            // let code = self
+            //     .request_manager
+            //     .set_authorized(client, uri, device_id, sso_session.account)
+            //     .await?;
+        }
+        todo!()
     }
 
     pub async fn get_sessions(
@@ -483,7 +478,7 @@ impl OAuthProvider {
         device_id: &DeviceId,
         parameters: &OAuthAuthorizationRequestParameters,
     ) -> Result<Vec<OAuthProviderSession>, OAuthError> {
-        let accounts = self.account_manager.list(device_id).await;
+        let accounts = self.account_manager.list(device_id);
 
         let hint = parameters.login_hint.clone();
 
@@ -521,11 +516,9 @@ impl OAuthProvider {
 
         // Ensure the request is still valid (and update the request expiration)
         // @TODO use the returned scopes to determine if consent is required
-        self.request_manager
-            .get(&uri, &client_id, &device_id)
-            .await?;
+        self.request_manager.get(uri, client_id, device_id).await?;
 
-        let account_info = match self.account_manager.sign_in(credentials, device_id).await {
+        let account_info = match self.account_manager.sign_in(credentials, device_id) {
             Ok(res) => res,
             Err(error) => return Err(error),
         };
@@ -555,14 +548,11 @@ impl OAuthProvider {
     ) -> Result<AcceptRequestResponse, OAuthError> {
         let client = self.client_manager.get_client(&client_id).await?;
 
-        let result = self
-            .request_manager
-            .get(&uri, &client_id, &device_id)
-            .await?;
+        let result = self.request_manager.get(uri, client_id, device_id).await?;
         let parameters = result.parameters;
         let client_auth = result.client_auth;
 
-        let result = match self.account_manager.get(&device_id, sub).await {
+        let result = match self.account_manager.get(&device_id, sub) {
             Ok(res) => res,
             Err(e) => {
                 self.delete_request(uri, parameters).await?;
@@ -595,8 +585,7 @@ impl OAuthProvider {
         };
 
         self.account_manager
-            .add_authorized_client(device_id, account, client, client_auth)
-            .await;
+            .add_authorized_client(device_id, account, client, client_auth);
 
         Ok(AcceptRequestResponse {
             issuer: self.oauth_verifier.issuer.clone(),
@@ -611,10 +600,7 @@ impl OAuthProvider {
         uri: OAuthRequestUri,
         client_id: ClientId,
     ) -> Result<RejectRequestResponse, OAuthError> {
-        let request_info = self
-            .request_manager
-            .get(&uri, &client_id, &device_id)
-            .await?;
+        let request_info = self.request_manager.get(uri, client_id, device_id).await?;
 
         self.delete_request(uri, request_info.parameters.clone())
             .await?;
@@ -815,21 +801,21 @@ impl OAuthProvider {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
-        unimplemented!()
-        // if is_token_id(token.to_string().as_str()) {
-        //     self.oauth_verifier
-        //         .assert_token_type_allowed(token_type.clone(), AccessTokenType::ID)?;
-        //
-        //     //TODO
-        //     // return self.token_manager.authenticate_token_id(
-        //     //     token_type,
-        //     //     token.to_string(),
-        //     //     dpop_jkt,
-        //     //     verify_options,
-        //     // )?;
-        // }
-        //
-        // self.oauth_verifier
-        //     .authenticate_token(token_type, token, dpop_jkt, verify_options).await?
+        if is_token_id(token.to_string().as_str()) {
+            self.oauth_verifier
+                .assert_token_type_allowed(token_type.clone(), AccessTokenType::ID)?;
+
+            //TODO
+            // return self.token_manager.authenticate_token_id(
+            //     token_type,
+            //     token.to_string(),
+            //     dpop_jkt,
+            //     verify_options,
+            // )?;
+        }
+
+        self.oauth_verifier
+            .authenticate_token(token_type, token, dpop_jkt, verify_options)
+            .await
     }
 }

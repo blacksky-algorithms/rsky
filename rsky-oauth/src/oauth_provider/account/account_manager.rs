@@ -6,29 +6,29 @@ use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_types::is_oauth_client_id_loopback;
-use rocket::futures::stream::iter;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 const TIMING_ATTACK_MITIGATION_DELAY: u32 = 400;
 
 pub struct AccountManager {
-    pub store: AccountStore,
+    pub store: Arc<RwLock<dyn AccountStore>>,
 }
 
 impl AccountManager {
-    pub fn new(store: AccountStore) -> Self {
+    pub fn new(store: Arc<RwLock<dyn AccountStore>>) -> Self {
         Self { store }
     }
 
-    pub async fn sign_in(
+    pub fn sign_in(
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
     ) -> Result<AccountInfo, OAuthError> {
-        // TODO Add protection for time
         match self
             .store
+            .blocking_read()
             .authenticate_account(credentials, device_id)
-            .await
         {
             None => Err(OAuthError::InvalidRequestError(
                 "Invalid credentials".to_string(),
@@ -37,8 +37,12 @@ impl AccountManager {
         }
     }
 
-    pub async fn get(&self, device_id: &DeviceId, sub: Sub) -> Result<AccountInfo, OAuthError> {
-        match self.store.get_device_account(device_id, sub).await {
+    pub fn get(&self, device_id: &DeviceId, sub: Sub) -> Result<AccountInfo, OAuthError> {
+        match self
+            .store
+            .blocking_read()
+            .get_device_account(device_id, sub)
+        {
             None => Err(OAuthError::InvalidRequestError(
                 "Account not found".to_string(),
             )),
@@ -46,7 +50,7 @@ impl AccountManager {
         }
     }
 
-    pub async fn add_authorized_client(
+    pub fn add_authorized_client(
         &self,
         device_id: DeviceId,
         account: Account,
@@ -56,13 +60,13 @@ impl AccountManager {
         // "Loopback" clients are not distinguishable from one another.
         if !is_oauth_client_id_loopback(&client.id) {
             self.store
-                .add_authorized_client(device_id, account.sub, client.id)
-                .await;
+                .blocking_write()
+                .add_authorized_client(device_id, account.sub, client.id);
         }
     }
 
-    pub async fn list(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
-        let results = self.store.list_device_accounts(device_id).await;
+    pub fn list(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
+        let results = self.store.blocking_read().list_device_accounts(device_id);
         let mut x = Vec::new();
         for res in results {
             if res.info.remembered {

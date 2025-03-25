@@ -4,6 +4,8 @@ use crate::oauth_provider::device::device_store::DeviceStore;
 use crate::oauth_provider::device::session_id::SessionId;
 use rocket::Request;
 use std::cmp::PartialEq;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct DeviceManagerOptions {
     /**
@@ -88,7 +90,7 @@ impl Default for DeviceManagerOptions {
 }
 
 pub struct DeviceManager {
-    store: DeviceStore,
+    store: Arc<RwLock<dyn DeviceStore>>,
     device_manager_options: DeviceManagerOptions,
 }
 
@@ -98,11 +100,8 @@ pub struct DeviceManager {
  * identify the session.
  */
 impl DeviceManager {
-    pub fn new(store: DeviceStore, options: Option<DeviceManagerOptions>) -> Self {
-        let device_manager_options = match options {
-            None => DeviceManagerOptions::default(),
-            Some(options) => options,
-        };
+    pub fn new(store: Arc<RwLock<dyn DeviceStore>>, options: Option<DeviceManagerOptions>) -> Self {
+        let device_manager_options = options.unwrap_or_else(|| DeviceManagerOptions::default());
         Self {
             store,
             device_manager_options,

@@ -1,20 +1,66 @@
+use crate::account_manager::AccountManager;
+use crate::actor_store::ActorStore;
+use crate::oauth::detailed_account_store::DetailedAccountStore;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
 use rsky_oauth::jwk::Keyset;
-use rsky_oauth::oauth_provider::account::account_store::AccountStore;
 use rsky_oauth::oauth_provider::client::client_store::ClientStore;
-use rsky_oauth::oauth_provider::device::device_store::DeviceStore;
 use rsky_oauth::oauth_provider::metadata::build_metadata::CustomMetadata;
 use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderOptions};
-use rsky_oauth::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
-use rsky_oauth::oauth_provider::request::request_store_memory::RequestStoreMemory;
-use rsky_oauth::oauth_provider::token::token_store::TokenStore;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub fn build_oauth_provider() -> OAuthProvider {
-    let issuer = OAuthIssuerIdentifier::new("https://rsky.com").expect("Valid Issuer");
+pub struct AuthProviderOptions {
+    pub issuer: OAuthIssuerIdentifier,
+    pub account_manager: AccountManager,
+    pub actor_store: ActorStore,
+}
+
+pub fn build_oauth_provider(options: AuthProviderOptions) -> OAuthProvider {
+    let account_manager_guard = Arc::new(RwLock::new(options.account_manager.clone()));
+    let request_store = account_manager_guard.clone();
+    let device_store = account_manager_guard.clone();
+    let token_store = account_manager_guard.clone();
+
+    let keyset = build_keyset();
+
+    let custom_metadata = build_custom_metadata();
+
+    let account_store = Arc::new(RwLock::new(DetailedAccountStore::new(
+        options.account_manager,
+        options.actor_store,
+    )));
+
+    let oauth_options = OAuthProviderOptions {
+        authentication_max_age: None,
+        token_max_age: None,
+        metadata: Some(custom_metadata),
+        customization: None,
+        safe_fetch: false,
+        redis: "".to_string(),
+        store: None,
+        account_store: Some(account_store),
+        device_store: Some(device_store),
+        client_store: None,
+        replay_store: None,
+        request_store: Some(request_store),
+        token_store: Some(token_store),
+        client_jwks_cache: None,
+        client_metadata_cache: None,
+        loopback_metadata: "".to_string(),
+        dpop_secret: None,
+        dpop_step: None,
+        issuer: options.issuer,
+        keyset: Some(keyset),
+        access_token_type: None,
+    };
+    OAuthProvider::new(oauth_options).unwrap()
+}
+
+fn build_keyset() -> Keyset {
     let mut keys = Vec::new();
     let key = Jwk {
         common: CommonParameters {
@@ -36,36 +82,16 @@ pub fn build_oauth_provider() -> OAuthProvider {
     };
     keys.push(key);
     let jwk_set = JwkSet { keys };
-    let keyset = Keyset::new(jwk_set);
-    let custom_metadata = CustomMetadata {
+    Keyset::new(jwk_set)
+}
+
+fn build_custom_metadata() -> CustomMetadata {
+    CustomMetadata {
         scopes_supported: Some(vec![
             "transition:generic".to_string(),
             "transition:chat.bsky".to_string(),
         ]),
         authorization_details_type_supported: None,
         protected_resources: None,
-    };
-    let oauth_options = OAuthProviderOptions {
-        authentication_max_age: None,
-        token_max_age: None,
-        metadata: Some(custom_metadata),
-        customization: None,
-        safe_fetch: false,
-        redis: "".to_string(),
-        account_store: AccountStore {},
-        device_store: DeviceStore {},
-        client_store: ClientStore {},
-        replay_store: ReplayStoreMemory::new(),
-        request_store: RequestStoreMemory::new(),
-        token_store: TokenStore {},
-        client_jwks_cache: None,
-        client_metadata_cache: None,
-        loopback_metadata: "".to_string(),
-        dpop_secret: None,
-        dpop_step: None,
-        issuer,
-        keyset: Some(keyset),
-        access_token_type: None,
-    };
-    OAuthProvider::new(oauth_options).unwrap()
+    }
 }

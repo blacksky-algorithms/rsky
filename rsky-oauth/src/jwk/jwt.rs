@@ -1,11 +1,13 @@
 use crate::jwk::Jwk;
+use crate::oauth_provider::errors::OAuthError;
 use chrono::NaiveDate;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use thiserror::Error; // We'll need this for the jwk field
+use thiserror::Error;
+// We'll need this for the jwk field
 
 pub const HS256_STR: &str = "HS256";
 pub const HS384_STR: &str = "HS384";
@@ -602,5 +604,13 @@ mod tests {
             decoded_claims.additional_claims["custom"],
             serde_json::json!("value")
         );
+    }
+}
+
+pub struct SignedJwt(String);
+
+impl SignedJwt {
+    pub fn new(val: impl Into<String>) -> Result<Self, OAuthError> {
+        Ok(Self(val.into()))
     }
 }

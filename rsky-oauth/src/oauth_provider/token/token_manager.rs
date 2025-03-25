@@ -1,3 +1,4 @@
+use crate::jwk::SignedJwt;
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_store::DeviceAccountInfo;
@@ -7,11 +8,14 @@ use crate::oauth_provider::constants::TOKEN_MAX_AGE;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
+use crate::oauth_provider::request::code::{is_code, Code};
 use crate::oauth_provider::signer::signer::Signer;
+use crate::oauth_provider::token::refresh_token::{is_refresh_token, RefreshToken};
+use crate::oauth_provider::token::token_claims::TokenClaims;
 use crate::oauth_provider::token::token_id::{is_token_id, TokenId};
 use crate::oauth_provider::token::token_store::{TokenInfo, TokenStore};
 use crate::oauth_provider::token::verify_token_claims::{
-    VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
+    verify_token_claims, VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{
     OAuthAccessToken, OAuthAuthorizationCodeGrantTokenRequest, OAuthAuthorizationDetails,
@@ -19,6 +23,8 @@ use crate::oauth_types::{
     OAuthPasswordGrantTokenRequest, OAuthRefreshTokenGrantTokenRequest, OAuthTokenIdentification,
     OAuthTokenResponse, OAuthTokenType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct AuthenticateTokenIdResult {
     verify_token_claims_result: VerifyTokenClaimsResult,
@@ -32,7 +38,7 @@ enum CreateTokenInput {
 }
 
 pub struct TokenManager {
-    pub store: TokenStore,
+    pub store: Arc<RwLock<dyn TokenStore>>,
     pub signer: Signer,
     pub access_token_type: AccessTokenType,
     pub token_max_age: u64,
@@ -40,7 +46,7 @@ pub struct TokenManager {
 
 impl TokenManager {
     pub fn new(
-        store: TokenStore,
+        store: Arc<RwLock<dyn TokenStore>>,
         signer: Signer,
         access_token_type: AccessTokenType,
         max_age: Option<u64>,
@@ -147,11 +153,40 @@ impl TokenManager {
         input: OAuthRefreshTokenGrantTokenRequest,
         dpop_jkt: Option<String>,
     ) -> OAuthTokenResponse {
+        //Refresh Token Parsed
+
+        // let token_info = self.store.blocking_read().find_token_by_refresh_token(input.refresh_token())?;
         unimplemented!()
     }
 
-    pub async fn revoke(&self, token: &OAuthTokenIdentification) {
-        unimplemented!()
+    /**
+     * @see {@link https://datatracker.ietf.org/doc/html/rfc7009#section-2.2 | RFC7009 Section 2.2}
+     */
+    pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
+        if is_token_id(token.token.as_str()) {
+            let token_id = TokenId::new(token.token.clone());
+            self.store.blocking_write().delete_token(token_id)?;
+        } else if let Ok(signed_jwt) = SignedJwt::new(token.token.as_str()) {
+            let verify_result = self.signer.verify(token.token.as_str()).await;
+            // let token_id = TokenId::new(verify_result.payload)
+            unimplemented!()
+        } else if let Ok(refresh_token) = RefreshToken::new(token.token.as_str()) {
+            let token_info = self
+                .store
+                .blocking_read()
+                .find_token_by_refresh_token(refresh_token)?;
+            if let Some(token_info) = token_info {
+                self.store.blocking_write().delete_token(token_info.id)?;
+            }
+        } else if let Ok(code) = Code::new(token.token.as_str()) {
+            let token_info = self.store.blocking_read().find_token_by_code(code)?;
+            if let Some(token_info) = token_info {
+                self.store.blocking_write().delete_token(token_info.id)?;
+            }
+        } else {
+            // No error should be returned if the token is not valid
+        }
+        Ok(())
     }
 
     /**
@@ -174,7 +209,7 @@ impl TokenManager {
         match self.validate_access(client, client_auth, &token_info).await {
             Ok(res) => {}
             Err(e) => {
-                self.store.delete_token(token_info.id).await?;
+                self.store.blocking_write().delete_token(token_info.id)?;
                 return Err(e);
             }
         }
@@ -194,7 +229,7 @@ impl TokenManager {
         let token_val = token.token.clone();
 
         if is_token_id(token_val.as_str()) {
-            return self.store.read_token(token_val.as_str()).await;
+            return self.store.blocking_read().read_token(token_val.as_str());
         }
 
         return Ok(None);
@@ -206,7 +241,24 @@ impl TokenManager {
         token_type: OAuthTokenType,
         token_id: TokenId,
     ) -> Result<TokenInfo, OAuthError> {
-        unimplemented!()
+        let token_info = self.store.blocking_read().read_token(token_id)?;
+
+        match token_info {
+            None => Err(OAuthError::InvalidTokenError(
+                token_type,
+                "Invalid token".to_string(),
+            )),
+            Some(token_info) => {
+                if token_info.data.expires_at > 1u64 {
+                    return Err(OAuthError::InvalidTokenError(
+                        token_type,
+                        "Token expired".to_string(),
+                    ));
+                }
+
+                Ok(token_info)
+            }
+        }
     }
 
     pub async fn authenticate_token_id(
@@ -216,6 +268,27 @@ impl TokenManager {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<AuthenticateTokenIdResult, OAuthError> {
-        unimplemented!()
+        let token_info = self.get_token_info(token_type, token).await?;
+        let parameters = token_info.data.clone();
+
+        // Construct a list of claim, as if the token was a JWT.
+        let claims = TokenClaims {
+            aud: Some(token_info.account.aud.clone()),
+            sub: Some(token_info.account.sub.clone()),
+            exp: Some(token_info.data.expires_at.clone()),
+            iat: Some(token_info.data.updated_at.clone()),
+            scope: token_info.data.parameters.scope.clone(),
+            client_id: Some(token_info.data.client_id.clone()),
+            cnf: None,
+            ..Default::default()
+        };
+
+        let result =
+            verify_token_claims(token, token, token_type, dpop_jkt, claims, verify_options)?;
+
+        Ok(AuthenticateTokenIdResult {
+            verify_token_claims_result: result,
+            token_info,
+        })
     }
 }

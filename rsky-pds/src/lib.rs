@@ -36,7 +36,7 @@ use crate::crawlers::Crawlers;
 use crate::db::DbConn;
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
 use diesel::prelude::*;
-use rocket::{catch, catchers, get, options, routes, Build, Rocket};
+use rocket::{catch, catchers, get, options, routes, Build, Rocket, Route};
 
 pub static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_HOMEPAGE"),
@@ -71,6 +71,7 @@ lazy_static! {
 #[macro_use]
 extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
+use crate::oauth::provider::build_oauth_provider;
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use diesel::prelude::*;
@@ -92,6 +93,8 @@ use rocket::{Request, Response};
 use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
+use rsky_oauth::oauth_provider::oauth_provider::OAuthProvider;
+use rsky_oauth::oauth_provider::routes::{get_routes, SharedOAuthProvider};
 use std::env;
 use tokio::sync::RwLock;
 
@@ -282,93 +285,20 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         })),
     };
 
+    //Setup OAuth Provider
+    // let oauth_provider = build_oauth_provider();
+    // let shared_oauth_provider = SharedOAuthProvider {
+    //     oauth_provider: RwLock::new(oauth_provider),
+    // };
+
     let shield = Shield::default().enable(NoSniff::Enable);
 
+    let mut pds_routes = pds_routes();
+    let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
+    pds_routes.append(&mut oauth_routes);
+
     rocket::custom(figment)
-        .mount(
-            "/",
-            routes![
-                index,
-                robots,
-                health,
-                com::atproto::admin::delete_account::delete_account,
-                com::atproto::admin::disable_account_invites::disable_account_invites,
-                com::atproto::admin::disable_invite_codes::disable_invite_codes,
-                com::atproto::admin::enable_account_invites::enable_account_invites,
-                com::atproto::admin::get_account_info::get_account_info,
-                com::atproto::admin::get_invite_codes::get_invite_codes,
-                com::atproto::admin::get_subject_status::get_subject_status,
-                com::atproto::admin::send_email::send_email,
-                com::atproto::admin::update_account_password::update_account_password,
-                com::atproto::admin::update_account_email::update_account_email,
-                com::atproto::admin::update_account_handle::update_account_handle,
-                com::atproto::admin::update_subject_status::update_subject_status,
-                com::atproto::identity::resolve_handle::resolve_handle,
-                com::atproto::identity::update_handle::update_handle,
-                com::atproto::identity::sign_plc_operation::sign_plc_operation,
-                com::atproto::identity::get_recommended_did_credentials::get_recommended_did_credentials,
-                com::atproto::identity::request_plc_operation_signature::request_plc_operation_signature,
-                com::atproto::identity::submit_plc_operation::submit_plc_operation,
-                com::atproto::repo::apply_writes::apply_writes,
-                com::atproto::repo::create_record::create_record,
-                com::atproto::repo::delete_record::delete_record,
-                com::atproto::repo::describe_repo::describe_repo,
-                com::atproto::repo::get_record::get_record,
-                com::atproto::repo::import_repo::import_repo,
-                com::atproto::repo::list_records::list_records,
-                com::atproto::repo::list_missing_blobs::list_missing_blobs,
-                com::atproto::repo::put_record::put_record,
-                com::atproto::repo::upload_blob::upload_blob,
-                com::atproto::server::confirm_email::confirm_email,
-                com::atproto::server::create_account::server_create_account,
-                com::atproto::server::create_app_password::create_app_password,
-                com::atproto::server::create_invite_code::create_invite_code,
-                com::atproto::server::create_invite_codes::create_invite_codes,
-                com::atproto::server::create_session::create_session,
-                com::atproto::server::deactivate_account::deactivate_account,
-                com::atproto::server::delete_account::delete_account,
-                com::atproto::server::delete_session::delete_session,
-                com::atproto::server::describe_server::describe_server,
-                com::atproto::server::check_account_status::check_account_status,
-                com::atproto::server::activate_account::activate_account,
-                com::atproto::server::get_service_auth::get_service_auth,
-                com::atproto::server::get_account_invite_codes::get_account_invite_codes,
-                com::atproto::server::get_session::get_session,
-                com::atproto::server::list_app_passwords::list_app_passwords,
-                com::atproto::server::refresh_session::refresh_session,
-                com::atproto::server::request_account_delete::request_account_delete,
-                com::atproto::server::request_email_confirmation::request_email_confirmation,
-                com::atproto::server::request_email_update::request_email_update,
-                com::atproto::server::request_password_reset::request_password_reset,
-                com::atproto::server::reset_password::reset_password,
-                com::atproto::server::revoke_app_password::revoke_app_password,
-                com::atproto::server::update_email::update_email,
-                com::atproto::server::reserve_signing_key::reserve_signing_key,
-                com::atproto::sync::get_blob::get_blob,
-                com::atproto::sync::get_blocks::get_blocks,
-                com::atproto::sync::get_latest_commit::get_latest_commit,
-                com::atproto::sync::get_record::get_record,
-                com::atproto::sync::get_repo::get_repo,
-                com::atproto::sync::get_repo_status::get_repo_status,
-                com::atproto::sync::list_blobs::list_blobs,
-                com::atproto::sync::list_repos::list_repos,
-                com::atproto::sync::subscribe_repos::subscribe_repos,
-                app::bsky::actor::get_preferences::get_preferences,
-                app::bsky::actor::get_profile::get_profile,
-                app::bsky::actor::get_profiles::get_profiles,
-                app::bsky::actor::put_preferences::put_preferences,
-                app::bsky::feed::get_actor_likes::get_actor_likes,
-                app::bsky::feed::get_author_feed::get_author_feed,
-                app::bsky::feed::get_feed::get_feed,
-                app::bsky::feed::get_post_thread::get_post_thread,
-                app::bsky::feed::get_timeline::get_timeline,
-                app::bsky::notification::register_push::register_push,
-                bsky_api_get_forwarder,
-                bsky_api_post_forwarder,
-                well_known::well_known,
-                all_options
-            ],
-        )
+        .mount("/", pds_routes)
         .register("/", catchers![default_catcher])
         .attach(CORS)
         .attach(DbConn::fairing())
@@ -379,4 +309,85 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
+    // .manage(shared_oauth_provider)
+}
+
+fn pds_routes() -> Vec<Route> {
+    routes![
+        index,
+        robots,
+        health,
+        com::atproto::admin::delete_account::delete_account,
+        com::atproto::admin::disable_account_invites::disable_account_invites,
+        com::atproto::admin::disable_invite_codes::disable_invite_codes,
+        com::atproto::admin::enable_account_invites::enable_account_invites,
+        com::atproto::admin::get_account_info::get_account_info,
+        com::atproto::admin::get_invite_codes::get_invite_codes,
+        com::atproto::admin::get_subject_status::get_subject_status,
+        com::atproto::admin::send_email::send_email,
+        com::atproto::admin::update_account_password::update_account_password,
+        com::atproto::admin::update_account_email::update_account_email,
+        com::atproto::admin::update_account_handle::update_account_handle,
+        com::atproto::admin::update_subject_status::update_subject_status,
+        com::atproto::identity::resolve_handle::resolve_handle,
+        com::atproto::identity::update_handle::update_handle,
+        com::atproto::repo::apply_writes::apply_writes,
+        com::atproto::repo::create_record::create_record,
+        com::atproto::repo::delete_record::delete_record,
+        com::atproto::repo::describe_repo::describe_repo,
+        com::atproto::repo::get_record::get_record,
+        com::atproto::repo::import_repo::import_repo,
+        com::atproto::repo::list_records::list_records,
+        com::atproto::repo::list_missing_blobs::list_missing_blobs,
+        com::atproto::repo::put_record::put_record,
+        com::atproto::repo::upload_blob::upload_blob,
+        com::atproto::server::confirm_email::confirm_email,
+        com::atproto::server::create_account::server_create_account,
+        com::atproto::server::create_app_password::create_app_password,
+        com::atproto::server::create_invite_code::create_invite_code,
+        com::atproto::server::create_invite_codes::create_invite_codes,
+        com::atproto::server::create_session::create_session,
+        com::atproto::server::deactivate_account::deactivate_account,
+        com::atproto::server::delete_account::delete_account,
+        com::atproto::server::delete_session::delete_session,
+        com::atproto::server::describe_server::describe_server,
+        com::atproto::server::check_account_status::check_account_status,
+        com::atproto::server::activate_account::activate_account,
+        com::atproto::server::get_service_auth::get_service_auth,
+        com::atproto::server::get_account_invite_codes::get_account_invite_codes,
+        com::atproto::server::get_session::get_session,
+        com::atproto::server::list_app_passwords::list_app_passwords,
+        com::atproto::server::refresh_session::refresh_session,
+        com::atproto::server::request_account_delete::request_account_delete,
+        com::atproto::server::request_email_confirmation::request_email_confirmation,
+        com::atproto::server::request_email_update::request_email_update,
+        com::atproto::server::request_password_reset::request_password_reset,
+        com::atproto::server::reset_password::reset_password,
+        com::atproto::server::revoke_app_password::revoke_app_password,
+        com::atproto::server::update_email::update_email,
+        com::atproto::server::reserve_signing_key::reserve_signing_key,
+        com::atproto::sync::get_blob::get_blob,
+        com::atproto::sync::get_blocks::get_blocks,
+        com::atproto::sync::get_latest_commit::get_latest_commit,
+        com::atproto::sync::get_record::get_record,
+        com::atproto::sync::get_repo::get_repo,
+        com::atproto::sync::get_repo_status::get_repo_status,
+        com::atproto::sync::list_blobs::list_blobs,
+        com::atproto::sync::list_repos::list_repos,
+        com::atproto::sync::subscribe_repos::subscribe_repos,
+        app::bsky::actor::get_preferences::get_preferences,
+        app::bsky::actor::get_profile::get_profile,
+        app::bsky::actor::get_profiles::get_profiles,
+        app::bsky::actor::put_preferences::put_preferences,
+        app::bsky::feed::get_actor_likes::get_actor_likes,
+        app::bsky::feed::get_author_feed::get_author_feed,
+        app::bsky::feed::get_feed::get_feed,
+        app::bsky::feed::get_post_thread::get_post_thread,
+        app::bsky::feed::get_timeline::get_timeline,
+        app::bsky::notification::register_push::register_push,
+        bsky_api_get_forwarder,
+        bsky_api_post_forwarder,
+        well_known::well_known,
+        all_options
+    ]
 }

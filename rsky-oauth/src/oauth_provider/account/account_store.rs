@@ -32,34 +32,18 @@ pub struct AccountInfo {
     pub info: DeviceAccountInfo,
 }
 
-pub struct AccountStore {}
-
-impl AccountStore {
-    pub async fn authenticate_account(
+pub trait AccountStore: Send + Sync {
+    fn authenticate_account(
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
-    ) -> Option<AccountInfo> {
-        unimplemented!()
-    }
-    pub async fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: ClientId) {
-        unimplemented!()
-    }
-    pub async fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo> {
-        unimplemented!()
-    }
-    pub async fn remove_device_account(&self, device_id: DeviceId, sub: Sub) {
-        unimplemented!()
-    }
-    pub async fn list_device_accounts(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
-        unimplemented!()
-    }
-}
-
-pub fn is_account_store() {
-    unimplemented!()
-}
-
-pub fn as_account_store() {
-    unimplemented!()
+    ) -> Option<AccountInfo>;
+    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: ClientId);
+    fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo>;
+    fn remove_device_account(&self, device_id: DeviceId, sub: Sub);
+    /**
+     * @note Only the accounts that where logged in with `remember: true` need to
+     * be returned. The others will be ignored.
+     */
+    fn list_device_accounts(&self, device_id: &DeviceId) -> Vec<AccountInfo>;
 }

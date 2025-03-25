@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::time::SystemTime;
 
-const REPO_REV_HEADER: &'static str = "atproto-repo-rev";
+const REPO_REV_HEADER: &str = "atproto-repo-rev";
 
 pub type MungeFn<T> = fn(LocalViewer, T, LocalRecords, String) -> Result<T>;
 

@@ -6,4 +6,3 @@ pub mod request_manager;
 pub mod request_store;
 pub mod request_store_memory;
 pub mod request_uri;
-pub mod token;

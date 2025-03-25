@@ -1,7 +1,9 @@
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::RequestData;
 use crate::oauth_provider::request::request_id::RequestId;
-use crate::oauth_provider::request::request_store::{FoundRequestResult, UpdateRequestData};
+use crate::oauth_provider::request::request_store::{
+    FoundRequestResult, RequestStore, UpdateRequestData,
+};
 use anyhow::bail;
 use std::collections::BTreeMap;
 
@@ -10,19 +12,23 @@ pub struct RequestStoreMemory {
 }
 
 impl RequestStoreMemory {
-    pub async fn create_request(&mut self, id: RequestId, data: RequestData) {
+    pub fn new() -> Self {
+        Self {
+            requests: Default::default(),
+        }
+    }
+}
+
+impl RequestStore for RequestStoreMemory {
+    fn create_request(&mut self, id: RequestId, data: RequestData) {
         self.requests.insert(id, data);
     }
 
-    async fn read_request(&self, id: RequestId) -> Option<&RequestData> {
-        self.requests.get(&id)
+    fn read_request(&self, id: &RequestId) -> Option<&RequestData> {
+        self.requests.get(id)
     }
 
-    async fn update_request(
-        &mut self,
-        id: RequestId,
-        data: UpdateRequestData,
-    ) -> anyhow::Result<()> {
+    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> anyhow::Result<()> {
         let current = match self.requests.get(&id) {
             None => {
                 bail!("Request not found")
@@ -42,11 +48,11 @@ impl RequestStoreMemory {
         Ok(())
     }
 
-    async fn delete_request(&mut self, id: RequestId) {
+    fn delete_request(&mut self, id: RequestId) {
         self.requests.remove(&id);
     }
 
-    async fn find_request_by_code(&self, code: Code) -> Option<FoundRequestResult> {
+    fn find_request_by_code(&self, code: Code) -> Option<FoundRequestResult> {
         for (id, data) in &self.requests {
             if let Some(found_code) = &data.code {
                 if found_code.clone() == code {
@@ -58,13 +64,5 @@ impl RequestStoreMemory {
             }
         }
         None
-    }
-}
-
-impl RequestStoreMemory {
-    pub fn new() -> Self {
-        Self {
-            requests: Default::default(),
-        }
     }
 }

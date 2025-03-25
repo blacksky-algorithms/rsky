@@ -21,6 +21,25 @@ use rsky_common::time::{from_micros_to_str, from_str_to_micros, HOUR};
 use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
+use rsky_oauth::oauth_provider::account::account_store::{
+    AccountInfo, AccountStore, SignInCredentials,
+};
+use rsky_oauth::oauth_provider::client::client_id::ClientId;
+use rsky_oauth::oauth_provider::device::device_data::DeviceData;
+use rsky_oauth::oauth_provider::device::device_id::DeviceId;
+use rsky_oauth::oauth_provider::device::device_store::DeviceStore;
+use rsky_oauth::oauth_provider::errors::OAuthError;
+use rsky_oauth::oauth_provider::oidc::sub::Sub;
+use rsky_oauth::oauth_provider::request::code::Code;
+use rsky_oauth::oauth_provider::request::request_data::RequestData;
+use rsky_oauth::oauth_provider::request::request_id::RequestId;
+use rsky_oauth::oauth_provider::request::request_store::{
+    FoundRequestResult, RequestStore, UpdateRequestData,
+};
+use rsky_oauth::oauth_provider::token::refresh_token::RefreshToken;
+use rsky_oauth::oauth_provider::token::token_data::TokenData;
+use rsky_oauth::oauth_provider::token::token_id::TokenId;
+use rsky_oauth::oauth_provider::token::token_store::{NewTokenData, TokenInfo, TokenStore};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
@@ -529,6 +548,112 @@ impl AccountManager {
 
     pub async fn create_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<String> {
         email_token::create_email_token(did, purpose).await
+    }
+}
+
+impl AccountStore for AccountManager {
+    fn authenticate_account(
+        &self,
+        credentials: SignInCredentials,
+        device_id: DeviceId,
+    ) -> Option<AccountInfo> {
+        todo!()
+    }
+
+    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: ClientId) {
+        todo!()
+    }
+
+    fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo> {
+        todo!()
+    }
+
+    fn remove_device_account(&self, device_id: DeviceId, sub: Sub) {
+        todo!()
+    }
+
+    fn list_device_accounts(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
+        todo!()
+    }
+}
+
+impl RequestStore for AccountManager {
+    fn create_request(&mut self, id: RequestId, data: RequestData) {
+        todo!()
+    }
+
+    fn read_request(&self, id: &RequestId) -> Option<&RequestData> {
+        todo!()
+    }
+
+    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<()> {
+        todo!()
+    }
+
+    fn delete_request(&mut self, id: RequestId) {
+        todo!()
+    }
+
+    fn find_request_by_code(&self, code: Code) -> Option<FoundRequestResult> {
+        todo!()
+    }
+}
+
+impl DeviceStore for AccountManager {
+    fn create_device(&mut self, device_id: DeviceId, data: DeviceData) {
+        todo!()
+    }
+
+    fn read_device(&self, device_id: DeviceId) -> Option<DeviceData> {
+        todo!()
+    }
+
+    fn update_device(&mut self, device_id: DeviceId, data: DeviceData) {
+        todo!()
+    }
+
+    fn delete_device(&mut self, device_id: DeviceId) {
+        todo!()
+    }
+}
+
+impl TokenStore for AccountManager {
+    fn create_token(
+        &mut self,
+        token_id: TokenId,
+        data: TokenData,
+        refresh_token: Option<RefreshToken>,
+    ) -> std::result::Result<(), OAuthError> {
+        todo!()
+    }
+
+    fn read_token(&self, token_id: &str) -> std::result::Result<Option<TokenInfo>, OAuthError> {
+        todo!()
+    }
+
+    fn delete_token(&mut self, token_id: TokenId) -> std::result::Result<(), OAuthError> {
+        todo!()
+    }
+
+    fn rotate_token(
+        &mut self,
+        token_id: TokenId,
+        new_token_id: TokenId,
+        new_refresh_token: RefreshToken,
+        new_data: NewTokenData,
+    ) -> std::result::Result<(), OAuthError> {
+        todo!()
+    }
+
+    fn find_token_by_refresh_token(
+        &self,
+        refresh_token: RefreshToken,
+    ) -> std::result::Result<Option<TokenInfo>, OAuthError> {
+        todo!()
+    }
+
+    fn find_token_by_code(&self, code: Code) -> std::result::Result<Option<TokenInfo>, OAuthError> {
+        todo!()
     }
 }
 

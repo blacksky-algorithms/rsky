@@ -228,7 +228,7 @@ pub async fn pipethrough_procedure_post<'r>(
 // Request setup/formatting
 // -------------------
 
-const REQ_HEADERS_TO_FORWARD: [&'static str; 4] = [
+const REQ_HEADERS_TO_FORWARD: [&str; 4] = [
     "accept-language",
     "content-type",
     "atproto-accept-labelers",
@@ -462,7 +462,7 @@ pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
 // Response parsing/forwarding
 // -------------------
 
-const RES_HEADERS_TO_FORWARD: [&'static str; 4] = [
+const RES_HEADERS_TO_FORWARD: [&str; 4] = [
     "content-type",
     "content-language",
     "atproto-repo-rev",

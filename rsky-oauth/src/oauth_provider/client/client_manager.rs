@@ -11,18 +11,28 @@ use crate::oauth_types::{
     OAuthClientId, OAuthClientMetadata,
 };
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct ClientManager {
     // jwks: (String, JwkBase),
     // metadata_getter: (String, OAuthClientMetadata),
-    // server_metadata: OAuthAuthorizationServerMetadata,
-    // keyset: Keyset,
-    store: Option<ClientStore>,
+    server_metadata: OAuthAuthorizationServerMetadata,
+    keyset: Keyset,
+    store: Arc<RwLock<dyn ClientStore>>,
 }
 
 impl ClientManager {
-    pub fn new() -> Self {
-        Self { store: None }
+    pub fn new(
+        server_metadata: OAuthAuthorizationServerMetadata,
+        keyset: Keyset,
+        store: Arc<RwLock<dyn ClientStore>>,
+    ) -> Self {
+        Self {
+            server_metadata,
+            keyset,
+            store,
+        }
     }
 
     /**
@@ -44,16 +54,14 @@ impl ClientManager {
             self.get_loopback_client_metadata(client_id).await
         } else if is_oauth_client_id_discoverable(client_id) {
             return self.get_discoverable_client_metadata(client_id).await;
-        } else if self.store.is_some() {
-            return self.get_stored_client_metadata(client_id).await;
         } else {
-            return Err(OAuthError::InvalidRequestError("test".to_string()));
+            return self.get_stored_client_metadata(client_id).await;
         }
     }
 
     async fn get_loopback_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         unimplemented!()
     }
@@ -67,14 +75,21 @@ impl ClientManager {
 
     async fn get_stored_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: ClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
+        let metadata = self.store.blocking_read().find_client(client_id.clone())?;
+        self.validate_client_metadata(&client_id, metadata).await
     }
 
+    /**
+     * This method will ensure that the client metadata is valid w.r.t. the OAuth
+     * and OIDC specifications. It will also ensure that the metadata is
+     * compatible with the implementation of this library, and ATPROTO's
+     * requirements.
+     */
     async fn validate_client_metadata(
         &self,
-        client_id: &str,
+        client_id: &ClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         unimplemented!()

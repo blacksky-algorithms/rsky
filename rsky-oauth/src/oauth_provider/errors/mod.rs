@@ -21,6 +21,8 @@ pub enum OAuthError {
     AccountSelectionRequiredError,
     LoginRequiredError,
     ConsentRequiredError,
+    InvalidAuthorizationDetailsError(String),
+    InvalidScopeError(String),
 }
 
 #[derive(Serialize)]
