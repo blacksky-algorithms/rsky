@@ -17,13 +17,14 @@ async fn inner_delete_account(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<()> {
     let DeleteAccountInput { did } = body.into_inner();
 
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     actor_store.destroy().await?;
-    AccountManager::delete_account(&did).await?;
+    account_manager.delete_account(&did).await?;
     let mut lock = sequencer.sequencer.write().await;
     let account_seq = lock
         .sequence_account_evt(did.clone(), AccountStatus::Deleted)
@@ -45,8 +46,9 @@ pub async fn delete_account(
     s3_config: &State<SdkConfig>,
     _auth: AdminToken,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_account(body, sequencer, s3_config, db).await {
+    match inner_delete_account(body, sequencer, s3_config, db, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

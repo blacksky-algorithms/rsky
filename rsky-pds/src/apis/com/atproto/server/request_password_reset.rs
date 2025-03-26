@@ -9,24 +9,28 @@ use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::RequestPasswordResetInput;
 
-async fn inner_request_password_reset(body: Json<RequestPasswordResetInput>) -> Result<()> {
+async fn inner_request_password_reset(
+    body: Json<RequestPasswordResetInput>,
+    account_manager: AccountManager,
+) -> Result<()> {
     let RequestPasswordResetInput { email } = body.into_inner();
     let email = email.to_lowercase();
 
-    let account = AccountManager::get_account_by_email_legacy(
-        &email,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: Some(true),
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account_by_email(
+            &email,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
 
     if let Some(account) = account {
         if let Some(email) = account.email {
-            let token =
-                AccountManager::create_email_token(&account.did, EmailTokenPurpose::ResetPassword)
-                    .await?;
+            let token = account_manager
+                .create_email_token(&account.did, EmailTokenPurpose::ResetPassword)
+                .await?;
             mailer::send_reset_password(
                 email.clone(),
                 IdentifierAndTokenParams {
@@ -53,8 +57,9 @@ async fn inner_request_password_reset(body: Json<RequestPasswordResetInput>) -> 
 pub async fn request_password_reset(
     body: Json<RequestPasswordResetInput>,
     _auth: AccessStandardIncludeChecks,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_request_password_reset(body).await {
+    match inner_request_password_reset(body, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

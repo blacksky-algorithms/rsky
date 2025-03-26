@@ -29,7 +29,7 @@ pub mod schema;
 pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
-use crate::account_manager::AccountManager;
+use crate::account_manager::{AccountManager, SharedAccountManager};
 use crate::config::env_to_cfg;
 use crate::crawlers::Crawlers;
 use crate::db::DbConn;
@@ -67,12 +67,10 @@ lazy_static! {
     pub static ref EVENT_EMITTER: RwLock<EventEmitter> = RwLock::new(EventEmitter::new());
 }
 
-#[macro_use]
 extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use diesel::prelude::*;
 use diesel::sql_types::Int4;
 use dotenvy::dotenv;
 use rocket::data::{Limits, ToByteUnit};
@@ -83,7 +81,6 @@ use rocket::figment::{
 };
 use rocket::http::Header;
 use rocket::http::Status;
-use rocket::request::local_cache;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
@@ -264,7 +261,6 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     };
     let local_viewer = SharedLocalViewer {
         local_viewer: RwLock::new(LocalViewer::creator(LocalViewerCreatorParams {
-            account_manager: AccountManager {},
             pds_hostname: cfg.service.hostname.clone(),
             appview_agent: match cfg.bsky_app_view {
                 None => None,
@@ -279,6 +275,9 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 Some(ref bsky_app_view) => bsky_app_view.cdn_url_pattern.clone(),
             },
         })),
+    };
+    let account_manager = SharedAccountManager {
+        account_manager: RwLock::new(AccountManager::creator()),
     };
 
     let shield = Shield::default().enable(NoSniff::Enable);
@@ -379,4 +378,5 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
+        .manage(account_manager)
 }

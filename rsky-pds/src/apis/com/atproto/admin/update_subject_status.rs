@@ -19,6 +19,7 @@ async fn inner_update_subject_status(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<UpdateSubjectStatusOutput> {
     let SubjectStatus {
         subject,
@@ -29,7 +30,9 @@ async fn inner_update_subject_status(
     if let Some(takedown) = &takedown {
         match &subject {
             Subject::RepoRef(subject) => {
-                AccountManager::takedown_account(&subject.did, takedown.clone()).await?;
+                account_manager
+                    .takedown_account(&subject.did, takedown.clone())
+                    .await?;
             }
             Subject::StrongRef(subject) => {
                 let subject_at_uri: AtUri = subject.uri.clone().try_into()?;
@@ -60,15 +63,17 @@ async fn inner_update_subject_status(
     if let Some(deactivated) = deactivated {
         if let Subject::RepoRef(subject) = &subject {
             if deactivated.applied {
-                AccountManager::deactivate_account(&subject.did, None).await?;
+                account_manager
+                    .deactivate_account(&subject.did, None)
+                    .await?;
             } else {
-                AccountManager::activate_account(&subject.did).await?;
+                account_manager.activate_account(&subject.did).await?;
             }
         }
     }
 
     if let Subject::RepoRef(subject) = &subject {
-        let status = AccountManager::get_account_status(&subject.did).await?;
+        let status = account_manager.get_account_status(&subject.did).await?;
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_account_evt(subject.did.clone(), status)
             .await?;
@@ -89,8 +94,9 @@ pub async fn update_subject_status(
     s3_config: &State<SdkConfig>,
     db: DbConn,
     _auth: Moderator,
+    account_manager: AccountManager,
 ) -> Result<Json<UpdateSubjectStatusOutput>, ApiError> {
-    match inner_update_subject_status(body, sequencer, s3_config, db).await {
+    match inner_update_subject_status(body, sequencer, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

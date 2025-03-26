@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, FormattedAccountStatus,
 };
+use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -16,8 +17,9 @@ async fn inner_get_repo(
     did: String,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<GetRepoStatusOutput> {
-    let account = assert_repo_availability(&did, true).await?;
+    let account = assert_repo_availability(&did, true, &account_manager).await?;
     let FormattedAccountStatus { active, status } = format_account_status(Some(account));
 
     let mut rev: Option<String> = None;
@@ -56,8 +58,9 @@ pub async fn get_repo_status(
     did: String,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<GetRepoStatusOutput>, ApiError> {
-    match inner_get_repo(did, s3_config, db).await {
+    match inner_get_repo(did, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

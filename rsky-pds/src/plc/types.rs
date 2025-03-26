@@ -69,7 +69,7 @@ pub enum CompatibleOpOrTombstone {
 }
 
 impl CompatibleOpOrTombstone {
-    pub fn set_sig(&mut self, sig: String) -> () {
+    pub fn set_sig(&mut self, sig: String) {
         match self {
             Self::CreateOpV1(create) => create.sig = Some(sig),
             Self::Operation(op) => op.sig = Some(sig),
@@ -94,7 +94,7 @@ pub enum CompatibleOp {
 }
 
 impl CompatibleOp {
-    pub fn set_sig(&mut self, sig: String) -> () {
+    pub fn set_sig(&mut self, sig: String) {
         match self {
             Self::CreateOpV1(create) => create.sig = Some(sig),
             Self::Operation(op) => op.sig = Some(sig),
@@ -117,7 +117,7 @@ pub enum OpOrTombstone {
 }
 
 impl OpOrTombstone {
-    pub fn set_sig(&mut self, sig: String) -> () {
+    pub fn set_sig(&mut self, sig: String) {
         match self {
             Self::Operation(op) => op.sig = Some(sig),
             Self::Tombstone(tombstone) => tombstone.sig = Some(sig),

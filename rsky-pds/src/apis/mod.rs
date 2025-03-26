@@ -62,10 +62,10 @@ pub async fn bsky_api_get_forwarder(
     }
 }
 
-#[rocket::post("/xrpc/<nsid>", data = "<body>", rank = 2)]
+#[rocket::post("/xrpc/<_nsid>", data = "<body>", rank = 2)]
 pub async fn bsky_api_post_forwarder(
     body: Data<'_>,
-    nsid: Nsid,
+    _nsid: Nsid,
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {

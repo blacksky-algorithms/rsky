@@ -23,6 +23,7 @@ async fn inner_create_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<CreateRecordOutput> {
     let CreateRecordInput {
         repo,
@@ -32,14 +33,15 @@ async fn inner_create_record(
         validate,
         swap_commit,
     } = body.into_inner();
-    let account = AccountManager::get_account_legacy(
-        &repo,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &repo,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await?;
     if let Some(account) = account {
         if account.deactivated_at.is_some() {
             bail!("Account is deactivated")
@@ -96,11 +98,9 @@ async fn inner_create_record(
 
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_commit(did.clone(), commit.clone()).await?;
-        AccountManager::update_repo_root_legacy(
-            did,
-            commit.commit_data.cid,
-            commit.commit_data.rev,
-        )?;
+        account_manager
+            .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
+            .await?;
 
         Ok(CreateRecordOutput {
             uri: write.uri.clone(),
@@ -123,9 +123,10 @@ pub async fn create_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug create_record {body:#?}");
-    match inner_create_record(body, auth, sequencer, s3_config, db).await {
+    match inner_create_record(body, auth, sequencer, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

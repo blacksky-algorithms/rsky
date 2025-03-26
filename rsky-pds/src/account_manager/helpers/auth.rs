@@ -1,5 +1,5 @@
 use crate::auth_verifier::AuthScope;
-use crate::db::{establish_connection, DbConn};
+use crate::db::DbConn;
 use crate::models;
 use anyhow::Result;
 use diesel::*;
@@ -111,7 +111,7 @@ pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
         expires_in,
         ..
     } = opts;
-    let scope = scope.unwrap_or_else(|| AuthScope::Access);
+    let scope = scope.unwrap_or(AuthScope::Access);
     let expires_in = expires_in.unwrap_or_else(|| Duration::from_hours(2));
     let claims = Claims::with_custom_claims(
         CustomClaimObj {
@@ -136,7 +136,7 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
         expires_in,
         ..
     } = opts;
-    let jti = jti.unwrap_or_else(|| get_random_str());
+    let jti = jti.unwrap_or_else(get_random_str);
     let expires_in = expires_in.unwrap_or_else(|| Duration::from_days(90));
     let claims = Claims::with_custom_claims(
         CustomClaimObj {
@@ -214,30 +214,6 @@ pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToke
     })
 }
 
-#[allow(deprecated)]
-pub async fn store_refresh_token_legacy(
-    payload: RefreshToken,
-    app_password_name: Option<String>,
-) -> Result<()> {
-    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-
-    let exp = from_micros_to_utc((payload.exp.as_millis() / 1000) as i64);
-
-    let conn = &mut establish_connection()?;
-
-    insert_into(RefreshTokenSchema::refresh_token)
-        .values((
-            RefreshTokenSchema::id.eq(payload.jti),
-            RefreshTokenSchema::did.eq(payload.sub),
-            RefreshTokenSchema::appPasswordName.eq(app_password_name),
-            RefreshTokenSchema::expiresAt.eq(format!("{}", exp.format(RFC3339_VARIANT))),
-        ))
-        .on_conflict_do_nothing() // E.g. when re-granting during a refresh grace period
-        .execute(conn)?;
-
-    Ok(())
-}
-
 pub async fn store_refresh_token(
     payload: RefreshToken,
     app_password_name: Option<String>,
@@ -263,88 +239,105 @@ pub async fn store_refresh_token(
     Ok(())
 }
 
-pub async fn revoke_refresh_token(id: String) -> Result<bool> {
+pub async fn revoke_refresh_token(id: String, db: &DbConn) -> Result<bool> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
+    db.run(move |conn| {
+        let deleted_rows = delete(RefreshTokenSchema::refresh_token)
+            .filter(RefreshTokenSchema::id.eq(id))
+            .get_results::<models::RefreshToken>(conn)?;
 
-    let deleted_rows = delete(RefreshTokenSchema::refresh_token)
-        .filter(RefreshTokenSchema::id.eq(id))
-        .get_results::<models::RefreshToken>(conn)?;
-
-    Ok(deleted_rows.len() > 0)
+        Ok(!deleted_rows.is_empty())
+    })
+    .await
 }
 
-pub async fn revoke_refresh_tokens_by_did(did: &String) -> Result<bool> {
+pub async fn revoke_refresh_tokens_by_did(did: &str, db: &DbConn) -> Result<bool> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
+    let did = did.to_owned();
+    db.run(move |conn| {
+        let deleted_rows = delete(RefreshTokenSchema::refresh_token)
+            .filter(RefreshTokenSchema::did.eq(did))
+            .get_results::<models::RefreshToken>(conn)?;
 
-    let deleted_rows = delete(RefreshTokenSchema::refresh_token)
-        .filter(RefreshTokenSchema::did.eq(did))
-        .get_results::<models::RefreshToken>(conn)?;
-
-    Ok(deleted_rows.len() > 0)
+        Ok(!deleted_rows.is_empty())
+    })
+    .await
 }
 
 pub async fn revoke_app_password_refresh_token(
-    did: &String,
-    app_pass_name: &String,
+    did: &str,
+    app_pass_name: &str,
+    db: &DbConn,
 ) -> Result<bool> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
 
-    let deleted_rows = delete(RefreshTokenSchema::refresh_token)
-        .filter(RefreshTokenSchema::did.eq(did))
-        .filter(RefreshTokenSchema::appPasswordName.eq(app_pass_name))
-        .get_results::<models::RefreshToken>(conn)?;
+    let did = did.to_owned();
+    let app_pass_name = app_pass_name.to_owned();
+    db.run(move |conn| {
+        let deleted_rows = delete(RefreshTokenSchema::refresh_token)
+            .filter(RefreshTokenSchema::did.eq(did))
+            .filter(RefreshTokenSchema::appPasswordName.eq(app_pass_name))
+            .get_results::<models::RefreshToken>(conn)?;
 
-    Ok(deleted_rows.len() > 0)
+        Ok(!deleted_rows.is_empty())
+    })
+    .await
 }
 
-pub async fn get_refresh_token(id: &String) -> Result<Option<models::RefreshToken>> {
+pub async fn get_refresh_token(id: &str, db: &DbConn) -> Result<Option<models::RefreshToken>> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
-
-    Ok(RefreshTokenSchema::refresh_token
-        .find(id)
-        .first(conn)
-        .optional()?)
+    let id = id.to_owned();
+    db.run(move |conn| {
+        Ok(RefreshTokenSchema::refresh_token
+            .find(id)
+            .first(conn)
+            .optional()?)
+    })
+    .await
 }
 
-pub async fn delete_expired_refresh_tokens(did: &String, now: String) -> Result<()> {
+pub async fn delete_expired_refresh_tokens(did: &str, now: String, db: &DbConn) -> Result<()> {
     use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
+    let did = did.to_owned();
 
-    delete(RefreshTokenSchema::refresh_token)
-        .filter(RefreshTokenSchema::did.eq(did))
-        .filter(RefreshTokenSchema::expiresAt.le(now))
-        .execute(conn)?;
-    Ok(())
+    db.run(move |conn| {
+        delete(RefreshTokenSchema::refresh_token)
+            .filter(RefreshTokenSchema::did.eq(did))
+            .filter(RefreshTokenSchema::expiresAt.le(now))
+            .execute(conn)?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn add_refresh_grace_period(opts: RefreshGracePeriodOpts) -> Result<()> {
-    let RefreshGracePeriodOpts {
-        id,
-        expires_at,
-        next_id,
-    } = opts;
-    use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
-    let conn = &mut establish_connection()?;
+pub async fn add_refresh_grace_period(opts: RefreshGracePeriodOpts, db: &DbConn) -> Result<()> {
+    db.run(move |conn| {
+        let RefreshGracePeriodOpts {
+            id,
+            expires_at,
+            next_id,
+        } = opts;
+        use crate::schema::pds::refresh_token::dsl as RefreshTokenSchema;
 
-    update(RefreshTokenSchema::refresh_token)
-        .filter(RefreshTokenSchema::id.eq(id))
-        .filter(
-            RefreshTokenSchema::nextId
-                .is_null()
-                .or(RefreshTokenSchema::nextId.eq(&next_id)),
-        )
-        .set((
-            RefreshTokenSchema::expiresAt.eq(expires_at),
-            RefreshTokenSchema::nextId.eq(&next_id),
-        ))
-        .returning(models::RefreshToken::as_select())
-        .get_results(conn)
-        .map_err(|error| anyhow::Error::new(AuthHelperError::ConcurrentRefresh).context(error))?;
-    Ok(())
+        update(RefreshTokenSchema::refresh_token)
+            .filter(RefreshTokenSchema::id.eq(id))
+            .filter(
+                RefreshTokenSchema::nextId
+                    .is_null()
+                    .or(RefreshTokenSchema::nextId.eq(&next_id)),
+            )
+            .set((
+                RefreshTokenSchema::expiresAt.eq(expires_at),
+                RefreshTokenSchema::nextId.eq(&next_id),
+            ))
+            .returning(models::RefreshToken::as_select())
+            .get_results(conn)
+            .map_err(|error| {
+                anyhow::Error::new(AuthHelperError::ConcurrentRefresh).context(error)
+            })?;
+        Ok(())
+    })
+    .await
 }
 
 pub fn get_refresh_token_id() -> String {

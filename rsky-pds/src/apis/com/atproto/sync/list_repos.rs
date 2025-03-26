@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, ActorAccount, FormattedAccountStatus,
 };
 use crate::apis::ApiError;
-use crate::db::establish_connection;
+use crate::db::DbConn;
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
@@ -112,7 +112,7 @@ impl TimeDidKeySet {
             None => Ok(None),
             Some(cursor_str) => {
                 let result = cursor_str.split("::").collect::<Vec<&str>>();
-                match (result.get(0), result.get(1), result.get(2)) {
+                match (result.first(), result.get(1), result.get(2)) {
                     (Some(primary), Some(secondary), None) => Ok(Some(Cursor {
                         primary: primary.to_string(),
                         secondary: secondary.to_string(),
@@ -126,6 +126,7 @@ impl TimeDidKeySet {
     pub async fn paginate(
         &self,
         opts: KeySetPaginateOpts,
+        db: &DbConn,
     ) -> Result<
         Vec<(
             String,
@@ -145,7 +146,6 @@ impl TimeDidKeySet {
 
         use crate::schema::pds::actor::dsl as ActorSchema;
         use crate::schema::pds::repo_root::dsl as RepoRootSchema;
-        let conn = &mut establish_connection()?;
 
         let labeled = self.unpack(cursor)?;
 
@@ -196,26 +196,37 @@ impl TimeDidKeySet {
             }
         }
 
-        let res = builder.load::<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )>(conn)?;
+        let res = db
+            .run(move |conn| {
+                builder.load::<(
+                    String,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                )>(conn)
+            })
+            .await?;
         Ok(res)
     }
 }
 
-async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<ListReposOutput> {
+async fn inner_list_repos(
+    limit: Option<i64>,
+    cursor: Option<String>,
+    db: &DbConn,
+) -> Result<ListReposOutput> {
     let keyset = TimeDidKeySet::new();
     let result = keyset
-        .paginate(KeySetPaginateOpts {
-            limit: limit.unwrap_or(500),
-            cursor,
-            direction: Some("asc".to_string()),
-        })
+        .paginate(
+            KeySetPaginateOpts {
+                limit: limit.unwrap_or(500),
+                cursor,
+                direction: Some("asc".to_string()),
+            },
+            db,
+        )
         .await?;
     let time_did_results = result
         .iter()
@@ -270,8 +281,9 @@ async fn inner_list_repos(limit: Option<i64>, cursor: Option<String>) -> Result<
 pub async fn list_repos(
     limit: Option<i64>,
     cursor: Option<String>,
+    db: DbConn,
 ) -> Result<Json<ListReposOutput>, ApiError> {
-    match inner_list_repos(limit, cursor).await {
+    match inner_list_repos(limit, cursor, &db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -5,14 +5,14 @@ use reqwest::header::HeaderMap;
 use secp256k1::SecretKey;
 use std::env;
 
-pub async fn service_auth_headers(did: &String, aud: &String, lxm: &String) -> Result<HeaderMap> {
-    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let keypair = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+pub async fn service_auth_headers(did: &str, aud: &str, lxm: &str) -> Result<HeaderMap> {
+    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX")?;
+    let keypair = SecretKey::from_slice(&hex::decode(private_key.as_bytes())?)?;
     create_service_auth_headers(ServiceJwtParams {
-        iss: did.clone(),
-        aud: aud.clone(),
+        iss: did.to_owned(),
+        aud: aud.to_owned(),
         exp: None,
-        lxm: Some(lxm.clone()),
+        lxm: Some(lxm.to_owned()),
         jti: None,
         keypair,
     })

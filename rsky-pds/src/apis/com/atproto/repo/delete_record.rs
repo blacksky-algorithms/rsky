@@ -23,6 +23,7 @@ async fn inner_delete_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<()> {
     let DeleteRecordInput {
         repo,
@@ -31,14 +32,15 @@ async fn inner_delete_record(
         swap_record,
         swap_commit,
     } = body.into_inner();
-    let account = AccountManager::get_account_legacy(
-        &repo,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &repo,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await?;
     match account {
         None => bail!("Could not find repo: `{repo}`"),
         Some(account) if account.deactivated_at.is_some() => bail!("Account is deactivated"),
@@ -81,11 +83,9 @@ async fn inner_delete_record(
 
             let mut lock = sequencer.sequencer.write().await;
             lock.sequence_commit(did.clone(), commit.clone()).await?;
-            AccountManager::update_repo_root_legacy(
-                did,
-                commit.commit_data.cid,
-                commit.commit_data.rev,
-            )?;
+            account_manager
+                .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
+                .await?;
 
             Ok(())
         }
@@ -104,8 +104,9 @@ pub async fn delete_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_record(body, auth, sequencer, s3_config, db).await {
+    match inner_delete_record(body, auth, sequencer, s3_config, db, account_manager).await {
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

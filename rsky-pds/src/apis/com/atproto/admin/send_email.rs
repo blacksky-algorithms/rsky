@@ -7,7 +7,10 @@ use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::admin::{SendMailInput, SendMailOutput};
 
-async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
+async fn inner_send_email(
+    body: Json<SendMailInput>,
+    account_manager: AccountManager,
+) -> Result<SendMailOutput> {
     let SendMailInput {
         content,
         recipient_did,
@@ -16,14 +19,15 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
     } = body.into_inner();
     let subject = subject.unwrap_or("Message via your PDS".to_string());
 
-    let account = AccountManager::get_account_legacy(
-        &recipient_did,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: Some(true),
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &recipient_did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
 
     match account {
         None => bail!("Recipient not found"),
@@ -48,8 +52,9 @@ async fn inner_send_email(body: Json<SendMailInput>) -> Result<SendMailOutput> {
 pub async fn send_email(
     body: Json<SendMailInput>,
     _auth: Moderator,
+    account_manager: AccountManager,
 ) -> Result<Json<SendMailOutput>, ApiError> {
-    match inner_send_email(body).await {
+    match inner_send_email(body, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

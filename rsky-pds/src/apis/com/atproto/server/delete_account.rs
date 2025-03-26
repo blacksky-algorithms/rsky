@@ -19,36 +19,37 @@ async fn inner_delete_account(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let DeleteAccountInput {
         did,
         password,
         token,
     } = body.into_inner();
-    let account = AccountManager::get_account_legacy(
-        &did,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: Some(true),
-        }),
-    )
-    .await?;
-    if let Some(_) = account {
-        let valid_pass = AccountManager::verify_account_password_legacy(&did, &password).await?;
+    let account = account_manager
+        .get_account(
+            &did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
+    if account.is_some() {
+        let valid_pass = account_manager
+            .verify_account_password(&did, &password)
+            .await?;
         if !valid_pass {
             return Err(ApiError::InvalidLogin);
         }
-        AccountManager::assert_valid_email_token(
-            &did,
-            EmailTokenPurpose::from_str("delete_account")?,
-            &token,
-        )
-        .await?;
+        account_manager
+            .assert_valid_email_token(&did, EmailTokenPurpose::from_str("delete_account")?, &token)
+            .await?;
 
         let mut actor_store =
             ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
         actor_store.destroy().await?;
-        AccountManager::delete_account(&did).await?;
+        account_manager.delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;
         let account_seq = lock
             .sequence_account_evt(did.clone(), AccountStatus::Deleted)
@@ -73,8 +74,9 @@ pub async fn delete_account(
     s3_config: &State<SdkConfig>,
     db: DbConn,
     _auth: AdminToken,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_account(body, sequencer, s3_config, db).await {
+    match inner_delete_account(body, sequencer, s3_config, db, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

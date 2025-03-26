@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -24,13 +25,14 @@ async fn inner_get_blob(
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<(Vec<u8>, Option<String>)> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
         false
     };
-    let _ = assert_repo_availability(&did, is_user_or_admin).await?;
+    let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
 
     let cid = Cid::from_str(&cid)?;
     let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
@@ -50,8 +52,9 @@ pub async fn get_blob(
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<BlobResponder, ApiError> {
-    match inner_get_blob(did, cid, s3_config, auth, db).await {
+    match inner_get_blob(did, cid, s3_config, auth, db, account_manager).await {
         Ok(res) => {
             let (bytes, mime_type) = res;
             Ok(BlobResponder(
