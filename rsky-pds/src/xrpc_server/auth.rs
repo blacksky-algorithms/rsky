@@ -51,7 +51,7 @@ where
     G: Fn(String, bool) -> Result<String>,
 {
     let parts = jwt_str.split(".").collect::<Vec<&str>>();
-    match (parts.get(0), parts.get(1), parts.get(2)) {
+    match (parts.first(), parts.get(1), parts.get(2)) {
         (Some(_), Some(parts_1), Some(sig)) if parts.len() == 3 => {
             let parts_1 = *parts_1;
             let sig = *sig;

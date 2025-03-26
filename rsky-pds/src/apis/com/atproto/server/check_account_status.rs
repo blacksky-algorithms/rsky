@@ -16,6 +16,7 @@ async fn inner_check_account_status(
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<CheckAccountStatusOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
@@ -39,7 +40,7 @@ async fn inner_check_account_status(
     )?;
 
     let (activated, valid_did) = try_join!(
-        AccountManager::is_account_activated(&requester),
+        account_manager.is_account_activated(&requester),
         is_valid_did_doc_for_service(requester.clone())
     )?;
 
@@ -62,8 +63,9 @@ pub async fn check_account_status(
     auth: AccessFull,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<CheckAccountStatusOutput>, ApiError> {
-    match inner_check_account_status(auth, s3_config, db).await {
+    match inner_check_account_status(auth, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("Internal Error: {error}");

@@ -46,10 +46,7 @@ impl ReadableBlockstore for SqlRepoReader {
             use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
             let cached = {
                 let cache_guard = self.cache.read().await;
-                match cache_guard.get(cid) {
-                    None => None,
-                    Some(v) => Some(v.clone()),
-                }
+                cache_guard.get(cid).map(|v| v.clone())
             };
             if let Some(cached_result) = cached {
                 return Ok(Some(cached_result.clone()));
@@ -102,7 +99,7 @@ impl ReadableBlockstore for SqlRepoReader {
                 cache_guard.get_many(cids)?
             };
 
-            if cached.missing.len() < 1 {
+            if cached.missing.is_empty() {
                 return Ok(cached);
             }
             let missing = CidSet::new(Some(cached.missing.clone()));
@@ -322,13 +319,13 @@ impl RepoStorage for SqlRepoReader {
 
 // Basically handles getting ipld blocks from db
 impl SqlRepoReader {
-    pub fn new(did: String, now: Option<String>, db: DbConn) -> Self {
-        let now = now.unwrap_or_else(|| rsky_common::now());
+    pub fn new(did: String, now: Option<String>, db: Arc<DbConn>) -> Self {
+        let now = now.unwrap_or_else(rsky_common::now);
         SqlRepoReader {
             cache: Arc::new(RwLock::new(BlockMap::new())),
             root: None,
             rev: None,
-            db: Arc::new(db),
+            db,
             now,
             did,
         }
@@ -336,7 +333,7 @@ impl SqlRepoReader {
 
     pub async fn get_car_stream(&self, since: Option<String>) -> Result<Vec<u8>> {
         match self.get_root().await {
-            None => return Err(anyhow::Error::new(RepoRootNotFoundError)),
+            None => Err(anyhow::Error::new(RepoRootNotFoundError)),
             Some(root) => {
                 let mut car = BlockMap::new();
                 let mut cursor: Option<CidAndRev> = None;
@@ -448,7 +445,7 @@ impl SqlRepoReader {
     }
 
     pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
-        if cids.len() < 1 {
+        if cids.is_empty() {
             return Ok(());
         }
         let did: String = self.did.clone();

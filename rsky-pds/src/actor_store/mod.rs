@@ -37,13 +37,18 @@ pub struct ActorStore {
 // Combination of RepoReader/Transactor, BlobReader/Transactor, SqlRepoReader/Transactor
 impl ActorStore {
     /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
-    pub fn new(did: String, blobstore: S3BlobStore, conn: DbConn) -> Self {
+    pub fn new(did: String, blobstore: S3BlobStore, db: DbConn) -> Self {
+        let db = Arc::new(db);
         ActorStore {
-            storage: Arc::new(RwLock::new(SqlRepoReader::new(did.clone(), None, conn))),
-            record: RecordReader::new(did.clone()),
-            pref: PreferenceReader::new(did.clone()),
+            storage: Arc::new(RwLock::new(SqlRepoReader::new(
+                did.clone(),
+                None,
+                db.clone(),
+            ))),
+            record: RecordReader::new(did.clone(), db.clone()),
+            pref: PreferenceReader::new(did.clone(), db.clone()),
             did,
-            blob: BlobReader::new(blobstore), // Unlike TS impl, just use blob reader vs generator
+            blob: BlobReader::new(blobstore, db.clone()), // Unlike TS impl, just use blob reader vs generator
         }
     }
 
@@ -85,9 +90,9 @@ impl ActorStore {
         storage_guard.apply_commit(commit.clone(), None).await?;
         let writes = writes
             .into_iter()
-            .map(|w| PreparedWrite::Create(w))
+            .map(PreparedWrite::Create)
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs_legacy(writes).await?;
+        self.blob.process_write_blobs(writes).await?;
         Ok(commit)
     }
 
@@ -95,7 +100,6 @@ impl ActorStore {
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
-        db: &DbConn,
     ) -> Result<CommitData> {
         let write_ops = writes
             .clone()
@@ -121,9 +125,9 @@ impl ActorStore {
         storage_guard.apply_commit(commit.clone(), None).await?;
         let writes = writes
             .into_iter()
-            .map(|w| PreparedWrite::Create(w))
+            .map(PreparedWrite::Create)
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs(writes, db).await?;
+        self.blob.process_write_blobs(writes).await?;
         Ok(commit)
     }
 
@@ -143,7 +147,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs_legacy(writes).await?;
+        self.blob.process_write_blobs(writes).await?;
         Ok(())
     }
 
@@ -164,7 +168,7 @@ impl ActorStore {
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
         // process blobs
-        self.blob.process_write_blobs_legacy(writes).await?;
+        self.blob.process_write_blobs(writes).await?;
         Ok(commit)
     }
 
@@ -266,7 +270,7 @@ impl ActorStore {
             // find blocks that are relevant to ops but not included in diff
             // (for instance a record that was moved but cid stayed the same)
             let new_record_blocks = commit.relevant_blocks.get_many(new_record_cids)?;
-            if new_record_blocks.missing.len() > 0 {
+            if !new_record_blocks.missing.is_empty() {
                 let missing_blocks = {
                     let storage_guard = self.storage.read().await;
                     storage_guard.get_blocks(new_record_blocks.missing).await?
@@ -279,7 +283,7 @@ impl ActorStore {
         }
     }
 
-    pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &String) -> Result<()> {
+    pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &str) -> Result<()> {
         let now: &str = &rsky_common::now();
 
         let _ = stream::iter(writes)
@@ -293,7 +297,7 @@ impl ActorStore {
                                 write.cid,
                                 Some(write.record),
                                 Some(write.action),
-                                rev.clone(),
+                                rev.to_owned(),
                                 Some(now.to_string()),
                             )
                             .await?
@@ -306,7 +310,7 @@ impl ActorStore {
                                 write.cid,
                                 Some(write.record),
                                 Some(write.action),
-                                rev.clone(),
+                                rev.to_owned(),
                                 Some(now.to_string()),
                             )
                             .await?
@@ -343,9 +347,7 @@ impl ActorStore {
             .map(|row| Ok(Cid::from_str(&row)?))
             .collect::<Result<Vec<Cid>>>()?;
         let _ = stream::iter(cids.chunks(500))
-            .then(|chunk| async {
-                Ok::<(), anyhow::Error>(self.blob.blobstore.delete_many(chunk.to_vec()).await?)
-            })
+            .then(|chunk| async { self.blob.blobstore.delete_many(chunk.to_vec()).await })
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -358,7 +360,7 @@ impl ActorStore {
         cids: Vec<Cid>,
         touched_uris: Vec<AtUri>,
     ) -> Result<Vec<Cid>> {
-        if touched_uris.len() == 0 || cids.len() == 0 {
+        if touched_uris.is_empty() || cids.is_empty() {
             return Ok(vec![]);
         }
         let did: String = self.did.clone();
@@ -378,10 +380,9 @@ impl ActorStore {
                     .get_results(conn)
             })
             .await?;
-        Ok(res
-            .into_iter()
+        res.into_iter()
             .map(|row| Cid::from_str(&row).map_err(|error| anyhow::Error::new(error)))
-            .collect::<Result<Vec<Cid>>>()?)
+            .collect::<Result<Vec<Cid>>>()
     }
 }
 

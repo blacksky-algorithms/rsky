@@ -17,14 +17,14 @@ async fn inner_describe_repo(
     id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<DescribeRepoOutput> {
-    let account = AccountManager::get_account_legacy(&repo, None).await?;
+    let account = account_manager.get_account(&repo, None).await?;
     match account {
         None => bail!("Cound not find user: `{repo}`"),
         Some(account) => {
-            let did_doc: DidDocument;
             let mut lock = id_resolver.id_resolver.write().await;
-            did_doc = match lock.did.ensure_resolve(&account.did, None).await {
+            let did_doc: DidDocument = match lock.did.ensure_resolve(&account.did, None).await {
                 Err(err) => bail!("Could not resolve DID: `{err}`"),
                 Ok(res) => res,
             };
@@ -56,8 +56,9 @@ pub async fn describe_repo(
     id_resolver: &State<SharedIdResolver>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<DescribeRepoOutput>, ApiError> {
-    match inner_describe_repo(repo, id_resolver, s3_config, db).await {
+    match inner_describe_repo(repo, id_resolver, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("{error:?}");

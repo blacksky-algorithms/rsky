@@ -51,7 +51,7 @@ pub async fn inner_register_push(
 
     if let Some(ref bsky_app_view) = cfg.bsky_app_view {
         if bsky_app_view.did == service_did {
-            let _ = agent
+            agent
                 .service
                 .app
                 .bsky
@@ -81,7 +81,7 @@ pub async fn inner_register_push(
         )
         .build();
     let agent = AtpServiceClient::new(client);
-    let _ = agent
+    agent
         .service
         .app
         .bsky
@@ -111,7 +111,7 @@ pub async fn register_push(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
 ) -> Result<(), ApiError> {
-    if !vec!["ios", "android", "web"].contains(&body.platform.as_str()) {
+    if !["ios", "android", "web"].contains(&body.platform.as_str()) {
         return Err(ApiError::InvalidRequest("invalid platform".to_string()));
     }
     match &cfg.bsky_app_view {

@@ -96,7 +96,7 @@ impl Client {
         &self,
         did: &String,
         signer: &SecretKey,
-        handle: &String,
+        handle: &str,
     ) -> Result<()> {
         let last_op: CompatibleOp = match self.ensure_last_op(did).await? {
             CompatibleOpOrTombstone::CreateOpV1(last_op) => CompatibleOp::CreateOpV1(last_op),
@@ -105,8 +105,8 @@ impl Client {
                 panic!("ensure_last_op() didn't prevent tombstone")
             }
         };
-        let op = update_handle_op(last_op, signer, handle.clone()).await?;
-        self.send_operation(&did, &OpOrTombstone::Operation(op))
+        let op = update_handle_op(last_op, signer, handle.to_owned()).await?;
+        self.send_operation(did, &OpOrTombstone::Operation(op))
             .await
     }
 }

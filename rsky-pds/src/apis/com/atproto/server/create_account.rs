@@ -48,8 +48,8 @@ pub async fn server_create_account(
     s3_config: &State<SdkConfig>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
+    account_manager: AccountManager,
     db: DbConn,
-    blob_db: DbConn,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -65,15 +65,19 @@ pub async fn server_create_account(
         deactivated,
         plc_op,
         signing_key,
-    } = validate_inputs_for_local_pds(cfg, id_resolver, body.into_inner(), requester, &db).await?;
+    } = validate_inputs_for_local_pds(
+        cfg,
+        id_resolver,
+        body.into_inner(),
+        requester,
+        &account_manager,
+    )
+    .await?;
 
     // Create new actor repo TODO: Proper rollback
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store
-        .create_repo(signing_key, Vec::new(), &blob_db)
-        .await
-    {
+    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
         Ok(commit) => commit,
         Err(error) => {
             tracing::error!("Failed to create repo\n{:?}", error);
@@ -104,20 +108,19 @@ pub async fn server_create_account(
         }
     }
 
-    let did_doc;
-    match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
-        Ok(res) => did_doc = res,
+    let did_doc = match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
+        Ok(res) => res,
         Err(error) => {
             tracing::error!("Error resolving DID Doc\n{error}");
             actor_store.destroy().await?;
             return Err(ApiError::RuntimeError);
         }
-    }
+    };
 
     // Create Account
     let (access_jwt, refresh_jwt);
-    match AccountManager::create_account(
-        CreateAccountOpts {
+    match account_manager
+        .create_account(CreateAccountOpts {
             did: did.clone(),
             handle: handle.clone(),
             email: Some(email),
@@ -126,17 +129,15 @@ pub async fn server_create_account(
             repo_rev: commit.rev.clone(),
             invite_code,
             deactivated: Some(deactivated),
-        },
-        &blob_db,
-    )
-    .await
+        })
+        .await
     {
         Ok(res) => {
             (access_jwt, refresh_jwt) = res;
         }
         Err(error) => {
             tracing::error!("Error creating account\n{error}");
-            actor_store.destroy().await.unwrap();
+            actor_store.destroy().await?;
             return Err(ApiError::RuntimeError);
         }
     }
@@ -180,7 +181,10 @@ pub async fn server_create_account(
             }
         }
     }
-    match AccountManager::update_repo_root(did.clone(), commit.cid, commit.rev, &blob_db).await {
+    match account_manager
+        .update_repo_root(did.clone(), commit.cid, commit.rev)
+        .await
+    {
         Ok(_) => {
             tracing::debug!("Successfully updated repo root");
         }
@@ -217,14 +221,12 @@ pub async fn validate_inputs_for_local_pds(
     id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
     requester: Option<String>,
-    db: &DbConn,
+    account_manager: &AccountManager,
 ) -> Result<TransformedCreateAccountInput, ApiError> {
     let did: String;
     let plc_op;
     let deactivated: bool;
     let email;
-    let password;
-    let invite_code;
 
     //PLC Op Validation
     if input.plc_op.is_some() {
@@ -234,11 +236,11 @@ pub async fn validate_inputs_for_local_pds(
     }
 
     //Invite Code Validation
-    if cfg.invites.required && input.invite_code.is_none() {
+    let invite_code = if cfg.invites.required && input.invite_code.is_none() {
         return Err(ApiError::InvalidInviteCode);
     } else {
-        invite_code = input.invite_code.clone();
-    }
+        input.invite_code.clone()
+    };
 
     //Email Validation
     if input.email.is_none() {
@@ -272,8 +274,8 @@ pub async fn validate_inputs_for_local_pds(
     };
 
     // Check Handle and Email are still available
-    let handle_accnt = AccountManager::get_account(&handle, None, db).await?;
-    let email_accnt = AccountManager::get_account_by_email(&email, None, db).await?;
+    let handle_accnt = account_manager.get_account(&handle, None).await?;
+    let email_accnt = account_manager.get_account_by_email(&email, None).await?;
     if handle_accnt.is_some() {
         return Err(ApiError::HandleNotAvailable);
     } else if email_accnt.is_some() {
@@ -281,9 +283,9 @@ pub async fn validate_inputs_for_local_pds(
     }
 
     // Check password  exists
-    match input.password {
+    let password = match input.password {
         None => return Err(ApiError::InvalidPassword),
-        Some(ref pass) => password = pass.clone(),
+        Some(ref pass) => pass.clone(),
     };
 
     // Get Signing Key
@@ -344,7 +346,7 @@ async fn format_did_and_plc_op(
     rotation_keys.push(encode_did_key(&rotation_keypair.public_key()));
 
     //Build PLC Create Operation
-    let response;
+
     let create_op_input = CreateAtprotoOpInput {
         signing_key: encode_did_key(&signing_key.public_key()),
         handle: input.handle,
@@ -354,15 +356,13 @@ async fn format_did_and_plc_op(
         ),
         rotation_keys,
     };
-    match create_op(create_op_input, rotation_keypair.secret_key()).await {
-        Ok(res) => {
-            response = res;
-        }
+    let response = match create_op(create_op_input, rotation_keypair.secret_key()).await {
+        Ok(res) => res,
         Err(error) => {
             tracing::error!("{error}");
             return Err(ApiError::RuntimeError);
         }
-    }
+    };
 
     Ok(response)
 }

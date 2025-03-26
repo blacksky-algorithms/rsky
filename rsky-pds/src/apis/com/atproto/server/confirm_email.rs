@@ -9,38 +9,38 @@ use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
 async fn inner_confirm_email(
     body: Json<ConfirmEmailInput>,
     auth: AccessStandardIncludeChecks,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
 
-    let user;
-    match AccountManager::get_account_legacy(
-        &did,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await
+    let user = match account_manager
+        .get_account(
+            &did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await
     {
-        Ok(res) => {
-            user = res;
-        }
+        Ok(res) => res,
         Err(e) => {
             tracing::error!("Error: {e}");
             return Err(ApiError::RuntimeError);
         }
-    }
+    };
     if let Some(user) = user {
         if let Some(user_email) = user.email {
             let ConfirmEmailInput { token, email } = body.into_inner();
             if user_email != email.to_lowercase() {
                 return Err(ApiError::InvalidEmail);
             }
-            match AccountManager::confirm_email(ConfirmEmailOpts {
-                did: &did,
-                token: &token,
-            })
-            .await
+            match account_manager
+                .confirm_email(ConfirmEmailOpts {
+                    did: &did,
+                    token: &token,
+                })
+                .await
             {
                 Ok(_) => {}
                 Err(e) => {
@@ -66,8 +66,9 @@ async fn inner_confirm_email(
 pub async fn confirm_email(
     body: Json<ConfirmEmailInput>,
     auth: AccessStandardIncludeChecks,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_confirm_email(body, auth).await {
+    match inner_confirm_email(body, auth, account_manager).await {
         Ok(()) => Ok(()),
         Err(error) => Err(error),
     }

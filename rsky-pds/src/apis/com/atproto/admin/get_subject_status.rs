@@ -20,6 +20,7 @@ async fn inner_get_subject_status(
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<SubjectStatus> {
     let mut body: Option<SubjectStatus> = None;
     if let Some(blob) = blob {
@@ -49,7 +50,8 @@ async fn inner_get_subject_status(
     } else if let Some(uri) = uri {
         let uri_without_prefix = uri.replace("at://", "");
         let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
-        if let (Some(uri_hostname), Some(_), Some(_)) = (parts.get(0), parts.get(1), parts.get(2)) {
+        if let (Some(uri_hostname), Some(_), Some(_)) = (parts.first(), parts.get(1), parts.get(2))
+        {
             let actor_store = ActorStore::new(
                 uri_hostname.to_string(),
                 S3BlobStore::new(uri_hostname.to_string(), s3_config),
@@ -71,7 +73,7 @@ async fn inner_get_subject_status(
             }
         }
     } else if let Some(did) = did {
-        let status = AccountManager::get_account_admin_status(&did).await?;
+        let status = account_manager.get_account_admin_status(&did).await?;
         if let Some(status) = status {
             body = Some(SubjectStatus {
                 subject: Subject::RepoRef(RepoRef { did }),
@@ -97,8 +99,9 @@ pub async fn get_subject_status(
     s3_config: &State<SdkConfig>,
     db: DbConn,
     _auth: Moderator,
+    account_manager: AccountManager,
 ) -> Result<Json<SubjectStatus>, ApiError> {
-    match inner_get_subject_status(did, uri, blob, s3_config, db).await {
+    match inner_get_subject_status(did, uri, blob, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

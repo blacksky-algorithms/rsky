@@ -33,9 +33,7 @@ impl S3BlobStore {
     }
 
     pub fn creator(cfg: &SdkConfig) -> Box<dyn Fn(String) -> S3BlobStore + '_> {
-        Box::new(move |did: String| {
-            return S3BlobStore::new(did, cfg);
-        })
+        Box::new(move |did: String| S3BlobStore::new(did, cfg))
     }
 
     fn gen_key(&self) -> String {
@@ -47,11 +45,11 @@ impl S3BlobStore {
     }
 
     fn get_stored_path(&self, cid: Cid) -> String {
-        format!("blocks/{0}/{1}", self.bucket, cid.to_string())
+        format!("blocks/{0}/{1}", self.bucket, cid)
     }
 
     fn get_quarantined_path(&self, cid: Cid) -> String {
-        format!("quarantine/{0}/{1}", self.bucket, cid.to_string())
+        format!("quarantine/{0}/{1}", self.bucket, cid)
     }
 
     pub async fn put_temp(&self, bytes: Vec<u8>) -> Result<String> {
@@ -97,21 +95,19 @@ impl S3BlobStore {
     }
 
     pub async fn quarantine(&self, cid: Cid) -> Result<()> {
-        Ok(self
-            .move_object(MoveObject {
-                from: self.get_stored_path(cid),
-                to: self.get_quarantined_path(cid),
-            })
-            .await?)
+        self.move_object(MoveObject {
+            from: self.get_stored_path(cid),
+            to: self.get_quarantined_path(cid),
+        })
+        .await
     }
 
     pub async fn unquarantine(&self, cid: Cid) -> Result<()> {
-        Ok(self
-            .move_object(MoveObject {
-                from: self.get_quarantined_path(cid),
-                to: self.get_stored_path(cid),
-            })
-            .await?)
+        self.move_object(MoveObject {
+            from: self.get_quarantined_path(cid),
+            to: self.get_stored_path(cid),
+        })
+        .await
     }
 
     async fn get_object(&self, cid: Cid) -> Result<ByteStream> {
@@ -136,13 +132,12 @@ impl S3BlobStore {
     }
 
     pub async fn get_stream(&self, cid: Cid) -> Result<ByteStream> {
-        Ok(self.get_object(cid).await?)
+        self.get_object(cid).await
     }
 
     pub async fn delete(&self, cid: String) -> Result<()> {
-        Ok(self
-            .delete_key(self.get_stored_path(Cid::from_str(&cid)?))
-            .await?)
+        self.delete_key(self.get_stored_path(Cid::from_str(&cid)?))
+            .await
     }
 
     pub async fn delete_many(&self, cids: Vec<Cid>) -> Result<()> {
@@ -150,7 +145,7 @@ impl S3BlobStore {
             .into_iter()
             .map(|cid| self.get_stored_path(cid))
             .collect();
-        Ok(self.delete_many_keys(keys).await?)
+        self.delete_many_keys(keys).await
     }
 
     pub async fn has_stored(&self, cid: Cid) -> Result<bool> {
@@ -169,10 +164,7 @@ impl S3BlobStore {
             .key(key)
             .send()
             .await;
-        match res {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        res.is_ok()
     }
 
     async fn delete_key(&self, key: String) -> Result<()> {

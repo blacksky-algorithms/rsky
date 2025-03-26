@@ -1,11 +1,12 @@
 use crate::actor_store::aws::s3::S3BlobStore;
-use crate::db::{establish_connection, DbConn};
+use crate::db::DbConn;
 use crate::image;
 use crate::models::models;
 use anyhow::{bail, Result};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use diesel::dsl::{count_distinct, exists, not};
+use diesel::result::Error;
 use diesel::sql_types::{Integer, Nullable, Text};
 use diesel::*;
 use futures::stream::{self, StreamExt};
@@ -21,6 +22,7 @@ use rsky_lexicon::com::atproto::repo::ListMissingBlobsRefRecordBlob;
 use rsky_repo::error::BlobError;
 use rsky_repo::types::{PreparedBlobRef, PreparedWrite};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub struct BlobMetadata {
     pub temp_key: String,
@@ -34,6 +36,7 @@ pub struct BlobMetadata {
 pub struct BlobReader {
     pub blobstore: S3BlobStore,
     pub did: String,
+    pub db: Arc<DbConn>,
 }
 
 pub struct ListMissingBlobsOpts {
@@ -60,24 +63,30 @@ pub struct GetBlobMetadataOutput {
 
 // Basically handles getting blob records from db
 impl BlobReader {
-    pub fn new(blobstore: S3BlobStore) -> Self {
+    pub fn new(blobstore: S3BlobStore, db: Arc<DbConn>) -> Self {
         BlobReader {
             did: blobstore.bucket.clone(),
             blobstore,
+            db,
         }
     }
 
     pub async fn get_blob_metadata(&self, cid: Cid) -> Result<GetBlobMetadataOutput> {
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let found = BlobSchema::blob
-            .filter(BlobSchema::did.eq(&self.did))
-            .filter(BlobSchema::cid.eq(&cid.to_string()))
-            .filter(BlobSchema::takedownRef.is_null())
-            .select(models::Blob::as_select())
-            .first(conn)
-            .optional()?;
+        let did = self.did.clone();
+        let found = self
+            .db
+            .run(move |conn| {
+                BlobSchema::blob
+                    .filter(BlobSchema::did.eq(did))
+                    .filter(BlobSchema::cid.eq(cid.to_string()))
+                    .filter(BlobSchema::takedownRef.is_null())
+                    .select(models::Blob::as_select())
+                    .first(conn)
+                    .optional()
+            })
+            .await?;
 
         match found {
             None => bail!("Blob not found"),
@@ -110,15 +119,19 @@ impl BlobReader {
 
     pub async fn get_records_for_blob(&self, cid: Cid) -> Result<Vec<String>> {
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = RecordBlobSchema::record_blob
-            .filter(RecordBlobSchema::blobCid.eq(cid.to_string()))
-            .filter(RecordBlobSchema::did.eq(&self.did))
-            .select(models::RecordBlob::as_select())
-            .get_results(conn)?
-            .into_iter()
-            .map(|row| row.record_uri)
+        let did = self.did.clone();
+        let res = self
+            .db
+            .run(move |conn| {
+                let results = RecordBlobSchema::record_blob
+                    .filter(RecordBlobSchema::blobCid.eq(cid.to_string()))
+                    .filter(RecordBlobSchema::did.eq(did))
+                    .select(models::RecordBlob::as_select())
+                    .get_results(conn)?;
+                Ok::<_, Error>(results.into_iter().map(|row| row.record_uri))
+            })
+            .await?
             .collect::<Vec<String>>();
 
         Ok(res)
@@ -149,7 +162,7 @@ impl BlobReader {
             cid,
             mime_type,
             width: if let Some(ref info) = img_info {
-                Some(info.width.clone() as i32)
+                Some(info.width as i32)
             } else {
                 None
             },
@@ -163,70 +176,69 @@ impl BlobReader {
 
     pub async fn track_untethered_blob(&self, metadata: BlobMetadata) -> Result<BlobRef> {
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
-        let BlobMetadata {
-            temp_key,
-            size,
-            cid,
-            mime_type,
-            width,
-            height,
-        } = metadata;
-        let created_at = now();
 
-        let found = BlobSchema::blob
-            .filter(BlobSchema::did.eq(&self.did))
-            .filter(BlobSchema::cid.eq(&cid.to_string()))
-            .select(models::Blob::as_select())
-            .first(conn)
-            .optional()?;
+        let did = self.did.clone();
+        self.db.run(move |conn| {
+            let BlobMetadata {
+                temp_key,
+                size,
+                cid,
+                mime_type,
+                width,
+                height,
+            } = metadata;
+            let created_at = now();
 
-        if let Some(found) = found {
-            if found.takedown_ref.is_some() {
-                bail!("Blob has been takendown, cannot re-upload")
+            let found = BlobSchema::blob
+                .filter(BlobSchema::did.eq(&did))
+                .filter(BlobSchema::cid.eq(&cid.to_string()))
+                .select(models::Blob::as_select())
+                .first(conn)
+                .optional()?;
+
+            if let Some(found) = found {
+                if found.takedown_ref.is_some() {
+                    bail!("Blob has been takendown, cannot re-upload")
+                }
             }
-        }
 
-        let upsert = sql_query("INSERT INTO pds.blob (cid, did, \"mimeType\", size, \"tempKey\", width, height, \"createdAt\", \"takedownRef\") \
+            let upsert = sql_query("INSERT INTO pds.blob (cid, did, \"mimeType\", size, \"tempKey\", width, height, \"createdAt\", \"takedownRef\") \
         VALUES \
             ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
         ON CONFLICT (cid, did) DO UPDATE \
         SET \"tempKey\" = EXCLUDED.\"tempKey\" \
             WHERE pds.blob.\"tempKey\" is not null;");
-        upsert
-            .bind::<Text, _>(&cid.to_string())
-            .bind::<Text, _>(&self.did)
-            .bind::<Text, _>(&mime_type)
-            .bind::<Integer, _>(size.clone() as i32)
-            .bind::<Nullable<Text>, _>(Some(temp_key.clone()))
-            .bind::<Nullable<Integer>, _>(width)
-            .bind::<Nullable<Integer>, _>(height)
-            .bind::<Text, _>(created_at)
-            .bind::<Nullable<Text>, _>(None as Option<String>)
-            .execute(conn)?;
+            upsert
+                .bind::<Text, _>(&cid.to_string())
+                .bind::<Text, _>(&did)
+                .bind::<Text, _>(&mime_type)
+                .bind::<Integer, _>(size as i32)
+                .bind::<Nullable<Text>, _>(Some(temp_key.clone()))
+                .bind::<Nullable<Integer>, _>(width)
+                .bind::<Nullable<Integer>, _>(height)
+                .bind::<Text, _>(created_at)
+                .bind::<Nullable<Text>, _>(None as Option<String>)
+                .execute(conn)?;
 
-        Ok(BlobRef::new(cid, mime_type, size, None))
+            Ok(BlobRef::new(cid, mime_type, size, None))
+        }).await
     }
 
-    #[deprecated]
-    pub async fn process_write_blobs_legacy(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        self.delete_dereferenced_blobs_legacy(writes.clone())
-            .await?;
+    pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+        self.delete_dereferenced_blobs(writes.clone()).await?;
         let _ = stream::iter(writes)
             .then(|write| async move {
                 Ok::<(), anyhow::Error>(match write {
                     PreparedWrite::Create(w) => {
                         for blob in w.blobs {
-                            self.verify_blob_and_make_permanent_legacy(blob.clone())
-                                .await?;
-                            self.associate_blob_legacy(blob, w.uri.clone()).await?;
+                            self.verify_blob_and_make_permanent(blob.clone()).await?;
+                            self.associate_blob(blob, w.uri.clone()).await?;
                         }
                     }
                     PreparedWrite::Update(w) => {
                         for blob in w.blobs {
-                            self.verify_blob_and_make_permanent_legacy(blob.clone())
-                                .await?;
-                            self.associate_blob_legacy(blob, w.uri.clone()).await?;
+                            self.verify_blob_and_make_permanent(blob.clone()).await?;
+                            self.associate_blob(blob, w.uri.clone()).await?;
                         }
                     }
                     _ => (),
@@ -239,124 +251,7 @@ impl BlobReader {
         Ok(())
     }
 
-    pub async fn process_write_blobs(
-        &self,
-        writes: Vec<PreparedWrite>,
-        _db: &DbConn,
-    ) -> Result<()> {
-        let db = _db.clone();
-        self.delete_dereferenced_blobs(writes.clone(), db).await?;
-        let _ = stream::iter(writes)
-            .then(|write| async move {
-                Ok::<(), anyhow::Error>(match write {
-                    PreparedWrite::Create(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone(), db)
-                                .await?;
-                            self.associate_blob(blob, w.uri.clone(), db).await?;
-                        }
-                    }
-                    PreparedWrite::Update(w) => {
-                        for blob in w.blobs {
-                            self.verify_blob_and_make_permanent(blob.clone(), db)
-                                .await?;
-                            self.associate_blob(blob, w.uri.clone(), db).await?;
-                        }
-                    }
-                    _ => (),
-                })
-            })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(())
-    }
-
-    #[deprecated]
-    pub async fn delete_dereferenced_blobs_legacy(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        use crate::schema::pds::blob::dsl as BlobSchema;
-        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
-
-        let uris: Vec<String> = writes
-            .clone()
-            .into_iter()
-            .filter_map(|w| match w {
-                PreparedWrite::Delete(w) => Some(w.uri),
-                PreparedWrite::Update(w) => Some(w.uri),
-                _ => None,
-            })
-            .collect();
-        if uris.len() == 0 {
-            return Ok(());
-        }
-
-        let deleted_repo_blobs: Vec<models::RecordBlob> = delete(RecordBlobSchema::record_blob)
-            .filter(RecordBlobSchema::recordUri.eq_any(uris))
-            .get_results(conn)?
-            .into_iter()
-            .collect::<Vec<models::RecordBlob>>();
-        if deleted_repo_blobs.len() < 1 {
-            return Ok(());
-        }
-
-        let deleted_repo_blob_cids: Vec<String> = deleted_repo_blobs
-            .into_iter()
-            .map(|row| row.blob_cid)
-            .collect::<Vec<String>>();
-        let mut duplicated_cids: Vec<String> = RecordBlobSchema::record_blob
-            .select(RecordBlobSchema::blobCid)
-            .filter(RecordBlobSchema::blobCid.eq_any(&deleted_repo_blob_cids))
-            .load(conn)?
-            .into_iter()
-            .collect::<Vec<String>>();
-
-        let mut new_blob_cids: Vec<String> = writes
-            .into_iter()
-            .map(|w| match w {
-                PreparedWrite::Create(w) => w.blobs,
-                PreparedWrite::Update(w) => w.blobs,
-                PreparedWrite::Delete(_) => Vec::new(),
-            })
-            .collect::<Vec<Vec<PreparedBlobRef>>>()
-            .into_iter()
-            .flat_map(|v: Vec<PreparedBlobRef>| v.into_iter().map(|b| b.cid.to_string()))
-            .collect();
-        let mut cids_to_keep = Vec::new();
-        cids_to_keep.append(&mut new_blob_cids);
-        cids_to_keep.append(&mut duplicated_cids);
-
-        let cids_to_delete = deleted_repo_blob_cids
-            .into_iter()
-            .filter_map(|cid: String| match cids_to_keep.contains(&cid) {
-                true => Some(cid),
-                false => None,
-            })
-            .collect::<Vec<String>>();
-        if cids_to_delete.len() < 1 {
-            return Ok(());
-        }
-
-        delete(BlobSchema::blob)
-            .filter(BlobSchema::cid.eq_any(&cids_to_delete))
-            .execute(conn)?;
-
-        // Original code queues a background job to delete by CID from S3 compatible blobstore
-        let _ = stream::iter(cids_to_delete)
-            .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(())
-    }
-
-    pub async fn delete_dereferenced_blobs(
-        &self,
-        writes: Vec<PreparedWrite>,
-        db: &DbConn,
-    ) -> Result<()> {
+    pub async fn delete_dereferenced_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
 
@@ -369,20 +264,21 @@ impl BlobReader {
                 _ => None,
             })
             .collect();
-        if uris.len() == 0 {
+        if uris.is_empty() {
             return Ok(());
         }
 
-        let deleted_repo_blobs: Vec<models::RecordBlob> = db
+        let deleted_repo_blobs: Vec<models::RecordBlob> = self
+            .db
             .run(move |conn| {
-                return delete(RecordBlobSchema::record_blob)
+                delete(RecordBlobSchema::record_blob)
                     .filter(RecordBlobSchema::recordUri.eq_any(uris))
-                    .get_results(conn);
+                    .get_results(conn)
             })
             .await?
             .into_iter()
             .collect::<Vec<models::RecordBlob>>();
-        if deleted_repo_blobs.len() < 1 {
+        if deleted_repo_blobs.is_empty() {
             return Ok(());
         }
 
@@ -392,7 +288,8 @@ impl BlobReader {
             .collect::<Vec<String>>();
 
         let x = deleted_repo_blob_cids.clone();
-        let mut duplicated_cids: Vec<String> = db
+        let mut duplicated_cids: Vec<String> = self
+            .db
             .run(move |conn| {
                 RecordBlobSchema::record_blob
                     .select(RecordBlobSchema::blobCid)
@@ -425,21 +322,22 @@ impl BlobReader {
                 false => None,
             })
             .collect::<Vec<String>>();
-        if cids_to_delete.len() < 1 {
+        if cids_to_delete.is_empty() {
             return Ok(());
         }
 
         let y = cids_to_delete.clone();
-        db.run(move |conn| {
-            delete(BlobSchema::blob)
-                .filter(BlobSchema::cid.eq_any(&y))
-                .execute(conn)
-        })
-        .await?;
+        self.db
+            .run(move |conn| {
+                delete(BlobSchema::blob)
+                    .filter(BlobSchema::cid.eq_any(&y))
+                    .execute(conn)
+            })
+            .await?;
 
         // Original code queues a background job to delete by CID from S3 compatible blobstore
         let _ = stream::iter(cids_to_delete)
-            .then(|cid| async { Ok::<(), anyhow::Error>(self.blobstore.delete(cid).await?) })
+            .then(|cid| async { self.blobstore.delete(cid).await })
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -447,45 +345,11 @@ impl BlobReader {
         Ok(())
     }
 
-    #[deprecated]
-    pub async fn verify_blob_and_make_permanent_legacy(&self, blob: PreparedBlobRef) -> Result<()> {
-        use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
-
-        let found = BlobSchema::blob
-            .filter(
-                BlobSchema::cid
-                    .eq(blob.cid.to_string())
-                    .and(BlobSchema::takedownRef.is_null()),
-            )
-            .select(models::Blob::as_select())
-            .first(conn)
-            .optional()?;
-        if let Some(found) = found {
-            verify_blob(&blob, &found).await?;
-            if let Some(ref temp_key) = found.temp_key {
-                self.blobstore
-                    .make_permanent(temp_key.clone(), blob.cid)
-                    .await?;
-            }
-            update(BlobSchema::blob)
-                .filter(BlobSchema::tempKey.eq(found.temp_key))
-                .set(BlobSchema::tempKey.eq::<Option<String>>(None))
-                .execute(conn)?;
-            Ok(())
-        } else {
-            bail!("Cound not find blob: {:?}", blob.cid.to_string())
-        }
-    }
-
-    pub async fn verify_blob_and_make_permanent(
-        &self,
-        blob: PreparedBlobRef,
-        db: &DbConn,
-    ) -> Result<()> {
+    pub async fn verify_blob_and_make_permanent(&self, blob: PreparedBlobRef) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
 
-        let found = db
+        let found = self
+            .db
             .run(move |conn| {
                 BlobSchema::blob
                     .filter(
@@ -505,85 +369,69 @@ impl BlobReader {
                     .make_permanent(temp_key.clone(), blob.cid)
                     .await?;
             }
-            db.run(move |conn| {
-                update(BlobSchema::blob)
-                    .filter(BlobSchema::tempKey.eq(found.temp_key))
-                    .set(BlobSchema::tempKey.eq::<Option<String>>(None))
-                    .execute(conn)
-            })
-            .await?;
+            self.db
+                .run(move |conn| {
+                    update(BlobSchema::blob)
+                        .filter(BlobSchema::tempKey.eq(found.temp_key))
+                        .set(BlobSchema::tempKey.eq::<Option<String>>(None))
+                        .execute(conn)
+                })
+                .await?;
             Ok(())
         } else {
             bail!("Cound not find blob: {:?}", blob.cid.to_string())
         }
     }
 
-    #[deprecated]
-    pub async fn associate_blob_legacy(
-        &self,
-        blob: PreparedBlobRef,
-        record_uri: String,
-    ) -> Result<()> {
-        use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
-
-        insert_into(RecordBlobSchema::record_blob)
-            .values((
-                RecordBlobSchema::blobCid.eq(blob.cid.to_string()),
-                RecordBlobSchema::recordUri.eq(record_uri),
-                RecordBlobSchema::did.eq(&self.did),
-            ))
-            .on_conflict_do_nothing()
-            .execute(conn)?;
-        Ok(())
-    }
-
-    pub async fn associate_blob(
-        &self,
-        blob: PreparedBlobRef,
-        _record_uri: String,
-        db: &DbConn,
-    ) -> Result<()> {
+    pub async fn associate_blob(&self, blob: PreparedBlobRef, _record_uri: String) -> Result<()> {
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
 
         let cid = blob.cid.to_string();
         let record_uri = _record_uri;
         let did = self.did.clone();
-        db.run(move |conn| {
-            insert_into(RecordBlobSchema::record_blob)
-                .values((
-                    RecordBlobSchema::blobCid.eq(cid),
-                    RecordBlobSchema::recordUri.eq(record_uri),
-                    RecordBlobSchema::did.eq(&did),
-                ))
-                .on_conflict_do_nothing()
-                .execute(conn)
-        })
-        .await?;
+        self.db
+            .run(move |conn| {
+                insert_into(RecordBlobSchema::record_blob)
+                    .values((
+                        RecordBlobSchema::blobCid.eq(cid),
+                        RecordBlobSchema::recordUri.eq(record_uri),
+                        RecordBlobSchema::did.eq(&did),
+                    ))
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+            })
+            .await?;
         Ok(())
     }
 
     pub async fn blob_count(&self) -> Result<i64> {
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = BlobSchema::blob
-            .filter(BlobSchema::did.eq(&self.did))
-            .count()
-            .get_result(conn)?;
-        Ok(res)
+        let did = self.did.clone();
+        self.db
+            .run(move |conn| {
+                let res = BlobSchema::blob
+                    .filter(BlobSchema::did.eq(&did))
+                    .count()
+                    .get_result(conn)?;
+                Ok(res)
+            })
+            .await
     }
 
     pub async fn record_blob_count(&self) -> Result<i64> {
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let res: i64 = RecordBlobSchema::record_blob
-            .filter(RecordBlobSchema::did.eq(&self.did))
-            .select(count_distinct(RecordBlobSchema::blobCid))
-            .get_result(conn)?;
-
-        Ok(res)
+        let did = self.did.clone();
+        self.db
+            .run(move |conn| {
+                let res: i64 = RecordBlobSchema::record_blob
+                    .filter(RecordBlobSchema::did.eq(&did))
+                    .select(count_distinct(RecordBlobSchema::blobCid))
+                    .get_result(conn)?;
+                Ok(res)
+            })
+            .await
     }
 
     pub async fn list_missing_blobs(
@@ -592,57 +440,61 @@ impl BlobReader {
     ) -> Result<Vec<ListMissingBlobsRefRecordBlob>> {
         use crate::schema::pds::blob::dsl as BlobSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
-        let ListMissingBlobsOpts { cursor, limit } = opts;
 
-        if limit > 1000 {
-            bail!("Limit too high. Max: 1000.");
-        }
+        let did = self.did.clone();
+        self.db
+            .run(move |conn| {
+                let ListMissingBlobsOpts { cursor, limit } = opts;
 
-        let res: Vec<models::RecordBlob> = if let Some(cursor) = cursor {
-            RecordBlobSchema::record_blob
-                .limit(limit as i64)
-                .filter(not(exists(
-                    BlobSchema::blob
-                        .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
-                        .filter(BlobSchema::did.eq(&self.did))
-                        .select(models::Blob::as_select()),
-                )))
-                .filter(RecordBlobSchema::blobCid.gt(cursor))
-                .filter(RecordBlobSchema::did.eq(&self.did))
-                .select(models::RecordBlob::as_select())
-                .order(RecordBlobSchema::blobCid.asc())
-                .distinct_on(RecordBlobSchema::blobCid)
-                .get_results(conn)?
-        } else {
-            RecordBlobSchema::record_blob
-                .limit(limit as i64)
-                .filter(not(exists(
-                    BlobSchema::blob
-                        .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
-                        .filter(BlobSchema::did.eq(&self.did))
-                        .select(models::Blob::as_select()),
-                )))
-                .filter(RecordBlobSchema::did.eq(&self.did))
-                .select(models::RecordBlob::as_select())
-                .order(RecordBlobSchema::blobCid.asc())
-                .distinct_on(RecordBlobSchema::blobCid)
-                .get_results(conn)?
-        };
+                if limit > 1000 {
+                    bail!("Limit too high. Max: 1000.");
+                }
 
-        Ok(res
-            .into_iter()
-            .map(|row| ListMissingBlobsRefRecordBlob {
-                cid: row.blob_cid,
-                record_uri: row.record_uri,
+                let res: Vec<models::RecordBlob> = if let Some(cursor) = cursor {
+                    RecordBlobSchema::record_blob
+                        .limit(limit as i64)
+                        .filter(not(exists(
+                            BlobSchema::blob
+                                .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
+                                .filter(BlobSchema::did.eq(&did))
+                                .select(models::Blob::as_select()),
+                        )))
+                        .filter(RecordBlobSchema::blobCid.gt(cursor))
+                        .filter(RecordBlobSchema::did.eq(&did))
+                        .select(models::RecordBlob::as_select())
+                        .order(RecordBlobSchema::blobCid.asc())
+                        .distinct_on(RecordBlobSchema::blobCid)
+                        .get_results(conn)?
+                } else {
+                    RecordBlobSchema::record_blob
+                        .limit(limit as i64)
+                        .filter(not(exists(
+                            BlobSchema::blob
+                                .filter(BlobSchema::cid.eq(RecordBlobSchema::blobCid))
+                                .filter(BlobSchema::did.eq(&did))
+                                .select(models::Blob::as_select()),
+                        )))
+                        .filter(RecordBlobSchema::did.eq(&did))
+                        .select(models::RecordBlob::as_select())
+                        .order(RecordBlobSchema::blobCid.asc())
+                        .distinct_on(RecordBlobSchema::blobCid)
+                        .get_results(conn)?
+                };
+
+                Ok(res
+                    .into_iter()
+                    .map(|row| ListMissingBlobsRefRecordBlob {
+                        cid: row.blob_cid,
+                        record_uri: row.record_uri,
+                    })
+                    .collect())
             })
-            .collect())
+            .await
     }
 
     pub async fn list_blobs(&self, opts: ListBlobsOpts) -> Result<Vec<String>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::record_blob::dsl as RecordBlobSchema;
-        let conn = &mut establish_connection()?;
         let ListBlobsOpts {
             since,
             cursor,
@@ -654,7 +506,7 @@ impl BlobReader {
                 .inner_join(
                     RecordSchema::record.on(RecordSchema::uri.eq(RecordBlobSchema::recordUri)),
                 )
-                .filter(RecordSchema::repoRev.gt(&since))
+                .filter(RecordSchema::repoRev.gt(since))
                 .select(RecordBlobSchema::blobCid)
                 .distinct()
                 .order(RecordBlobSchema::blobCid.asc())
@@ -664,7 +516,7 @@ impl BlobReader {
             if let Some(cursor) = cursor {
                 builder = builder.filter(RecordBlobSchema::blobCid.gt(cursor));
             }
-            builder.load(conn)?
+            self.db.run(move |conn| builder.load(conn)).await?
         } else {
             let mut builder = RecordBlobSchema::record_blob
                 .select(RecordBlobSchema::blobCid)
@@ -676,33 +528,36 @@ impl BlobReader {
             if let Some(cursor) = cursor {
                 builder = builder.filter(RecordBlobSchema::blobCid.gt(cursor));
             }
-            builder.load(conn)?
+            self.db.run(move |conn| builder.load(conn)).await?
         };
         Ok(res)
     }
 
     pub async fn get_blob_takedown_status(&self, cid: Cid) -> Result<Option<StatusAttr>> {
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = BlobSchema::blob
-            .filter(BlobSchema::cid.eq(cid.to_string()))
-            .select(models::Blob::as_select())
-            .first(conn)
-            .optional()?;
-        match res {
-            None => Ok(None),
-            Some(res) => match res.takedown_ref {
-                None => Ok(Some(StatusAttr {
-                    applied: false,
-                    r#ref: None,
-                })),
-                Some(takedown_ref) => Ok(Some(StatusAttr {
-                    applied: true,
-                    r#ref: Some(takedown_ref),
-                })),
-            },
-        }
+        self.db
+            .run(move |conn| {
+                let res = BlobSchema::blob
+                    .filter(BlobSchema::cid.eq(cid.to_string()))
+                    .select(models::Blob::as_select())
+                    .first(conn)
+                    .optional()?;
+                match res {
+                    None => Ok(None),
+                    Some(res) => match res.takedown_ref {
+                        None => Ok(Some(StatusAttr {
+                            applied: false,
+                            r#ref: None,
+                        })),
+                        Some(takedown_ref) => Ok(Some(StatusAttr {
+                            applied: true,
+                            r#ref: Some(takedown_ref),
+                        })),
+                    },
+                }
+            })
+            .await
     }
 
     // Transactors
@@ -710,7 +565,6 @@ impl BlobReader {
 
     pub async fn update_blob_takedown_status(&self, blob: Cid, takedown: StatusAttr) -> Result<()> {
         use crate::schema::pds::blob::dsl as BlobSchema;
-        let conn = &mut establish_connection()?;
 
         let takedown_ref: Option<String> = match takedown.applied {
             true => match takedown.r#ref {
@@ -720,10 +574,16 @@ impl BlobReader {
             false => None,
         };
 
-        update(BlobSchema::blob)
-            .filter(BlobSchema::cid.eq(blob.to_string()))
-            .set(BlobSchema::takedownRef.eq(takedown_ref))
-            .execute(conn)?;
+        let blob = self
+            .db
+            .run(move |conn| {
+                update(BlobSchema::blob)
+                    .filter(BlobSchema::cid.eq(blob.to_string()))
+                    .set(BlobSchema::takedownRef.eq(takedown_ref))
+                    .execute(conn)?;
+                Ok::<_, Error>(blob)
+            })
+            .await?;
 
         let res = match takedown.applied {
             true => self.blobstore.quarantine(blob).await,
@@ -756,7 +616,7 @@ pub async fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
             }
         }
     }
-    return accepted.contains(mime);
+    accepted.contains(mime)
 }
 
 pub async fn verify_blob(blob: &PreparedBlobRef, found: &models::Blob) -> Result<()> {

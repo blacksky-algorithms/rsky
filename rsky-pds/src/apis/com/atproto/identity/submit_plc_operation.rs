@@ -90,6 +90,7 @@ async fn validate_plc_request(
     did: &str,
     op: &Operation,
     public_endpoint: &str,
+    account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
     let public_rotation_key = get_public_signing_key()?;
     if !op.rotation_keys.contains(&public_rotation_key) {
@@ -131,14 +132,15 @@ async fn validate_plc_request(
         }
     }
 
-    let account = match AccountManager::get_account_legacy(
-        &did.to_string(),
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await
+    let account = match account_manager
+        .get_account(
+            &did.to_string(),
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await
     {
         Ok(res) => match res {
             None => {
@@ -216,6 +218,7 @@ pub async fn submit_plc_operation(
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = get_requester_did(&auth)?;
 
@@ -223,7 +226,13 @@ pub async fn submit_plc_operation(
     let op = validate_operation_body(body.into_inner())?;
 
     //Validate PLC Operation is valid
-    validate_plc_request(did.as_str(), &op, server_config.service.public_url.as_str()).await?;
+    validate_plc_request(
+        did.as_str(),
+        &op,
+        server_config.service.public_url.as_str(),
+        &account_manager,
+    )
+    .await?;
 
     //Send PLC Operation to PLC Service
     do_plc_operation(server_config.identity.plc_url.as_str(), did.as_str(), op).await?;

@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
@@ -23,6 +24,7 @@ pub async fn inner_get_actor_likes(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
     let requester: Option<String> = match auth.access.credentials {
         None => None,
@@ -39,6 +41,7 @@ pub async fn inner_get_actor_likes(
                 s3_config,
                 state_local_viewer,
                 db,
+                account_manager,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -59,6 +62,7 @@ pub async fn get_actor_likes(
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     if let Some(limit) = limit {
         if limit > 100 {
@@ -76,6 +80,7 @@ pub async fn get_actor_likes(
             s3_config,
             state_local_viewer,
             db,
+            account_manager,
         )
         .await
         {
