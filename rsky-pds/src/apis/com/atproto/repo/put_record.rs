@@ -24,6 +24,7 @@ async fn inner_put_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<PutRecordOutput> {
     let PutRecordInput {
         repo,
@@ -34,14 +35,15 @@ async fn inner_put_record(
         swap_record,
         swap_commit,
     } = body.into_inner();
-    let account = AccountManager::get_account_legacy(
-        &repo,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &repo,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await?;
     if let Some(account) = account {
         if account.deactivated_at.is_some() {
             bail!("Account is deactivated")
@@ -109,7 +111,9 @@ async fn inner_put_record(
             let mut lock = sequencer.sequencer.write().await;
             lock.sequence_commit(did.clone(), commit.clone(), vec![write.clone()])
                 .await?;
-            AccountManager::update_repo_root_legacy(did, commit.cid, commit.rev)?;
+            account_manager
+                .update_repo_root(did, commit.cid, commit.rev)
+                .await?;
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),
@@ -128,9 +132,10 @@ pub async fn put_record(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug put_record {body:#?}");
-    match inner_put_record(body, auth, sequencer, s3_config, db).await {
+    match inner_put_record(body, auth, sequencer, s3_config, db, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

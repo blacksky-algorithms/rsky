@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::db::DbConn;
@@ -76,10 +77,7 @@ impl<'r, T: Serialize> Responder<'r, 'static> for ReadAfterWriteResponse<T> {
 }
 
 pub fn get_repo_rev(headers: &BTreeMap<String, String>) -> Option<String> {
-    match headers.get(REPO_REV_HEADER) {
-        None => None,
-        Some(value) => Some(value.clone()),
-    }
+    headers.get(REPO_REV_HEADER).map(|value| value.clone())
 }
 
 pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
@@ -116,6 +114,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
     match read_after_write_internal(
         nsid,
@@ -125,6 +124,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
         s3_config,
         state_local_viewer,
         db,
+        account_manager,
     )
     .await
     {
@@ -148,8 +148,9 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
-    let headers = &res.headers.clone().unwrap_or_else(|| BTreeMap::new());
+    let headers = &res.headers.clone().unwrap_or_else(BTreeMap::new);
     let rev = get_repo_rev(headers);
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
@@ -164,7 +165,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
                 return Ok(ReadAfterWriteResponse::HandlerPipeThrough(res));
             }
             let local_viewer_lock = state_local_viewer.local_viewer.read().await;
-            let local_viewer = local_viewer_lock(actor_store);
+            let local_viewer = local_viewer_lock(actor_store, account_manager);
             let parse_res = parse_res(nsid, res)?;
             let data = munge(local_viewer, parse_res, local.clone(), requester)?;
             Ok(ReadAfterWriteResponse::HandlerResponse(

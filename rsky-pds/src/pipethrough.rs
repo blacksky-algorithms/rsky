@@ -476,7 +476,7 @@ pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
     };
     // Release borrow
     let encoding = encoding.to_string();
-    let res_headers = RES_HEADERS_TO_FORWARD.clone().into_iter().fold(
+    let res_headers = RES_HEADERS_TO_FORWARD.into_iter().fold(
         BTreeMap::new(),
         |mut acc: BTreeMap<String, String>, cur| {
             let _ = match res.headers().get(cur) {
@@ -546,10 +546,7 @@ lazy_static! {
 
 }
 
-pub async fn default_service<'r>(
-    req: &'r ProxyRequest<'_>,
-    nsid: &String,
-) -> Option<ServiceConfig> {
+pub async fn default_service<'r>(req: &'r ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
     let cfg = req.cfg;
     match Ids::from_str(nsid) {
         Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),

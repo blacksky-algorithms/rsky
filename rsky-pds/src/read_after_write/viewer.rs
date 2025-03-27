@@ -1,7 +1,6 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
-use crate::db::establish_connection;
 use crate::models::models;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util;
@@ -51,7 +50,7 @@ use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
-pub type LocalViewerCreator = Box<dyn Fn(ActorStore) -> LocalViewer + Send + Sync>;
+pub type LocalViewerCreator = Box<dyn Fn(ActorStore, AccountManager) -> LocalViewer + Send + Sync>;
 
 pub struct LocalViewerCreatorParams {
     pub pds_hostname: String,
@@ -61,6 +60,7 @@ pub struct LocalViewerCreatorParams {
 }
 
 pub struct LocalViewer {
+    pub account_manager: AccountManager,
     pub did: String,
     pub actor_store: ActorStore,
     pub pds_hostname: String,
@@ -73,6 +73,7 @@ pub struct LocalViewer {
 impl LocalViewer {
     pub fn new(
         actor_store: ActorStore,
+        account_manager: AccountManager,
         pds_hostname: String,
         appview_agent: Option<Agent>,
         appview_agent_str: Option<String>,
@@ -82,6 +83,7 @@ impl LocalViewer {
         LocalViewer {
             did: actor_store.did.clone(),
             actor_store,
+            account_manager,
             pds_hostname,
             appview_agent,
             appview_agent_str,
@@ -91,33 +93,36 @@ impl LocalViewer {
     }
 
     pub fn creator(params: LocalViewerCreatorParams) -> LocalViewerCreator {
-        return Box::new(move |actor_store: ActorStore| -> LocalViewer {
-            LocalViewer::new(
-                actor_store,
-                params.pds_hostname.clone(),
-                match params.appview_agent {
-                    None => None,
-                    Some(ref bsky_app_view_url) => {
-                        let client = ReqwestClientBuilder::new(bsky_app_view_url.clone())
-                            .client(
-                                reqwest::ClientBuilder::new()
-                                    .user_agent(APP_USER_AGENT)
-                                    .timeout(std::time::Duration::from_millis(1000))
-                                    .build()
-                                    .unwrap(),
-                            )
-                            .build();
-                        Some(AtpServiceClient::new(client))
-                    }
-                },
-                match params.appview_agent {
-                    None => None,
-                    Some(ref bsky_app_view_url) => Some(bsky_app_view_url.clone()),
-                },
-                params.appview_did.clone(),
-                params.appview_cdn_url_pattern.clone(),
-            )
-        });
+        Box::new(
+            move |actor_store: ActorStore, account_manager: AccountManager| -> LocalViewer {
+                LocalViewer::new(
+                    actor_store,
+                    account_manager,
+                    params.pds_hostname.clone(),
+                    match params.appview_agent {
+                        None => None,
+                        Some(ref bsky_app_view_url) => {
+                            let client = ReqwestClientBuilder::new(bsky_app_view_url.clone())
+                                .client(
+                                    reqwest::ClientBuilder::new()
+                                        .user_agent(APP_USER_AGENT)
+                                        .timeout(std::time::Duration::from_millis(1000))
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .build();
+                            Some(AtpServiceClient::new(client))
+                        }
+                    },
+                    match params.appview_agent {
+                        None => None,
+                        Some(ref bsky_app_view_url) => Some(bsky_app_view_url.clone()),
+                    },
+                    params.appview_did.clone(),
+                    params.appview_cdn_url_pattern.clone(),
+                )
+            },
+        )
     }
 
     pub fn get_image_url(&self, pattern: String, cid: String) -> String {
@@ -135,7 +140,7 @@ impl LocalViewer {
         }
     }
 
-    pub async fn service_auth_headers(&self, did: &String, lxm: &String) -> Result<HeaderMap> {
+    pub async fn service_auth_headers(&self, did: &str, lxm: &str) -> Result<HeaderMap> {
         match &self.appview_did {
             None => bail!("Could not find bsky appview did"),
             Some(appview_did) => {
@@ -143,10 +148,10 @@ impl LocalViewer {
                 let keypair =
                     SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
                 create_service_auth_headers(ServiceJwtParams {
-                    iss: did.clone(),
+                    iss: did.to_owned(),
                     aud: appview_did.clone(),
                     exp: None,
-                    lxm: Some(lxm.clone()),
+                    lxm: Some(lxm.to_owned()),
                     jti: None,
                     keypair,
                 })
@@ -162,20 +167,27 @@ impl LocalViewer {
     pub async fn get_profile_basic(&self) -> Result<Option<ProfileViewBasic>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-        let conn = &mut establish_connection()?;
 
-        let profile_res: Option<(models::Record, Option<models::RepoBlock>)> = RecordSchema::record
-            .left_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
-            .select((
-                models::Record::as_select(),
-                Option::<models::RepoBlock>::as_select(),
-            ))
-            .filter(RecordSchema::did.eq(&self.actor_store.did))
-            .filter(RecordSchema::collection.eq(Ids::AppBskyActorProfile.as_str()))
-            .filter(RecordSchema::rkey.eq("self"))
-            .first(conn)
-            .optional()?;
-        let account_res = AccountManager::get_account_legacy(&self.did, None).await?;
+        let db = self.actor_store.record.db.clone();
+        let did = self.actor_store.did.clone();
+        let profile_res: Option<(models::Record, Option<models::RepoBlock>)> = db
+            .run(move |conn| {
+                RecordSchema::record
+                    .left_join(
+                        RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
+                    )
+                    .select((
+                        models::Record::as_select(),
+                        Option::<models::RepoBlock>::as_select(),
+                    ))
+                    .filter(RecordSchema::did.eq(&did))
+                    .filter(RecordSchema::collection.eq(Ids::AppBskyActorProfile.as_str()))
+                    .filter(RecordSchema::rkey.eq("self"))
+                    .first(conn)
+                    .optional()
+            })
+            .await?;
+        let account_res = self.account_manager.get_account(&self.did, None).await?;
         match account_res {
             None => Ok(None),
             Some(account_res) => {
@@ -223,7 +235,7 @@ impl LocalViewer {
         mut feed: Vec<FeedViewPost>,
         posts: Vec<RecordDescript<Post>>,
     ) -> Result<Vec<FeedViewPost>> {
-        if posts.len() == 0 {
+        if posts.is_empty() {
             return Ok(feed);
         }
         let last_time: String = match feed.last() {
@@ -644,27 +656,43 @@ impl LocalViewer {
 pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Result<LocalRecords> {
     use crate::schema::pds::record::dsl as RecordSchema;
     use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-    let conn = &mut establish_connection()?;
 
-    let res: Vec<(models::Record, models::RepoBlock)> = RecordSchema::record
-        .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
-        .select((models::Record::as_select(), models::RepoBlock::as_select()))
-        .filter(RecordSchema::did.eq(&actor_store.did))
-        .filter(RecordSchema::repoRev.gt(&rev))
-        .limit(10)
-        .order_by(RecordSchema::repoRev.asc())
-        .get_results(conn)?;
+    let did = actor_store.did.clone();
+    let did_1 = did.clone();
+    let rev_1 = rev.clone();
+    let res: Vec<(models::Record, models::RepoBlock)> = actor_store
+        .record
+        .db
+        .run(move |conn| {
+            RecordSchema::record
+                .inner_join(
+                    RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
+                )
+                .select((models::Record::as_select(), models::RepoBlock::as_select()))
+                .filter(RecordSchema::did.eq(did_1))
+                .filter(RecordSchema::repoRev.gt(rev_1))
+                .limit(10)
+                .order_by(RecordSchema::repoRev.asc())
+                .get_results(conn)
+        })
+        .await?;
 
     // sanity check to ensure that the clock received is not before _all_ local records
     // (for instance in case of account migration)
-    if res.len() > 0 {
-        let sanity_checks = RecordSchema::record
-            .select(models::Record::as_select())
-            .filter(RecordSchema::did.eq(&actor_store.did))
-            .filter(RecordSchema::repoRev.le(&rev))
-            .limit(1)
-            .first(conn)
-            .optional()?;
+    if !res.is_empty() {
+        let sanity_checks = actor_store
+            .record
+            .db
+            .run(move |conn| {
+                RecordSchema::record
+                    .select(models::Record::as_select())
+                    .filter(RecordSchema::did.eq(&did))
+                    .filter(RecordSchema::repoRev.le(&rev))
+                    .limit(1)
+                    .first(conn)
+                    .optional()
+            })
+            .await?;
         if sanity_checks.is_none() {
             return Ok(LocalRecords {
                 count: 0,

@@ -9,9 +9,15 @@ use rsky_lexicon::com::atproto::server::ResetPasswordInput;
     format = "json",
     data = "<body>"
 )]
-pub async fn reset_password(body: Json<ResetPasswordInput>) -> Result<(), ApiError> {
+pub async fn reset_password(
+    body: Json<ResetPasswordInput>,
+    account_manager: AccountManager,
+) -> Result<(), ApiError> {
     let ResetPasswordInput { token, password } = body.into_inner();
-    match AccountManager::reset_password(ResetPasswordOpts { token, password }).await {
+    match account_manager
+        .reset_password(ResetPasswordOpts { token, password })
+        .await
+    {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

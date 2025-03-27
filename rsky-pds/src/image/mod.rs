@@ -1,5 +1,5 @@
 use anyhow::Result;
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use image::{guess_format, GenericImageView};
 use std::io::Cursor;
 
@@ -33,8 +33,8 @@ pub async fn maybe_get_info(bytes: Vec<u8>) -> Result<Option<ImageInfo>> {
         }))
     };
 
-    return match process_image() {
+    match process_image() {
         Ok(info) => Ok(info),
         Err(_) => Ok(None),
-    };
+    }
 }

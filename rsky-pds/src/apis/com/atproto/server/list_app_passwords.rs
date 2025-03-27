@@ -8,9 +8,10 @@ use rsky_lexicon::com::atproto::server::{AppPassword, ListAppPasswordsOutput};
 #[rocket::get("/xrpc/com.atproto.server.listAppPasswords")]
 pub async fn list_app_passwords(
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<Json<ListAppPasswordsOutput>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
-    match AccountManager::list_app_passwords(&did).await {
+    match account_manager.list_app_passwords(&did).await {
         Ok(passwords) => {
             let passwords: Vec<AppPassword> = passwords
                 .into_iter()

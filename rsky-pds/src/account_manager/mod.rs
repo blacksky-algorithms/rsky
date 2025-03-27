@@ -4,7 +4,7 @@ use crate::account_manager::helpers::account::{
 use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
 };
-use crate::account_manager::helpers::invite::{CodeDetail, CodeUse};
+use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::repo;
 use crate::actor_store::ActorStore;
@@ -23,6 +23,9 @@ use chrono::DateTime;
 use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
 use libipld::Cid;
+use rocket::http::Status;
+use rocket::request::{FromRequest, Outcome};
+use rocket::Request;
 use rsky_common;
 use rsky_common::time::{from_micros_to_str, from_str_to_micros, HOUR};
 use rsky_common::RFC3339_VARIANT;
@@ -91,62 +94,50 @@ pub struct DisableInviteCodesOpts {
     pub accounts: Vec<String>,
 }
 
-pub type AccountManagerCreator = Box<dyn Fn(DbConn) -> AccountManager + Send + Sync>;
-
+#[derive(Clone, Debug)]
 pub struct AccountManager {
-    pub db: DbConn,
+    pub db: Arc<DbConn>,
 }
 
+pub type AccountManagerCreator = Box<dyn Fn(Arc<DbConn>) -> AccountManager + Send + Sync>;
+
 impl AccountManager {
-    pub fn new(db: DbConn) -> Self {
+    pub fn new(db: Arc<DbConn>) -> Self {
         Self { db }
     }
 
     pub fn creator() -> AccountManagerCreator {
-        Box::new(move |db: DbConn| -> AccountManager { AccountManager::new(db) })
-    }
-
-    #[deprecated]
-    pub async fn get_account_legacy(
-        handle_or_did: &String,
-        flags: Option<AvailabilityFlags>,
-    ) -> Result<Option<ActorAccount>> {
-        account::get_account_legacy(handle_or_did, flags).await
+        Box::new(move |db: Arc<DbConn>| -> AccountManager { AccountManager::new(db) })
     }
 
     pub async fn get_account(
-        handle_or_did: &String,
-        flags: Option<AvailabilityFlags>,
-        db: &DbConn,
-    ) -> Result<Option<ActorAccount>> {
-        account::get_account(handle_or_did, flags, db).await
-    }
-
-    #[deprecated]
-    pub async fn get_account_by_email_legacy(
-        email: &String,
+        &self,
+        handle_or_did: &str,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<ActorAccount>> {
-        account::get_account_by_email_legacy(email, flags).await
+        let db = self.db.clone();
+        account::get_account(handle_or_did, flags, db.as_ref()).await
     }
 
     pub async fn get_account_by_email(
-        email: &String,
+        &self,
+        email: &str,
         flags: Option<AvailabilityFlags>,
-        db: &DbConn,
     ) -> Result<Option<ActorAccount>> {
-        account::get_account_by_email(email, flags, db).await
+        let db = self.db.clone();
+        account::get_account_by_email(email, flags, db.as_ref()).await
     }
 
-    pub async fn is_account_activated(did: &String) -> Result<bool> {
-        let account = Self::get_account_legacy(
-            did,
-            Some(AvailabilityFlags {
-                include_taken_down: None,
-                include_deactivated: Some(true),
-            }),
-        )
-        .await?;
+    pub async fn is_account_activated(&self, did: &str) -> Result<bool> {
+        let account = self
+            .get_account(
+                did,
+                Some(AvailabilityFlags {
+                    include_taken_down: None,
+                    include_deactivated: Some(true),
+                }),
+            )
+            .await?;
         if let Some(account) = account {
             Ok(account.deactivated_at.is_none())
         } else {
@@ -155,16 +146,18 @@ impl AccountManager {
     }
 
     pub async fn get_did_for_actor(
-        handle_or_did: &String,
+        &self,
+        handle_or_did: &str,
         flags: Option<AvailabilityFlags>,
     ) -> Result<Option<String>> {
-        match Self::get_account_legacy(handle_or_did, flags).await {
+        match self.get_account(handle_or_did, flags).await {
             Ok(Some(got)) => Ok(Some(got.did)),
             _ => Ok(None),
         }
     }
 
-    pub async fn create_account(opts: CreateAccountOpts, db: &DbConn) -> Result<(String, String)> {
+    pub async fn create_account(&self, opts: CreateAccountOpts) -> Result<(String, String)> {
+        let db = self.db.clone();
         let CreateAccountOpts {
             did,
             handle,
@@ -181,11 +174,11 @@ impl AccountManager {
         };
         // Should be a global var so this only happens once
         let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX")?;
         let secret_key =
-            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+            SecretKey::from_slice(&Result::unwrap(hex::decode(private_key.as_bytes())))?;
         let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-        let (access_jwt, refresh_jwt) = auth::create_tokens(auth::CreateTokensOpts {
+        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did: did.clone(),
             jwt_key,
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
@@ -197,65 +190,67 @@ impl AccountManager {
         let now = rsky_common::now();
 
         if let Some(invite_code) = invite_code.clone() {
-            invite::ensure_invite_is_available(invite_code, db).await?;
+            invite::ensure_invite_is_available(invite_code, db.as_ref()).await?;
         }
-        account::register_actor(did.clone(), handle, deactivated, db).await?;
+        account::register_actor(did.clone(), handle, deactivated, db.as_ref()).await?;
         if let (Some(email), Some(password_encrypted)) = (email, password_encrypted) {
-            account::register_account(did.clone(), email, password_encrypted, db).await?;
+            account::register_account(did.clone(), email, password_encrypted, db.as_ref()).await?;
         }
-        invite::record_invite_use(did.clone(), invite_code, now, db).await?;
-        auth::store_refresh_token(refresh_payload, None, db).await?;
-        repo::update_root(did, repo_cid, repo_rev, db).await?;
+        invite::record_invite_use(did.clone(), invite_code, now, db.as_ref()).await?;
+        auth::store_refresh_token(refresh_payload, None, db.as_ref()).await?;
+        repo::update_root(did, repo_cid, repo_rev, db.as_ref()).await?;
         Ok((access_jwt, refresh_jwt))
     }
 
     pub async fn get_account_admin_status(
-        did: &String,
+        &self,
+        did: &str,
     ) -> Result<Option<GetAccountAdminStatusOutput>> {
-        account::get_account_admin_status(did).await
+        let db = self.db.clone();
+        account::get_account_admin_status(did, db.as_ref()).await
     }
 
-    #[deprecated]
-    pub fn update_repo_root_legacy(did: String, cid: Cid, rev: String) -> Result<()> {
-        Ok(repo::update_root_legacy(did, cid, rev)?)
+    pub async fn update_repo_root(&self, did: String, cid: Cid, rev: String) -> Result<()> {
+        let db = self.db.clone();
+        repo::update_root(did, cid, rev, db.as_ref()).await
     }
 
-    pub async fn update_repo_root(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
-        Ok(repo::update_root(did, cid, rev, db).await?)
+    pub async fn delete_account(&self, did: &str) -> Result<()> {
+        let db = self.db.clone();
+        account::delete_account(did, db.as_ref()).await
     }
 
-    pub async fn delete_account(did: &String) -> Result<()> {
-        account::delete_account(did).await
-    }
-
-    pub async fn takedown_account(did: &String, takedown: StatusAttr) -> Result<()> {
+    pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<()> {
         (_, _) = try_join!(
-            account::update_account_takedown_status(did, takedown),
-            auth::revoke_refresh_tokens_by_did(did)
+            account::update_account_takedown_status(did, takedown, self.db.as_ref()),
+            auth::revoke_refresh_tokens_by_did(did, self.db.as_ref())
         )?;
         Ok(())
     }
 
     // @NOTE should always be paired with a sequenceHandle().
-    pub async fn update_handle(did: &String, handle: &String) -> Result<()> {
-        account::update_handle(did, handle).await
+    pub async fn update_handle(&self, did: &str, handle: &str) -> Result<()> {
+        let db = self.db.clone();
+        account::update_handle(did, handle, db.as_ref()).await
     }
 
-    pub async fn deactivate_account(did: &String, delete_after: Option<String>) -> Result<()> {
-        account::deactivate_account(did, delete_after).await
+    pub async fn deactivate_account(&self, did: &str, delete_after: Option<String>) -> Result<()> {
+        account::deactivate_account(did, delete_after, self.db.as_ref()).await
     }
 
-    pub async fn activate_account(did: &String) -> Result<()> {
-        account::activate_account(did).await
+    pub async fn activate_account(&self, did: &str) -> Result<()> {
+        let db = self.db.clone();
+        account::activate_account(did, db.as_ref()).await
     }
 
-    pub async fn get_account_status(handle_or_did: &String) -> Result<AccountStatus> {
-        let got = account::get_account_legacy(
+    pub async fn get_account_status(&self, handle_or_did: &str) -> Result<AccountStatus> {
+        let got = account::get_account(
             handle_or_did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true),
             }),
+            self.db.as_ref(),
         )
         .await?;
         let res = account::format_account_status(got);
@@ -267,43 +262,15 @@ impl AccountManager {
 
     // Auth
     // ----------
-    #[deprecated]
-    pub async fn create_session_legacy(
-        did: String,
-        app_password_name: Option<String>,
-    ) -> Result<(String, String)> {
-        let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-        let secret_key =
-            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-        let scope = if app_password_name.is_none() {
-            AuthScope::Access
-        } else {
-            AuthScope::AppPass
-        };
-        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
-            did,
-            jwt_key,
-            service_did: env::var("PDS_SERVICE_DID").unwrap(),
-            scope: Some(scope),
-            jti: None,
-            expires_in: None,
-        })?;
-        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
-        auth::store_refresh_token_legacy(refresh_payload, app_password_name).await?;
-        Ok((access_jwt, refresh_jwt))
-    }
-
     pub async fn create_session(
+        &self,
         did: String,
         app_password_name: Option<String>,
-        db: &DbConn,
     ) -> Result<(String, String)> {
+        let db = self.db.clone();
         let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-        let secret_key =
-            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX")?;
+        let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes())?)?;
         let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
         let scope = if app_password_name.is_none() {
             AuthScope::Access
@@ -319,12 +286,12 @@ impl AccountManager {
             expires_in: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
-        auth::store_refresh_token(refresh_payload, app_password_name, db).await?;
+        auth::store_refresh_token(refresh_payload, app_password_name, db.as_ref()).await?;
         Ok((access_jwt, refresh_jwt))
     }
 
-    pub async fn rotate_refresh_token(id: &String) -> Result<Option<(String, String)>> {
-        let token = auth::get_refresh_token(id).await?;
+    pub async fn rotate_refresh_token(&self, id: &String) -> Result<Option<(String, String)>> {
+        let token = auth::get_refresh_token(id, self.db.as_ref()).await?;
         if let Some(token) = token {
             let system_time = SystemTime::now();
             let dt: DateTime<UtcOffset> = system_time.into();
@@ -332,7 +299,7 @@ impl AccountManager {
 
             // take the chance to tidy all of a user's expired tokens
             // does not need to be transactional since this is just best-effort
-            auth::delete_expired_refresh_tokens(&token.did, now).await?;
+            auth::delete_expired_refresh_tokens(&token.did, now, self.db.as_ref()).await?;
 
             // Shorten the refresh token lifespan down from its
             // original expiration time to its revocation grace period.
@@ -353,9 +320,7 @@ impl AccountManager {
 
             // Determine the next refresh token id: upon refresh token
             // reuse you always receive a refresh token with the same id.
-            let next_id = token
-                .next_id
-                .unwrap_or_else(|| auth::get_refresh_token_id());
+            let next_id = token.next_id.unwrap_or_else(auth::get_refresh_token_id);
 
             let secp = Secp256k1::new();
             let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
@@ -377,17 +342,24 @@ impl AccountManager {
             })?;
             let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
             match try_join!(
-                auth::add_refresh_grace_period(RefreshGracePeriodOpts {
-                    id: id.clone(),
-                    expires_at: from_micros_to_str(expires_at),
-                    next_id
-                }),
-                auth::store_refresh_token_legacy(refresh_payload, token.app_password_name)
+                auth::add_refresh_grace_period(
+                    RefreshGracePeriodOpts {
+                        id: id.clone(),
+                        expires_at: from_micros_to_str(expires_at),
+                        next_id
+                    },
+                    self.db.as_ref()
+                ),
+                auth::store_refresh_token(
+                    refresh_payload,
+                    token.app_password_name,
+                    self.db.as_ref()
+                )
             ) {
                 Ok(_) => Ok(Some((access_jwt, refresh_jwt))),
                 Err(e) => match e.downcast_ref() {
                     Some(AuthHelperError::ConcurrentRefresh) => {
-                        Box::pin(Self::rotate_refresh_token(id)).await
+                        Box::pin(self.rotate_refresh_token(id)).await
                     }
                     _ => Err(e),
                 },
@@ -397,177 +369,190 @@ impl AccountManager {
         }
     }
 
-    pub async fn revoke_refresh_token(id: String) -> Result<bool> {
-        auth::revoke_refresh_token(id).await
+    pub async fn revoke_refresh_token(&self, id: String) -> Result<bool> {
+        auth::revoke_refresh_token(id, self.db.as_ref()).await
     }
+
     // Invites
     // ----------
 
-    pub async fn ensure_invite_is_available(code: String) -> Result<()> {
-        invite::ensure_invite_is_available_legacy(code).await
-    }
-
     pub async fn create_invite_codes(
+        &self,
         to_create: Vec<AccountCodes>,
         use_count: i32,
-        db: &DbConn,
     ) -> Result<()> {
-        invite::create_invite_codes(to_create, use_count, db).await
+        let db = self.db.clone();
+        invite::create_invite_codes(to_create, use_count, db.as_ref()).await
     }
 
     pub async fn create_account_invite_codes(
-        for_account: &String,
+        &self,
+        for_account: &str,
         codes: Vec<String>,
         expected_total: usize,
         disabled: bool,
     ) -> Result<Vec<CodeDetail>> {
-        invite::create_account_invite_codes(for_account, codes, expected_total, disabled).await
+        invite::create_account_invite_codes(
+            for_account,
+            codes,
+            expected_total,
+            disabled,
+            self.db.as_ref(),
+        )
+        .await
     }
 
-    pub async fn get_account_invite_codes(did: &String) -> Result<Vec<CodeDetail>> {
-        invite::get_account_invite_codes(did).await
+    pub async fn get_account_invite_codes(&self, did: &str) -> Result<Vec<CodeDetail>> {
+        let db = self.db.clone();
+        invite::get_account_invite_codes(did, db.as_ref()).await
     }
 
     pub async fn get_invited_by_for_accounts(
-        dids: Vec<&String>,
+        &self,
+        dids: Vec<String>,
     ) -> Result<BTreeMap<String, CodeDetail>> {
-        invite::get_invited_by_for_accounts(dids).await
+        let db = self.db.clone();
+        invite::get_invited_by_for_accounts(dids, db.as_ref()).await
     }
 
-    pub async fn get_invite_codes_uses(
-        codes: Vec<String>,
-    ) -> Result<BTreeMap<String, Vec<CodeUse>>> {
-        invite::get_invite_codes_uses(codes).await
+    pub async fn set_account_invites_disabled(&self, did: &str, disabled: bool) -> Result<()> {
+        invite::set_account_invites_disabled(did, disabled, self.db.as_ref()).await
     }
 
-    pub async fn set_account_invites_disabled(did: &String, disabled: bool) -> Result<()> {
-        invite::set_account_invites_disabled(did, disabled).await
-    }
-
-    pub async fn disable_invite_codes(opts: DisableInviteCodesOpts) -> Result<()> {
-        invite::disable_invite_codes(opts).await
+    pub async fn disable_invite_codes(&self, opts: DisableInviteCodesOpts) -> Result<()> {
+        invite::disable_invite_codes(opts, self.db.as_ref()).await
     }
 
     // Passwords
     // ----------
 
-    pub async fn create_app_password(did: String, name: String) -> Result<CreateAppPasswordOutput> {
-        password::create_app_password(did, name).await
+    pub async fn create_app_password(
+        &self,
+        did: String,
+        name: String,
+    ) -> Result<CreateAppPasswordOutput> {
+        password::create_app_password(did, name, self.db.as_ref()).await
     }
 
-    pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
-        password::list_app_passwords(did).await
+    pub async fn list_app_passwords(&self, did: &str) -> Result<Vec<(String, String)>> {
+        password::list_app_passwords(did, self.db.as_ref()).await
     }
 
-    #[deprecated]
-    pub async fn verify_account_password_legacy(
-        did: &String,
-        password_str: &String,
-    ) -> Result<bool> {
-        password::verify_account_password_legacy(did, password_str).await
-    }
-
-    pub async fn verify_account_password(
-        did: &String,
-        password_str: &String,
-        db: &DbConn,
-    ) -> Result<bool> {
-        password::verify_account_password(did, password_str, db).await
-    }
-
-    #[deprecated]
-    pub async fn verify_app_password_legacy(
-        did: &String,
-        password_str: &String,
-    ) -> Result<Option<String>> {
-        password::verify_app_password_legacy(did, password_str).await
+    pub async fn verify_account_password(&self, did: &str, password_str: &String) -> Result<bool> {
+        let db = self.db.clone();
+        password::verify_account_password(did, password_str, db.as_ref()).await
     }
 
     pub async fn verify_app_password(
-        did: &String,
-        password_str: &String,
-        db: &DbConn,
+        &self,
+        did: &str,
+        password_str: &str,
     ) -> Result<Option<String>> {
-        password::verify_app_password(did, password_str, db).await
+        let db = self.db.clone();
+        password::verify_app_password(did, password_str, db.as_ref()).await
     }
 
-    pub async fn reset_password(opts: ResetPasswordOpts) -> Result<()> {
+    pub async fn reset_password(&self, opts: ResetPasswordOpts) -> Result<()> {
+        let db = self.db.clone();
         let did = email_token::assert_valid_token_and_find_did(
             EmailTokenPurpose::ResetPassword,
             &opts.token,
             None,
+            db.as_ref(),
         )
         .await?;
-        Self::update_account_password(UpdateAccountPasswordOpts {
+        self.update_account_password(UpdateAccountPasswordOpts {
             did,
             password: opts.password,
         })
         .await
     }
 
-    pub async fn update_account_password(opts: UpdateAccountPasswordOpts) -> Result<()> {
+    pub async fn update_account_password(&self, opts: UpdateAccountPasswordOpts) -> Result<()> {
+        let db = self.db.clone();
         let UpdateAccountPasswordOpts { did, .. } = opts;
         let password_encrypted = password::gen_salt_and_hash(opts.password)?;
         try_join!(
-            password::update_user_password(UpdateUserPasswordOpts {
-                did: did.clone(),
-                password_encrypted
-            }),
-            email_token::delete_email_token(&did, EmailTokenPurpose::ResetPassword),
-            auth::revoke_refresh_tokens_by_did(&did)
+            password::update_user_password(
+                UpdateUserPasswordOpts {
+                    did: did.clone(),
+                    password_encrypted
+                },
+                self.db.as_ref()
+            ),
+            email_token::delete_email_token(&did, EmailTokenPurpose::ResetPassword, db.as_ref()),
+            auth::revoke_refresh_tokens_by_did(&did, self.db.as_ref())
         )?;
         Ok(())
     }
 
-    pub async fn revoke_app_password(did: String, name: String) -> Result<()> {
+    pub async fn revoke_app_password(&self, did: String, name: String) -> Result<()> {
         try_join!(
-            password::delete_app_password(&did, &name),
-            auth::revoke_app_password_refresh_token(&did, &name)
+            password::delete_app_password(&did, &name, self.db.as_ref()),
+            auth::revoke_app_password_refresh_token(&did, &name, self.db.as_ref())
         )?;
         Ok(())
     }
 
     // Email Tokens
     // ----------
-    pub async fn confirm_email<'em>(opts: ConfirmEmailOpts<'em>) -> Result<()> {
+    pub async fn confirm_email<'em>(&self, opts: ConfirmEmailOpts<'em>) -> Result<()> {
+        let db = self.db.clone();
         let ConfirmEmailOpts { did, token } = opts;
-        email_token::assert_valid_token(did, EmailTokenPurpose::ConfirmEmail, token, None).await?;
+        email_token::assert_valid_token(
+            did,
+            EmailTokenPurpose::ConfirmEmail,
+            token,
+            None,
+            db.as_ref(),
+        )
+        .await?;
         let now = rsky_common::now();
         try_join!(
-            email_token::delete_email_token(did, EmailTokenPurpose::ConfirmEmail),
-            account::set_email_confirmed_at(did, now)
+            email_token::delete_email_token(did, EmailTokenPurpose::ConfirmEmail, db.as_ref()),
+            account::set_email_confirmed_at(did, now, self.db.as_ref())
         )?;
         Ok(())
     }
 
-    pub async fn update_email(opts: UpdateEmailOpts) -> Result<()> {
+    pub async fn update_email(&self, opts: UpdateEmailOpts) -> Result<()> {
+        let db = self.db.clone();
         let UpdateEmailOpts { did, email } = opts;
         try_join!(
-            account::update_email(&did, &email),
-            email_token::delete_all_email_tokens(&did)
+            account::update_email(&did, &email, db.as_ref()),
+            email_token::delete_all_email_tokens(&did, db.as_ref())
         )?;
         Ok(())
     }
 
     pub async fn assert_valid_email_token(
-        did: &String,
+        &self,
+        did: &str,
         purpose: EmailTokenPurpose,
-        token: &String,
+        token: &str,
     ) -> Result<()> {
-        email_token::assert_valid_token(did, purpose, token, None).await
+        let db = self.db.clone();
+        email_token::assert_valid_token(did, purpose, token, None, db.as_ref()).await
     }
 
     pub async fn assert_valid_email_token_and_cleanup(
-        did: &String,
+        &self,
+        did: &str,
         purpose: EmailTokenPurpose,
-        token: &String,
+        token: &str,
     ) -> Result<()> {
-        email_token::assert_valid_token(did, purpose, token, None).await?;
-        email_token::delete_email_token(did, purpose).await
+        let db = self.db.clone();
+        email_token::assert_valid_token(did, purpose, token, None, db.as_ref()).await?;
+        email_token::delete_email_token(did, purpose, db.as_ref()).await
     }
 
-    pub async fn create_email_token(did: &String, purpose: EmailTokenPurpose) -> Result<String> {
-        email_token::create_email_token(did, purpose).await
+    pub async fn create_email_token(
+        &self,
+        did: &str,
+        purpose: EmailTokenPurpose,
+    ) -> Result<String> {
+        let db = self.db.clone();
+        email_token::create_email_token(did, purpose, db.as_ref()).await
     }
 }
 
@@ -678,3 +663,24 @@ impl TokenStore for AccountManager {
 }
 
 pub mod helpers;
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccountManager {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.rocket().state::<SharedAccountManager>() {
+            None => Outcome::Error((Status::InternalServerError, ())),
+            Some(shared_account_manager) => {
+                let db = req.guard::<DbConn>().await.unwrap();
+                let account_manager_creator = shared_account_manager.account_manager.read().await;
+                let account_manager = account_manager_creator(Arc::new(db));
+                Outcome::Success(account_manager)
+            }
+        }
+    }
+}
+
+pub struct SharedAccountManager {
+    pub account_manager: RwLock<AccountManagerCreator>,
+}

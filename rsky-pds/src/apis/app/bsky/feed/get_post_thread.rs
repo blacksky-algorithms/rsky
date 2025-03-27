@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
@@ -53,6 +54,7 @@ pub async fn inner_get_post_thread(
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
     let requester: String = match auth.access.credentials {
         None => "".to_string(),
@@ -68,6 +70,7 @@ pub async fn inner_get_post_thread(
                 s3_config,
                 state_local_viewer,
                 db,
+                account_manager,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -89,7 +92,7 @@ pub async fn inner_get_post_thread(
                                 db,
                             );
                             let local_viewer_lock = state_local_viewer.local_viewer.read().await;
-                            let local_viewer = local_viewer_lock(actor_store);
+                            let local_viewer = local_viewer_lock(actor_store, account_manager);
                             let local = read_after_write_not_found(
                                 local_viewer,
                                 uri,
@@ -109,7 +112,7 @@ pub async fn inner_get_post_thread(
                         _ => Err(err),
                     }
                 } else {
-                    return Err(err);
+                    Err(err)
                 }
             }
             _ => Err(err),
@@ -133,6 +136,7 @@ pub async fn get_post_thread(
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, ApiError> {
     let depth = depth.unwrap_or(6);
     let parentHeight = parentHeight.unwrap_or(80);
@@ -153,6 +157,7 @@ pub async fn get_post_thread(
             state_local_viewer,
             cfg,
             db,
+            account_manager,
         )
         .await
         {

@@ -20,6 +20,7 @@ async fn inner_update_handle(
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     auth: AccessStandardCheckTakedown,
+    account_manager: AccountManager,
 ) -> Result<()> {
     let UpdateHandleInput { handle } = body.into_inner();
     let requester = auth.access.credentials.unwrap().did.unwrap();
@@ -35,14 +36,15 @@ async fn inner_update_handle(
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
 
-    let account = AccountManager::get_account_legacy(
-        &handle,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &handle,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await?;
 
     match account {
         Some(account) if account.did != requester => bail!("Handle already taken: {handle}"),
@@ -55,7 +57,7 @@ async fn inner_update_handle(
             plc_client
                 .update_handle(&requester, &signing_key, &handle)
                 .await?;
-            AccountManager::update_handle(&requester, &handle).await?;
+            account_manager.update_handle(&requester, &handle).await?;
         }
     }
     let mut lock = sequencer.sequencer.write().await;
@@ -88,8 +90,18 @@ pub async fn update_handle(
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     auth: AccessStandardCheckTakedown,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_update_handle(body, sequencer, server_config, id_resolver, auth).await {
+    match inner_update_handle(
+        body,
+        sequencer,
+        server_config,
+        id_resolver,
+        auth,
+        account_manager,
+    )
+    .await
+    {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

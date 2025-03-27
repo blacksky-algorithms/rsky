@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::crawlers::Crawlers;
-use crate::db::establish_connection;
+use crate::db::establish_connection_for_sequencer;
 use crate::models;
 use crate::sequencer::events::{
     format_seq_account_evt, format_seq_commit, format_seq_handle_update, format_seq_identity_evt,
@@ -66,7 +66,7 @@ impl Sequencer {
 
     pub async fn curr(&self) -> Result<Option<i64>> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-        let conn = &mut establish_connection()?;
+        let conn = &mut establish_connection_for_sequencer()?;
 
         let got = RepoSeqSchema::repo_seq
             .select(models::RepoSeq::as_select())
@@ -81,7 +81,7 @@ impl Sequencer {
 
     pub async fn next_seq(&self, cursor: i64) -> Result<Option<models::RepoSeq>> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-        let conn = &mut establish_connection()?;
+        let conn = &mut establish_connection_for_sequencer()?;
 
         let got = RepoSeqSchema::repo_seq
             .filter(RepoSeqSchema::seq.gt(cursor))
@@ -94,7 +94,7 @@ impl Sequencer {
 
     pub async fn earliest_after_time(&self, time: String) -> Result<Option<models::RepoSeq>> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-        let conn = &mut establish_connection()?;
+        let conn = &mut establish_connection_for_sequencer()?;
 
         let got = RepoSeqSchema::repo_seq
             .filter(RepoSeqSchema::sequencedAt.ge(time))
@@ -107,7 +107,7 @@ impl Sequencer {
 
     pub async fn request_seq_range(&self, opts: RequestSeqRangeOpts) -> Result<Vec<SeqEvt>> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-        let conn = &mut establish_connection()?;
+        let conn = &mut establish_connection_for_sequencer()?;
 
         let RequestSeqRangeOpts {
             earliest_seq,
@@ -201,7 +201,7 @@ impl Sequencer {
 
     pub async fn sequence_evt(&mut self, evt: models::RepoSeq) -> Result<i64> {
         use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-        let conn = &mut establish_connection()?;
+        let conn = &mut establish_connection_for_sequencer()?;
 
         let res = insert_into(RepoSeqSchema::repo_seq)
             .values((
@@ -306,7 +306,7 @@ impl Stream for Sequencer {
 
 pub async fn delete_all_for_user(did: &String, excluding_seqs: Option<Vec<i64>>) -> Result<()> {
     use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
-    let conn = &mut establish_connection()?;
+    let conn = &mut establish_connection_for_sequencer()?;
     let excluding_seqs = excluding_seqs.unwrap_or_else(|| vec![]);
 
     let mut builder = delete(RepoSeqSchema::repo_seq)

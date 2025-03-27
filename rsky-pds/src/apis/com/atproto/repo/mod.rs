@@ -5,15 +5,17 @@ use anyhow::{bail, Result};
 pub async fn assert_repo_availability(
     did: &String,
     is_admin_of_self: bool,
+    account_manager: &AccountManager,
 ) -> Result<ActorAccount> {
-    let account = AccountManager::get_account_legacy(
-        did,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: Some(true),
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
     match account {
         None => bail!("RepoNotFound: Could not find repo for DID: {did}"),
         Some(account) => {

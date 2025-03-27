@@ -1,7 +1,6 @@
 use crate::account_manager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
-use crate::db::DbConn;
 use account_manager::AccountManager;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{
@@ -16,8 +15,8 @@ use rsky_lexicon::com::atproto::server::{
 )]
 pub async fn create_invite_code(
     body: Json<CreateInviteCodeInput>,
-    db: DbConn,
     _auth: AdminToken,
+    account_manager: AccountManager,
 ) -> Result<Json<CreateInviteCodeOutput>, ApiError> {
     // @TODO: verify admin auth token
     let CreateInviteCodeInput {
@@ -26,15 +25,15 @@ pub async fn create_invite_code(
     } = body.into_inner();
     let code = super::gen_invite_code();
 
-    match AccountManager::create_invite_codes(
-        vec![AccountCodes {
-            codes: vec![code.clone()],
-            account: for_account.unwrap_or("admin".to_owned()),
-        }],
-        use_count,
-        &db,
-    )
-    .await
+    match account_manager
+        .create_invite_codes(
+            vec![AccountCodes {
+                codes: vec![code.clone()],
+                account: for_account.unwrap_or("admin".to_owned()),
+            }],
+            use_count,
+        )
+        .await
     {
         Ok(_) => Ok(Json(CreateInviteCodeOutput { code })),
         Err(error) => {

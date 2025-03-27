@@ -27,11 +27,12 @@ async fn inner_list_records(
     reverse: bool,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ListRecordsOutput> {
     if limit > 100 {
         bail!("Error: limit can not be greater than 100")
     }
-    let did = AccountManager::get_did_for_actor(&repo, None).await?;
+    let did = account_manager.get_did_for_actor(&repo, None).await?;
     if let Some(did) = did {
         let mut actor_store =
             ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
@@ -91,12 +92,22 @@ pub async fn list_records(
     reverse: Option<bool>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<ListRecordsOutput>, ApiError> {
     let limit = limit.unwrap_or(50);
     let reverse = reverse.unwrap_or(false);
 
     match inner_list_records(
-        repo, collection, limit, cursor, rkeyStart, rkeyEnd, reverse, s3_config, db,
+        repo,
+        collection,
+        limit,
+        cursor,
+        rkeyStart,
+        rkeyEnd,
+        reverse,
+        s3_config,
+        db,
+        account_manager,
     )
     .await
     {

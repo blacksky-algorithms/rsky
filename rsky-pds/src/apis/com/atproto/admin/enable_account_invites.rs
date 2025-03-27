@@ -14,9 +14,13 @@ use rsky_lexicon::com::atproto::admin::EnableAccountInvitesInput;
 pub async fn enable_account_invites(
     body: Json<EnableAccountInvitesInput>,
     _auth: Moderator,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let EnableAccountInvitesInput { account, .. } = body.into_inner();
-    match AccountManager::set_account_invites_disabled(&account, false).await {
+    match account_manager
+        .set_account_invites_disabled(&account, false)
+        .await
+    {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

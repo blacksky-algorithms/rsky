@@ -14,9 +14,12 @@ use rsky_lexicon::com::atproto::admin::UpdateAccountPasswordInput;
 pub async fn update_account_password(
     body: Json<UpdateAccountPasswordInput>,
     _auth: AdminToken,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let UpdateAccountPasswordInput { did, password } = body.into_inner();
-    match AccountManager::update_account_password(UpdateAccountPasswordOpts { did, password }).await
+    match account_manager
+        .update_account_password(UpdateAccountPasswordOpts { did, password })
+        .await
     {
         Ok(_) => Ok(()),
         Err(error) => {

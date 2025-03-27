@@ -67,7 +67,7 @@ async fn inner_upload_blob(
     if !records_for_blob.is_empty() {
         actor_store
             .blob
-            .verify_blob_and_make_permanent_legacy(PreparedBlobRef {
+            .verify_blob_and_make_permanent(PreparedBlobRef {
                 cid: blobref.get_cid()?,
                 mime_type: blobref.get_mime_type().to_string(),
                 constraints: BlobConstraint {

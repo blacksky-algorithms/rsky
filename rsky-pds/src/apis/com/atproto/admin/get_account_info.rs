@@ -9,17 +9,20 @@ use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::admin::AccountView;
 use rsky_syntax::handle::INVALID_HANDLE;
 
-async fn inner_get_account_info(did: String) -> Result<AccountView> {
+async fn inner_get_account_info(
+    did: String,
+    account_manager: AccountManager,
+) -> Result<AccountView> {
     let (account, invites, invited_by) = try_join!(
-        AccountManager::get_account_legacy(
+        account_manager.get_account(
             &did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true)
             })
         ),
-        AccountManager::get_account_invite_codes(&did),
-        AccountManager::get_invited_by_for_accounts(vec![&did])
+        account_manager.get_account_invite_codes(&did),
+        account_manager.get_invited_by_for_accounts(vec![did.clone()])
     )?;
     if let Some(account) = account {
         let manages_own_invites = env_str("PDS_ENTRYWAY_URL").is_none();
@@ -56,8 +59,9 @@ async fn inner_get_account_info(did: String) -> Result<AccountView> {
 pub async fn get_account_info(
     did: String,
     _auth: Moderator,
+    account_manager: AccountManager,
 ) -> Result<Json<AccountView>, ApiError> {
-    match inner_get_account_info(did).await {
+    match inner_get_account_info(did, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

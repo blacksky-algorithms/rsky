@@ -13,11 +13,12 @@ use rsky_lexicon::com::atproto::server::RevokeAppPasswordInput;
 pub async fn revoke_app_password(
     body: Json<RevokeAppPasswordInput>,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let RevokeAppPasswordInput { name } = body.into_inner();
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
-    match AccountManager::revoke_app_password(requester, name).await {
+    match account_manager.revoke_app_password(requester, name).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

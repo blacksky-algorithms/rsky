@@ -15,11 +15,10 @@ impl Debug for DbConn {
     }
 }
 
-// @TODO: Deprecate and replace with DbConn
 #[tracing::instrument(skip_all)]
-pub fn establish_connection() -> Result<PgConnection> {
+pub fn establish_connection_for_sequencer() -> Result<PgConnection> {
     dotenv().ok();
-    tracing::debug!("Establishing database connection");
+    tracing::debug!("Establishing database connection for Sequencer");
     let database_url = env::var("DATABASE_URL").unwrap_or("".into());
     let result = PgConnection::establish(&database_url).map_err(|error| {
         let context = format!("Error connecting to {database_url:?}");

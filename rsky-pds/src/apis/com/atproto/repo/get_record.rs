@@ -20,8 +20,9 @@ async fn inner_get_record(
     s3_config: &State<SdkConfig>,
     db: DbConn,
     req: ProxyRequest<'_>,
+    account_manager: AccountManager,
 ) -> Result<GetRecordOutput> {
-    let did = AccountManager::get_did_for_actor(&repo, None).await?;
+    let did = account_manager.get_did_for_actor(&repo, None).await?;
 
     // fetch from pds if available, if not then fetch from appview
     if let Some(did) = did {
@@ -74,8 +75,20 @@ pub async fn get_record(
     s3_config: &State<SdkConfig>,
     db: DbConn,
     req: ProxyRequest<'_>,
+    account_manager: AccountManager,
 ) -> Result<Json<GetRecordOutput>, ApiError> {
-    match inner_get_record(repo, collection, rkey, cid, s3_config, db, req).await {
+    match inner_get_record(
+        repo,
+        collection,
+        rkey,
+        cid,
+        s3_config,
+        db,
+        req,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

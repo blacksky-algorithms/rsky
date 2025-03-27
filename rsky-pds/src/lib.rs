@@ -30,7 +30,7 @@ pub mod schema;
 pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
-use crate::account_manager::AccountManager;
+use crate::account_manager::{AccountManager, SharedAccountManager};
 use crate::config::env_to_cfg;
 use crate::crawlers::Crawlers;
 use crate::db::DbConn;
@@ -68,13 +68,11 @@ lazy_static! {
     pub static ref EVENT_EMITTER: RwLock<EventEmitter> = RwLock::new(EventEmitter::new());
 }
 
-#[macro_use]
 extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
 use crate::oauth::provider::build_oauth_provider;
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use diesel::prelude::*;
 use diesel::sql_types::Int4;
 use dotenvy::dotenv;
 use rocket::data::{Limits, ToByteUnit};
@@ -85,7 +83,6 @@ use rocket::figment::{
 };
 use rocket::http::Header;
 use rocket::http::Status;
-use rocket::request::local_cache;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
@@ -115,7 +112,7 @@ async fn index() -> &'static str {
     | (__) || (__) || :\/: |
     | '--'P|| '--'D|| '--'S|
     `------'`------'`------'
-
+    
     This is an atproto [https://atproto.com] Personal Data Server (PDS) running the rsky-pds codebase [https://github.com/blacksky-algorithms/rsky]
 
     Most API routes are under /xrpc/
@@ -283,6 +280,9 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
+    let account_manager = SharedAccountManager {
+        account_manager: RwLock::new(AccountManager::creator()),
+    };
 
     //Setup OAuth Provider
     let oauth_provider = build_oauth_provider();
@@ -315,6 +315,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(local_viewer)
         .manage(app_view_agent)
         .manage(shared_oauth_provider)
+        .manage(account_manager)
 }
 
 fn pds_routes() -> Vec<Route> {

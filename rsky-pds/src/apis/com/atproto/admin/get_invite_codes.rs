@@ -1,7 +1,7 @@
-use crate::account_manager::helpers::invite::{get_invite_codes_uses, CodeDetail};
+use crate::account_manager::helpers::invite::{get_invite_codes_uses_v2, CodeDetail};
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
-use crate::db::establish_connection;
+use crate::db::DbConn;
 use crate::models;
 use anyhow::{anyhow, bail, Result};
 use diesel::dsl::sql;
@@ -124,7 +124,7 @@ impl TimeCodeKeySet {
         }
     }
 
-    pub async fn paginate(&self, opts: KeySetPaginateOpts) -> Result<Vec<CodeDetail>> {
+    pub async fn paginate(&self, opts: KeySetPaginateOpts, db: &DbConn) -> Result<Vec<CodeDetail>> {
         let KeySetPaginateOpts {
             limit,
             cursor,
@@ -133,7 +133,6 @@ impl TimeCodeKeySet {
         let direction = direction.unwrap_or("desc".to_string());
 
         use crate::schema::pds::invite_code::dsl as InviteCodeSchema;
-        let conn = &mut establish_connection()?;
 
         let labeled = self.unpack(cursor)?;
 
@@ -185,9 +184,9 @@ impl TimeCodeKeySet {
             }
         }
 
-        let res = builder.load(conn)?;
+        let res = db.run(|conn| builder.load(conn)).await?;
         let codes: Vec<String> = res.iter().map(|row| row.code.clone()).collect();
-        let mut uses = get_invite_codes_uses(codes).await?;
+        let mut uses = get_invite_codes_uses_v2(codes, db).await?;
 
         Ok(res
             .into_iter()
@@ -300,16 +299,20 @@ async fn inner_get_invite_codes(
     sort: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
+    db: DbConn,
 ) -> Result<GetInviteCodesOutput> {
     let (res, result_cursor) = match sort {
         Some(sort) if sort == "recent" => {
             let keyset = TimeCodeKeySet::new();
             let result = keyset
-                .paginate(KeySetPaginateOpts {
-                    limit,
-                    cursor,
-                    direction: None,
-                })
+                .paginate(
+                    KeySetPaginateOpts {
+                        limit,
+                        cursor,
+                        direction: None,
+                    },
+                    &db,
+                )
                 .await?;
             let time_code_results = result
                 .iter()
@@ -339,8 +342,9 @@ pub async fn get_invite_codes(
     limit: Option<i64>,
     cursor: Option<String>,
     _auth: Moderator,
+    db: DbConn,
 ) -> Result<Json<GetInviteCodesOutput>, ApiError> {
-    match inner_get_invite_codes(sort, limit, cursor).await {
+    match inner_get_invite_codes(sort, limit, cursor, db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("Internal Error: {error}");

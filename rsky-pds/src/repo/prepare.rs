@@ -85,8 +85,8 @@ pub fn blobs_for_write(record: RepoRecord, validate: bool) -> anyhow::Result<Vec
 }
 
 pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) -> Vec<FoundBlobRef> {
-    let layer = layer.unwrap_or_else(|| 0);
-    let path = path.unwrap_or_else(|| vec![]);
+    let layer = layer.unwrap_or(0);
+    let path = path.unwrap_or_else(std::vec::Vec::new);
     if layer > 32 {
         return vec![];
     }
@@ -149,7 +149,7 @@ pub fn set_collection_name(
     mut record: RepoRecord,
     validate: bool,
 ) -> anyhow::Result<RepoRecord> {
-    if record.get("$type").is_none() {
+    if !record.contains_key("$type") {
         record.insert(
             "$type".to_string(),
             Lex::Ipld(Ipld::Json(JsonValue::String(collection.clone()))),
@@ -180,7 +180,7 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> anyhow::Result<PreparedC
         validate,
         ..
     } = opts;
-    let validate = validate.unwrap_or_else(|| true);
+    let validate = validate.unwrap_or(true);
 
     let record = set_collection_name(&collection, opts.record, validate)?;
     if validate {
@@ -210,7 +210,7 @@ pub async fn prepare_update(opts: PrepareUpdateOpts) -> anyhow::Result<PreparedC
         validate,
         ..
     } = opts;
-    let validate = validate.unwrap_or_else(|| true);
+    let validate = validate.unwrap_or(true);
 
     let record = set_collection_name(&collection, opts.record, validate)?;
     if validate {

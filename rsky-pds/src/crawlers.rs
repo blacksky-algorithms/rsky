@@ -32,7 +32,7 @@ impl Crawlers {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("timestamp in micros since UNIX epoch")
             .as_micros() as usize;
-        if now - &self.last_notified < NOTIFY_THRESHOLD as usize {
+        if now - self.last_notified < NOTIFY_THRESHOLD as usize {
             return Ok(());
         }
         let _ = stream::iter(self.crawlers.clone())

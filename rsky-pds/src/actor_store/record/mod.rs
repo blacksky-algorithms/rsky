@@ -1,6 +1,7 @@
-use crate::db::establish_connection;
+use crate::db::DbConn;
 use crate::models::{models, Backlink, Record};
 use anyhow::{bail, Result};
+use diesel::result::Error;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use lexicon_cid::Cid;
@@ -15,6 +16,7 @@ use rsky_syntax::did::ensure_valid_did;
 use serde_json::Value as JsonValue;
 use std::env;
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GetRecord {
@@ -42,7 +44,7 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<Backlink>> 
             || record_type == Ids::AppBskyGraphBlock.as_str()
         {
             if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject)))) = record.get("subject") {
-                match ensure_valid_did(&uri) {
+                match ensure_valid_did(uri) {
                     Ok(_) => {
                         return Ok(vec![Backlink {
                             uri: uri.to_string(),
@@ -60,7 +62,7 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<Backlink>> 
                 if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(subject_uri)))) =
                     ref_object.get("uri")
                 {
-                    match ensure_valid_at_uri(&uri) {
+                    match ensure_valid_at_uri(uri) {
                         Ok(_) => {
                             return Ok(vec![Backlink {
                                 uri: uri.to_string(),
@@ -79,34 +81,43 @@ pub fn get_backlinks(uri: &AtUri, record: &RepoRecord) -> Result<Vec<Backlink>> 
 
 pub struct RecordReader {
     pub did: String,
+    pub db: Arc<DbConn>,
 }
 
 // Basically handles getting lexicon records from db
 impl RecordReader {
-    pub fn new(did: String) -> Self {
-        RecordReader { did }
+    pub fn new(did: String, db: Arc<DbConn>) -> Self {
+        RecordReader { did, db }
     }
 
     pub async fn record_count(&mut self) -> Result<i64> {
         use crate::schema::pds::record::dsl::*;
-        let conn = &mut establish_connection()?;
 
-        let res: i64 = record.filter(did.eq(&self.did)).count().get_result(conn)?;
-        Ok(res)
+        let other_did = self.did.clone();
+        self.db
+            .run(move |conn| {
+                let res: i64 = record.filter(did.eq(&other_did)).count().get_result(conn)?;
+                Ok(res)
+            })
+            .await
     }
 
     pub async fn list_collections(&mut self) -> Result<Vec<String>> {
         use crate::schema::pds::record::dsl::*;
-        let conn = &mut establish_connection()?;
 
-        let collections = record
-            .filter(did.eq(&self.did))
-            .select(collection)
-            .group_by(collection)
-            .load::<String>(conn)?
-            .into_iter()
-            .collect::<Vec<String>>();
-        Ok(collections)
+        let other_did = self.did.clone();
+        self.db
+            .run(move |conn| {
+                let collections = record
+                    .filter(did.eq(&other_did))
+                    .select(collection)
+                    .group_by(collection)
+                    .load::<String>(conn)?
+                    .into_iter()
+                    .collect::<Vec<String>>();
+                Ok(collections)
+            })
+            .await
     }
 
     pub async fn list_records_for_collection(
@@ -121,7 +132,6 @@ impl RecordReader {
     ) -> Result<Vec<RecordsForCollection>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-        let conn = &mut establish_connection()?;
 
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
@@ -132,7 +142,7 @@ impl RecordReader {
             .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
             .limit(limit)
             .select((models::Record::as_select(), models::RepoBlock::as_select()))
-            .filter(RecordSchema::did.eq(&self.did))
+            .filter(RecordSchema::did.eq(self.did.clone()))
             .filter(RecordSchema::collection.eq(collection))
             .into_boxed();
         if !include_soft_deleted {
@@ -158,9 +168,9 @@ impl RecordReader {
                 builder = builder.filter(RecordSchema::rkey.lt(rkey_end));
             }
         }
-        let res: Vec<(models::Record, models::RepoBlock)> = builder.load(conn)?;
-        Ok(res
-            .into_iter()
+        let res: Vec<(models::Record, models::RepoBlock)> =
+            self.db.run(move |conn| builder.load(conn)).await?;
+        res.into_iter()
             .map(|row| {
                 Ok(RecordsForCollection {
                     uri: row.0.uri,
@@ -168,7 +178,7 @@ impl RecordReader {
                     value: cbor_to_lex_record(row.1.content)?,
                 })
             })
-            .collect::<Result<Vec<RecordsForCollection>>>()?)
+            .collect::<Result<Vec<RecordsForCollection>>>()
     }
 
     pub async fn get_record(
@@ -179,7 +189,6 @@ impl RecordReader {
     ) -> Result<Option<GetRecord>> {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-        let conn = &mut establish_connection()?;
 
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
@@ -197,7 +206,10 @@ impl RecordReader {
         if let Some(cid) = cid {
             builder = builder.filter(RecordSchema::cid.eq(cid));
         }
-        let record: Option<(models::Record, models::RepoBlock)> = builder.first(conn).optional()?;
+        let record: Option<(models::Record, models::RepoBlock)> = self
+            .db
+            .run(move |conn| builder.first(conn).optional())
+            .await?;
         if let Some(record) = record {
             Ok(Some(GetRecord {
                 uri: record.0.uri,
@@ -218,7 +230,6 @@ impl RecordReader {
         include_soft_deleted: Option<bool>,
     ) -> Result<bool> {
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
         let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
             include_soft_deleted
@@ -235,19 +246,26 @@ impl RecordReader {
         if let Some(cid) = cid {
             builder = builder.filter(RecordSchema::cid.eq(cid));
         }
-        let record_uri = builder.first::<String>(conn).optional()?;
+        let record_uri = self
+            .db
+            .run(move |conn| builder.first::<String>(conn).optional())
+            .await?;
         Ok(!!record_uri.is_some())
     }
 
     pub async fn get_record_takedown_status(&self, uri: String) -> Result<Option<StatusAttr>> {
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = RecordSchema::record
-            .select(RecordSchema::takedownRef)
-            .filter(RecordSchema::uri.eq(uri))
-            .first::<Option<String>>(conn)
-            .optional()?;
+        let res = self
+            .db
+            .run(move |conn| {
+                RecordSchema::record
+                    .select(RecordSchema::takedownRef)
+                    .filter(RecordSchema::uri.eq(uri))
+                    .first::<Option<String>>(conn)
+                    .optional()
+            })
+            .await?;
         if let Some(res) = res {
             if let Some(takedown_ref) = res {
                 Ok(Some(StatusAttr {
@@ -267,13 +285,17 @@ impl RecordReader {
 
     pub async fn get_current_record_cid(&self, uri: String) -> Result<Option<Cid>> {
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = RecordSchema::record
-            .select(RecordSchema::cid)
-            .filter(RecordSchema::uri.eq(uri))
-            .first::<String>(conn)
-            .optional()?;
+        let res = self
+            .db
+            .run(move |conn| {
+                RecordSchema::record
+                    .select(RecordSchema::cid)
+                    .filter(RecordSchema::uri.eq(uri))
+                    .first::<String>(conn)
+                    .optional()
+            })
+            .await?;
         if let Some(res) = res {
             Ok(Some(Cid::from_str(&res)?))
         } else {
@@ -289,15 +311,21 @@ impl RecordReader {
     ) -> Result<Vec<Record>> {
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
-        let res = RecordSchema::record
-            .inner_join(BacklinkSchema::backlink.on(BacklinkSchema::uri.eq(RecordSchema::uri)))
-            .select(Record::as_select())
-            .filter(BacklinkSchema::path.eq(path))
-            .filter(BacklinkSchema::linkTo.eq(link_to))
-            .filter(RecordSchema::collection.eq(collection))
-            .load::<Record>(conn)?;
+        let res = self
+            .db
+            .run(move |conn| {
+                RecordSchema::record
+                    .inner_join(
+                        BacklinkSchema::backlink.on(BacklinkSchema::uri.eq(RecordSchema::uri)),
+                    )
+                    .select(Record::as_select())
+                    .filter(BacklinkSchema::path.eq(path))
+                    .filter(BacklinkSchema::linkTo.eq(link_to))
+                    .filter(RecordSchema::collection.eq(collection))
+                    .load::<Record>(conn)
+            })
+            .await?;
         Ok(res)
     }
 
@@ -349,6 +377,7 @@ impl RecordReader {
         timestamp: Option<String>,
     ) -> Result<()> {
         tracing::debug!("@LOG DEBUG RecordReader::index_record, indexing record {uri}");
+
         let collection = uri.get_collection();
         let rkey = uri.get_rkey();
         let hostname = uri.get_hostname().to_string();
@@ -367,26 +396,31 @@ impl RecordReader {
 
         if !hostname.starts_with("did:") {
             bail!("Expected indexed URI to contain DID")
-        } else if collection.len() < 1 {
+        } else if collection.is_empty() {
             bail!("Expected indexed URI to contain a collection")
-        } else if rkey.len() < 1 {
+        } else if rkey.is_empty() {
             bail!("Expected indexed URI to contain a record key")
         }
 
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
         // Track current version of record
-        insert_into(RecordSchema::record)
-            .values(row)
-            .on_conflict(RecordSchema::uri)
-            .do_update()
-            .set((
-                RecordSchema::cid.eq(cid.to_string()),
-                RecordSchema::repoRev.eq(&repo_rev),
-                RecordSchema::indexedAt.eq(&indexed_at),
-            ))
-            .execute(conn)?;
+        let (record, uri) = self
+            .db
+            .run(move |conn| {
+                insert_into(RecordSchema::record)
+                    .values(row)
+                    .on_conflict(RecordSchema::uri)
+                    .do_update()
+                    .set((
+                        RecordSchema::cid.eq(cid.to_string()),
+                        RecordSchema::repoRev.eq(&repo_rev),
+                        RecordSchema::indexedAt.eq(&indexed_at),
+                    ))
+                    .execute(conn)?;
+                Ok::<_, Error>((record, uri))
+            })
+            .await?;
 
         if let Some(record) = record {
             // Maintain backlinks
@@ -407,24 +441,34 @@ impl RecordReader {
         tracing::debug!("@LOG DEBUG RecordReader::delete_record, deleting indexed record {uri}");
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
-        delete(RecordSchema::record)
-            .filter(RecordSchema::uri.eq(uri.to_string()))
-            .execute(conn)?;
-        delete(BacklinkSchema::backlink)
-            .filter(BacklinkSchema::uri.eq(uri.to_string()))
-            .execute(conn)?;
-        tracing::debug!("@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}");
-        Ok(())
+        let uri = uri.to_string();
+        self.db
+            .run(move |conn| {
+                delete(RecordSchema::record)
+                    .filter(RecordSchema::uri.eq(&uri))
+                    .execute(conn)?;
+                delete(BacklinkSchema::backlink)
+                    .filter(BacklinkSchema::uri.eq(&uri))
+                    .execute(conn)?;
+                tracing::debug!(
+                    "@LOG DEBUG RecordReader::delete_record, deleted indexed record {uri}"
+                );
+                Ok(())
+            })
+            .await
     }
 
     pub async fn remove_backlinks_by_uri(&self, uri: &AtUri) -> Result<()> {
         use crate::schema::pds::backlink::dsl as BacklinkSchema;
-        let conn = &mut establish_connection()?;
-        delete(BacklinkSchema::backlink)
-            .filter(BacklinkSchema::uri.eq(uri.to_string()))
-            .execute(conn)?;
-        Ok(())
+        let uri = uri.to_string();
+        self.db
+            .run(move |conn| {
+                delete(BacklinkSchema::backlink)
+                    .filter(BacklinkSchema::uri.eq(uri))
+                    .execute(conn)?;
+                Ok(())
+            })
+            .await
     }
 
     pub async fn add_backlinks(&self, backlinks: Vec<Backlink>) -> Result<()> {
@@ -432,12 +476,15 @@ impl RecordReader {
             Ok(())
         } else {
             use crate::schema::pds::backlink::dsl as BacklinkSchema;
-            let conn = &mut establish_connection()?;
-            insert_into(BacklinkSchema::backlink)
-                .values(&backlinks)
-                .on_conflict_do_nothing()
-                .execute(conn)?;
-            Ok(())
+            self.db
+                .run(move |conn| {
+                    insert_into(BacklinkSchema::backlink)
+                        .values(&backlinks)
+                        .on_conflict_do_nothing()
+                        .execute(conn)?;
+                    Ok(())
+                })
+                .await
         }
     }
 
@@ -447,7 +494,6 @@ impl RecordReader {
         takedown: StatusAttr,
     ) -> Result<()> {
         use crate::schema::pds::record::dsl as RecordSchema;
-        let conn = &mut establish_connection()?;
 
         let takedown_ref: Option<String> = match takedown.applied {
             true => match takedown.r#ref {
@@ -457,11 +503,15 @@ impl RecordReader {
             false => None,
         };
         let uri_string = uri.to_string();
-        update(RecordSchema::record)
-            .filter(RecordSchema::uri.eq(uri_string))
-            .set(RecordSchema::takedownRef.eq(takedown_ref))
-            .execute(conn)?;
 
-        Ok(())
+        self.db
+            .run(move |conn| {
+                update(RecordSchema::record)
+                    .filter(RecordSchema::uri.eq(uri_string))
+                    .set(RecordSchema::takedownRef.eq(takedown_ref))
+                    .execute(conn)?;
+                Ok(())
+            })
+            .await
     }
 }
