@@ -46,11 +46,6 @@ fn resolve_identity() {
 
     Ok(())
 }
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    resolve_did_and_handle().await
-}
 ```
 
 ## License
