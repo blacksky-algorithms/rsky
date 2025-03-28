@@ -9,24 +9,26 @@ mod oauth_revoke;
 mod oauth_token;
 mod oauth_well_known;
 
+use crate::jwk::Keyset;
 use crate::oauth_provider::account::account_manager::AccountManager;
-use crate::oauth_provider::account::account_store::SignInCredentials;
+use crate::oauth_provider::account::account_store::{AccountStore, SignInCredentials};
 use crate::oauth_provider::client::client_manager::ClientManager;
 use crate::oauth_provider::device::device_id::DeviceId;
-use crate::oauth_provider::device::device_manager::DeviceManager;
 use crate::oauth_provider::oauth_provider::OAuthProvider;
 use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_uri::RequestUri;
 use crate::oauth_provider::token::token_manager::TokenManager;
 use crate::oauth_types::{
     OAuthAuthorizationRequestQuery, OAuthClientCredentials, OAuthClientId, OAuthRequestUri,
-    OAuthTokenIdentification, OAuthTokenRequest,
+    OAuthTokenIdentification,
 };
 use rocket::data::{FromData, ToByteUnit};
 use rocket::futures::TryFutureExt;
-use rocket::request::FromRequest;
+use rocket::http::Status;
+use rocket::request::{FromRequest, Outcome};
 use rocket::{routes, Request, Route};
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub struct SignInPayload {
     csrf_token: String,
@@ -78,8 +80,41 @@ pub type OAuthProviderCreator = Box<
         + Sync,
 >;
 
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for OAuthProvider {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.rocket().state::<SharedOAuthProvider>() {
+            None => Outcome::Error((Status::InternalServerError, ())),
+            Some(shared_account_manager) => {
+                let db = req.guard::<dyn AccountStore>().await.unwrap();
+                let account_manager_creator = shared_account_manager.account_manager.read().await;
+                let account_manager = account_manager_creator(Arc::new(db));
+                Outcome::Success(account_manager)
+            }
+        }
+    }
+}
+
 pub struct SharedOAuthProvider {
-    pub oauth_provider: RwLock<OAuthProviderCreator>,
+    oauth_provider: RwLock<OAuthProviderCreator>,
+    keyset: Arc<RwLock<Keyset>>,
+}
+
+impl SharedOAuthProvider {
+    pub fn new(oauth_provider: RwLock<OAuthProviderCreator>, keyset: Arc<RwLock<Keyset>>) -> Self {
+        Self {
+            oauth_provider,
+            keyset,
+        }
+    }
+
+    pub async fn read(&self) {
+        let creator = self.oauth_provider.read().await;
+    }
+
+    pub async fn write(&mut self) {}
 }
 
 pub fn get_routes() -> Vec<Route> {

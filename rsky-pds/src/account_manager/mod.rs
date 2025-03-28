@@ -6,22 +6,16 @@ use crate::account_manager::helpers::auth::{
 };
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
-use crate::account_manager::helpers::repo;
-use crate::actor_store::ActorStore;
+use crate::account_manager::helpers::token::{find_by_qb, FindByQbOpts};
+use crate::account_manager::helpers::{repo, request};
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
-use crate::read_after_write::viewer::{
-    Agent, LocalViewer, LocalViewerCreator, LocalViewerCreatorParams,
-};
-use crate::APP_USER_AGENT;
 use anyhow::Result;
-use atrium_api::client::AtpServiceClient;
-use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use futures::try_join;
-use helpers::{account, auth, email_token, invite, password};
+use helpers::{account, auth, device, email_token, invite, password};
 use libipld::Cid;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
@@ -584,7 +578,7 @@ impl AccountStore for AccountManager {
 
 impl RequestStore for AccountManager {
     fn create_request(&mut self, id: RequestId, data: RequestData) {
-        todo!()
+        request::create_request(id, data, self.db.as_ref()).unwrap();
     }
 
     fn read_request(&self, id: &RequestId) -> Option<&RequestData> {
@@ -606,19 +600,21 @@ impl RequestStore for AccountManager {
 
 impl DeviceStore for AccountManager {
     fn create_device(&mut self, device_id: DeviceId, data: DeviceData) {
-        todo!()
+        device::create_device(device_id, data, self.db.as_ref()).unwrap()
     }
 
     fn read_device(&self, device_id: DeviceId) -> Option<DeviceData> {
-        todo!()
+        device::read_device(device_id, self.db.as_ref()).unwrap()
     }
 
     fn update_device(&mut self, device_id: DeviceId, data: DeviceData) {
-        todo!()
+        //TODO
+        device::update_device(device_id, self.db.as_ref()).unwrap()
     }
 
     fn delete_device(&mut self, device_id: DeviceId) {
-        todo!()
+        // Will cascade to device_account (device_account_device_id_fk)
+        device::delete_device(device_id, self.db.as_ref()).unwrap()
     }
 }
 
@@ -654,11 +650,20 @@ impl TokenStore for AccountManager {
         &self,
         refresh_token: RefreshToken,
     ) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        todo!()
+        unimplemented!()
     }
 
     fn find_token_by_code(&self, code: Code) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        todo!()
+        let opts = FindByQbOpts {
+            id: None,
+            code: Some(code.val()),
+            token_id: None,
+            current_refresh_token: None,
+        };
+        match find_by_qb(self.db.as_ref(), opts) {
+            Ok(token_info) => Ok(token_info),
+            Err(error) => Err(OAuthError::RuntimeError("DB Exception".to_string())),
+        }
     }
 }
 

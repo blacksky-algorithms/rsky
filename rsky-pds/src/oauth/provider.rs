@@ -1,14 +1,16 @@
-use crate::account_manager::AccountManager;
+use crate::account_manager::{AccountManager, SharedAccountManager};
 use crate::actor_store::ActorStore;
 use crate::oauth::detailed_account_store::DetailedAccountStore;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
+use rocket::request::FromRequest;
 use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::client::client_store::ClientStore;
 use rsky_oauth::oauth_provider::metadata::build_metadata::CustomMetadata;
 use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderOptions};
+use rsky_oauth::oauth_provider::routes::{OAuthProviderCreator, SharedOAuthProvider};
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -94,4 +96,8 @@ fn build_custom_metadata() -> CustomMetadata {
         authorization_details_type_supported: None,
         protected_resources: None,
     }
+}
+
+pub struct SharedOauthProvider {
+    pub oauth_provider: RwLock<OAuthProviderCreator>,
 }

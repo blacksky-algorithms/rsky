@@ -295,6 +295,7 @@ impl RequestManager {
 
     pub async fn set_authorized(
         &mut self,
+        client: Client,
         uri: OAuthRequestUri,
         device_id: DeviceId,
         account: Account,

@@ -27,7 +27,7 @@ use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_store::RequestStore;
 use crate::oauth_provider::routes::OAuthProviderCreator;
-use crate::oauth_provider::token::token_id::is_token_id;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_provider::token::token_manager::TokenManager;
 use crate::oauth_provider::token::token_store::TokenStore;
 use crate::oauth_provider::token::verify_token_claims::{
@@ -40,10 +40,11 @@ use crate::oauth_types::{
     OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientMetadata,
     OAuthIntrospectionResponse, OAuthIssuerIdentifier, OAuthParResponse,
     OAuthRefreshTokenGrantTokenRequest, OAuthRequestUri, OAuthTokenIdentification,
-    OAuthTokenRequest, OAuthTokenResponse, OAuthTokenType,
+    OAuthTokenRequest, OAuthTokenResponse, OAuthTokenType, Prompt,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet};
-use rocket::form::validate::Contains;
+use rocket::http::Status;
+use rocket::request::FromRequest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -187,67 +188,84 @@ pub struct OAuthProvider {
 }
 
 impl OAuthProvider {
+    // /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
+    // pub fn new(did: String, blobstore: S3BlobStore, db: DbConn) -> Self {
+    //     let db = Arc::new(db);
+    //     ActorStore {
+    //         storage: Arc::new(RwLock::new(SqlRepoReader::new(
+    //             did.clone(),
+    //             None,
+    //             db.clone(),
+    //         ))),
+    //         record: RecordReader::new(did.clone(), db.clone()),
+    //         pref: PreferenceReader::new(did.clone(), db.clone()),
+    //         did,
+    //         blob: BlobReader::new(blobstore, db.clone()), // Unlike TS impl, just use blob reader vs generator
+    //     }
+    // }
+
     pub fn creator(options: OAuthProviderOptions) -> OAuthProviderCreator {
-        let options = options;
-        Box::new(move || -> OAuthProvider {
-            let store = options.store;
-
-            // Requires stores
-            let account_store = store.clone().unwrap();
-            let device_store = store.clone().unwrap();
-            let token_store = store.clone().unwrap();
-
-            // These are optional
-            let client_store = store.clone().unwrap();
-            let replay_store = store.clone().unwrap();
-            let request_store = store.clone().unwrap();
-
-            let verifier_opts = OAuthVerifierOptions {
-                issuer: options.issuer.clone(),
-                keyset: options.keyset.unwrap(),
-                access_token_type: options.access_token_type,
-                redis: Some(options.redis),
-                replay_store,
-            };
-            let oauth_verifier = OAuthVerifier::new(verifier_opts);
-
-            let authentication_max_age = options
-                .authentication_max_age
-                .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
-            let metadata = build_metadata(options.issuer, options.metadata);
-            let customization = options.customization;
-
-            let account_manager = AccountManager::new(account_store);
-            let client_manager = ClientManager::new(
-                metadata.clone(),
-                oauth_verifier.keyset.clone(),
-                client_store,
-            );
-            let request_manager = RequestManager::new(
-                request_store,
-                oauth_verifier.signer.clone(),
-                metadata.clone(),
-                authentication_max_age,
-            );
-            let token_manager = TokenManager::new(
-                token_store,
-                oauth_verifier.signer.clone(),
-                oauth_verifier.access_token_type.clone(),
-                Some(authentication_max_age),
-            );
-
-            OAuthProvider {
-                oauth_verifier,
-                metadata,
-                customization,
-                authentication_max_age,
-                account_manager,
-                client_manager,
-                request_manager,
-                token_manager,
-                device_store,
-            }
-        })
+        unimplemented!()
+        // let options = options;
+        // Box::new(move || -> OAuthProvider {
+        //     let store = options.store;
+        //
+        //     // Requires stores
+        //     let account_store = store.clone().unwrap();
+        //     let device_store = store.clone().unwrap();
+        //     let token_store = store.clone().unwrap();
+        //
+        //     // These are optional
+        //     let client_store = store.clone().unwrap();
+        //     let replay_store = store.clone().unwrap();
+        //     let request_store = store.clone().unwrap();
+        //
+        //     let verifier_opts = OAuthVerifierOptions {
+        //         issuer: options.issuer.clone(),
+        //         keyset: options.keyset.unwrap(),
+        //         access_token_type: options.access_token_type,
+        //         redis: Some(options.redis),
+        //         replay_store,
+        //     };
+        //     let oauth_verifier = OAuthVerifier::new(verifier_opts);
+        //
+        //     let authentication_max_age = options
+        //         .authentication_max_age
+        //         .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
+        //     let metadata = build_metadata(options.issuer, options.metadata);
+        //     let customization = options.customization;
+        //
+        //     let account_manager = AccountManager::new(account_store);
+        //     let client_manager = ClientManager::new(
+        //         metadata.clone(),
+        //         oauth_verifier.keyset.clone(),
+        //         client_store,
+        //     );
+        //     let request_manager = RequestManager::new(
+        //         request_store,
+        //         oauth_verifier.signer.clone(),
+        //         metadata.clone(),
+        //         authentication_max_age,
+        //     );
+        //     let token_manager = TokenManager::new(
+        //         token_store,
+        //         oauth_verifier.signer.clone(),
+        //         oauth_verifier.access_token_type.clone(),
+        //         Some(authentication_max_age),
+        //     );
+        //
+        //     OAuthProvider {
+        //         oauth_verifier,
+        //         metadata,
+        //         customization,
+        //         authentication_max_age,
+        //         account_manager,
+        //         client_manager,
+        //         request_manager,
+        //         token_manager,
+        //         device_store,
+        //     }
+        // })
     }
 
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
@@ -469,31 +487,73 @@ impl OAuthProvider {
         Ok(())
     }
 
+    /**
+     * @see {@link https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.1}
+     */
     pub async fn authorize(
-        &self,
+        &mut self,
         device_id: &DeviceId,
         credentials: &OAuthClientCredentials,
         query: &OAuthAuthorizationRequestQuery,
     ) -> Result<AuthorizationResult, OAuthError> {
-        // let issuer = self.oauth_verifier.issuer.clone();
-        //
-        // // If there is a chance to redirect the user to the client, let's do
-        // // it by wrapping the error in an AccessDeniedError.
-        // if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
-        //     if params.redirect_uri.is_some() {
-        //         // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
-        //         return Err(OAuthError::AccessDeniedError("invalid_request".to_string()));
-        //     }
-        // }
-        //
-        // let client = self
-        //     .client_manager
-        //     .get_client(&credentials.client_id)
-        //     .await?;
-        //
-        // let request_info = self
-        //     .process_authorization_request(client, device_id, query)
-        //     .await?;
+        let issuer = self.oauth_verifier.issuer.clone();
+
+        // If there is a chance to redirect the user to the client, let's do
+        // it by wrapping the error in an AccessDeniedError.
+        if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
+            if params.redirect_uri.is_some() {
+                // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
+                return Err(OAuthError::AccessDeniedError("invalid_request".to_string()));
+            }
+        }
+
+        let client = self
+            .client_manager
+            .get_client(&credentials.client_id())
+            .await?;
+
+        let request_info = self
+            .process_authorization_request(&client, &device_id, &query)
+            .await?;
+        let client_auth = request_info.client_auth;
+        let parameters = request_info.parameters;
+        let uri = request_info.uri;
+
+        let sessions = self
+            .get_sessions(&client, &client_auth, &device_id, &parameters)
+            .await?;
+
+        if let Some(prompt) = parameters.prompt {
+            match prompt {
+                Prompt::None => {
+                    let sso_sessions: Vec<OAuthProviderSession> =
+                        sessions.iter().filter(|s| s.matches_hint).collect();
+                    if sso_sessions.is_empty() {
+                        return Err(OAuthError::LoginRequiredError);
+                    }
+
+                    if sso_sessions.len() > 1 {
+                        return Err(OAuthError::AccountSelectionRequiredError);
+                    }
+
+                    let sso_session = sso_sessions.first().unwrap();
+                    if sso_session.login_required {
+                        return Err(OAuthError::LoginRequiredError);
+                    }
+                    if sso_session.consent_required {
+                        return Err(OAuthError::ConsentRequiredError);
+                    }
+
+                    let code = self
+                        .request_manager
+                        .set_authorized(client, uri, device_id, &sso_session.account)
+                        .await?;
+
+                    return Ok(AuthorizationResult {});
+                }
+                _ => {}
+            }
+        }
         unimplemented!()
     }
 
@@ -532,7 +592,11 @@ impl OAuthProvider {
             //     .set_authorized(client, uri, device_id, sso_session.account)
             //     .await?;
         }
-        todo!()
+
+        // Automatic SSO when a did was provided
+        if parameters.prompt.is_none() && parameters.login_hint.is_some() {
+            // let sso_sessions: Vec<OAuthProviderSession>;
+        }
     }
 
     pub async fn get_sessions(
@@ -576,32 +640,31 @@ impl OAuthProvider {
         client_id: ClientId,
         credentials: SignInCredentials,
     ) -> Result<SignInResponse, OAuthError> {
-        unimplemented!()
-        // let client = self.client_manager.get_client(&client_id).await?;
-        //
-        // // Ensure the request is still valid (and update the request expiration)
-        // // @TODO use the returned scopes to determine if consent is required
-        // self.request_manager.get(uri, client_id, device_id).await?;
-        //
-        // let account_info = match self.account_manager.sign_in(credentials, device_id) {
-        //     Ok(res) => res,
-        //     Err(error) => return Err(error),
-        // };
-        // let account = account_info.account;
-        // let info = account_info.info;
-        // let consent_required = match client.info.is_first_party {
-        //     true => false,
-        //     false => {
-        //         // @TODO: the "authorizedClients" should also include the scopes that
-        //         // were already authorized for the client. Otherwise a client could
-        //         // use silent authentication to get additional scopes without consent.
-        //         !info.authorized_clients.contains(client.id)
-        //     }
-        // };
-        // Ok(SignInResponse {
-        //     account,
-        //     consent_required,
-        // })
+        let client = self.client_manager.get_client(&client_id).await?;
+
+        // Ensure the request is still valid (and update the request expiration)
+        // @TODO use the returned scopes to determine if consent is required
+        self.request_manager.get(uri, client_id, device_id).await?;
+
+        let account_info = match self.account_manager.sign_in(credentials, device_id) {
+            Ok(res) => res,
+            Err(error) => return Err(error),
+        };
+        let account = account_info.account;
+        let info = account_info.info;
+        let consent_required = match client.info.is_first_party {
+            true => false,
+            false => {
+                // @TODO: the "authorizedClients" should also include the scopes that
+                // were already authorized for the client. Otherwise a client could
+                // use silent authentication to get additional scopes without consent.
+                !info.authorized_clients.contains(&client.id)
+            }
+        };
+        Ok(SignInResponse {
+            account,
+            consent_required,
+        })
     }
 
     pub async fn accept_request(
@@ -611,53 +674,52 @@ impl OAuthProvider {
         client_id: ClientId,
         sub: Sub,
     ) -> Result<AcceptRequestResponse, OAuthError> {
-        unimplemented!()
-        // let client = self.client_manager.get_client(&client_id).await?;
-        //
-        // let result = self.request_manager.get(uri, client_id, device_id).await?;
-        // let parameters = result.parameters;
-        // let client_auth = result.client_auth;
-        //
-        // let result = match self.account_manager.get(&device_id, sub) {
-        //     Ok(res) => res,
-        //     Err(e) => {
-        //         self.delete_request(uri, parameters).await?;
-        //         return Err(OAuthError::AccessDeniedError("test".to_string()));
-        //     }
-        // };
-        // let account = result.account;
-        // let info = result.info;
-        //
-        // // The user is trying to authorize without a fresh login
-        // if self.login_required(&info) {
-        //     return Err(OAuthError::LoginRequiredError);
-        // }
-        //
-        // let code = match self
-        //     .request_manager
-        //     .set_authorized(
-        //         client.clone(),
-        //         uri.clone(),
-        //         device_id.clone(),
-        //         account.clone(),
-        //     )
-        //     .await
-        // {
-        //     Ok(res) => res,
-        //     Err(e) => {
-        //         self.delete_request(uri, parameters).await?;
-        //         return Err(OAuthError::AccessDeniedError("test".to_string()));
-        //     }
-        // };
-        //
-        // self.account_manager
-        //     .add_authorized_client(device_id, account, client, client_auth);
-        //
-        // Ok(AcceptRequestResponse {
-        //     issuer: self.oauth_verifier.issuer.clone(),
-        //     parameters,
-        //     redirect_code: code,
-        // })
+        let client = self.client_manager.get_client(&client_id).await?;
+
+        let result = self.request_manager.get(uri, client_id, device_id).await?;
+        let parameters = result.parameters;
+        let client_auth = result.client_auth;
+
+        let result = match self.account_manager.get(&device_id, sub) {
+            Ok(res) => res,
+            Err(e) => {
+                self.delete_request(uri, parameters).await?;
+                return Err(OAuthError::AccessDeniedError("test".to_string()));
+            }
+        };
+        let account = result.account;
+        let info = result.info;
+
+        // The user is trying to authorize without a fresh login
+        if self.login_required(&info) {
+            return Err(OAuthError::LoginRequiredError);
+        }
+
+        let code = match self
+            .request_manager
+            .set_authorized(
+                client.clone(),
+                uri.clone(),
+                device_id.clone(),
+                account.clone(),
+            )
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                self.delete_request(uri, parameters).await?;
+                return Err(OAuthError::AccessDeniedError("test".to_string()));
+            }
+        };
+
+        self.account_manager
+            .add_authorized_client(device_id, account, client, client_auth);
+
+        Ok(AcceptRequestResponse {
+            issuer: self.oauth_verifier.issuer.clone(),
+            parameters,
+            redirect_code: code,
+        })
     }
 
     pub async fn reject_request(
@@ -730,61 +792,61 @@ impl OAuthProvider {
         input: OAuthAuthorizationCodeGrantTokenRequest,
         dpop_jkt: Option<String>,
     ) -> Result<OAuthTokenResponse, OAuthError> {
-        unimplemented!()
-        // let code = parse(input.code().to_string())?;
+        let code = match Code::new(input.code()) {
+            Ok(code) => code,
+            Err(error) => return Err(OAuthError::RuntimeError("getbacktothis".to_string())),
+        };
+
+        let request_data_authorized = self
+            .request_manager
+            .find_code(client, client_auth, code)
+            .await?;
+
+        // the following check prevents re-use of PKCE challenges, enforcing the
+        // clients to generate a new challenge for each authorization request. The
+        // replay manager typically prevents replay over a certain time frame,
+        // which might not cover the entire lifetime of the token (depending on
+        // the implementation of the replay store). For this reason, we should
+        // ideally ensure that the code_challenge was not already used by any
+        // existing token or any other pending request.
         //
-        // let request_data_authorized = self
-        //     .request_manager
-        //     .find_code(client, client_auth, code)
-        //     .await?;
-        //
-        // // the following check prevents re-use of PKCE challenges, enforcing the
-        // // clients to generate a new challenge for each authorization request. The
-        // // replay manager typically prevents replay over a certain time frame,
-        // // which might not cover the entire lifetime of the token (depending on
-        // // the implementation of the replay store). For this reason, we should
-        // // ideally ensure that the code_challenge was not already used by any
-        // // existing token or any other pending request.
-        // //
-        // // The current implementation will cause client devs not issuing a new
-        // // code challenge for each authorization request to fail, which should be
-        // // a good enough incentive to follow the best practices, until we have a
-        // // better implementation.
-        // //
-        // // @TODO: Use tokenManager to ensure uniqueness of code_challenge
-        // if let Some(code_challenge) = request_data_authorized.parameters.code_challenge {
-        //     let unique = self
-        //         .oauth_verifier
-        //         .replay_manager
-        //         .unique_code_challenge(code_challenge)
-        //         .await;
-        //     if !unique {
-        //         return Err(OAuthError::InvalidGrantError(
-        //             "Code challenge already used".to_string(),
-        //         ));
-        //     }
-        // }
-        //
-        // let account_info = self
-        //     .account_manager
-        //     .get(
-        //         &request_data_authorized.device_id,
-        //         request_data_authorized.sub,
-        //     )
-        //     .await?;
-        //
-        // Ok(self
-        //     .token_manager
-        //     .create(
-        //         client,
-        //         client_auth,
-        //         account_info.account,
-        //         Some((request_data_authorized.device_id, account_info.info)),
-        //         request_data_authorized.parameters,
-        //         None, // input,
-        //         dpop_jkt,
-        //     )
-        //     .await?)
+        // The current implementation will cause client devs not issuing a new
+        // code challenge for each authorization request to fail, which should be
+        // a good enough incentive to follow the best practices, until we have a
+        // better implementation.
+        if let Some(code_challenge) = request_data_authorized.parameters.code_challenge {
+            let unique = self
+                .oauth_verifier
+                .replay_manager
+                .unique_code_challenge(code_challenge)
+                .await;
+            if !unique {
+                return Err(OAuthError::InvalidGrantError(
+                    "Code challenge already used".to_string(),
+                ));
+            }
+        }
+
+        let account_info = self
+            .account_manager
+            .get(
+                &request_data_authorized.device_id,
+                request_data_authorized.sub,
+            )
+            .await?;
+
+        Ok(self
+            .token_manager
+            .create(
+                client,
+                client_auth,
+                account_info.account,
+                Some((request_data_authorized.device_id, account_info.info)),
+                request_data_authorized.parameters,
+                None, // input,
+                dpop_jkt,
+            )
+            .await?)
     }
 
     pub async fn refresh_token_grant(
@@ -869,17 +931,16 @@ impl OAuthProvider {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
-        if is_token_id(token.to_string().as_str()) {
+        if let Ok(token_id) = TokenId::new(token.clone().into_inner()) {
             self.oauth_verifier
                 .assert_token_type_allowed(token_type.clone(), AccessTokenType::ID)?;
 
-            //TODO
-            // return self.token_manager.authenticate_token_id(
-            //     token_type,
-            //     token.to_string(),
-            //     dpop_jkt,
-            //     verify_options,
-            // )?;
+            return self.token_manager.authenticate_token_id(
+                token_type,
+                token_id,
+                dpop_jkt,
+                verify_options,
+            )?;
         }
 
         self.oauth_verifier

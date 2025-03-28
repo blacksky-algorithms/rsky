@@ -6,8 +6,10 @@ use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJ
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose::STANDARD as base64pad, Engine as _};
+use infer::is;
 use jwt_simple::claims::Audiences;
 use jwt_simple::prelude::*;
+use rocket::form::validate::Contains;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
@@ -15,9 +17,13 @@ use rsky_common::env::env_str;
 use rsky_common::get_verification_material;
 use rsky_identity::did::atproto_data::get_did_key_from_multibase;
 use rsky_identity::types::DidDocument;
+use rsky_oauth::oauth_provider::oauth_verifier::OAuthVerifier;
+use rsky_oauth::oauth_provider::oidc::sub::Sub;
+use rsky_oauth::oauth_types::OAuthScope;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str;
+use std::thread::scope;
 use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
@@ -780,6 +786,90 @@ pub async fn validate_bearer_token<'r>(
         bail!("AuthMissing")
     }
 }
+
+// pub async fn validate_dpop_access_token<'r>(
+//     request: &'r Request<'_>,
+//     scopes: Vec<AuthScope>,
+//     oauth_verifier: OAuthVerifier,
+// ) -> Result<AccessOutput> {
+//     let mut options = VerificationOptions::default();
+//     options.allowed_audiences = Some(HashSet::from_strings(&[
+//         env::var("PDS_SERVICE_DID")?
+//     ]));
+//
+//     let result = oauth_verifier
+//         .authenticate_request(
+//             request.method().to_string(),
+//             request.uri().to_string(),
+//             request.headers(),
+//             None,
+//         )
+//         .await?;
+//     let sub = match result.claims.sub {
+//         None => {
+//             return return Err(anyhow::Error::new(AuthError::InternalServerError(
+//                 "Unexpected Error Occurred".to_string(),
+//             )))
+//         }
+//         Some(sub) => sub,
+//     };
+//     let token_scopes = match result.claims.scope {
+//         None => {
+//             return return Err(anyhow::Error::new(AuthError::InternalServerError(
+//                 "Unexpected Error Occurred".to_string(),
+//             )))
+//         }
+//         Some(scope) => {
+//             let mut res = HashSet::new();
+//             res.insert(scope.into_inner());
+//             res
+//         }
+//     };
+//     if !token_scopes.contains("transition:generic") {
+//         return Err(anyhow::Error::new(AuthError::InternalServerError(
+//             "Missing required scope: transition:generic".to_string(),
+//         )));
+//     }
+//
+//     let scope_equivalent = match token_scopes.contains("transition:chat.bsky") {
+//         true => AuthScope::AppPassPrivileged,
+//         false => AuthScope::AppPass,
+//     };
+//
+//     if !scopes.contains(&scope_equivalent) {
+//         // AppPassPrivileged is sufficient but was not provided "transition:chat.bsky"
+//         if scopes.contains(AuthScope::AppPassPrivileged) {
+//             return Err(anyhow::Error::new(AuthError::InternalServerError(
+//                 "Missing required scope: transition:chat.bsky".to_string(),
+//             )));
+//         }
+//
+//         // AuthScope.Access and AuthScope.SignupQueued do not have an OAuth
+//         // scope equivalent.
+//         return Err(anyhow::Error::new(AuthError::InternalServerError(
+//             "DPoP access token cannot be used for this request".to_string(),
+//         )));
+//     }
+//
+//     let is_privileged =
+//         [AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope_equivalent);
+//
+//     let credentials = Credentials {
+//         r#type: "access".to_string(),
+//         did: Some(sub.get()),
+//         scope: Some(scope_equivalent),
+//         audience: None,
+//         token_id: None,
+//         aud: Some(env::var("PDS_SERVICE_DID")?),
+//         iss: None,
+//         is_privileged: Some(is_privileged),
+//     };
+//     let artifact = result.token.into_inner();
+//     Ok(AccessOutput {
+//         credentials: Some(credentials),
+//         artifacts: Some(artifact),
+//     })
+// }
 
 // @TODO: Implement DPop/OAuth
 pub async fn validate_access_token<'r>(

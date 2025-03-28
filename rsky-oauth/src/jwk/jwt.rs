@@ -1,5 +1,7 @@
 use crate::jwk::Jwk;
+use crate::oauth_provider::constants::TOKEN_ID_PREFIX;
 use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::token::token_id::TokenIdError;
 use chrono::NaiveDate;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
@@ -607,10 +609,23 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SignedJwt(String);
 
+/// Errors that can occur when working with token identification.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SignedJwtError {
+    #[error("Invalid format")]
+    InvalidFormat,
+}
+
 impl SignedJwt {
-    pub fn new(val: impl Into<String>) -> Result<Self, OAuthError> {
-        Ok(Self(val.into()))
+    pub fn new(data: impl Into<String>) -> Result<Self, SignedJwtError> {
+        let data = data.into();
+        Ok(Self(data))
+    }
+
+    pub fn val(&self) -> String {
+        self.0.clone()
     }
 }

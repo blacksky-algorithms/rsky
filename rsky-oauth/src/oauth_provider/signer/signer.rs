@@ -1,4 +1,6 @@
-use crate::jwk::{Audience, JwtConfirmation, JwtPayload, Keyset, VerifyOptions, VerifyResult};
+use crate::jwk::{
+    Audience, JwtConfirmation, JwtPayload, Keyset, SignedJwt, VerifyOptions, VerifyResult,
+};
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_types::{
@@ -19,7 +21,12 @@ impl Signer {
         Signer { issuer, keyset }
     }
 
-    pub async fn verify(&self, token: &str) -> VerifyResult {
+    pub async fn verify(
+        &self,
+        signed_jwt: &SignedJwt,
+        clock_tolerance: bool,
+        required_claims: String,
+    ) -> VerifyResult {
         unimplemented!()
         // self.keyset.verify_jwt(token).await
     }

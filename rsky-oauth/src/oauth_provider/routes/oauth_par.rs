@@ -174,22 +174,23 @@ pub async fn oauth_par(
     body: OAuthParRequestBody,
     dpop_jkt: DpopJkt,
 ) -> Result<Json<OAuthParResponse>, OAuthError> {
-    let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
-    let dpop_jkt = oauth_provider
-        .oauth_verifier
-        .check_dpop_proof(
-            dpop_jkt.0.unwrap().as_str(),
-            "POST",
-            body.url.as_str(),
-            None,
-        )
-        .await;
-    let res = oauth_provider
-        .pushed_authorization_request(
-            body.oauth_client_credentials.clone(),
-            body.oauth_authorization_request_par.clone(),
-            dpop_jkt,
-        )
-        .await?;
-    Ok(Json(res))
+    unimplemented!()
+    // let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
+    // let dpop_jkt = oauth_provider
+    //     .oauth_verifier
+    //     .check_dpop_proof(
+    //         dpop_jkt.0.unwrap().as_str(),
+    //         "POST",
+    //         body.url.as_str(),
+    //         None,
+    //     )
+    //     .await;
+    // let res = oauth_provider
+    //     .pushed_authorization_request(
+    //         body.oauth_client_credentials.clone(),
+    //         body.oauth_authorization_request_par.clone(),
+    //         dpop_jkt,
+    //     )
+    //     .await?;
+    // Ok(Json(res))
 }

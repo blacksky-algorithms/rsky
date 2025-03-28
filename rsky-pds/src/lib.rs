@@ -280,27 +280,27 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    let account_manager = SharedAccountManager {
-        account_manager: RwLock::new(AccountManager::creator()),
-    };
+    // let account_manager = SharedAccountManager {
+    //     account_manager: RwLock::new(AccountManager::creator()),
+    // };
 
-    //Setup OAuth Provider
-    let oauth_provider = build_oauth_provider();
-    let shared_oauth_provider = SharedOAuthProvider {
-        oauth_provider: RwLock::new(oauth_provider),
-    };
-
-    //Setup Device Manager
-    let oauth_provider = build_oauth_provider();
-    let shared_oauth_provider = SharedOAuthProvider {
-        oauth_provider: RwLock::new(oauth_provider),
-    };
+    // //Setup OAuth Provider
+    // let oauth_provider = build_oauth_provider();
+    // let shared_oauth_provider = SharedOAuthProvider {
+    //     oauth_provider: RwLock::new(oauth_provider),
+    // };
+    //
+    // //Setup Device Manager
+    // let oauth_provider = build_oauth_provider();
+    // let shared_oauth_provider = SharedOAuthProvider {
+    //     oauth_provider: RwLock::new(oauth_provider),
+    // };
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
     let mut pds_routes = pds_routes();
-    let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
-    pds_routes.append(&mut oauth_routes);
+    // let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
+    // pds_routes.append(&mut oauth_routes);
 
     rocket::custom(figment)
         .mount("/", pds_routes)
@@ -314,8 +314,8 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
-        .manage(shared_oauth_provider)
-        .manage(account_manager)
+    // .manage(shared_oauth_provider)
+    // .manage(account_manager)
 }
 
 fn pds_routes() -> Vec<Route> {

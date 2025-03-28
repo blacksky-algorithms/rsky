@@ -163,31 +163,30 @@ impl TokenManager {
      * @see {@link https://datatracker.ietf.org/doc/html/rfc7009#section-2.2 | RFC7009 Section 2.2}
      */
     pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
-        unimplemented!()
-        // if is_token_id(token.token.as_str()) {
-        //     let token_id = TokenId::new(token.token.clone());
-        //     self.store.blocking_write().delete_token(token_id)?;
-        // } else if let Ok(signed_jwt) = SignedJwt::new(token.token.as_str()) {
-        //     let verify_result = self.signer.verify(token.token.as_str()).await;
-        //     // let token_id = TokenId::new(verify_result.payload)
-        //     unimplemented!()
-        // } else if let Ok(refresh_token) = RefreshToken::new(token.token.as_str()) {
-        //     let token_info = self
-        //         .store
-        //         .blocking_read()
-        //         .find_token_by_refresh_token(refresh_token)?;
-        //     if let Some(token_info) = token_info {
-        //         self.store.blocking_write().delete_token(token_info.id)?;
-        //     }
-        // } else if let Ok(code) = Code::new(token.token.as_str()) {
-        //     let token_info = self.store.blocking_read().find_token_by_code(code)?;
-        //     if let Some(token_info) = token_info {
-        //         self.store.blocking_write().delete_token(token_info.id)?;
-        //     }
-        // } else {
-        //     // No error should be returned if the token is not valid
-        // }
-        // Ok(())
+        let token = token.token.clone();
+        if let Ok(token_id) = TokenId::new(token.as_str()) {
+            self.store.blocking_write().delete_token(token_id)?;
+        } else if let Ok(signed_jwt) = SignedJwt::new(token.as_str()) {
+            // let verify_result = self.signer.verify(token.token.as_str()).await;
+            // let token_id = TokenId::new(verify_result.payload)
+            unimplemented!()
+        } else if let Ok(refresh_token) = RefreshToken::new(token.as_str()) {
+            let token_info = self
+                .store
+                .blocking_read()
+                .find_token_by_refresh_token(refresh_token)?;
+            if let Some(token_info) = token_info {
+                self.store.blocking_write().delete_token(token_info.id)?;
+            }
+        } else if let Ok(code) = Code::new(token.as_str()) {
+            let token_info = self.store.blocking_read().find_token_by_code(code)?;
+            if let Some(token_info) = token_info {
+                self.store.blocking_write().delete_token(token_info.id)?;
+            }
+        } else {
+            // No error should be returned if the token is not valid
+        }
+        Ok(())
     }
 
     /**
@@ -227,15 +226,17 @@ impl TokenManager {
         &self,
         token: &OAuthTokenIdentification,
     ) -> Result<Option<TokenInfo>, OAuthError> {
-        unimplemented!()
-        // let token_val = token.token.clone();
-        //
-        // if is_token_id(token_val.as_str()) {
-        //     return self.store.blocking_read().read_token(token_val.as_str());
-        // }
-        //
-        // return Ok(None);
-        // // if is_signed_jwt {  }
+        let token_val = token.token.clone();
+
+        if let Ok(token_id) = TokenId::new(token_val.as_str()) {
+            return self.store.blocking_read().read_token(token_id);
+        } else if let Ok(signed_jwt) = SignedJwt::new(token_val.as_str()) {
+        } else if let Ok(refresh_token) = RefreshToken::new(token_val.as_str()) {
+        } else {
+            return Ok(None);
+        }
+
+        return Ok(None);
     }
 
     pub async fn get_token_info(

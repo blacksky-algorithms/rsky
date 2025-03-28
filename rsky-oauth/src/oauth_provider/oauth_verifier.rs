@@ -10,6 +10,7 @@ use crate::oauth_provider::token::verify_token_claims::{
     VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{OAuthAccessToken, OAuthIssuerIdentifier, OAuthTokenType};
+use std::any::Any;
 use std::clone;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -148,7 +149,6 @@ impl OAuthVerifier {
         headers: (Option<String>, Option<String>),
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
-        unimplemented!()
         // let (token_type, token) = parse_authorization_header(headers.0);
         // let dpop_jkt = self
         //     .check_dpop_proof(headers.1.unwrap(), method, url, Some(token.clone()))

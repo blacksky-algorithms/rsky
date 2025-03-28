@@ -1,17 +1,21 @@
-use crate::oauth_types::oauth_access_token::OAuthAccessToken;
-use crate::oauth_types::oauth_token_type::OAuthTokenType;
+pub struct AuthorizationHeader(String);
 
-pub fn parse_authorization_header(header: Option<String>) -> (OAuthTokenType, OAuthAccessToken) {
-    match header {
-        None => {
-            panic!("Invalid Request")
+impl AuthorizationHeader {
+    pub fn new(header: impl Into<String>) -> Result<Self, AuthorizationHeaderError> {
+        let header = header.into();
+        if header.is_empty() {
+            return Err(AuthorizationHeaderError::Empty);
         }
-        Some(header) => {
-            let res: Vec<&str> = header.split(" ").collect();
-            (
-                res.get(0).unwrap().to_string(),
-                res.get(1).unwrap().to_string(),
-            )
-        }
+        Ok(Self(header))
     }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthorizationHeaderError {
+    #[error("Refresh token cannot be empty")]
+    Empty,
 }

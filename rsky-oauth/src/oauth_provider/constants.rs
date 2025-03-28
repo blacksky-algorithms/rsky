@@ -10,13 +10,13 @@ pub const REFRESH_TOKEN_PREFIX: &str = "ref-";
 pub const REFRESH_TOKEN_BYTES_LENGTH: usize = 32; // 256 bits
 
 pub const TOKEN_ID_PREFIX: &str = "tok-";
-pub const TOKEN_ID_BYTES_LENGTH: u64 = 16; // 128 bits - used as `jti` in JWTs (cannot be forged)
+pub const TOKEN_ID_BYTES_LENGTH: usize = 16; // 128 bits - used as `jti` in JWTs (cannot be forged)
 
 pub const REQUEST_ID_PREFIX: &str = "req-";
 pub const REQUEST_ID_BYTES_LENGTH: usize = 16; // 128 bits
 
 pub const CODE_PREFIX: &str = "cod-";
-pub const CODE_BYTES_LENGTH: u64 = 32;
+pub const CODE_BYTES_LENGTH: usize = 32;
 
 pub const SECOND: u64 = 1;
 pub const MINUTE: u64 = 60 * SECOND;
