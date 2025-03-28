@@ -1,7 +1,7 @@
 /// Module version of lib.rs
-mod error;
+pub mod error;
 mod header;
-mod reader;
+pub mod reader;
 mod util;
 mod writer;
 
