@@ -175,6 +175,7 @@ pub mod ipld;
 pub mod sign;
 pub mod tid;
 pub mod time;
+pub mod models;
 
 #[cfg(test)]
 mod tests {
