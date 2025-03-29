@@ -1,14 +1,18 @@
 # Blacksky Algorithms' Contributor Guide
 
----
 First, we appreciate you showing interest in contributing to the rsky project! Any form of contribution is appreciated.
 In this document, we outline the different ways one can contribute to this project.
 
 Second, understand that all repositories in the **rsky** repository fall under two categories,
 "crates", and "services". Crates are libraries for hosted on the [Crates website](https://crates.io/search?q=rsky).
-The repositories in the "services" section are what is being used to serve the end user. 
+The repositories in the "services" section are what is being used to serve the end user.
 
----
+# Table of Contents
+- [Getting Started](#getting-started)
+- [Contribution Process](#contribution-process)
+- [Code of Conduct](#code-of-conduct)
+- [Contact Information](#contact-information)
+- [Important Links](#important-links)
 
 ## Getting Started
 This project heavily involves the AT Protocol. There are resources attached to this
@@ -57,9 +61,18 @@ yourself if this feature will only be useful to the majority of users, or if the
 that will benefit. If it is the latter option, consider making an add-on library with that functionality. Finally,
 the feature request has not already been suggested. If it has, be sure to add a comment or a reaction.
 
+When creating your feature request, make it adheres to the following guidelines:
+- A clear and descriptive title
+- A step-by-step description of the suggestion's behavior. Use as much detail as possible.
+- Describe what the current behavior is compared to what its new behavior would be if your changes were added to the
+project.
+- Feel free to use images, or short screen recordings to describe how your feature request would work.
+- Use any existing projects to explain how they solved this issue as it can be used as inspiration.
+
 ## Code of Conduct
 This project and everyone participating in it is governed by the [Code of Conduct](https://github.com/blacksky-algorithms/rsky/blob/main/.github/CODE_OF_CONDUCT.md). 
-By participating, you are expected to uphold this code. Please report any unacceptable behavior to <get-email>
+By participating, you are expected to uphold this code. Please report any unacceptable behavior to <get-email>.
+
 ## Contact Information
 
 
@@ -67,3 +80,5 @@ By participating, you are expected to uphold this code. Please report any unacce
 * [License Information](https://github.com/blacksky-algorithms/rsky/blob/main/LICENSE)
 * [Project Roadmap](https://github.com/d3ol-dev/rsky/blob/main/ROADMAP.md)
 * [Issue Tracker](https://github.com/blacksky-algorithms/rsky/issues)
+
+Special thanks to https://contributing.md for the guidance with this document.
