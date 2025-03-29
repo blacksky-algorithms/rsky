@@ -10,8 +10,8 @@ The repositories in the "services" section are what is being used to serve the e
 # Table of Contents
 - [Getting Started](#getting-started)
 - [Contribution Process](#contribution-process)
+- [Other Forms of Contribution](#other-forms-of-contribution)
 - [Code of Conduct](#code-of-conduct)
-- [Contact Information](#contact-information)
 - [Important Links](#important-links)
 
 ## Getting Started
@@ -35,14 +35,22 @@ the relays, for it to be used in feeds.
 * [Example AppView](https://github.com/bluesky-social/statusphere-example-app/tree/main)
 * [Constellation, a global backlink indexing tool](https://github.com/at-microcosm/links/tree/main/constellation)
 
-
 ## Contribution Process
+
+To be able to submit pull requests (PRs) to this project, you must first make a fork of this project. This can be done by
+going to the [project's homepage](https://github.com/blacksky-algorithms/rsky), looking in the top-right section of
+the page, clicking the "Fork" button. 
+
+Regarding pull requests, please try to avoid submitting PRs that change large parts of the codebase at once, or 
+introducing new, and unneccesary dependencies. Additionally, refrain from adding new features or changing the
+tooling or frameworks without prior discussion.
+
 ### Submitting a Bug Report
 Before you decide that it's time to submit a bug report, be sure to investigate the issue, and thoroughly read
 the documentation. Before submitting any report, please go through the checklist below to help us fix this bug
 as soon as possible.
 - Confirm that you are using the latest version of the project
-- Make sure the issue you are experiencing isn't due to any user error.
+- Make sure the issue you are experiencing isn't due to any user error. (We currently don't support build issues.)
 - Check if there is an existing issue outlining the same one you are experiencing. If you do happen to find one,
 consider leaving a comment with your experience.
 
@@ -52,7 +60,7 @@ In the report, we ask that you include the following information:
 - The Rust Compiler Version (type `rustc --version` to get the version)
 - If you are able to reliably reproduce this issue, how.
 
-If your bug report is concerning a security vulnerability, we encourage you to email us at <provide-email>.
+If your bug report is concerning a security vulnerability, we encourage you to email us at rudy@blacksky.app.
 
 ### Submitting a Feature Request
 Similar to the [Bug Report](#submitting-a-bug-report) section, confirm that you are using the latest version, and that
@@ -69,12 +77,27 @@ project.
 - Feel free to use images, or short screen recordings to describe how your feature request would work.
 - Use any existing projects to explain how they solved this issue as it can be used as inspiration.
 
+## Other Forms of Contribution
+We understand that not everyone is in a position to give technical contributions to the project. We want to outline some
+other ways you can contribute. Don't feel pressured if you aren't in a position to participate in upcoming suggestions.
+Simply giving us a "star", or sharing the word about the project is appreciated.
+
+Some other ways you can contribute to the project include:
+- [Financial Donations](https://opencollective.com/blacksky)
+- Updating and/or Translating Documentation
+  - Writing Tutorials
+  - Adapting the Project for Specific Regions
+- Community Support
+- Design Elements
+  - User Experience
+  - User Interface
+
+If there are any other ways you would like to contribute to the project. Consider reaching out to the team to see if 
+there is a fit! 
+
 ## Code of Conduct
 This project and everyone participating in it is governed by the [Code of Conduct](https://github.com/blacksky-algorithms/rsky/blob/main/.github/CODE_OF_CONDUCT.md). 
-By participating, you are expected to uphold this code. Please report any unacceptable behavior to <get-email>.
-
-## Contact Information
-
+By participating, you are expected to uphold this code. Please report any unacceptable behavior to rudy@blacksky.app.
 
 ## Important Links
 * [License Information](https://github.com/blacksky-algorithms/rsky/blob/main/LICENSE)
