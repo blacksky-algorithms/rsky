@@ -3,4 +3,4 @@ mod manager;
 mod types;
 mod worker;
 
-pub use manager::{Manager, ManagerError};
+pub use manager::Manager;

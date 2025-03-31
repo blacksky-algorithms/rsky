@@ -31,7 +31,6 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub enum Command {
     Connect(Config),
-    Reconnect(LocalId),
     Shutdown,
 }
 

@@ -1,10 +1,14 @@
+use std::thread;
+
+#[cfg(target_os = "linux")]
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
 use thiserror::Error;
 
-use crate::client::connection::{Connection, ConnectionError};
-use crate::client::types::{Command, CommandReceiver, Config, LocalId, StatusSender, WorkerId};
+use crate::crawler::connection::{Connection, ConnectionError};
+use crate::crawler::types::{Command, CommandReceiver, Config, LocalId, StatusSender, WorkerId};
 use crate::types::MessageSender;
 
+#[cfg(target_os = "linux")]
 const EPOLL_FLAGS: EpollFlags = EpollFlags::EPOLLIN;
 
 #[derive(Debug, Error)]
@@ -20,7 +24,9 @@ pub struct Worker {
     message_tx: MessageSender,
     status_tx: StatusSender,
     command_rx: CommandReceiver,
+    #[cfg(target_os = "linux")]
     epoll: Epoll,
+    #[cfg(target_os = "linux")]
     events: Vec<EpollEvent>,
 }
 
@@ -36,14 +42,28 @@ impl Worker {
             message_tx,
             status_tx,
             command_rx,
+            #[cfg(target_os = "linux")]
             #[expect(clippy::expect_used)]
             epoll: Epoll::new(EpollCreateFlags::empty()).expect("failed to create epoll"),
+            #[cfg(target_os = "linux")]
             events: vec![EpollEvent::empty(); 1024],
         }
     }
 
-    pub fn run(mut self) {
-        while self.update() {}
+    pub fn run(mut self) -> Result<(), WorkerError> {
+        while self.update() {
+            thread::yield_now();
+        }
+        self.shutdown()
+    }
+
+    pub fn shutdown(mut self) -> Result<(), WorkerError> {
+        for conn in self.connections.iter_mut().filter_map(|x| x.as_mut()) {
+            if let Err(err) = conn.close() {
+                tracing::warn!("crawler conn close error: {err}");
+            }
+        }
+        Ok(())
     }
 
     fn handle_command(&mut self, command: Command) -> bool {
@@ -55,6 +75,7 @@ impl Worker {
                     self.status_tx.clone(),
                 ) {
                     Ok(conn) => {
+                        #[cfg(target_os = "linux")]
                         #[expect(clippy::expect_used)]
                         self.epoll
                             .add(&conn, EpollEvent::new(EPOLL_FLAGS, config.local_id.0 as _))
@@ -62,37 +83,22 @@ impl Worker {
                         self.connections.push(Some(conn));
                         self.configs.push(config);
                     }
-                    Err(_) => todo!(),
-                }
-            }
-            Command::Reconnect(local_id) => {
-                if let Some(conn) = &mut self.connections[local_id.0] {
-                    match conn.close() {
-                        Ok(()) => {
-                            self.connections[local_id.0] = None;
-                        }
-                        Err(_) => todo!(),
+                    Err(err) => {
+                        tracing::warn!("[{}] unable to requestCrawl: {err}", config.uri);
                     }
                 }
-                match Connection::connect(
-                    self.configs[local_id.0].clone(),
-                    self.message_tx.clone(),
-                    self.status_tx.clone(),
-                ) {
-                    Ok(conn) => {
-                        self.connections[local_id.0] = Some(conn);
-                    }
-                    Err(_) => todo!(),
-                }
             }
-            Command::Shutdown => return false,
+            Command::Shutdown => {
+                tracing::debug!("shutting down crawler: {}", self.worker_id.0);
+                return false;
+            }
         }
         true
     }
 
+    #[cfg(target_os = "linux")]
     fn update(&mut self) -> bool {
         for _ in 0..32 {
-            // returns false only upon global shutdown, true otherwise
             if let Ok(command) = self.command_rx.pop() {
                 if !self.handle_command(command) {
                     return false;
@@ -128,9 +134,29 @@ impl Worker {
         true
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn update(&mut self) -> bool {
+        if let Ok(command) = self.command_rx.pop() {
+            if !self.handle_command(command) {
+                return false;
+            }
+        }
+
+        for _ in 0..32 {
+            for local_id in 0..self.connections.len() {
+                if !self.poll(LocalId(local_id)) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     fn poll(&mut self, local_id: LocalId) -> bool {
         if let Some(conn) = &mut self.connections[local_id.0] {
             if let Err(_) = conn.poll() {
+                #[cfg(target_os = "linux")]
                 #[expect(clippy::expect_used)]
                 self.epoll.delete(conn).expect("failed to delete connection");
                 self.connections[local_id.0] = None;

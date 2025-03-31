@@ -1,9 +1,14 @@
+use std::net::TcpStream;
+
 use http::Uri;
 use rtrb::{Consumer, Producer};
 use thingbuf::{Recycle, mpsc};
+use tungstenite::stream::MaybeTlsStream;
 
-pub type CrawlRequestSender = Producer<CrawlRequest>;
-pub type CrawlRequestReceiver = Consumer<CrawlRequest>;
+pub type RequestCrawlSender = Producer<RequestCrawl>;
+pub type RequestCrawlReceiver = Consumer<RequestCrawl>;
+pub type SubscribeReposSender = Producer<SubscribeRepos>;
+pub type SubscribeReposReceiver = Consumer<SubscribeRepos>;
 pub type MessageSender = mpsc::blocking::Sender<Message, MessageRecycle>;
 pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
 
@@ -11,11 +16,17 @@ pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
 pub struct FeedId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Cursor(pub usize);
+pub struct Cursor(pub u64);
 
 #[derive(Debug)]
-pub struct CrawlRequest {
+pub struct RequestCrawl {
     pub uri: Uri,
+}
+
+#[derive(Debug)]
+pub struct SubscribeRepos {
+    pub stream: MaybeTlsStream<TcpStream>,
+    pub cursor: Cursor,
 }
 
 #[derive(Debug)]

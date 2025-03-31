@@ -1,16 +1,18 @@
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 
-use hashbrown::HashMap;
-use http::Uri;
+use bus::Bus;
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
 use thiserror::Error;
 
-use crate::client::types::{
+use crate::SHUTDOWN;
+use crate::publisher::types::{
     Command, CommandSender, Config, LocalId, Status, StatusReceiver, WorkerId,
 };
-use crate::client::worker::{Worker, WorkerError};
-use crate::types::{CrawlRequestReceiver, Cursor, MessageSender};
+use crate::publisher::worker::{Worker, WorkerError};
+use crate::types::{MessageReceiver, SubscribeReposReceiver};
 
 const CAPACITY: usize = 1024;
 
@@ -28,30 +30,32 @@ pub enum ManagerError {
 struct WorkerHandle {
     pub configs: Vec<Config>,
     pub command_tx: CommandSender,
-    pub thread_handle: thread::JoinHandle<()>,
+    pub thread_handle: thread::JoinHandle<Result<(), WorkerError>>,
 }
 
 pub struct Manager {
     workers: Box<[WorkerHandle]>,
     next_id: WorkerId,
-    configs: HashMap<Uri, Config>,
+    message_rx: MessageReceiver,
+    bus: Bus<Arc<Vec<u8>>>,
     status_rx: StatusReceiver,
-    crawl_request_rx: CrawlRequestReceiver,
+    subscribe_repos_rx: SubscribeReposReceiver,
 }
 
 impl Manager {
     pub fn new(
-        n_workers: usize, message_tx: MessageSender, crawl_request_rx: CrawlRequestReceiver,
+        n_workers: usize, message_rx: MessageReceiver, subscribe_repos_rx: SubscribeReposReceiver,
     ) -> Result<Self, ManagerError> {
+        let mut bus = Bus::new(CAPACITY);
         let (status_tx, status_rx) =
             magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY).unwrap());
         let workers = (0..n_workers)
             .map(|worker_id| {
-                let message_tx = message_tx.clone();
+                let message_rx = bus.add_rx();
                 let status_tx = status_tx.clone();
                 let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
                 let thread_handle = thread::spawn(move || {
-                    Worker::new(WorkerId(worker_id), message_tx, status_tx, command_rx).run();
+                    Worker::new(WorkerId(worker_id), message_rx, status_tx, command_rx).run()
                 });
                 WorkerHandle { configs: Vec::new(), command_tx, thread_handle }
             })
@@ -59,9 +63,10 @@ impl Manager {
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: WorkerId(0),
-            configs: HashMap::new(),
+            message_rx,
+            bus,
             status_rx,
-            crawl_request_rx,
+            subscribe_repos_rx,
         })
     }
 
@@ -74,8 +79,10 @@ impl Manager {
         for worker in &mut self.workers {
             worker.command_tx.push(Command::Shutdown)?;
         }
-        for worker in self.workers {
-            worker.thread_handle.join().map_err(|_| ManagerError::JoinError)?;
+        for (id, worker) in self.workers.into_iter().enumerate() {
+            if let Err(err) = worker.thread_handle.join().map_err(|_| ManagerError::JoinError)? {
+                tracing::warn!("publisher worker {id} error: {err}");
+            }
         }
         Ok(())
     }
@@ -86,24 +93,36 @@ impl Manager {
     }
 
     fn update(&mut self) -> Result<bool, ManagerError> {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
         if let Ok(status) = self.status_rx.try_pop() {
             if !self.handle_status(status)? {
                 return Ok(false);
             }
         }
 
-        if let Ok(request) = self.crawl_request_rx.pop() {
-            if !self.configs.contains_key(&request.uri) {
-                let config = Config {
-                    uri: request.uri.clone(),
-                    cursor: Cursor(0),
-                    worker_id: self.next_id,
-                    local_id: LocalId(self.workers[self.next_id.0].configs.len()),
-                };
-                self.next_id = WorkerId((self.next_id.0 + 1) % self.workers.len());
-                self.configs.insert(request.uri.clone(), config.clone());
-                self.workers[config.worker_id.0].command_tx.push(Command::Connect(config)).unwrap();
+        for _ in 0..32 {
+            match self.message_rx.try_recv_ref() {
+                Ok(msg) => {
+                    self.bus.try_broadcast(Arc::new(msg.data.clone().into())).unwrap();
+                }
+                Err(thingbuf::mpsc::errors::TryRecvError::Empty) => break,
+                Err(thingbuf::mpsc::errors::TryRecvError::Closed) => return Ok(false),
+                Err(_) => unreachable!(),
             }
+        }
+
+        if let Ok(subscribe_repos) = self.subscribe_repos_rx.pop() {
+            let config = Config {
+                stream: subscribe_repos.stream,
+                cursor: subscribe_repos.cursor,
+                worker_id: self.next_id,
+                local_id: LocalId(self.workers[self.next_id.0].configs.len()),
+            };
+            self.next_id = WorkerId((self.next_id.0 + 1) % self.workers.len());
+            self.workers[config.worker_id.0].command_tx.push(Command::Connect(config)).unwrap();
         }
 
         Ok(true)

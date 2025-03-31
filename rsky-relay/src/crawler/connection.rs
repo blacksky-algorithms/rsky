@@ -6,7 +6,7 @@ use thiserror::Error;
 use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
 
-use crate::client::types::{Client, Config, StatusSender};
+use crate::crawler::types::{Client, Config, StatusSender};
 use crate::types::MessageSender;
 
 #[derive(Debug, Error)]
@@ -27,6 +27,7 @@ pub struct Connection {
 }
 
 impl AsFd for Connection {
+    #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         match self.client.get_ref() {
             MaybeTlsStream::Plain(stream) => stream.as_fd(),
@@ -60,11 +61,11 @@ impl Connection {
     }
 
     pub fn poll(&mut self) -> Result<(), ConnectionError> {
-        loop {
+        for _ in 0..1024 {
             let msg = match self.client.read() {
                 Ok(msg) => msg,
                 Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
-                    return Ok(());
+                    break;
                 }
                 Err(err) => Err(err)?,
             };
@@ -79,5 +80,6 @@ impl Connection {
             slot.data = bytes.into();
             slot.uri = self.config.uri.clone();
         }
+        Ok(())
     }
 }
