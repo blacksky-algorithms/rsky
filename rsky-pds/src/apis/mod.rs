@@ -112,6 +112,36 @@ pub enum ApiError {
     AuthRequiredError(String),
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::RuntimeError => write!(f, "InternalServerError: Something went wrong"),
+            ApiError::InvalidLogin => write!(f, "InvalidLogin: Invalid identifier or password"),
+            ApiError::AccountTakendown => {
+                write!(f, "AccountTakendown: Account has been taken down")
+            }
+            ApiError::InvalidRequest(msg) => write!(f, "InvalidRequest: {}", msg),
+            ApiError::ExpiredToken => write!(f, "ExpiredToken: Token is expired"),
+            ApiError::InvalidToken => write!(f, "InvalidToken: Token is invalid"),
+            ApiError::RecordNotFound => write!(f, "RecordNotFound: Record could not be found"),
+            ApiError::InvalidHandle => write!(f, "InvalidHandle: Handle is invalid"),
+            ApiError::InvalidEmail => write!(f, "InvalidEmail: Invalid email"),
+            ApiError::InvalidPassword => write!(f, "InvalidPassword: Invalid Password"),
+            ApiError::InvalidInviteCode => write!(f, "InvalidInviteCode: Invalid invite code"),
+            ApiError::HandleNotAvailable => write!(f, "HandleNotAvailable: Handle not available"),
+            ApiError::EmailNotAvailable => write!(f, "EmailNotAvailable: Email not available"),
+            ApiError::UnsupportedDomain => write!(f, "UnsupportedDomain: Unsupported domain"),
+            ApiError::UnresolvableDid => write!(f, "UnresolvableDid: Unresolved Did"),
+            ApiError::IncompatibleDidDoc => write!(f, "IncompatibleDidDoc: IncompatibleDidDoc"),
+            ApiError::WellKnownNotFound => write!(f, "WellKnownNotFound: User not found"),
+            ApiError::AccountNotFound => write!(f, "AccountNotFound: Account could not be found"),
+            ApiError::BlobNotFound => write!(f, "BlobNotFound: Blob could not be found"),
+            ApiError::BadRequest(error, message) => write!(f, "{}: {}", error, message),
+            ApiError::AuthRequiredError(msg) => write!(f, "AuthRequiredError: {}", msg),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ErrorBody {
     error: String,
