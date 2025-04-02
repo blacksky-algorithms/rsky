@@ -4,7 +4,7 @@ First, we appreciate you showing interest in contributing to the rsky project! A
 In this document, we outline the different ways one can contribute to this project.
 
 Second, understand that all repositories in the **rsky** repository fall under two categories,
-"crates", and "services". Crates are libraries for hosted on the [Crates website](https://crates.io/search?q=rsky).
+"crates", and "services". Crates are libraries hosted on [Crates.io](https://crates.io/search?q=rsky).
 The repositories in the "services" section are what is being used to serve the end user.
 
 # Table of Contents
@@ -19,8 +19,8 @@ This project heavily involves the AT Protocol. There are resources attached to t
 document that you can use to gain a better understanding.
 
 At a high level, the **Authenticated Transfer Protocol** (aka AT Protocol, ATProto, atproto) is a generic, federated protocol for
-building open social media appliactions. **Personal Data Stores** (or PDSs) store user data
-and handles identity. **Relays** aggregate and distributes data across the network. **App Views** aggregate data from
+building open social media appliactions. **Personal Data Servers** (or PDSs) store user data
+and handle identity. **Relays** aggregate and distribute data across the network. **App Views** aggregate data from
 the relays, for it to be used in feeds.
 
 ### Resources
@@ -83,7 +83,7 @@ other ways you can contribute. Don't feel pressured if you aren't in a position 
 Simply giving us a "star", or sharing the word about the project is appreciated.
 
 Some other ways you can contribute to the project include:
-- [Financial Donations](https://opencollective.com/blacksky)
+- [Financial Contributions](https://opencollective.com/blacksky)
 - Updating and/or Translating Documentation
   - Writing Tutorials
   - Adapting the Project for Specific Regions
@@ -101,7 +101,7 @@ By participating, you are expected to uphold this code. Please report any unacce
 
 ## Important Links
 * [License Information](https://github.com/blacksky-algorithms/rsky/blob/main/LICENSE)
-* [Project Roadmap](https://github.com/d3ol-dev/rsky/blob/main/ROADMAP.md)
+* [Project Roadmap](https://github.com/blacksky-algorithms/rsky/blob/main/ROADMAP.md)
 * [Issue Tracker](https://github.com/blacksky-algorithms/rsky/issues)
 
 Special thanks to https://contributing.md for the guidance with this document.
