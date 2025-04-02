@@ -331,6 +331,20 @@ async fn process_labels(message: Vec<u8>, client: &reqwest::Client) {
     }
 }
 
+fn websocket_url(
+    subscriber_base_path: &str,
+    subscriber_endpoint: &str,
+    subscriber_cursor: Option<&str>,
+) -> Url {
+    let url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint);
+    let mut ws_url = Url::parse(&url).expect("Invalid WebSocket URL");
+    let query = subscriber_cursor
+        .as_ref()
+        .map(|cursor| format!("cursor={}", cursor));
+    ws_url.set_query(query.as_deref());
+    ws_url
+}
+
 #[tokio::main]
 async fn main() {
     // Load environment variables from .env file
@@ -341,6 +355,7 @@ async fn main() {
         env::var("FEEDGEN_SUBSCRIPTION_PATH").unwrap_or_else(|_| "wss://bsky.network".to_string());
     let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
         .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
+    let subscriber_cursor = env::var("FEEDGEN_SUBSCRIPTION_CURSOR").ok();
 
     // Configure the reqwest client with connection pooling settings
     let client = Arc::new(
@@ -355,13 +370,16 @@ async fn main() {
     // Create a semaphore to limit the number of concurrent processing tasks
     let semaphore = Arc::new(Semaphore::new(100)); // Adjust the limit as needed
 
-    loop {
-        // Construct the WebSocket URL
-        let url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint);
-        let ws_url = Url::parse(&url).expect("Invalid WebSocket URL");
+    // Construct the WebSocket URL
+    let ws_url = websocket_url(
+        &subscriber_base_path,
+        &subscriber_endpoint,
+        subscriber_cursor.as_deref(),
+    );
 
+    loop {
         // Attempt to establish a WebSocket connection
-        match connect_async(ws_url).await {
+        match connect_async(&ws_url).await {
             Ok((mut socket, _response)) => {
                 println!("Connected to {}", subscriber_base_path);
 
