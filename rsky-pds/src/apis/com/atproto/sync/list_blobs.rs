@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::blob::ListBlobsOpts;
 use crate::actor_store::ActorStore;
@@ -20,13 +21,14 @@ async fn inner_list_blobs(
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ListBlobsOutput> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
         false
     };
-    let _ = assert_repo_availability(&did, is_user_or_admin).await?;
+    let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
 
     let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
     let blob_cids = actor_store
@@ -60,8 +62,20 @@ pub async fn list_blobs(
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<ListBlobsOutput>, ApiError> {
-    match inner_list_blobs(did, since, limit, cursor, s3_config, auth, db).await {
+    match inner_list_blobs(
+        did,
+        since,
+        limit,
+        cursor,
+        s3_config,
+        auth,
+        db,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

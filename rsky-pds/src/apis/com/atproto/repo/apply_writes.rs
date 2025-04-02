@@ -26,6 +26,7 @@ async fn inner_apply_writes(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<()> {
     let tx: ApplyWritesInput = body.into_inner();
     let ApplyWritesInput {
@@ -34,14 +35,15 @@ async fn inner_apply_writes(
         swap_commit,
         ..
     } = tx;
-    let account = AccountManager::get_account_legacy(
-        &repo,
-        Some(AvailabilityFlags {
-            include_deactivated: Some(true),
-            include_taken_down: None,
-        }),
-    )
-    .await?;
+    let account = account_manager
+        .get_account(
+            &repo,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: None,
+            }),
+        )
+        .await?;
 
     if let Some(account) = account {
         if account.deactivated_at.is_some() {
@@ -111,7 +113,9 @@ async fn inner_apply_writes(
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_commit(did.clone(), commit.clone(), writes)
             .await?;
-        AccountManager::update_repo_root_legacy(did.to_string(), commit.cid, commit.rev)?;
+        account_manager
+            .update_repo_root(did.to_string(), commit.cid, commit.rev)
+            .await?;
         Ok(())
     } else {
         bail!("Could not find repo: `{repo}`")
@@ -126,9 +130,10 @@ pub async fn apply_writes(
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
-    match inner_apply_writes(body, auth, sequencer, s3_config, db).await {
+    match inner_apply_writes(body, auth, sequencer, s3_config, db, account_manager).await {
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

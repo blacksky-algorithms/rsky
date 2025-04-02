@@ -13,9 +13,11 @@ use rsky_lexicon::com::atproto::server::{CreateAppPasswordInput, CreateAppPasswo
 pub async fn create_app_password(
     body: Json<CreateAppPasswordInput>,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<Json<CreateAppPasswordOutput>, ApiError> {
     let CreateAppPasswordInput { name } = body.into_inner();
-    match AccountManager::create_app_password(auth.access.credentials.unwrap().did.unwrap(), name)
+    match account_manager
+        .create_app_password(auth.access.credentials.unwrap().did.unwrap(), name)
         .await
     {
         Ok(app_password) => Ok(Json(app_password)),

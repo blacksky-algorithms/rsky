@@ -1,4 +1,4 @@
-use crate::db::{establish_connection, DbConn};
+use crate::db::DbConn;
 use crate::models;
 use crate::models::AppPassword;
 use anyhow::{anyhow, bail, Result};
@@ -17,27 +17,10 @@ pub struct UpdateUserPasswordOpts {
     pub password_encrypted: String,
 }
 
-#[deprecated]
-pub async fn verify_account_password_legacy(did: &String, password: &String) -> Result<bool> {
-    use crate::schema::pds::account::dsl as AccountSchema;
-    let conn = &mut establish_connection()?;
-
-    let found = AccountSchema::account
-        .filter(AccountSchema::did.eq(did))
-        .select(models::Account::as_select())
-        .first(conn)
-        .optional()?;
-    if let Some(found) = found {
-        verify(password, &found.password)
-    } else {
-        Ok(false)
-    }
-}
-
-pub async fn verify_account_password(did: &String, password: &String, db: &DbConn) -> Result<bool> {
+pub async fn verify_account_password(did: &str, password: &String, db: &DbConn) -> Result<bool> {
     use crate::schema::pds::account::dsl as AccountSchema;
 
-    let did = did.clone();
+    let did = did.to_owned();
     let found = db
         .run(move |conn| {
             AccountSchema::account
@@ -54,36 +37,11 @@ pub async fn verify_account_password(did: &String, password: &String, db: &DbCon
     }
 }
 
-#[deprecated]
-pub async fn verify_app_password_legacy(did: &String, password: &String) -> Result<Option<String>> {
-    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-    let conn = &mut establish_connection()?;
-
-    let did = did.clone();
-    let password = password.clone();
-    let password_encrypted = hash_app_password(&did, &password).await?;
-    let found = AppPasswordSchema::app_password
-        .filter(AppPasswordSchema::did.eq(did))
-        .filter(AppPasswordSchema::password.eq(password_encrypted))
-        .select(AppPassword::as_select())
-        .first(conn)
-        .optional()?;
-    if let Some(found) = found {
-        Ok(Some(found.name))
-    } else {
-        Ok(None)
-    }
-}
-
-pub async fn verify_app_password(
-    did: &String,
-    password: &String,
-    db: &DbConn,
-) -> Result<Option<String>> {
+pub async fn verify_app_password(did: &str, password: &str, db: &DbConn) -> Result<Option<String>> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
 
-    let did = did.clone();
-    let password = password.clone();
+    let did = did.to_owned();
+    let password = password.to_owned();
     let password_encrypted = hash_app_password(&did, &password).await?;
     let found = db
         .run(move |conn| {
@@ -114,7 +72,7 @@ pub fn gen_salt_and_hash(password: String) -> Result<String> {
     Ok(password_hash)
 }
 
-pub fn hash_with_salt(password: &String, salt: &String) -> Result<String> {
+pub fn hash_with_salt(password: &String, salt: &str) -> Result<String> {
     let salt = SaltString::from_b64(salt).map_err(|error| anyhow!(error.to_string()))?;
     let argon2 = Argon2::default();
     let password_hash = argon2
@@ -124,7 +82,7 @@ pub fn hash_with_salt(password: &String, salt: &String) -> Result<String> {
     Ok(password_hash)
 }
 
-pub fn verify(password: &String, stored_hash: &String) -> Result<bool> {
+pub fn verify(password: &String, stored_hash: &str) -> Result<bool> {
     let parsed_hash = PasswordHash::new(stored_hash).map_err(|error| anyhow!(error.to_string()))?;
     Ok(Argon2::default()
         .verify_password(password.as_ref(), &parsed_hash)
@@ -139,66 +97,81 @@ pub async fn hash_app_password(did: &String, password: &String) -> Result<String
 
 /// create an app password with format:
 /// 1234-abcd-5678-efgh
-pub async fn create_app_password(did: String, name: String) -> Result<CreateAppPasswordOutput> {
+pub async fn create_app_password(
+    did: String,
+    name: String,
+    db: &DbConn,
+) -> Result<CreateAppPasswordOutput> {
     let str = &get_random_str()[0..16].to_lowercase();
-    let chunks = vec![&str[0..4], &str[4..8], &str[8..12], &str[12..16]];
+    let chunks = [&str[0..4], &str[4..8], &str[8..12], &str[12..16]];
     let password = chunks.join("-");
     let password_encrypted = hash_app_password(&did, &password).await?;
 
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-    let conn = &mut establish_connection()?;
 
     let created_at = now();
 
-    let got: Option<AppPassword> = insert_into(AppPasswordSchema::app_password)
-        .values((
-            AppPasswordSchema::did.eq(did),
-            AppPasswordSchema::name.eq(&name),
-            AppPasswordSchema::password.eq(password_encrypted),
-            AppPasswordSchema::createdAt.eq(&created_at),
-        ))
-        .returning(AppPassword::as_select())
-        .get_result(conn)
-        .optional()?;
-    if let Some(_) = got {
-        Ok(CreateAppPasswordOutput {
-            name,
-            password,
-            created_at,
-        })
-    } else {
-        bail!("could not create app-specific password")
-    }
+    db.run(move |conn| {
+        let got: Option<AppPassword> = insert_into(AppPasswordSchema::app_password)
+            .values((
+                AppPasswordSchema::did.eq(did),
+                AppPasswordSchema::name.eq(&name),
+                AppPasswordSchema::password.eq(password_encrypted),
+                AppPasswordSchema::createdAt.eq(&created_at),
+            ))
+            .returning(AppPassword::as_select())
+            .get_result(conn)
+            .optional()?;
+        if got.is_some() {
+            Ok(CreateAppPasswordOutput {
+                name,
+                password,
+                created_at,
+            })
+        } else {
+            bail!("could not create app-specific password")
+        }
+    })
+    .await
 }
 
-pub async fn list_app_passwords(did: &String) -> Result<Vec<(String, String)>> {
+pub async fn list_app_passwords(did: &str, db: &DbConn) -> Result<Vec<(String, String)>> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-    let conn = &mut establish_connection()?;
 
-    Ok(AppPasswordSchema::app_password
-        .filter(AppPasswordSchema::did.eq(did))
-        .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
-        .get_results(conn)?)
+    let did = did.to_owned();
+    db.run(move |conn| {
+        Ok(AppPasswordSchema::app_password
+            .filter(AppPasswordSchema::did.eq(did))
+            .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
+            .get_results(conn)?)
+    })
+    .await
 }
 
-pub async fn update_user_password(opts: UpdateUserPasswordOpts) -> Result<()> {
+pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &DbConn) -> Result<()> {
     use crate::schema::pds::account::dsl as AccountSchema;
-    let conn = &mut establish_connection()?;
 
-    update(AccountSchema::account)
-        .filter(AccountSchema::did.eq(opts.did))
-        .set(AccountSchema::password.eq(opts.password_encrypted))
-        .execute(conn)?;
-    Ok(())
+    db.run(move |conn| {
+        update(AccountSchema::account)
+            .filter(AccountSchema::did.eq(opts.did))
+            .set(AccountSchema::password.eq(opts.password_encrypted))
+            .execute(conn)?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn delete_app_password(did: &String, name: &String) -> Result<()> {
+pub async fn delete_app_password(did: &str, name: &str, db: &DbConn) -> Result<()> {
     use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-    let conn = &mut establish_connection()?;
 
-    delete(AppPasswordSchema::app_password)
-        .filter(AppPasswordSchema::did.eq(did))
-        .filter(AppPasswordSchema::name.eq(name))
-        .execute(conn)?;
-    Ok(())
+    let did = did.to_owned();
+    let name = name.to_owned();
+    db.run(move |conn| {
+        delete(AppPasswordSchema::app_password)
+            .filter(AppPasswordSchema::did.eq(did))
+            .filter(AppPasswordSchema::name.eq(name))
+            .execute(conn)?;
+        Ok(())
+    })
+    .await
 }

@@ -1,3 +1,4 @@
+use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
@@ -22,6 +23,7 @@ pub async fn inner_get_profile(
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<ProfileViewDetailed>, ApiError> {
     let requester: Option<String> = match auth.access.credentials {
         None => None,
@@ -38,6 +40,7 @@ pub async fn inner_get_profile(
                 s3_config,
                 state_local_viewer,
                 db,
+                account_manager,
             )
             .await?;
             Ok(read_afer_write_response)
@@ -58,11 +61,22 @@ pub async fn get_profile(
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<ProfileViewDetailed>, ApiError> {
     match cfg.bsky_app_view {
         None => Err(ApiError::AccountNotFound),
         Some(_) => {
-            match inner_get_profile(actor, auth, res, s3_config, state_local_viewer, db).await {
+            match inner_get_profile(
+                actor,
+                auth,
+                res,
+                s3_config,
+                state_local_viewer,
+                db,
+                account_manager,
+            )
+            .await
+            {
                 Ok(response) => Ok(response),
                 Err(error) => Err(error),
             }

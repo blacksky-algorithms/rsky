@@ -89,12 +89,10 @@ pub fn env_to_cfg() -> ServerConfig {
     let service_handle_domains: Vec<String>;
     if env_list("PDS_SERVICE_HANDLE_DOMAINS").len() > 0 {
         service_handle_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
+    } else if hostname == "localhost" {
+        service_handle_domains = vec![".test".to_string()];
     } else {
-        if hostname == "localhost" {
-            service_handle_domains = vec![".test".to_string()];
-        } else {
-            service_handle_domains = vec![format!(".{hostname}")];
-        }
+        service_handle_domains = vec![format!(".{hostname}")];
     }
     let identity_cfg: IdentityConfig = IdentityConfig {
         plc_url: env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_string()),

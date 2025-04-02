@@ -46,11 +46,10 @@ fn calculate_codes_to_create(opts: CalculateCodesToCreateOpts) -> Result<(usize,
     let user_lifespan = now - opts.user_created_at;
 
     // how many codes a user could create within the current epoch if they have 0
-    let could_create: usize;
 
-    if opts.user_created_at >= opts.epoch {
+    let could_create: usize = if opts.user_created_at >= opts.epoch {
         // if the user was created after the epoch, then they can create a code for each interval since the epoch
-        could_create = user_lifespan / opts.interval;
+        user_lifespan / opts.interval
     } else {
         // if the user was created before the epoch, we:
         // - calculate the total intervals since account creation
@@ -59,8 +58,8 @@ fn calculate_codes_to_create(opts: CalculateCodesToCreateOpts) -> Result<(usize,
         let could_create_total = user_lifespan / opts.interval;
         let user_pre_epoch_lifespan = opts.epoch - opts.user_created_at;
         let could_create_before_epoch = user_pre_epoch_lifespan / opts.interval;
-        could_create = could_create_total - could_create_before_epoch;
-    }
+        could_create_total - could_create_before_epoch
+    };
     // we count the codes that the user has created within the current epoch
     let epoch_codes: Vec<CodeDetail> = routine_codes
         .clone()
@@ -86,10 +85,11 @@ async fn inner_get_account_invite_codes(
     include_used: bool,
     create_available: bool,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<GetAccountInviteCodesOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
-    let account = AccountManager::get_account_legacy(&requester, None).await?;
-    let mut user_codes = AccountManager::get_account_invite_codes(&requester).await?;
+    let account = account_manager.get_account(&requester, None).await?;
+    let mut user_codes = account_manager.get_account_invite_codes(&requester).await?;
 
     if let Some(account) = account {
         let mut created: Vec<CodeDetail> = Vec::new();
@@ -109,13 +109,14 @@ async fn inner_get_account_invite_codes(
             })?;
             if to_create > 0 {
                 let codes = gen_invite_codes(to_create as i32);
-                created = AccountManager::create_account_invite_codes(
-                    &requester,
-                    codes,
-                    total,
-                    account.invites_disabled.unwrap_or(0) == 1,
-                )
-                .await?;
+                created = account_manager
+                    .create_account_invite_codes(
+                        &requester,
+                        codes,
+                        total,
+                        account.invites_disabled.unwrap_or(0) == 1,
+                    )
+                    .await?;
             }
         }
         let mut all_codes: Vec<CodeDetail> = Vec::new();
@@ -147,8 +148,10 @@ pub async fn get_account_invite_codes(
     includeUsed: bool,
     createAvailable: bool,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<Json<GetAccountInviteCodesOutput>, ApiError> {
-    match inner_get_account_invite_codes(includeUsed, createAvailable, auth).await {
+    match inner_get_account_invite_codes(includeUsed, createAvailable, auth, account_manager).await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -23,12 +23,16 @@ async fn get_requester_did(auth: &AccessFull) -> Result<String, ApiError> {
 }
 
 #[tracing::instrument(skip_all)]
-async fn get_account(requester_did: &str) -> Result<ActorAccount, ApiError> {
+async fn get_account(
+    requester_did: &str,
+    account_manager: &AccountManager,
+) -> Result<ActorAccount, ApiError> {
     let availability_flags = AvailabilityFlags {
         include_taken_down: Some(true),
         include_deactivated: Some(true),
     };
-    match AccountManager::get_account_legacy(&requester_did.to_string(), Some(availability_flags))
+    match account_manager
+        .get_account(&requester_did.to_string(), Some(availability_flags))
         .await
     {
         Ok(account) => match account {
@@ -46,12 +50,13 @@ async fn get_account(requester_did: &str) -> Result<ActorAccount, ApiError> {
 }
 
 #[tracing::instrument(skip_all)]
-async fn create_email_token(requester: &str) -> Result<String, ApiError> {
-    match AccountManager::create_email_token(
-        &requester.to_string(),
-        EmailTokenPurpose::PlcOperation,
-    )
-    .await
+async fn create_email_token(
+    requester: &str,
+    account_manager: &AccountManager,
+) -> Result<String, ApiError> {
+    match account_manager
+        .create_email_token(&requester.to_string(), EmailTokenPurpose::PlcOperation)
+        .await
     {
         Ok(res) => Ok(res),
         Err(error) => {
@@ -83,10 +88,13 @@ async fn do_plc_operation(account: &ActorAccount, token: String) -> Result<(), A
 
 #[rocket::post("/xrpc/com.atproto.identity.requestPlcOperationSignature")]
 #[tracing::instrument(skip_all)]
-pub async fn request_plc_operation_signature(auth: AccessFull) -> Result<(), ApiError> {
+pub async fn request_plc_operation_signature(
+    auth: AccessFull,
+    account_manager: AccountManager,
+) -> Result<(), ApiError> {
     let requester = get_requester_did(&auth).await?;
-    let account = get_account(requester.as_str()).await?;
-    let token = create_email_token(requester.as_str()).await?;
+    let account = get_account(requester.as_str(), &account_manager).await?;
+    let token = create_email_token(requester.as_str(), &account_manager).await?;
     do_plc_operation(&account, token).await?;
 
     Ok(())

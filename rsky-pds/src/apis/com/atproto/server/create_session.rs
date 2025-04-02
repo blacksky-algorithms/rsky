@@ -1,7 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::db::DbConn;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
@@ -9,7 +8,7 @@ use rsky_syntax::handle::INVALID_HANDLE;
 #[tracing::instrument(skip_all)]
 async fn inner_create_session(
     body: Json<CreateSessionInput>,
-    db: &DbConn,
+    account_manager: AccountManager,
 ) -> Result<CreateSessionOutput, ApiError> {
     let CreateSessionInput {
         password,
@@ -19,42 +18,46 @@ async fn inner_create_session(
 
     let user = match identifier.contains("@") {
         true => {
-            AccountManager::get_account_by_email(
-                &identifier,
-                Some(AvailabilityFlags {
-                    include_deactivated: Some(true),
-                    include_taken_down: Some(true),
-                }),
-                &db,
-            )
-            .await
+            account_manager
+                .get_account_by_email(
+                    &identifier,
+                    Some(AvailabilityFlags {
+                        include_deactivated: Some(true),
+                        include_taken_down: Some(true),
+                    }),
+                )
+                .await
         }
         false => {
-            AccountManager::get_account(
-                &identifier,
-                Some(AvailabilityFlags {
-                    include_deactivated: Some(true),
-                    include_taken_down: Some(true),
-                }),
-                &db,
-            )
-            .await
+            account_manager
+                .get_account(
+                    &identifier,
+                    Some(AvailabilityFlags {
+                        include_deactivated: Some(true),
+                        include_taken_down: Some(true),
+                    }),
+                )
+                .await
         }
     };
     if let Ok(Some(user)) = user {
         let mut app_password_name: Option<String> = None;
-        let valid_account_pass;
-        match AccountManager::verify_account_password(&user.did, &password, &db).await {
-            Ok(res) => {
-                valid_account_pass = res;
-            }
+
+        let valid_account_pass = match account_manager
+            .verify_account_password(&user.did, &password)
+            .await
+        {
+            Ok(res) => res,
             Err(e) => {
                 tracing::error!("{e:?}");
                 return Err(ApiError::RuntimeError);
             }
-        }
+        };
         if !valid_account_pass {
-            match AccountManager::verify_app_password(&user.did, &password, &db).await {
+            match account_manager
+                .verify_app_password(&user.did, &password)
+                .await
+            {
                 Ok(res) => {
                     app_password_name = res;
                 }
@@ -71,7 +74,10 @@ async fn inner_create_session(
             return Err(ApiError::AccountTakendown);
         }
         let (access_jwt, refresh_jwt);
-        match AccountManager::create_session(user.did.clone(), app_password_name, &db).await {
+        match account_manager
+            .create_session(user.did.clone(), app_password_name)
+            .await
+        {
             Ok(res) => {
                 (access_jwt, refresh_jwt) = res;
             }
@@ -101,11 +107,10 @@ async fn inner_create_session(
 )]
 pub async fn create_session(
     body: Json<CreateSessionInput>,
-    db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<CreateSessionOutput>, ApiError> {
     // @TODO: Add rate limiting
-
-    match inner_create_session(body, &db).await {
+    match inner_create_session(body, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => Err(error),
     }

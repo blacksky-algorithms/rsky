@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 pub async fn sign_plc_operation(
     body: Json<SignPlcOperationRequest>,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<Json<Operation>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let request = body.into_inner();
@@ -30,12 +31,9 @@ pub async fn sign_plc_operation(
             "email confirmation token required to sign PLC operations".to_string(),
         ));
     }
-    AccountManager::assert_valid_email_token_and_cleanup(
-        &did,
-        EmailTokenPurpose::PlcOperation,
-        &token,
-    )
-    .await?;
+    account_manager
+        .assert_valid_email_token_and_cleanup(&did, EmailTokenPurpose::PlcOperation, &token)
+        .await?;
 
     let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
     let plc_client = plc::Client::new(plc_url);

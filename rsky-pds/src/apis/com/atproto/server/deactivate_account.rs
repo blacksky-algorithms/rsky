@@ -14,10 +14,11 @@ use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 pub async fn deactivate_account(
     body: Json<DeactivateAccountInput>,
     auth: AccessFull,
+    account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let DeactivateAccountInput { delete_after } = body.into_inner();
-    match AccountManager::deactivate_account(&did, delete_after).await {
+    match account_manager.deactivate_account(&did, delete_after).await {
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("Internal Error: {error}");

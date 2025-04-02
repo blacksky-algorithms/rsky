@@ -47,10 +47,7 @@ impl<T> MessageFrame<T> {
     }
 
     pub fn get_type(&self) -> Option<&String> {
-        match self.header.t {
-            None => None,
-            Some(ref t) => Some(t),
-        }
+        self.header.t.as_ref()
     }
 }
 
@@ -93,10 +90,7 @@ impl ErrorFrame {
     }
 
     pub fn get_message(&self) -> Option<&String> {
-        match self.body.message {
-            None => None,
-            Some(ref message) => Some(message),
-        }
+        self.body.message.as_ref()
     }
 }
 

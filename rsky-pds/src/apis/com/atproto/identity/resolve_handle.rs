@@ -39,18 +39,18 @@ async fn try_resolve_from_app_view(handle: &String) -> Result<Option<String>> {
 async fn inner_resolve_handle(
     handle: String,
     id_resolver: &State<SharedIdResolver>,
+    account_manager: AccountManager,
 ) -> Result<ResolveHandleOutput> {
     // @TODO: Implement normalizeAndEnsureValidHandle()
     let mut did: Option<String> = None;
-    let user: Option<ActorAccount> = AccountManager::get_account_legacy(&handle, None).await?;
+    let user: Option<ActorAccount> = account_manager.get_account(&handle, None).await?;
 
     match user {
         Some(user) => did = Some(user.did),
         None => {
             let supported_handle = env_list("PDS_SERVICE_HANDLE_DOMAINS")
                 .iter()
-                .find(|host| handle.ends_with(host.as_str()) || handle == host[1..])
-                .is_some();
+                .any(|host| handle.ends_with(host.as_str()) || handle == host[1..]);
             // this should be in our DB & we couldn't find it, so fail
             if supported_handle {
                 bail!("unable to resolve handle");
@@ -80,8 +80,9 @@ async fn inner_resolve_handle(
 pub async fn resolve_handle(
     handle: String,
     id_resolver: &State<SharedIdResolver>,
+    account_manager: AccountManager,
 ) -> Result<Json<ResolveHandleOutput>, ApiError> {
-    match inner_resolve_handle(handle, id_resolver).await {
+    match inner_resolve_handle(handle, id_resolver, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
