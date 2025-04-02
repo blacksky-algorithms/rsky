@@ -6,16 +6,16 @@ use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_auth::ClientAuth;
 use crate::oauth_provider::constants::TOKEN_MAX_AGE;
 use crate::oauth_provider::device::device_id::DeviceId;
+use crate::oauth_provider::device::device_manager::DeviceManagerOptions;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::signer::signer::Signer;
-use crate::oauth_provider::token::refresh_token::{is_refresh_token, RefreshToken};
-use crate::oauth_provider::token::token_claims::TokenClaims;
-use crate::oauth_provider::token::token_id::{is_token_id, TokenId};
+use crate::oauth_provider::token::refresh_token::RefreshToken;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_provider::token::token_store::{TokenInfo, TokenStore};
 use crate::oauth_provider::token::verify_token_claims::{
-    verify_token_claims, VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
+    VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{
     OAuthAccessToken, OAuthAuthorizationCodeGrantTokenRequest, OAuthAuthorizationDetails,
@@ -39,15 +39,31 @@ enum CreateTokenInput {
 
 pub struct TokenManager {
     pub store: Arc<RwLock<dyn TokenStore>>,
-    pub signer: Signer,
+    pub signer: Arc<RwLock<Signer>>,
     pub access_token_type: AccessTokenType,
     pub token_max_age: u64,
 }
 
+pub type TokenManagerCreator = Box<
+    dyn Fn(Arc<RwLock<dyn TokenStore>>, Option<DeviceManagerOptions>) -> TokenManager + Send + Sync,
+>;
+
 impl TokenManager {
+    pub fn creator() -> TokenManagerCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn TokenStore>>,
+                  signer: Arc<RwLock<Signer>>,
+                  access_token_type: AccessTokenType,
+                  max_age: Option<u64>|
+                  -> TokenManager {
+                TokenManager::new(store, signer, access_token_type, max_age)
+            },
+        )
+    }
+
     pub fn new(
         store: Arc<RwLock<dyn TokenStore>>,
-        signer: Signer,
+        signer: Arc<RwLock<Signer>>,
         access_token_type: AccessTokenType,
         max_age: Option<u64>,
     ) -> Self {
@@ -70,6 +86,7 @@ impl TokenManager {
         if self.access_token_type == AccessTokenType::AUTO {
             return if account.aud.len() == 1 {
                 self.signer
+                    .blocking_read()
                     .issuer
                     .to_string()
                     .eq(account.aud.get(0).unwrap())

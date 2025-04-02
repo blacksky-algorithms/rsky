@@ -12,7 +12,7 @@ pub struct VerifyOptions {
     pub subject: Option<String>,
     pub typ: Option<String>,
     pub current_date: Option<u64>,
-    pub required_claimed: Option<String>,
+    pub required_claims: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]

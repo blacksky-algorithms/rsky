@@ -14,7 +14,7 @@ use crate::oauth_provider::account::account_manager::AccountManager;
 use crate::oauth_provider::account::account_store::{AccountStore, SignInCredentials};
 use crate::oauth_provider::client::client_manager::ClientManager;
 use crate::oauth_provider::device::device_id::DeviceId;
-use crate::oauth_provider::oauth_provider::OAuthProvider;
+use crate::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderCreator};
 use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_uri::RequestUri;
 use crate::oauth_provider::token::token_manager::TokenManager;
@@ -74,12 +74,6 @@ impl<'r> FromRequest<'r> for DpopJkt {
     }
 }
 
-pub type OAuthProviderCreator = Box<
-    dyn Fn(ClientManager, RequestManager, TokenManager, AccountManager) -> OAuthProvider
-        + Send
-        + Sync,
->;
-
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for OAuthProvider {
     type Error = ();
@@ -98,23 +92,20 @@ impl<'r> FromRequest<'r> for OAuthProvider {
 }
 
 pub struct SharedOAuthProvider {
-    oauth_provider: RwLock<OAuthProviderCreator>,
-    keyset: Arc<RwLock<Keyset>>,
+    pub oauth_provider: Arc<RwLock<OAuthProviderCreator>>,
+    pub keyset: Arc<RwLock<Keyset>>,
 }
 
 impl SharedOAuthProvider {
-    pub fn new(oauth_provider: RwLock<OAuthProviderCreator>, keyset: Arc<RwLock<Keyset>>) -> Self {
+    pub fn new(
+        oauth_provider: Arc<RwLock<OAuthProviderCreator>>,
+        keyset: Arc<RwLock<Keyset>>,
+    ) -> Self {
         Self {
             oauth_provider,
             keyset,
         }
     }
-
-    pub async fn read(&self) {
-        let creator = self.oauth_provider.read().await;
-    }
-
-    pub async fn write(&mut self) {}
 }
 
 pub fn get_routes() -> Vec<Route> {

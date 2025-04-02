@@ -1,10 +1,16 @@
-use crate::jwk::{JwkError, VerifyOptions, VerifyResult};
+use crate::jwk::{JwkError, JwtHeader, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
 use jsonwebtoken::jwk::{Jwk, JwkSet};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Header};
 
 #[derive(Clone)]
 pub struct Keyset {
     keys: JwkSet,
+}
+
+pub struct KeySearch {
+    pub r#use: Option<String>,
+    pub kid: Option<Vec<String>>,
+    pub alg: Option<Vec<String>>,
 }
 
 impl Keyset {
@@ -31,28 +37,41 @@ impl Keyset {
         false
     }
 
-    pub async fn verify_jwt(
+    async fn get(search: KeySearch) {}
+
+    async fn list(search: KeySearch) {}
+
+    async fn find_key(&self, header: JwtHeader, key_search: KeySearch) -> String {
+        unimplemented!()
+    }
+
+    pub async fn create_jwt(&self, header: Header, jwt_payload: JwtPayload) -> SignedJwt {
+        unimplemented!()
+        // let key ;
+        // jsonwebtoken::encode(&header, &jwt_payload, key).unwrap()
+    }
+
+    pub async fn verify_jwt<C>(
         &self,
-        token: &str,
+        signed_jwt: SignedJwt,
         options: Option<VerifyOptions>,
     ) -> Result<VerifyResult, JwkError> {
-        unimplemented!()
-        // let header = jsonwebtoken::decode_header(token).expect("No header");
-        // let kid = match header.kid {
-        //     Some(kid) => kid,
-        //     None => return Err(JwkError::JwtVerifyError),
+        let signed_jwt = signed_jwt.val();
+        let header = jsonwebtoken::decode_header(signed_jwt.as_str()).expect("No header");
+        let kid = match header.kid {
+            Some(kid) => kid,
+            None => return Err(JwkError::JwtVerifyError),
+        };
+        let alg = header.alg;
+
+        let key = match self.keys.find(kid.as_str()) {
+            None => return Err(JwkError::JwtVerifyError),
+            Some(jwk) => jwk.clone(),
+        };
+        let decoding_key = DecodingKey::from_jwk(&key).unwrap();
+
+        // let res = match jsonwebtoken::decode(token, &decoding_key, &validation) {
+        //
         // };
-        // let alg = header.alg;
-        //
-        // let key = match self.keys.find(kid.as_str()) {
-        //     None => return Err(JwkError::JwtVerifyError),
-        //     Some(jwk) => jwk.clone(),
-        // };
-        // let decoding_key = DecodingKey::from_jwk(&key).unwrap();
-        //
-        // let validation = Validation::new(alg);
-        //
-        // let res =
-        //     jsonwebtoken::decode(token, &decoding_key, &validation).unwrap();
     }
 }

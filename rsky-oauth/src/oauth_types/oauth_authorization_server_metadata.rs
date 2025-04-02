@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::oauth_types::{OAuthCodeChallengeMethod, OAuthIssuerIdentifier, WebUri};
+use crate::oauth_types::{OAuthCodeChallengeMethod, OAuthGrantType, OAuthIssuerIdentifier, WebUri};
 
 /// OAuth Authorization Server Metadata.
 ///
@@ -55,7 +55,7 @@ pub struct OAuthAuthorizationServerMetadata {
 
     /// Supported grant types
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub grant_types_supported: Option<Vec<String>>,
+    pub grant_types_supported: Option<Vec<OAuthGrantType>>,
 
     /// Supported PKCE challenge methods
     #[serde(skip_serializing_if = "Option::is_none")]

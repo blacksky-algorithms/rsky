@@ -688,4 +688,6 @@ impl<'r> FromRequest<'r> for AccountManager {
 
 pub struct SharedAccountManager {
     pub account_manager: RwLock<AccountManagerCreator>,
+    pub service_did: String,
+    pub jwt_key: String,
 }

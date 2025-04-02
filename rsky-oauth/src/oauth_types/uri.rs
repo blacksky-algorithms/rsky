@@ -178,6 +178,15 @@ impl Display for WebUri {
     }
 }
 
+impl WebUri {
+    pub fn domain(&self) -> String {
+        match self {
+            WebUri::Loopback(loopback_uri) => String::from("loopback"),
+            WebUri::Https(https_uri) => String::from("placeholder"),
+        }
+    }
+}
+
 /// Private-use URI (custom scheme with dot)
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateUseUri(String);

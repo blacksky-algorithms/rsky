@@ -28,6 +28,10 @@ impl OAuthClientId {
     pub fn into_inner(self) -> String {
         self.0
     }
+
+    pub fn val(&self) -> String {
+        self.0.clone()
+    }
 }
 
 impl AsRef<str> for OAuthClientId {

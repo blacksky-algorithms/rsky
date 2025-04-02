@@ -1,6 +1,8 @@
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::lexicon::lexicons::ProfileViewBasic;
+use crate::read_after_write::viewer::{LocalViewer, LocalViewerCreator};
+use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::account::account_store::{
     AccountInfo, AccountStore, SignInCredentials,
 };
@@ -20,13 +22,34 @@ use rsky_oauth::oauth_provider::oidc::sub::Sub;
 pub struct DetailedAccountStore {
     account_manager: AccountManager,
     actor_store: ActorStore,
+    local_view: LocalViewerCreator,
 }
 
+pub type DetailedAccountStoreCreator = Box<
+    dyn Fn(ActorStore, AccountManager, LocalViewerCreator) -> DetailedAccountStore + Send + Sync,
+>;
+
 impl DetailedAccountStore {
-    pub fn new(account_manager: AccountManager, actor_store: ActorStore) -> Self {
+    pub fn creator() -> DetailedAccountStoreCreator {
+        Box::new(
+            move |account_manager: AccountManager,
+                  actor_store: ActorStore,
+                  local_viewer: LocalViewerCreator|
+                  -> DetailedAccountStore {
+                DetailedAccountStore::new(account_manager, actor_store, local_viewer)
+            },
+        )
+    }
+
+    pub fn new(
+        account_manager: AccountManager,
+        actor_store: ActorStore,
+        local_viewer: LocalViewerCreator,
+    ) -> Self {
         Self {
             account_manager,
             actor_store,
+            local_view,
         }
     }
 

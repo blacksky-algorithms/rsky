@@ -2,47 +2,56 @@ use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_auth::ClientAuth;
 use crate::oauth_provider::client::client_id::ClientId;
-use crate::oauth_provider::constants::{AUTHORIZATION_INACTIVITY_TIMEOUT, PAR_EXPIRES_IN};
+use crate::oauth_provider::constants::AUTHORIZATION_INACTIVITY_TIMEOUT;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::request::code::{generate_code, Code};
-use crate::oauth_provider::request::request_data::{
-    is_request_data_authorized, RequestData, RequestDataAuthorized,
-};
-use crate::oauth_provider::request::request_id::{generate_request_id, RequestId};
+use crate::oauth_provider::request::code::Code;
+use crate::oauth_provider::request::request_data::RequestDataAuthorized;
 use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_store::{RequestStore, UpdateRequestData};
-use crate::oauth_provider::request::request_uri::{decode_request_uri, encode_request_uri};
+use crate::oauth_provider::request::request_uri::decode_request_uri;
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_types::{
     OAuthAuthorizationRequestParameters, OAuthAuthorizationServerMetadata, OAuthRequestUri,
 };
-use rocket::form::validate::Contains;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 pub struct RequestManager {
     store: Arc<RwLock<dyn RequestStore>>,
-    signer: Signer,
+    signer: Arc<RwLock<Signer>>,
     metadata: OAuthAuthorizationServerMetadata,
-    // hooks: OAuthHooks,
     token_max_age: u64,
 }
 
+pub type RequestManagerCreator =
+    Box<dyn Fn(Arc<RwLock<dyn RequestStore>>, Arc<RwLock<Signer>>) -> RequestManager + Send + Sync>;
+
 impl RequestManager {
+    pub fn creator(
+        metadata: OAuthAuthorizationServerMetadata,
+        token_max_age: u64,
+    ) -> RequestManagerCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn RequestStore>>,
+                  signer: Arc<RwLock<Signer>>|
+                  -> RequestManager {
+                RequestManager::new(store, signer, metadata, token_max_age)
+            },
+        )
+    }
+
     pub fn new(
         store: Arc<RwLock<dyn RequestStore>>,
-        signer: Signer,
+        signer: Arc<RwLock<Signer>>,
         metadata: OAuthAuthorizationServerMetadata,
-        // hooks: OAuthHooks,
         token_max_age: u64,
     ) -> Self {
         RequestManager {
             store,
             signer,
             metadata,
-            // hooks,
             token_max_age,
         }
     }

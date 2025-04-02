@@ -1,4 +1,4 @@
-use crate::jwk::Keyset;
+use crate::jwk::{Keyset, SignedJwt, SignedJwtError};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::dpop::dpop_manager::DpopManager;
 use crate::oauth_provider::errors::OAuthError;
@@ -7,7 +7,7 @@ use crate::oauth_provider::replay::replay_store::ReplayStore;
 use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_provider::token::verify_token_claims::{
-    VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
+    verify_token_claims, VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{OAuthAccessToken, OAuthIssuerIdentifier, OAuthTokenType};
 use std::any::Any;
@@ -24,7 +24,7 @@ pub struct OAuthVerifierOptions {
     /**
      * The keyset used to sign access tokens.
      */
-    pub keyset: Keyset,
+    pub keyset: Arc<RwLock<Keyset>>,
     /**
      * If set to {@link AccessTokenType.jwt}, the provider will use JWTs for
      * access tokens. If set to {@link AccessTokenType.id}, the provider will
@@ -52,11 +52,11 @@ pub struct OAuthVerifierOptions {
 
 pub struct OAuthVerifier {
     pub issuer: OAuthIssuerIdentifier,
-    pub keyset: Keyset,
+    pub keyset: Arc<RwLock<Keyset>>,
     pub access_token_type: AccessTokenType,
     pub dpop_manager: DpopManager,
     pub replay_manager: ReplayManager,
-    pub signer: Signer,
+    pub signer: Arc<RwLock<Signer>>,
     pub redis: Option<String>,
 }
 
@@ -74,7 +74,10 @@ impl OAuthVerifier {
             access_token_type: AccessTokenType::JWT,
             dpop_manager: DpopManager::new(None),
             replay_manager: ReplayManager::new(replay_store),
-            signer: Signer::new(opts.issuer.clone(), opts.keyset.clone()),
+            signer: Arc::new(RwLock::new(Signer::new(
+                opts.issuer.clone(),
+                opts.keyset.clone(),
+            ))),
             redis: None,
         }
     }
@@ -94,7 +97,7 @@ impl OAuthVerifier {
         // let res = self
         //     .dpop_manager
         //     .check_proof(proof, htm, htu, access_token)
-        //     .await;
+        //     .await
     }
 
     pub fn assert_token_type_allowed(
@@ -121,12 +124,15 @@ impl OAuthVerifier {
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
         unimplemented!()
-        // if !is_signed_jwt(token.as_str()) {
-        //     return Err(OAuthError::InvalidTokenError(
-        //         token_type,
-        //         "Malformed token".to_string(),
-        //     ));
-        // }
+        // let signed_jwt = match SignedJwt::new(token.into_inner()) {
+        //     Ok(signed_jwt) => { signed_jwt}
+        //     Err(error) => {
+        //         return Err(OAuthError::InvalidTokenError(
+        //             token_type,
+        //             "Malformed token".to_string(),
+        //         ));
+        //     }
+        // };
         //
         // self.assert_token_type_allowed(token_type.clone(), AccessTokenType::JWT)?;
         //
@@ -149,6 +155,7 @@ impl OAuthVerifier {
         headers: (Option<String>, Option<String>),
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
+        unimplemented!()
         // let (token_type, token) = parse_authorization_header(headers.0);
         // let dpop_jkt = self
         //     .check_dpop_proof(headers.1.unwrap(), method, url, Some(token.clone()))

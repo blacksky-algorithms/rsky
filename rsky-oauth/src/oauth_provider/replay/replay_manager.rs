@@ -3,6 +3,7 @@ use crate::oauth_provider::constants::{
     CLIENT_ASSERTION_MAX_AGE, CODE_CHALLENGE_REPLAY_TIMEFRAME, DPOP_NONCE_MAX_AGE, JAR_MAX_AGE,
 };
 use crate::oauth_provider::replay::replay_store::ReplayStore;
+use crate::oauth_provider::signer::signer::SignerCreator;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -10,7 +11,18 @@ pub struct ReplayManager {
     replay_store: Arc<RwLock<dyn ReplayStore>>, // get ipld blocks from db
 }
 
+pub type ReplayManagerCreator =
+    Box<dyn Fn(Arc<RwLock<dyn ReplayStore>>) -> ReplayManager + Send + Sync>;
+
 impl ReplayManager {
+    pub fn creator() -> SignerCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn ReplayStore>>| -> ReplayManager {
+                ReplayManager::new(store)
+            },
+        )
+    }
+
     pub fn new(replay_store: Arc<RwLock<dyn ReplayStore>>) -> Self {
         ReplayManager { replay_store }
     }

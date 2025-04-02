@@ -24,7 +24,9 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
+use rocket::request::FromRequest;
 use tokio::sync::RwLock;
+use crate::account_manager::SharedAccountManager;
 
 pub struct ActorStore {
     pub did: String,
@@ -391,3 +393,24 @@ pub mod blob;
 pub mod preference;
 pub mod record;
 pub mod repo;
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for ActorStore {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let db = req.guard::<DbConn>().await.unwrap();
+        let account_manager_creator = shared_account_manager.account_manager.read().await;
+        let account_manager = account_manager_creator(Arc::new(db));
+        Outcome::Success(account_manager)
+        match req.rocket().state::<SharedAccountManager>() {
+            None => Outcome::Error((Status::InternalServerError, ())),
+            Some(shared_account_manager) => {
+                let db = req.guard::<DbConn>().await.unwrap();
+                let account_manager_creator = shared_account_manager.account_manager.read().await;
+                let account_manager = account_manager_creator(Arc::new(db));
+                Outcome::Success(account_manager)
+            }
+        }
+    }
+}

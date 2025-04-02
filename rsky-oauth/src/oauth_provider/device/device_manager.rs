@@ -1,7 +1,11 @@
+use crate::jwk::Keyset;
+use crate::oauth_provider::client::client_manager::{ClientManager, ClientManagerCreator};
+use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::device::device_details::{extract_device_details, DeviceDetails};
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::device::device_store::DeviceStore;
 use crate::oauth_provider::device::session_id::SessionId;
+use crate::oauth_types::OAuthAuthorizationServerMetadata;
 use rocket::Request;
 use std::cmp::PartialEq;
 use std::sync::Arc;
@@ -94,12 +98,26 @@ pub struct DeviceManager {
     device_manager_options: DeviceManagerOptions,
 }
 
+pub type DeviceManagerCreator = Box<
+    dyn Fn(Arc<RwLock<dyn DeviceStore>>, Option<DeviceManagerOptions>) -> DeviceManager
+        + Send
+        + Sync,
+>;
+
 /**
  * This class provides an abstraction for keeping track of DEVICE sessions. It
  * relies on a {@link DeviceStore} to persist session data and a cookie to
  * identify the session.
  */
 impl DeviceManager {
+    pub fn creator() -> DeviceManagerCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn DeviceStore>>,
+                  options: Option<DeviceManagerOptions>|
+                  -> DeviceManager { DeviceManager::new(store, options) },
+        )
+    }
+
     pub fn new(store: Arc<RwLock<dyn DeviceStore>>, options: Option<DeviceManagerOptions>) -> Self {
         let device_manager_options = options.unwrap_or_else(|| DeviceManagerOptions::default());
         Self {

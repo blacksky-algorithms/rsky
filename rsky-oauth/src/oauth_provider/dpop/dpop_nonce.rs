@@ -15,6 +15,7 @@ pub struct DpopNonce {
     step: u64,
 }
 
+#[derive(Clone)]
 pub enum DpopNonceInput {
     String(String),
     Uint8Array(Vec<u8>),

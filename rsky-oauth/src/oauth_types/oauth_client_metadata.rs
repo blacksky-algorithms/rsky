@@ -29,7 +29,7 @@ pub struct OAuthClientMetadata {
 
     /// Method used for token endpoint authentication
     #[serde(default)]
-    pub token_endpoint_auth_method: OAuthEndpointAuthMethod,
+    pub token_endpoint_auth_method: Option<OAuthEndpointAuthMethod>,
 
     /// Algorithm used for token endpoint authentication
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,7 +57,7 @@ pub struct OAuthClientMetadata {
 
     /// Subject type requested for responses
     #[serde(default)]
-    pub subject_type: SubjectType,
+    pub subject_type: Option<SubjectType>,
 
     /// Algorithm for signing request objects
     #[serde(skip_serializing_if = "Option::is_none")]

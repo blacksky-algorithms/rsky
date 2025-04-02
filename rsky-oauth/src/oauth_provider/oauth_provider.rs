@@ -26,7 +26,7 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_manager::RequestManager;
 use crate::oauth_provider::request::request_store::RequestStore;
-use crate::oauth_provider::routes::OAuthProviderCreator;
+use crate::oauth_provider::routes::SharedOAuthProvider;
 use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_provider::token::token_manager::TokenManager;
 use crate::oauth_provider::token::token_store::TokenStore;
@@ -44,7 +44,8 @@ use crate::oauth_types::{
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use rocket::http::Status;
-use rocket::request::FromRequest;
+use rocket::request::{FromRequest, Outcome};
+use rocket::Request;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -88,6 +89,7 @@ pub struct DecodeJarResponse {
     pub jkt: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct OAuthProviderOptions {
     /**
      * Maximum age a device/account session can be before requiring
@@ -123,7 +125,7 @@ pub struct OAuthProviderOptions {
      * A redis instance to use for replay protection. If not provided, replay
      * protection will use memory storage.
      */
-    pub redis: String,
+    pub redis: Option<String>,
 
     /**
      * This will be used as the default store for all the stores. If a store is
@@ -168,7 +170,7 @@ pub struct OAuthProviderOptions {
     pub dpop_secret: Option<DpopNonceInput>,
     pub dpop_step: Option<u64>,
     pub issuer: OAuthIssuerIdentifier,
-    pub keyset: Option<Keyset>,
+    pub keyset: Option<Arc<RwLock<Keyset>>>,
     pub access_token_type: Option<AccessTokenType>,
 }
 
@@ -187,85 +189,123 @@ pub struct OAuthProvider {
     account_manager: AccountManager,
 }
 
-impl OAuthProvider {
-    // /// Concrete reader of an individual repo (hence S3BlobStore which takes `did` param)
-    // pub fn new(did: String, blobstore: S3BlobStore, db: DbConn) -> Self {
-    //     let db = Arc::new(db);
-    //     ActorStore {
-    //         storage: Arc::new(RwLock::new(SqlRepoReader::new(
-    //             did.clone(),
-    //             None,
-    //             db.clone(),
-    //         ))),
-    //         record: RecordReader::new(did.clone(), db.clone()),
-    //         pref: PreferenceReader::new(did.clone(), db.clone()),
-    //         did,
-    //         blob: BlobReader::new(blobstore, db.clone()), // Unlike TS impl, just use blob reader vs generator
-    //     }
-    // }
+#[derive(Clone)]
+pub struct OAuthProviderCreatorParams {
+    /**
+     * Maximum age a device/account session can be before requiring
+     * re-authentication.
+     */
+    pub authentication_max_age: Option<u64>,
 
-    pub fn creator(options: OAuthProviderOptions) -> OAuthProviderCreator {
-        unimplemented!()
-        // let options = options;
-        // Box::new(move || -> OAuthProvider {
-        //     let store = options.store;
-        //
-        //     // Requires stores
-        //     let account_store = store.clone().unwrap();
-        //     let device_store = store.clone().unwrap();
-        //     let token_store = store.clone().unwrap();
-        //
-        //     // These are optional
-        //     let client_store = store.clone().unwrap();
-        //     let replay_store = store.clone().unwrap();
-        //     let request_store = store.clone().unwrap();
-        //
-        //     let verifier_opts = OAuthVerifierOptions {
-        //         issuer: options.issuer.clone(),
-        //         keyset: options.keyset.unwrap(),
-        //         access_token_type: options.access_token_type,
-        //         redis: Some(options.redis),
-        //         replay_store,
-        //     };
-        //     let oauth_verifier = OAuthVerifier::new(verifier_opts);
-        //
-        //     let authentication_max_age = options
-        //         .authentication_max_age
-        //         .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
-        //     let metadata = build_metadata(options.issuer, options.metadata);
-        //     let customization = options.customization;
-        //
-        //     let account_manager = AccountManager::new(account_store);
-        //     let client_manager = ClientManager::new(
-        //         metadata.clone(),
-        //         oauth_verifier.keyset.clone(),
-        //         client_store,
-        //     );
-        //     let request_manager = RequestManager::new(
-        //         request_store,
-        //         oauth_verifier.signer.clone(),
-        //         metadata.clone(),
-        //         authentication_max_age,
-        //     );
-        //     let token_manager = TokenManager::new(
-        //         token_store,
-        //         oauth_verifier.signer.clone(),
-        //         oauth_verifier.access_token_type.clone(),
-        //         Some(authentication_max_age),
-        //     );
-        //
-        //     OAuthProvider {
-        //         oauth_verifier,
-        //         metadata,
-        //         customization,
-        //         authentication_max_age,
-        //         account_manager,
-        //         client_manager,
-        //         request_manager,
-        //         token_manager,
-        //         device_store,
-        //     }
-        // })
+    /**
+     * Maximum age access & id tokens can be before requiring a refresh.
+     */
+    pub token_max_age: Option<u64>,
+
+    /**
+     * Additional metadata to be included in the discovery document.
+     */
+    pub metadata: Option<CustomMetadata>,
+
+    /**
+     * UI customizations
+     */
+    pub customization: Option<Customization>,
+
+    /**
+     * A custom fetch function that can be used to fetch the client metadata from
+     * the internet. By default, the fetch function is a safeFetchWrap() function
+     * that protects against SSRF attacks, large responses & known bad domains. If
+     * you want to disable all protections, you can provide `globalThis.fetch` as
+     * fetch function.
+     */
+    pub safe_fetch: bool,
+
+    /**
+     * A redis instance to use for replay protection. If not provided, replay
+     * protection will use memory storage.
+     */
+    pub redis: Option<String>,
+
+    /**
+     * This will be used as the default store for all the stores. If a store is
+     * not provided, this store will be used instead. If the `store` does not
+     * implement a specific store, a runtime error will be thrown. Make sure that
+     * this store implements all the interfaces not provided in the other
+     * `<name>Store` options.
+     */
+    pub store: Option<Arc<RwLock<dyn OAuthProviderStore>>>,
+
+    /**
+     * In order to speed up the client fetching process, you can provide a cache
+     * to store HTTP responses.
+     *
+     * @note the cached entries should automatically expire after a certain time (typically 10 minutes)
+     */
+    pub client_jwks_cache: Option<BTreeMap<String, JwkSet>>,
+
+    /**
+     * In order to speed up the client fetching process, you can provide a cache
+     * to store HTTP responses.
+     *
+     * @note the cached entries should automatically expire after a certain time (typically 10 minutes)
+     */
+    pub client_metadata_cache: Option<BTreeMap<String, OAuthClientMetadata>>,
+
+    /**
+     * In order to enable loopback clients, you can provide a function that
+     * returns the client metadata for a given loopback URL. This is useful for
+     * development and testing purposes. This function is not called for internet
+     * clients.
+     *
+     * @default is as specified by ATPROTO
+     */
+    pub loopback_metadata: String,
+    pub dpop_secret: Option<DpopNonceInput>,
+    pub dpop_step: Option<u64>,
+    pub issuer: OAuthIssuerIdentifier,
+    pub keyset: Option<Keyset>,
+    pub access_token_type: Option<AccessTokenType>,
+}
+
+pub type OAuthProviderCreator =
+Box<dyn Fn(Arc<RwLock<dyn OAuthProviderStore>>) -> OAuthProvider + Send + Sync>;
+
+pub struct OAuthProviderCreatorOptions {
+    pub metadata: Option<OAuthAuthorizationServerMetadata>,
+    pub authentication_max_age: Option<u64>,
+}
+
+impl OAuthProvider {
+    pub fn creator(creator_options: OAuthProviderCreatorParams) -> OAuthProviderCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn OAuthProviderStore>>| -> Result<OAuthProvider, OAuthError> {
+                let options = OAuthProviderOptions {
+                    authentication_max_age: creator_options.authentication_max_age,
+                    token_max_age: creator_options.token_max_age,
+                    metadata: creator_options.metadata,
+                    customization: creator_options.customization,
+                    safe_fetch: false,
+                    redis: creator_options.redis,
+                    store: creator_options.store.clone(),
+                    account_store: creator_options.store.clone(),
+                    device_store: creator_options.store.clone(),
+                    client_store: creator_options.store.clone(),
+                    replay_store: creator_options.store.clone(),
+                    request_store: creator_options.store.clone(),
+                    token_store: creator_options.store.clone(),
+                    client_jwks_cache: creator_options.client_jwks_cache,
+                    client_metadata_cache: creator_options.client_metadata_cache,
+                    loopback_metadata: "".to_string(),
+                    dpop_secret: creator_options.dpop_secret,
+                    dpop_step: creator_options.dpop_step,
+                    issuer: creator_options.issuer,
+                    keyset: creator_options.keyset,
+                    access_token_type: creator_options.access_token_type,
+                };
+                OAuthProvider::new(options)
+            },
+        )
     }
 
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
@@ -298,9 +338,9 @@ impl OAuthProvider {
 
         let account_manager = AccountManager::new(account_store);
         let client_manager = ClientManager::new(
-            metadata.clone(),
-            oauth_verifier.keyset.clone(),
             client_store,
+            oauth_verifier.keyset.clone(),
+            metadata.clone(),
         );
         let request_manager = RequestManager::new(
             request_store,
@@ -329,7 +369,7 @@ impl OAuthProvider {
     }
 
     pub fn get_jwks(&self) -> Vec<Jwk> {
-        self.oauth_verifier.keyset.public_jwks()
+        self.oauth_verifier.keyset.blocking_read().public_jwks()
     }
 
     fn login_required(&self, info: &DeviceAccountInfo) -> bool {
@@ -496,64 +536,64 @@ impl OAuthProvider {
         credentials: &OAuthClientCredentials,
         query: &OAuthAuthorizationRequestQuery,
     ) -> Result<AuthorizationResult, OAuthError> {
-        let issuer = self.oauth_verifier.issuer.clone();
-
-        // If there is a chance to redirect the user to the client, let's do
-        // it by wrapping the error in an AccessDeniedError.
-        if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
-            if params.redirect_uri.is_some() {
-                // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
-                return Err(OAuthError::AccessDeniedError("invalid_request".to_string()));
-            }
-        }
-
-        let client = self
-            .client_manager
-            .get_client(&credentials.client_id())
-            .await?;
-
-        let request_info = self
-            .process_authorization_request(&client, &device_id, &query)
-            .await?;
-        let client_auth = request_info.client_auth;
-        let parameters = request_info.parameters;
-        let uri = request_info.uri;
-
-        let sessions = self
-            .get_sessions(&client, &client_auth, &device_id, &parameters)
-            .await?;
-
-        if let Some(prompt) = parameters.prompt {
-            match prompt {
-                Prompt::None => {
-                    let sso_sessions: Vec<OAuthProviderSession> =
-                        sessions.iter().filter(|s| s.matches_hint).collect();
-                    if sso_sessions.is_empty() {
-                        return Err(OAuthError::LoginRequiredError);
-                    }
-
-                    if sso_sessions.len() > 1 {
-                        return Err(OAuthError::AccountSelectionRequiredError);
-                    }
-
-                    let sso_session = sso_sessions.first().unwrap();
-                    if sso_session.login_required {
-                        return Err(OAuthError::LoginRequiredError);
-                    }
-                    if sso_session.consent_required {
-                        return Err(OAuthError::ConsentRequiredError);
-                    }
-
-                    let code = self
-                        .request_manager
-                        .set_authorized(client, uri, device_id, &sso_session.account)
-                        .await?;
-
-                    return Ok(AuthorizationResult {});
-                }
-                _ => {}
-            }
-        }
+        // let issuer = self.oauth_verifier.issuer.clone();
+        //
+        // // If there is a chance to redirect the user to the client, let's do
+        // // it by wrapping the error in an AccessDeniedError.
+        // if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
+        //     if params.redirect_uri.is_some() {
+        //         // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
+        //         return Err(OAuthError::AccessDeniedError("invalid_request".to_string()));
+        //     }
+        // }
+        //
+        // let client = self
+        //     .client_manager
+        //     .get_client(&credentials.client_id())
+        //     .await?;
+        //
+        // let request_info = self
+        //     .process_authorization_request(&client, &device_id, &query)
+        //     .await?;
+        // let client_auth = request_info.client_auth;
+        // let parameters = request_info.parameters;
+        // let uri = request_info.uri;
+        //
+        // let sessions = self
+        //     .get_sessions(&client, &client_auth, &device_id, &parameters)
+        //     .await?;
+        //
+        // if let Some(prompt) = parameters.prompt {
+        //     match prompt {
+        //         Prompt::None => {
+        //             let sso_sessions: Vec<OAuthProviderSession> =
+        //                 sessions.iter().filter(|s| s.matches_hint).collect();
+        //             if sso_sessions.is_empty() {
+        //                 return Err(OAuthError::LoginRequiredError);
+        //             }
+        //
+        //             if sso_sessions.len() > 1 {
+        //                 return Err(OAuthError::AccountSelectionRequiredError);
+        //             }
+        //
+        //             let sso_session = sso_sessions.first().unwrap();
+        //             if sso_session.login_required {
+        //                 return Err(OAuthError::LoginRequiredError);
+        //             }
+        //             if sso_session.consent_required {
+        //                 return Err(OAuthError::ConsentRequiredError);
+        //             }
+        //
+        //             let code = self
+        //                 .request_manager
+        //                 .set_authorized(client, uri, device_id, &sso_session.account)
+        //                 .await?;
+        //
+        //             return Ok(AuthorizationResult {});
+        //         }
+        //         _ => {}
+        //     }
+        // }
         unimplemented!()
     }
 
@@ -946,5 +986,25 @@ impl OAuthProvider {
         self.oauth_verifier
             .authenticate_token(token_type, token, dpop_jkt, verify_options)
             .await
+    }
+}
+
+]
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for OAuthProvider {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match req.rocket().state::<SharedOAuthProvider>() {
+            None => Outcome::Error((Status::InternalServerError, ())),
+            Some(shared_oauth_provider) => {
+                let oauth_provider_creator = shared_oauth_provider.oauth_provider.read().await;
+
+                let db = req.guard::<DbConn>().await.unwrap();
+
+                let oauth_provider = oauth_provider_creator(Arc::new(db));
+                Outcome::Success(oauth_provider)
+            }
+        }
     }
 }

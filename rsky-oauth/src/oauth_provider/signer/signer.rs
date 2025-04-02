@@ -6,29 +6,36 @@ use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthIssuerIdentifier,
 };
-use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::Header;
-use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct Signer {
     pub issuer: OAuthIssuerIdentifier,
-    pub keyset: Keyset,
+    pub keyset: Arc<RwLock<Keyset>>,
 }
 
+pub type SignerCreator = Box<dyn Fn(Arc<RwLock<Keyset>>) -> Signer + Send + Sync>;
+
 impl Signer {
-    pub fn new(issuer: OAuthIssuerIdentifier, keyset: Keyset) -> Self {
+    pub fn creator(issuer: OAuthIssuerIdentifier) -> SignerCreator {
+        Box::new(move |keyset: Arc<RwLock<Keyset>>| -> Signer { Signer::new(issuer, keyset) })
+    }
+
+    pub fn new(issuer: OAuthIssuerIdentifier, keyset: Arc<RwLock<Keyset>>) -> Self {
         Signer { issuer, keyset }
     }
 
     pub async fn verify(
         &self,
-        signed_jwt: &SignedJwt,
-        clock_tolerance: bool,
-        required_claims: String,
+        signed_jwt: SignedJwt,
+        verify_options: Option<VerifyOptions>,
     ) -> VerifyResult {
-        unimplemented!()
-        // self.keyset.verify_jwt(token).await
+        self.keyset
+            .blocking_read()
+            .verify_jwt(signed_jwt, verify_options)
+            .await
     }
 
     pub async fn sign(

@@ -70,7 +70,7 @@ lazy_static! {
 
 extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
-use crate::oauth::provider::build_oauth_provider;
+use crate::oauth::provider::{build_oauth_provider, AuthProviderOptions};
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use diesel::sql_types::Int4;
@@ -92,6 +92,7 @@ use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use rsky_oauth::oauth_provider::oauth_provider::OAuthProvider;
 use rsky_oauth::oauth_provider::routes::{get_routes, SharedOAuthProvider};
+use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::env;
 use tokio::sync::RwLock;
 
@@ -280,27 +281,27 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    // let account_manager = SharedAccountManager {
-    //     account_manager: RwLock::new(AccountManager::creator()),
-    // };
 
-    // //Setup OAuth Provider
-    // let oauth_provider = build_oauth_provider();
-    // let shared_oauth_provider = SharedOAuthProvider {
-    //     oauth_provider: RwLock::new(oauth_provider),
-    // };
-    //
-    // //Setup Device Manager
-    // let oauth_provider = build_oauth_provider();
-    // let shared_oauth_provider = SharedOAuthProvider {
-    //     oauth_provider: RwLock::new(oauth_provider),
-    // };
+    //Setup OAuth Provider
+    let oauth_provider = build_oauth_provider(AuthProviderOptions {
+        issuer: OAuthIssuerIdentifier::new(
+            env::var("OAuthIssuerIdentifier").unwrap_or("https://todo.com".to_owned()),
+        )
+        .unwrap(),
+    });
+
+    //Setup Account Manager
+    let account_manager = SharedAccountManager {
+        account_manager: RwLock::new(AccountManager::creator()),
+        service_did: "".to_string(),
+        jwt_key: "".to_string(),
+    };
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
     let mut pds_routes = pds_routes();
-    // let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
-    // pds_routes.append(&mut oauth_routes);
+    let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
+    pds_routes.append(&mut oauth_routes);
 
     rocket::custom(figment)
         .mount("/", pds_routes)
@@ -314,8 +315,8 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
-    // .manage(shared_oauth_provider)
-    // .manage(account_manager)
+        .manage(oauth_provider)
+        .manage(account_manager)
 }
 
 fn pds_routes() -> Vec<Route> {

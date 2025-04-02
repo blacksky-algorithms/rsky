@@ -1,32 +1,42 @@
-use crate::jwk::{JwkBase, Keyset};
+use crate::jwk::{Jwk, Keyset};
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::errors::OAuthError::{
-    InvalidClientMetadataError, InvalidRedirectUriError,
-};
 use crate::oauth_types::{
-    is_oauth_client_id_discoverable, is_oauth_client_id_loopback, OAuthAuthorizationServerMetadata,
-    OAuthClientId, OAuthClientMetadata,
+    ApplicationType, OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientIdDiscoverable,
+    OAuthClientIdLoopback, OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType,
+    OAuthResponseType, SubjectType,
 };
-use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub type ClientManagerCreator =
+    Box<dyn Fn(Arc<RwLock<dyn ClientStore>>, Arc<RwLock<Keyset>>) -> ClientManager + Send + Sync>;
+
 pub struct ClientManager {
-    // jwks: (String, JwkBase),
-    // metadata_getter: (String, OAuthClientMetadata),
+    jwks: BTreeMap<String, Jwk>,
+    metadata_getter: BTreeMap<String, OAuthClientMetadata>,
     server_metadata: OAuthAuthorizationServerMetadata,
-    keyset: Keyset,
+    keyset: Arc<RwLock<Keyset>>,
     store: Arc<RwLock<dyn ClientStore>>,
+    // loopback_metadata: Option<LoopbackMetadataGetter>,
 }
 
 impl ClientManager {
+    pub fn creator(metadata: OAuthAuthorizationServerMetadata) -> ClientManagerCreator {
+        Box::new(
+            move |store: Arc<RwLock<dyn ClientStore>>,
+                  keyset: Arc<RwLock<Keyset>>|
+                  -> ClientManager { ClientManager::new(store, keyset, metadata) },
+        )
+    }
+
     pub fn new(
-        server_metadata: OAuthAuthorizationServerMetadata,
-        keyset: Keyset,
         store: Arc<RwLock<dyn ClientStore>>,
+        keyset: Arc<RwLock<Keyset>>,
+        server_metadata: OAuthAuthorizationServerMetadata,
     ) -> Self {
         Self {
             server_metadata,
@@ -38,7 +48,7 @@ impl ClientManager {
     /**
      * @see {@link https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2 OIDC Client Registration}
      */
-    pub async fn get_client(&self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
+    pub async fn get_client(&self, client_id: OAuthClientId) -> Result<Client, OAuthError> {
         let metadata = self.get_client_metadata(client_id).await?;
 
         let jwks = metadata.jwks;
@@ -48,30 +58,40 @@ impl ClientManager {
 
     async fn get_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: ClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
-        // if is_oauth_client_id_loopback(client_id) {
-        //     self.get_loopback_client_metadata(client_id).await
-        // } else if is_oauth_client_id_discoverable(client_id) {
-        //     return self.get_discoverable_client_metadata(client_id).await;
-        // } else {
-        //     return self.get_stored_client_metadata(client_id).await;
-        // }
+        if let Ok(loopback_client_id) = OAuthClientIdLoopback::new(client_id.val()) {
+            self.get_loopback_client_metadata(loopback_client_id).await
+        } else if let Ok(discoverable_client_id) = OAuthClientIdDiscoverable::new(client_id.val()) {
+            return self
+                .get_discoverable_client_metadata(&discoverable_client_id)
+                .await;
+        } else {
+            return self.get_stored_client_metadata(client_id).await;
+        }
     }
 
     async fn get_loopback_client_metadata(
         &self,
-        client_id: OAuthClientId,
+        client_id: OAuthClientIdLoopback,
     ) -> Result<OAuthClientMetadata, OAuthError> {
+        // if  {  }
         unimplemented!()
     }
 
     async fn get_discoverable_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: &OAuthClientIdDiscoverable,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
+        let metadata_url = client_id.as_url();
+
+        let metadata = self.metadata_getter.get(metadata_url.as_str()).await;
+
+        // Note: we do *not* re-validate the metadata here, as the metadata is
+        // validated within the getter. This is to avoid double validation.
+        //
+        // return this.validateClientMetadata(metadataUrl.href, metadata)
+        Ok(metadata)
     }
 
     async fn get_stored_client_metadata(
@@ -93,6 +113,300 @@ impl ClientManager {
         client_id: &ClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
+        if metadata.jwks.is_some() && metadata.jwks_uri.is_some() {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "jwks_uri and jwks are mutually exclusive".to_string(),
+            ));
+        }
+
+        // Known OIDC specific parameters
+        if metadata.default_max_age.is_some()
+            || metadata.userinfo_signed_response_alg.is_some()
+            || metadata.id_token_signed_response_alg.is_some()
+            || metadata.userinfo_encrypted_response_alg.is_some()
+        {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Unsupported parameter".to_string(),
+            ));
+        }
+
+        let client_uri_url = metadata.client_uri;
+        let client_uri_domain = match &client_uri_url {
+            None => None,
+            Some(web_uri) => Some(web_uri.domain()),
+        };
+
+        if client_uri_url.is_some() && client_uri_domain.is_none() {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "client_uri hostname is invalid".to_string(),
+            ));
+        }
+
+        let oauth_scope = match metadata.scope {
+            None => {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    "Missing scope property".to_string(),
+                ))
+            }
+            Some(scope) => scope,
+        };
+
+        let scopes: Vec<str> = oauth_scope.iter().map(|x| x()).collect();
+
+        if !scopes.contains("atproto") {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Missing atproto scope".to_string(),
+            ));
+        }
+
+        let dup_scope;
+        if dup_scope {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Duplicate scope".to_string(),
+            ));
+        }
+
+        for scope in scopes {
+            // Note, once we have dynamic scopes, this check will need to be
+            // updated to check against the server's supported scopes.
+            if let Some(scopes_supported) = &self.server_metadata.scopes_supported {
+                if !scopes_supported.contains(scope) {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Unsupported scope".to_string(),
+                    ));
+                }
+            }
+        }
+
+        let dup_grant_type;
+        if dup_grant_type {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Duplicate grant type".to_string(),
+            ));
+        }
+
+        for grant_type in metadata.grant_types {
+            match grant_type {
+                OAuthGrantType::AuthorizationCode => {
+                    if let Some(grant_types_supported) = &self.server_metadata.grant_types_supported
+                    {
+                        if !grant_types_supported.contains(&grant_type) {
+                            return Err(OAuthError::InvalidClientMetadataError(
+                                "Unsupported grant type".to_string(),
+                            ));
+                        }
+                    }
+                }
+                OAuthGrantType::Implicit => {
+                    // Never allowed (unsafe)
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Grant type is not allowed".to_string(),
+                    ));
+                }
+                OAuthGrantType::RefreshToken => {
+                    if let Some(grant_types_supported) = &self.server_metadata.grant_types_supported
+                    {
+                        if !grant_types_supported.contains(&grant_type) {
+                            return Err(OAuthError::InvalidClientMetadataError(
+                                "Unsupported grant type".to_string(),
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Grant type is not supported".to_string(),
+                    ))
+                }
+            }
+        }
+
+        if let Some(metadata_client_id) = metadata.client_id {
+            if metadata_client_id != client_id.clone() {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    "client_id does not match".to_string(),
+                ));
+            }
+        }
+
+        if let Some(metadata_subject_type) = metadata.subject_type {
+            match metadata_subject_type {
+                SubjectType::Public => {}
+                SubjectType::Pairwise => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Only public subject_type is supported".to_string(),
+                    ))
+                }
+            }
+        }
+
+        let method = match metadata.token_endpoint_auth_method {
+            None => {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    "Missing token_endpoint_auth_method client metadata".to_string(),
+                ))
+            }
+            Some(method) => method,
+        };
+        // match method {
+        //     OAuthEndpointAuthMethod::None => {
+        //         if metadata.token_endpoint_auth_signing_alg.is_some() {
+        //             return Err(OAuthError::InvalidClientMetadataError("token_endpoint_auth_method none must not have token_endpoint_auth_signing_alg".to_string()));
+        //         }
+        //     }
+        //     OAuthEndpointAuthMethod::PrivateKeyJwt => {
+        //         if metadata.jwks.is_none() && metadata.jwks_uri.is_none() {
+        //             return Err(OAuthError::InvalidClientMetadataError("private_key_jwt auth method requires jwks or jwks_uri".to_string()));
+        //         }
+        //
+        //         if let Some(jwks) = metadata.jwks {
+        //
+        //         }
+        //     }
+        //     _ => {}
+        // }
+
+        if metadata.authorization_encrypted_response_enc.is_some() {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Encrypted authorization response is not supported".to_string(),
+            ));
+        }
+
+        if metadata
+            .tls_client_certificate_bound_access_tokens
+            .is_some()
+        {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Mutual-TLS bound access tokens are not supported".to_string(),
+            ));
+        }
+
+        if metadata.authorization_encrypted_response_enc.is_some()
+            && metadata.authorization_encrypted_response_alg.is_none()
+        {
+            return Err(OAuthError::InvalidClientMetadataError("authorization_encrypted_response_enc requires authorization_encrypted_response_alg".to_string()));
+        }
+
+        // ATPROTO spec requires the use of DPoP (OAuth spec defaults to false)
+        if metadata.dpop_bound_access_tokens.is_none() {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "\"dpop_bound_access_tokens\" must be true".to_string(),
+            ));
+        }
+
+        // ATPROTO spec requires the use of PKCE, does not support OIDC
+        if !metadata.response_types.contains(&OAuthResponseType::Code) {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "response_types must include \"code\"".to_string(),
+            ));
+        } else if !metadata
+            .grant_types
+            .contains(&OAuthGrantType::AuthorizationCode)
+        {
+            return Err(OAuthError::InvalidClientMetadataError("The \"code\" response type requires that \"grant_types\" contains \"authorization_code\"".to_string()));
+        }
+
+        if metadata.redirect_uris.is_empty() {
+            // ATPROTO spec requires that at least one redirect URI is provided
+            return Err(OAuthError::InvalidClientMetadataError(
+                "At least one redirect_uri is required".to_string(),
+            ));
+        }
+
+        if metadata.application_type == ApplicationType::Web
+            && metadata.grant_types.contains(&OAuthGrantType::Implicit)
+        {
+            // https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2
+            //
+            // > Web Clients [as defined by "application_type"] using the OAuth
+            // > Implicit Grant Type MUST only register URLs using the https
+            // > scheme as redirect_uris; they MUST NOT use localhost as the
+            // > hostname.
+            for redirect_uri in metadata.redirect_uris {}
+        }
+
+        if let Ok(client_loopback_id) = OAuthClientIdLoopback::new(client_id) {
+            self.validate_loopback_client_metadata(client_id, metadata)
+        } else if let Ok(discoverable_client_id) = OAuthClientIdDiscoverable::new(client_id) {
+            return self.validate_discoverable_client_metadata(client_id, metadata);
+        } else {
+            Ok(metadata)
+        }
+    }
+
+    fn validate_loopback_client_metadata(
+        &self,
+        client_id: &ClientId,
+        metadata: OAuthClientMetadata,
+    ) -> Result<OAuthClientMetadata, OAuthError> {
+        if metadata.client_uri {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "client_uri is not allowed for loopback clients".to_string(),
+            ));
+        }
+
+        if metadata.application_type == ApplicationType::Native {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Loopback clients must have application_type \"native\"".to_string(),
+            ));
+        }
+
+        if let Some(method) = metadata.token_endpoint_auth_method {
+            return Err(OAuthError::InvalidClientMetadataError(
+                "Loopback clients are not allowed to use \"token_endpoint_auth_method\""
+                    .to_string(),
+            ));
+        }
+
+        for redirect_uri in metadata.redirect_uris {}
+
+        Ok(metadata)
+    }
+
+    fn validate_discoverable_client_metadata(
+        &self,
+        client_id: &ClientId,
+        metadata: OAuthClientMetadata,
+    ) -> Result<OAuthClientMetadata, OAuthError> {
+        if metadata.client_id.is_none() {
+            // https://drafts.aaronpk.com/draft-parecki-oauth-client-id-metadata-document/draft-parecki-oauth-client-id-metadata-document.html
+            return Err(OAuthError::InvalidClientMetadataError(
+                "client_id is required for discoverable clients".to_string(),
+            ));
+        }
+
+        if let Some(method) = metadata.token_endpoint_auth_method {
+            match method {
+                OAuthEndpointAuthMethod::ClientSecretBasic => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Client authentication method is not allowed for discoverable clients"
+                            .to_string(),
+                    ));
+                }
+                OAuthEndpointAuthMethod::ClientSecretJwt => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Client authentication method is not allowed for discoverable clients"
+                            .to_string(),
+                    ));
+                }
+                OAuthEndpointAuthMethod::ClientSecretPost => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Client authentication method is not allowed for discoverable clients"
+                            .to_string(),
+                    ));
+                }
+                OAuthEndpointAuthMethod::None => {}
+                OAuthEndpointAuthMethod::PrivateKeyJwt => {}
+                _ => {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Unsupported client authentication method ".to_string(),
+                    ));
+                }
+            }
+        }
+
+        for redirect_uri in metadata.redirect_uris {}
+
+        Ok(metadata)
     }
 }

@@ -1,65 +1,49 @@
-use crate::account_manager::{AccountManager, SharedAccountManager};
+use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
-use crate::oauth::detailed_account_store::DetailedAccountStore;
+use crate::read_after_write::viewer::LocalViewerCreator;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
-use rocket::request::FromRequest;
 use rsky_oauth::jwk::Keyset;
-use rsky_oauth::oauth_provider::client::client_store::ClientStore;
 use rsky_oauth::oauth_provider::metadata::build_metadata::CustomMetadata;
-use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderOptions};
-use rsky_oauth::oauth_provider::routes::{OAuthProviderCreator, SharedOAuthProvider};
+use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderCreatorParams};
+use rsky_oauth::oauth_provider::routes::SharedOAuthProvider;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct AuthProviderOptions {
     pub issuer: OAuthIssuerIdentifier,
-    pub account_manager: AccountManager,
-    pub actor_store: ActorStore,
 }
 
-pub fn build_oauth_provider(options: AuthProviderOptions) -> OAuthProvider {
-    let account_manager_guard = Arc::new(RwLock::new(options.account_manager.clone()));
-    let request_store = account_manager_guard.clone();
-    let device_store = account_manager_guard.clone();
-    let token_store = account_manager_guard.clone();
+pub fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthProvider {
+    let custom_metadata = build_custom_metadata();
 
     let keyset = build_keyset();
 
-    let custom_metadata = build_custom_metadata();
-
-    let account_store = Arc::new(RwLock::new(DetailedAccountStore::new(
-        options.account_manager,
-        options.actor_store,
-    )));
-
-    let oauth_options = OAuthProviderOptions {
-        authentication_max_age: None,
-        token_max_age: None,
-        metadata: Some(custom_metadata),
-        customization: None,
-        safe_fetch: false,
-        redis: "".to_string(),
-        store: None,
-        account_store: Some(account_store),
-        device_store: Some(device_store),
-        client_store: None,
-        replay_store: None,
-        request_store: Some(request_store),
-        token_store: Some(token_store),
-        client_jwks_cache: None,
-        client_metadata_cache: None,
-        loopback_metadata: "".to_string(),
-        dpop_secret: None,
-        dpop_step: None,
-        issuer: options.issuer,
-        keyset: Some(keyset),
-        access_token_type: None,
-    };
-    OAuthProvider::new(oauth_options).unwrap()
+    SharedOAuthProvider {
+        oauth_provider: Arc::new(RwLock::new(OAuthProvider::creator(
+            OAuthProviderCreatorParams {
+                authentication_max_age: None,
+                token_max_age: None,
+                metadata: Some(custom_metadata),
+                customization: None,
+                safe_fetch: false,
+                redis: None,
+                store: None,
+                client_jwks_cache: None,
+                client_metadata_cache: None,
+                loopback_metadata: "".to_string(),
+                dpop_secret: None,
+                dpop_step: None,
+                issuer: options.issuer,
+                keyset: None,
+                access_token_type: None,
+            },
+        ))),
+        keyset: Arc::new(RwLock::new(keyset)),
+    }
 }
 
 fn build_keyset() -> Keyset {
@@ -96,8 +80,4 @@ fn build_custom_metadata() -> CustomMetadata {
         authorization_details_type_supported: None,
         protected_resources: None,
     }
-}
-
-pub struct SharedOauthProvider {
-    pub oauth_provider: RwLock<OAuthProviderCreator>,
 }
