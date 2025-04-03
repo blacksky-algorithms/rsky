@@ -97,10 +97,9 @@ async fn inner_create_record(
             .await?;
 
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_commit(did.clone(), commit.clone(), writes)
-            .await?;
+        lock.sequence_commit(did.clone(), commit.clone()).await?;
         account_manager
-            .update_repo_root(did, commit.cid, commit.rev)
+            .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
             .await?;
 
         Ok(CreateRecordOutput {
