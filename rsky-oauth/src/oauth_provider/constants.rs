@@ -1,10 +1,10 @@
 // The purpose of the prefix is to provide type safety
 
 pub const DEVICE_ID_PREFIX: &str = "dev-";
-pub const DEVICE_ID_BYTES_LENGTH: u64 = 16; // 128 bits
+pub const DEVICE_ID_BYTES_LENGTH: usize = 16; // 128 bits
 
 pub const SESSION_ID_PREFIX: &str = "ses-";
-pub const SESSION_ID_BYTES_LENGTH: u64 = 16; // 128 bits - only valid if device id is valid
+pub const SESSION_ID_BYTES_LENGTH: usize = 16; // 128 bits - only valid if device id is valid
 
 pub const REFRESH_TOKEN_PREFIX: &str = "ref-";
 pub const REFRESH_TOKEN_BYTES_LENGTH: usize = 32; // 256 bits

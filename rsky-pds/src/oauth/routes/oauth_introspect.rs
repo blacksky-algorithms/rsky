@@ -1,12 +1,13 @@
-use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::routes::SharedOAuthProvider;
-use crate::oauth_types::OAuthIntrospectionResponse;
-use crate::oauth_types::{OAuthClientCredentials, OAuthTokenIdentification};
+use crate::oauth::SharedOAuthProvider;
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::{post, Data, Request, State};
+use rsky_oauth::oauth_provider::errors::OAuthError;
+use rsky_oauth::oauth_types::{
+    OAuthClientCredentials, OAuthIntrospectionResponse, OAuthTokenIdentification,
+};
 use std::num::NonZeroU64;
 
 pub struct OAuthIntrospectRequestBody {

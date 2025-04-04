@@ -69,6 +69,8 @@ lexicon_cid = { workspace = true }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 jsonwebtoken = "9.3.1"
+serde_urlencoded = "0.7.1"
+http = "1.2.0"
 
 [dev-dependencies]
 testcontainers = "0.23.2"

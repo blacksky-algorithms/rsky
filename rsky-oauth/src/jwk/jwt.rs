@@ -2,6 +2,7 @@ use crate::jwk::Jwk;
 use crate::oauth_provider::constants::TOKEN_ID_PREFIX;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::token::token_id::TokenIdError;
+use crate::oauth_types::{OAuthClientId, OAuthScope};
 use chrono::NaiveDate;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
@@ -282,9 +283,9 @@ pub struct JwtPayload {
 
     // OAuth 2.0 claims
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
+    pub client_id: Option<OAuthClientId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: Option<OAuthScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
 

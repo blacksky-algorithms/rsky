@@ -1,9 +1,9 @@
-use crate::oauth_provider::lib::http::request::validate_fetch_site;
-use crate::oauth_provider::routes::SharedOAuthProvider;
+use crate::oauth::SharedOAuthProvider;
 use rocket::get;
 use rocket::http::Status;
 use rocket::request::FromRequest;
 use rocket::{Request, State};
+use rsky_oauth::oauth_provider::lib::http::request::validate_fetch_site;
 
 pub struct AuthorizeAccept {
     // pub device_id: DeviceId,

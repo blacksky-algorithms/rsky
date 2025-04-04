@@ -87,17 +87,25 @@ impl OAuthVerifier {
     }
 
     pub async fn check_dpop_proof(
-        &self,
+        &mut self,
         proof: &str,
         htm: &str, // HTTP Method
         htu: &str, // HTTP URL
         access_token: Option<OAuthAccessToken>,
-    ) -> Option<String> {
-        unimplemented!()
-        // let res = self
-        //     .dpop_manager
-        //     .check_proof(proof, htm, htu, access_token)
-        //     .await
+    ) -> Result<String, OAuthError> {
+        let res = self
+            .dpop_manager
+            .check_proof(proof, htm, htu, access_token)
+            .await?;
+
+        let unique = self.replay_manager.unique_dpop(res.jti, None).await;
+        if !unique {
+            return Err(OAuthError::InvalidDpopProofError(
+                "DPoP proof jti is not unique".to_string(),
+            ));
+        }
+
+        Ok(res.jkt)
     }
 
     pub fn assert_token_type_allowed(

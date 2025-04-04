@@ -1,4 +1,5 @@
 use crate::jwk::{JwkError, JwtHeader, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
+use crate::oauth_provider::errors::OAuthError;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{DecodingKey, Header};
 
@@ -51,24 +52,25 @@ impl Keyset {
         // jsonwebtoken::encode(&header, &jwt_payload, key).unwrap()
     }
 
-    pub async fn verify_jwt<C>(
+    pub async fn verify_jwt(
         &self,
         signed_jwt: SignedJwt,
         options: Option<VerifyOptions>,
     ) -> Result<VerifyResult, JwkError> {
-        let signed_jwt = signed_jwt.val();
-        let header = jsonwebtoken::decode_header(signed_jwt.as_str()).expect("No header");
-        let kid = match header.kid {
-            Some(kid) => kid,
-            None => return Err(JwkError::JwtVerifyError),
-        };
-        let alg = header.alg;
-
-        let key = match self.keys.find(kid.as_str()) {
-            None => return Err(JwkError::JwtVerifyError),
-            Some(jwk) => jwk.clone(),
-        };
-        let decoding_key = DecodingKey::from_jwk(&key).unwrap();
+        unimplemented!()
+        // let signed_jwt = signed_jwt.val();
+        // let header = jsonwebtoken::decode_header(signed_jwt.as_str()).expect("No header");
+        // let kid = match header.kid {
+        //     Some(kid) => kid,
+        //     None => return Err(JwkError::JwtVerifyError),
+        // };
+        // let alg = header.alg;
+        //
+        // let key = match self.keys.find(kid.as_str()) {
+        //     None => return Err(JwkError::JwtVerifyError),
+        //     Some(jwk) => jwk.clone(),
+        // };
+        // let decoding_key = DecodingKey::from_jwk(&key).unwrap();
 
         // let res = match jsonwebtoken::decode(token, &decoding_key, &validation) {
         //

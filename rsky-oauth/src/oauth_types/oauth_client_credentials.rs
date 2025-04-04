@@ -48,16 +48,6 @@ pub enum OAuthClientCredentials {
     None(OAuthClientCredentialsNone),
 }
 
-impl OAuthClientCredentials {
-    pub fn client_id(&self) -> OAuthClientId {
-        match self {
-            OAuthClientCredentials::JwtBearer(client) => client.client_id.clone(),
-            OAuthClientCredentials::SecretPost(client) => client.client_id.clone(),
-            OAuthClientCredentials::None(client) => client.client_id.clone(),
-        }
-    }
-}
-
 impl OAuthClientCredentialsJwtBearer {
     /// Create new JWT bearer client credentials.
     pub fn new(

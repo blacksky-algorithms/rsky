@@ -1,19 +1,18 @@
 use crate::oauth_provider::client::client_auth::ClientAuth;
-use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::RequestData;
 use crate::oauth_provider::request::request_id::RequestId;
-use crate::oauth_types::OAuthAuthorizationRequestParameters;
+use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthClientId};
 
 #[derive(Default, Clone)]
 pub struct UpdateRequestData {
-    pub client_id: Option<ClientId>,
+    pub client_id: Option<OAuthClientId>,
     pub client_auth: Option<ClientAuth>,
     pub parameters: Option<OAuthAuthorizationRequestParameters>,
-    pub expires_at: Option<u32>,
+    pub expires_at: Option<u64>,
     pub device_id: Option<DeviceId>,
     pub sub: Option<Sub>,
     pub code: Option<Code>,

@@ -1,4 +1,4 @@
-use crate::oauth_types::OAuthTokenType;
+use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthTokenType};
 use rocket::http::{ContentType, Status};
 use rocket::serde::json::Json;
 use rocket::{response, Request};
@@ -10,7 +10,7 @@ pub enum OAuthError {
     InvalidRequestError(String),
     InvalidClientMetadataError(String),
     InvalidRedirectUriError(String),
-    InvalidParametersError(String),
+    InvalidParametersError(OAuthAuthorizationRequestParameters, String),
     UnauthorizedClientError(String),
     InvalidTokenError(OAuthTokenType, String),
     InvalidDpopKeyBindingError,
@@ -20,9 +20,9 @@ pub enum OAuthError {
     InvalidClientAuthMethod(String),
     AccountSelectionRequiredError,
     LoginRequiredError,
-    ConsentRequiredError,
+    ConsentRequiredError(OAuthAuthorizationRequestParameters, String),
     InvalidAuthorizationDetailsError(String),
-    InvalidScopeError(String),
+    InvalidScopeError(OAuthAuthorizationRequestParameters, String),
 }
 
 #[derive(Serialize)]

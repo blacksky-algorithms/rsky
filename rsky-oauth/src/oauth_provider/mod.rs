@@ -11,13 +11,11 @@ pub mod lib;
 pub mod metadata;
 pub mod oauth_hooks;
 pub mod oauth_provider;
-mod oauth_store;
 pub mod oauth_verifier;
 pub mod oidc;
 pub mod output;
 pub mod replay;
 pub mod request;
-pub mod routes;
 pub mod signer;
 pub mod token;
 

@@ -1,38 +1,17 @@
-use crate::jwk::Keyset;
-use crate::oauth_provider::client::client_manager::{ClientManager, ClientManagerCreator};
-use crate::oauth_provider::client::client_store::ClientStore;
+use crate::oauth_provider::device;
+use crate::oauth_provider::device::device_data::DeviceData;
 use crate::oauth_provider::device::device_details::{extract_device_details, DeviceDetails};
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::device::device_store::DeviceStore;
-use crate::oauth_provider::device::session_id::SessionId;
-use crate::oauth_types::OAuthAuthorizationServerMetadata;
-use rocket::Request;
-use std::cmp::PartialEq;
+use crate::oauth_provider::device::session_id::{generate_session_id, SessionId};
+use crate::oauth_provider::errors::OAuthError;
+use rocket::http::Cookie;
+use rocket::yansi::Paint;
+use rocket::{Request, Response};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub struct DeviceManagerOptions {
-    /**
-     * Controls whether the IP address is read from the `X-Forwarded-For` header
-     * (if `true`), or from the `req.socket.remoteAddress` property (if `false`).
-     *
-     * @default true // (nowadays, most requests are proxied)
-     */
-    pub trust_proxy: bool,
-
-    /**
-     * Amount of time (in ms) after which session IDs will be rotated
-     *
-     * @default 300e3 // (5 minutes)
-     */
-    pub rotation_rate: f64,
-
-    /**
-     * Cookie options
-     */
-    // cookie: {
-    // keys: undefined as undefined | Keygrip,
-
+struct CookieOptions {
     /**
      * Name of the cookie used to identify the device
      *
@@ -78,24 +57,49 @@ pub struct DeviceManagerOptions {
     pub same_site: String,
 }
 
+pub struct DeviceManagerOptions {
+    /**
+     * Controls whether the IP address is read from the `X-Forwarded-For` header
+     * (if `true`), or from the `req.socket.remoteAddress` property (if `false`).
+     *
+     * @default true // (nowadays, most requests are proxied)
+     */
+    pub trust_proxy: bool,
+
+    /**
+     * Amount of time (in ms) after which session IDs will be rotated
+     *
+     * @default 300e3 // (5 minutes)
+     */
+    pub rotation_rate: f64,
+
+    /**
+     * Cookie options
+     */
+    pub cookie: CookieOptions,
+}
+
 impl Default for DeviceManagerOptions {
     fn default() -> Self {
-        Self {
-            trust_proxy: true,
-            rotation_rate: 5f64 * 60e3f64,
+        let cookie_options = CookieOptions {
             device: "device-id".to_string(),
             session: "session-id".to_string(),
             path: "/oauth/authorize".to_string(),
             age: Some(10f64 * 365.2 * 24f64 * 60f64 * 60e3),
             secure: true,
             same_site: "lax".to_string(),
+        };
+        Self {
+            trust_proxy: true,
+            rotation_rate: 5f64 * 60e3f64,
+            cookie: cookie_options,
         }
     }
 }
 
 pub struct DeviceManager {
     store: Arc<RwLock<dyn DeviceStore>>,
-    device_manager_options: DeviceManagerOptions,
+    options: DeviceManagerOptions,
 }
 
 pub type DeviceManagerCreator = Box<
@@ -119,15 +123,13 @@ impl DeviceManager {
     }
 
     pub fn new(store: Arc<RwLock<dyn DeviceStore>>, options: Option<DeviceManagerOptions>) -> Self {
-        let device_manager_options = options.unwrap_or_else(|| DeviceManagerOptions::default());
-        Self {
-            store,
-            device_manager_options,
-        }
+        let options = options.unwrap_or_else(|| DeviceManagerOptions::default());
+        Self { store, options }
     }
 
-    pub async fn load(&self, req: &Request<'_>) -> DeviceId {
+    pub async fn load(&self, req: &Request<'_>, res: Response<'_>, force_rotate: bool) -> DeviceId {
         unimplemented!()
+        // let cookie = self.get_cookie().await;
         // let cookie = self.get_cookie().await;
         // match cookie {
         //     None => {
@@ -139,25 +141,89 @@ impl DeviceManager {
         // }
     }
 
-    async fn create(&self, req: &Request<'_>) {}
+    pub async fn rotate(
+        &mut self,
+        req: Request<'_>,
+        res: Response<'_>,
+        device_id: DeviceId,
+        data: Option<DeviceData>,
+    ) {
+        let session_id = generate_session_id().await;
 
-    async fn refresh(&self, req: &Request<'_>, device_id: DeviceId, session_id: SessionId) {
-        unimplemented!()
-        // let data = self.store.read_device(device_id).await;
-        // if data.is_none() {
-        //     return self.create(req).await
-        // }
-        //
-        // if session_id != data.unwrap().session_id {
-        //
-        // }
+        let data = match data {
+            Some(data) => DeviceData {
+                user_agent: data.user_agent,
+                ip_address: data.ip_address,
+                session_id: session_id.clone(),
+                last_seen_at: 0,
+            },
+            None => DeviceData {
+                user_agent: None,
+                ip_address: "".to_string(),
+                session_id: session_id.clone(),
+                last_seen_at: 0,
+            },
+        };
+        self.store
+            .blocking_write()
+            .update_device(device_id.clone(), data);
+        self.set_cookie(req, res, device_id, session_id)
     }
 
-    async fn get_cookie(&self) {}
+    async fn create(&self, req: &Request<'_>) {
+        unimplemented!()
+    }
 
-    fn set_cookie(&self) {}
+    async fn refresh(&self, req: Request<'_>, device_id: DeviceId, session_id: SessionId) {
+        let data = self.store.blocking_read().read_device(device_id);
+        if data.is_none() {
+            return self.create(&req).await;
+        }
 
-    fn write_cookie(&self, name: &str, value: Option<&str>) {}
+        if session_id != data.unwrap().session_id {}
+    }
+
+    async fn get_cookie(&self, req: Request<'_>) -> Result<(), OAuthError> {
+        let cookies = req.cookies();
+        let device = match cookies.get(self.options.cookie.device.as_str()) {
+            None => None,
+            Some(device_cookie) => {
+                if let Ok(device_id) = DeviceId::new(device_cookie.value()) {
+                    Some((device_id, false))
+                } else {
+                    None
+                }
+            }
+        };
+        let session = match cookies.get(self.options.cookie.session.as_str()) {
+            None => None,
+            Some(session_cookie) => {
+                if let Ok(session_id) = SessionId::new(session_cookie.value()) {
+                    Some((session_id, false))
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Silently ignore invalid cookies
+        if device.is_none() || session.is_none() {
+            // If the device cookie is valid, let's cleanup the DB
+            if let Some(device) = device {
+                self.store.blocking_write().delete_device(device.0)
+            }
+        }
+
+        //TODO
+        Ok(())
+    }
+
+    fn set_cookie(&self, req: Request, res: Response, device_id: DeviceId, session_id: SessionId) {
+        req.cookies()
+            .add((self.options.cookie.device.clone(), device_id.into_inner()));
+        req.cookies()
+            .add((self.options.cookie.session.clone(), session_id.into_inner()));
+    }
 
     fn get_device_details(&self, req: &Request) -> DeviceDetails {
         extract_device_details(req)

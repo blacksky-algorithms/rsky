@@ -4,13 +4,16 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// OAuth grant types, including standard grants and extension grants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Ord, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd)]
 pub enum OAuthGrantType {
     /// Authorization code grant
+    #[serde(rename = "authorization_code")]
     AuthorizationCode,
     /// Implicit grant (deprecated in OAuth 2.1)
     Implicit,
+
     /// Refresh token grant
+    #[serde(rename = "refresh_token")]
     RefreshToken,
     /// Resource owner password credentials grant (not in OAuth 2.1)
     Password,

@@ -1,22 +1,62 @@
-use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::routes::{DpopJkt, SharedOAuthProvider};
-use crate::oauth_types::OAuthParResponse;
-use crate::oauth_types::{OAuthAuthorizationRequestPar, OAuthClientCredentials};
+use crate::oauth::SharedOAuthProvider;
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
-use rocket::serde::json::Json;
-use rocket::{post, Data, Request, State};
+use rocket::request::FromRequest;
+use rocket::{get, post, Data, Request, State};
+use rsky_oauth::oauth_provider::errors::OAuthError;
+use rsky_oauth::oauth_types::{OAuthTokenIdentification, TokenTypeHint};
 use std::num::NonZeroU64;
 
-pub struct OAuthParRequestBody {
-    pub oauth_client_credentials: OAuthClientCredentials,
-    pub oauth_authorization_request_par: OAuthAuthorizationRequestPar,
-    pub url: String,
+pub struct OAuthRevokeGetRequestBody {
+    pub oauth_token_identification: OAuthTokenIdentification,
 }
 
 #[rocket::async_trait]
-impl<'r> FromData<'r> for OAuthParRequestBody {
+impl<'r> FromRequest<'r> for OAuthRevokeGetRequestBody {
+    type Error = OAuthError;
+
+    #[tracing::instrument(skip_all)]
+    async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
+        let token = req.query_value::<String>("token").unwrap().unwrap();
+        // let token_type_hint = req.query_value::<Option<TokenTypeHint>>("token_type_hint").unwrap().unwrap();
+        let hint = req
+            .query_value::<String>("token_type_hint")
+            .unwrap()
+            .unwrap();
+        let token_type_hint: Option<TokenTypeHint> = Some(hint.parse().unwrap());
+        let body = OAuthRevokeGetRequestBody {
+            oauth_token_identification: OAuthTokenIdentification {
+                token,
+                token_type_hint,
+            },
+        };
+        rocket::request::Outcome::Success(body)
+    }
+}
+
+#[get("/oauth/revoke")]
+pub async fn get_oauth_revoke(
+    shared_oauth_provider: &State<SharedOAuthProvider>,
+    body: OAuthRevokeGetRequestBody,
+) -> Result<(), OAuthError> {
+    unimplemented!()
+    // let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
+    // match oauth_provider
+    //     .revoke(&body.oauth_token_identification)
+    //     .await
+    // {
+    //     Ok(res) => Ok(()),
+    //     Err(e) => Err(e),
+    // }
+}
+
+pub struct OAuthRevokeRequestBody {
+    pub oauth_token_identification: OAuthTokenIdentification,
+}
+
+#[rocket::async_trait]
+impl<'r> FromData<'r> for OAuthRevokeRequestBody {
     type Error = OAuthError;
 
     #[tracing::instrument(skip_all)]
@@ -24,6 +64,7 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
         req: &'r Request<'_>,
         data: Data<'r>,
     ) -> rocket::data::Outcome<'r, Self, Self::Error> {
+        //TODO Separate JSON from URL Encoded Later
         match req.headers().get_one(header::CONTENT_TYPE.as_ref()) {
             None => {
                 let error = OAuthError::RuntimeError("test".to_string());
@@ -34,9 +75,7 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                 if content_type == "application/x-www-form-urlencoded" {
                     match req.headers().get_one(header::CONTENT_LENGTH.as_ref()) {
                         None => {
-                            let error = OAuthError::RuntimeError(
-                                "application/x-www-form-urlencoded".to_string(),
-                            );
+                            let error = OAuthError::RuntimeError("test".to_string());
                             req.local_cache(|| Some(error.clone()));
                             rocket::data::Outcome::Error((Status::BadRequest, error))
                         }
@@ -48,13 +87,12 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                                     .await
                                     .unwrap()
                                     .value;
-                                let oauth_client_credentials: OAuthClientCredentials =
+                                let oauth_token_identification: OAuthTokenIdentification =
                                     match serde_urlencoded::from_str(datastream.as_str()) {
                                         Ok(res) => res,
                                         Err(e) => {
-                                            let error = OAuthError::RuntimeError(
-                                                "serde_urlencoded::from_str(d".to_string(),
-                                            );
+                                            let error =
+                                                OAuthError::RuntimeError("test".to_string());
                                             req.local_cache(|| Some(error.clone()));
                                             return rocket::data::Outcome::Error((
                                                 Status::BadRequest,
@@ -62,25 +100,8 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                                             ));
                                         }
                                     };
-                                let oauth_authorization_request_par: OAuthAuthorizationRequestPar =
-                                    match serde_urlencoded::from_str(datastream.as_str()) {
-                                        Ok(res) => res,
-                                        Err(e) => {
-                                            print!("{}", e.to_string());
-                                            let error = OAuthError::RuntimeError(
-                                                "serde_urlencoded::from_str".to_string(),
-                                            );
-                                            req.local_cache(|| Some(error.clone()));
-                                            return rocket::data::Outcome::Error((
-                                                Status::BadRequest,
-                                                error,
-                                            ));
-                                        }
-                                    };
-                                rocket::data::Outcome::Success(OAuthParRequestBody {
-                                    oauth_client_credentials,
-                                    oauth_authorization_request_par,
-                                    url: "".to_string(),
+                                rocket::data::Outcome::Success(OAuthRevokeRequestBody {
+                                    oauth_token_identification,
                                 })
                             }
                             Err(_error) => {
@@ -99,7 +120,7 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                 } else if content_type == "application/json" {
                     match req.headers().get_one(header::CONTENT_LENGTH.as_ref()) {
                         None => {
-                            let error = OAuthError::RuntimeError("application/json".to_string());
+                            let error = OAuthError::RuntimeError("test".to_string());
                             req.local_cache(|| Some(error.clone()));
                             rocket::data::Outcome::Error((Status::BadRequest, error))
                         }
@@ -111,13 +132,12 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                                     .await
                                     .unwrap()
                                     .value;
-                                let oauth_client_credentials: OAuthClientCredentials =
+                                let oauth_token_identification: OAuthTokenIdentification =
                                     match serde_json::from_str(datastream.as_str()) {
                                         Ok(res) => res,
                                         Err(e) => {
-                                            let error = OAuthError::RuntimeError(
-                                                " serde_json::from_str".to_string(),
-                                            );
+                                            let error =
+                                                OAuthError::RuntimeError("test".to_string());
                                             req.local_cache(|| Some(error.clone()));
                                             return rocket::data::Outcome::Error((
                                                 Status::BadRequest,
@@ -125,24 +145,8 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                                             ));
                                         }
                                     };
-                                let oauth_authorization_request_par: OAuthAuthorizationRequestPar =
-                                    match serde_json::from_str(datastream.as_str()) {
-                                        Ok(res) => res,
-                                        Err(e) => {
-                                            let error = OAuthError::RuntimeError(
-                                                " serde_json::from_str".to_string(),
-                                            );
-                                            req.local_cache(|| Some(error.clone()));
-                                            return rocket::data::Outcome::Error((
-                                                Status::BadRequest,
-                                                error,
-                                            ));
-                                        }
-                                    };
-                                rocket::data::Outcome::Success(OAuthParRequestBody {
-                                    oauth_client_credentials,
-                                    oauth_authorization_request_par,
-                                    url: "".to_string(),
+                                rocket::data::Outcome::Success(OAuthRevokeRequestBody {
+                                    oauth_token_identification,
                                 })
                             }
                             Err(_error) => {
@@ -159,7 +163,7 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
                         },
                     }
                 } else {
-                    let error = OAuthError::RuntimeError("else".to_string());
+                    let error = OAuthError::RuntimeError("test".to_string());
                     req.local_cache(|| Some(error.clone()));
                     rocket::data::Outcome::Error((Status::BadRequest, error))
                 }
@@ -168,29 +172,19 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
     }
 }
 
-#[post("/oauth/par", data = "<body>")]
-pub async fn oauth_par(
+#[post("/oauth/revoke", data = "<body>")]
+pub async fn post_oauth_revoke(
     shared_oauth_provider: &State<SharedOAuthProvider>,
-    body: OAuthParRequestBody,
-    dpop_jkt: DpopJkt,
-) -> Result<Json<OAuthParResponse>, OAuthError> {
+    body: OAuthRevokeRequestBody,
+) -> Result<(), OAuthError> {
     unimplemented!()
-    // let mut oauth_provider = shared_oauth_provider.oauth_provider.write().await;
-    // let dpop_jkt = oauth_provider
-    //     .oauth_verifier
-    //     .check_dpop_proof(
-    //         dpop_jkt.0.unwrap().as_str(),
-    //         "POST",
-    //         body.url.as_str(),
-    //         None,
-    //     )
-    //     .await;
-    // let res = oauth_provider
-    //     .pushed_authorization_request(
-    //         body.oauth_client_credentials.clone(),
-    //         body.oauth_authorization_request_par.clone(),
-    //         dpop_jkt,
-    //     )
-    //     .await?;
-    // Ok(Json(res))
+    // let mut creator = shared_oauth_provider.oauth_provider.write().await;
+    // let x = creator(d);
+    // match oauth_provider
+    //     .revoke(&body.oauth_token_identification)
+    //     .await
+    // {
+    //     Ok(res) => Ok(()),
+    //     Err(e) => Err(e),
+    // }
 }

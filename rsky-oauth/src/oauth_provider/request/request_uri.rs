@@ -45,8 +45,9 @@ pub enum RequestUriError {
     Empty,
 }
 
-pub fn decode_request_uri(request_uri: OAuthRequestUri) -> RequestId {
-    unimplemented!()
+pub fn decode_request_uri(request_uri: &RequestUri) -> RequestId {
+    let val = request_uri.clone().into_inner();
+    RequestId::new(val).unwrap()
 }
 
 pub fn encode_request_uri(request_id: RequestId) -> RequestUri {

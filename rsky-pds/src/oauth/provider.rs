@@ -1,6 +1,4 @@
-use crate::account_manager::AccountManager;
-use crate::actor_store::ActorStore;
-use crate::read_after_write::viewer::LocalViewerCreator;
+use crate::oauth::SharedOAuthProvider;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
@@ -8,7 +6,6 @@ use jsonwebtoken::jwk::{
 use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::metadata::build_metadata::CustomMetadata;
 use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderCreatorParams};
-use rsky_oauth::oauth_provider::routes::SharedOAuthProvider;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,6 +19,7 @@ pub fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthProvider
 
     let keyset = build_keyset();
 
+    let keyset = Arc::new(RwLock::new(keyset));
     SharedOAuthProvider {
         oauth_provider: Arc::new(RwLock::new(OAuthProvider::creator(
             OAuthProviderCreatorParams {
@@ -38,11 +36,11 @@ pub fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthProvider
                 dpop_secret: None,
                 dpop_step: None,
                 issuer: options.issuer,
-                keyset: None,
+                keyset: Some(keyset.clone()),
                 access_token_type: None,
             },
         ))),
-        keyset: Arc::new(RwLock::new(keyset)),
+        keyset: keyset.clone(),
     }
 }
 

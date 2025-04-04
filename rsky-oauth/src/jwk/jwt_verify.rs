@@ -1,7 +1,7 @@
 use jsonwebtoken::Header;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct VerifyOptions {
     pub audience: Option<String>,
     /** in seconds */

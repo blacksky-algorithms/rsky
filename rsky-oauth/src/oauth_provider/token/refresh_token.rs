@@ -7,8 +7,18 @@ pub const REFRESH_TOKEN_LENGTH: usize = REFRESH_TOKEN_PREFIX.len() + REFRESH_TOK
 pub struct RefreshToken(String);
 
 impl RefreshToken {
-    pub fn new(val: impl Into<String>) -> Self {
-        RefreshToken(val.into())
+    pub fn new(val: impl Into<String>) -> Result<Self, RefreshTokenError> {
+        let val = val.into();
+
+        if val.len() != REFRESH_TOKEN_LENGTH {
+            return Err(RefreshTokenError::InvalidLength);
+        }
+
+        if !val.starts_with(REFRESH_TOKEN_PREFIX) {
+            return Err(RefreshTokenError::InvalidLength);
+        }
+
+        Ok(RefreshToken(val.into()))
     }
 
     pub fn val(&self) -> String {
@@ -16,6 +26,7 @@ impl RefreshToken {
     }
 }
 
+#[derive(Debug)]
 pub enum RefreshTokenError {
     InvalidLength,
     InvalidFormat(String),
@@ -28,5 +39,5 @@ pub fn is_refresh_token(data: &str) -> bool {
 
 pub async fn generate_refresh_token() -> RefreshToken {
     let val = "";
-    RefreshToken::new(val.to_string())
+    RefreshToken::new(val.to_string()).unwrap()
 }

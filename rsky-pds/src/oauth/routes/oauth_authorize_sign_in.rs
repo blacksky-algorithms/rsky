@@ -1,4 +1,4 @@
-use crate::oauth_provider::routes::SharedOAuthProvider;
+use crate::oauth::SharedOAuthProvider;
 use rocket::{get, post, State};
 
 #[post("/oauth/authorize/sign-in")]

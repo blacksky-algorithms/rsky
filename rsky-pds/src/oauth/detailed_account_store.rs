@@ -1,14 +1,13 @@
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::lexicon::lexicons::ProfileViewBasic;
-use crate::read_after_write::viewer::{LocalViewer, LocalViewerCreator};
-use rsky_oauth::jwk::Keyset;
+use crate::read_after_write::viewer::LocalViewerCreator;
 use rsky_oauth::oauth_provider::account::account_store::{
     AccountInfo, AccountStore, SignInCredentials,
 };
-use rsky_oauth::oauth_provider::client::client_id::ClientId;
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
 use rsky_oauth::oauth_provider::oidc::sub::Sub;
+use rsky_oauth::oauth_types::OAuthClientId;
 
 /**
  * Although the {@link AccountManager} class implements the {@link AccountStore}
@@ -31,14 +30,15 @@ pub type DetailedAccountStoreCreator = Box<
 
 impl DetailedAccountStore {
     pub fn creator() -> DetailedAccountStoreCreator {
-        Box::new(
-            move |account_manager: AccountManager,
-                  actor_store: ActorStore,
-                  local_viewer: LocalViewerCreator|
-                  -> DetailedAccountStore {
-                DetailedAccountStore::new(account_manager, actor_store, local_viewer)
-            },
-        )
+        unimplemented!()
+        // Box::new(
+        //     move |account_manager: AccountManager,
+        //           actor_store: ActorStore,
+        //           local_viewer: LocalViewerCreator|
+        //           -> DetailedAccountStore {
+        //         DetailedAccountStore::new(account_manager, actor_store, local_viewer)
+        //     },
+        // )
     }
 
     pub fn new(
@@ -49,7 +49,7 @@ impl DetailedAccountStore {
         Self {
             account_manager,
             actor_store,
-            local_view,
+            local_view: local_viewer,
         }
     }
 
@@ -89,7 +89,7 @@ impl AccountStore for DetailedAccountStore {
         }
     }
 
-    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: ClientId) {
+    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: OAuthClientId) {
         self.account_manager
             .add_authorized_client(device_id, sub, client_id)
     }

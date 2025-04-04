@@ -1,6 +1,6 @@
-use crate::jwk::{Jwk, Keyset};
+use crate::jwk::Keyset;
 use crate::oauth_provider::client::client::Client;
-use crate::oauth_provider::client::client_id::ClientId;
+use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_types::{
@@ -16,8 +16,8 @@ pub type ClientManagerCreator =
     Box<dyn Fn(Arc<RwLock<dyn ClientStore>>, Arc<RwLock<Keyset>>) -> ClientManager + Send + Sync>;
 
 pub struct ClientManager {
-    jwks: BTreeMap<String, Jwk>,
-    metadata_getter: BTreeMap<String, OAuthClientMetadata>,
+    // jwks: BTreeMap<String, Jwk>,
+    // metadata_getter: BTreeMap<String, OAuthClientMetadata>,
     server_metadata: OAuthAuthorizationServerMetadata,
     keyset: Arc<RwLock<Keyset>>,
     store: Arc<RwLock<dyn ClientStore>>,
@@ -48,17 +48,27 @@ impl ClientManager {
     /**
      * @see {@link https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2 OIDC Client Registration}
      */
-    pub async fn get_client(&self, client_id: OAuthClientId) -> Result<Client, OAuthError> {
-        let metadata = self.get_client_metadata(client_id).await?;
-
-        let jwks = metadata.jwks;
-
+    pub async fn get_client(&self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
         unimplemented!()
+        // let metadata = self.get_client_metadata(client_id).await?;
+        //
+        // let jwks = match metadata.jwks_uri {
+        //     None => {
+        //         None
+        //     }
+        //     Some(jwks_uri) => {
+        //         unimplemented!()
+        //     }
+        // };
+        //
+        // let partial_info: ClientInfo;
+        //
+        // Ok(Client::new(client_id.clone(), metadata, jwks, partial_info))
     }
 
     async fn get_client_metadata(
         &self,
-        client_id: ClientId,
+        client_id: &OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if let Ok(loopback_client_id) = OAuthClientIdLoopback::new(client_id.val()) {
             self.get_loopback_client_metadata(loopback_client_id).await
@@ -83,20 +93,21 @@ impl ClientManager {
         &self,
         client_id: &OAuthClientIdDiscoverable,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        let metadata_url = client_id.as_url();
+        unimplemented!()
+        // let metadata_url = client_id.as_url();
 
-        let metadata = self.metadata_getter.get(metadata_url.as_str()).await;
+        // let metadata = self.metadata_getter.get(metadata_url.as_str()).await;
 
         // Note: we do *not* re-validate the metadata here, as the metadata is
         // validated within the getter. This is to avoid double validation.
         //
         // return this.validateClientMetadata(metadataUrl.href, metadata)
-        Ok(metadata)
+        // Ok(metadata)
     }
 
     async fn get_stored_client_metadata(
         &self,
-        client_id: ClientId,
+        client_id: &OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         let metadata = self.store.blocking_read().find_client(client_id.clone())?;
         self.validate_client_metadata(&client_id, metadata).await
@@ -110,7 +121,7 @@ impl ClientManager {
      */
     async fn validate_client_metadata(
         &self,
-        client_id: &ClientId,
+        client_id: &OAuthClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if metadata.jwks.is_some() && metadata.jwks_uri.is_some() {
@@ -130,7 +141,7 @@ impl ClientManager {
             ));
         }
 
-        let client_uri_url = metadata.client_uri;
+        let client_uri_url = metadata.client_uri.clone();
         let client_uri_domain = match &client_uri_url {
             None => None,
             Some(web_uri) => Some(web_uri.domain()),
@@ -142,25 +153,27 @@ impl ClientManager {
             ));
         }
 
-        let oauth_scope = match metadata.scope {
+        let oauth_scope = match &metadata.scope {
             None => {
                 return Err(OAuthError::InvalidClientMetadataError(
                     "Missing scope property".to_string(),
                 ))
             }
-            Some(scope) => scope,
+            Some(scope) => scope.clone(),
         };
 
-        let scopes: Vec<str> = oauth_scope.iter().map(|x| x()).collect();
+        let mut scopes: Vec<String> = oauth_scope.iter().map(|x| x.to_string()).collect();
 
-        if !scopes.contains("atproto") {
+        if !scopes.contains(&"atproto".to_string()) {
             return Err(OAuthError::InvalidClientMetadataError(
                 "Missing atproto scope".to_string(),
             ));
         }
 
-        let dup_scope;
-        if dup_scope {
+        scopes.sort();
+        let x = scopes.len();
+        scopes.dedup();
+        if x != scopes.len() {
             return Err(OAuthError::InvalidClientMetadataError(
                 "Duplicate scope".to_string(),
             ));
@@ -170,7 +183,7 @@ impl ClientManager {
             // Note, once we have dynamic scopes, this check will need to be
             // updated to check against the server's supported scopes.
             if let Some(scopes_supported) = &self.server_metadata.scopes_supported {
-                if !scopes_supported.contains(scope) {
+                if !scopes_supported.contains(&scope) {
                     return Err(OAuthError::InvalidClientMetadataError(
                         "Unsupported scope".to_string(),
                     ));
@@ -178,14 +191,17 @@ impl ClientManager {
             }
         }
 
-        let dup_grant_type;
-        if dup_grant_type {
+        let mut grant_types = metadata.grant_types.clone();
+        grant_types.sort();
+        let x = grant_types.len();
+        grant_types.dedup();
+        if x != grant_types.len() {
             return Err(OAuthError::InvalidClientMetadataError(
                 "Duplicate grant type".to_string(),
             ));
         }
 
-        for grant_type in metadata.grant_types {
+        for grant_type in grant_types {
             match grant_type {
                 OAuthGrantType::AuthorizationCode => {
                     if let Some(grant_types_supported) = &self.server_metadata.grant_types_supported
@@ -221,7 +237,7 @@ impl ClientManager {
             }
         }
 
-        if let Some(metadata_client_id) = metadata.client_id {
+        if let Some(metadata_client_id) = metadata.client_id.clone() {
             if metadata_client_id != client_id.clone() {
                 return Err(OAuthError::InvalidClientMetadataError(
                     "client_id does not match".to_string(),
@@ -229,7 +245,7 @@ impl ClientManager {
             }
         }
 
-        if let Some(metadata_subject_type) = metadata.subject_type {
+        if let Some(metadata_subject_type) = &metadata.subject_type {
             match metadata_subject_type {
                 SubjectType::Public => {}
                 SubjectType::Pairwise => {
@@ -240,13 +256,13 @@ impl ClientManager {
             }
         }
 
-        let method = match metadata.token_endpoint_auth_method {
+        let method = match &metadata.token_endpoint_auth_method {
             None => {
                 return Err(OAuthError::InvalidClientMetadataError(
                     "Missing token_endpoint_auth_method client metadata".to_string(),
                 ))
             }
-            Some(method) => method,
+            Some(method) => method.clone(),
         };
         // match method {
         //     OAuthEndpointAuthMethod::None => {
@@ -322,12 +338,12 @@ impl ClientManager {
             // > Implicit Grant Type MUST only register URLs using the https
             // > scheme as redirect_uris; they MUST NOT use localhost as the
             // > hostname.
-            for redirect_uri in metadata.redirect_uris {}
+            for redirect_uri in metadata.redirect_uris.clone() {}
         }
 
-        if let Ok(client_loopback_id) = OAuthClientIdLoopback::new(client_id) {
+        if let Ok(client_loopback_id) = OAuthClientIdLoopback::new(client_id.val()) {
             self.validate_loopback_client_metadata(client_id, metadata)
-        } else if let Ok(discoverable_client_id) = OAuthClientIdDiscoverable::new(client_id) {
+        } else if let Ok(discoverable_client_id) = OAuthClientIdDiscoverable::new(client_id.val()) {
             return self.validate_discoverable_client_metadata(client_id, metadata);
         } else {
             Ok(metadata)
@@ -336,10 +352,10 @@ impl ClientManager {
 
     fn validate_loopback_client_metadata(
         &self,
-        client_id: &ClientId,
+        client_id: &OAuthClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        if metadata.client_uri {
+        if metadata.client_uri.is_some() {
             return Err(OAuthError::InvalidClientMetadataError(
                 "client_uri is not allowed for loopback clients".to_string(),
             ));
@@ -358,14 +374,16 @@ impl ClientManager {
             ));
         }
 
-        for redirect_uri in metadata.redirect_uris {}
+        for redirect_uri in metadata.redirect_uris.clone() {
+            //TODO
+        }
 
         Ok(metadata)
     }
 
     fn validate_discoverable_client_metadata(
         &self,
-        client_id: &ClientId,
+        client_id: &OAuthClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if metadata.client_id.is_none() {
@@ -405,7 +423,9 @@ impl ClientManager {
             }
         }
 
-        for redirect_uri in metadata.redirect_uris {}
+        for redirect_uri in metadata.redirect_uris.clone() {
+            //TODO
+        }
 
         Ok(metadata)
     }

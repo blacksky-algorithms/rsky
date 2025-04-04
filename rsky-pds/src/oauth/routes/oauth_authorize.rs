@@ -1,4 +1,4 @@
-use crate::oauth_provider::routes::SharedOAuthProvider;
+use crate::oauth::SharedOAuthProvider;
 use rocket::request::FromRequest;
 use rocket::{get, Request, State};
 

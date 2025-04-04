@@ -1,20 +1,16 @@
 pub const AUTH_METHODS_SUPPORTED: [&str; 2] = ["none", "private_key_jwt"];
 
-use crate::oauth_provider::client::client_auth::{auth_jwk_thumbprint, ClientAuth};
-use crate::oauth_provider::client::client_id::ClientId;
+use crate::oauth_provider::client::client_auth::ClientAuth;
 use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::lib::util::redirect_uri::compare_redirect_uri;
 use crate::oauth_types::{
-    OAuthAuthorizationRequestParameters, OAuthClientCredentials, OAuthClientMetadata,
-    OAuthEndpointAuthMethod, OAuthGrantType, OAuthIssuerIdentifier, OAuthRedirectUri,
-    CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    OAuthAuthorizationRequestParameters, OAuthClientCredentials, OAuthClientId,
+    OAuthClientMetadata, OAuthIssuerIdentifier, OAuthRedirectUri,
 };
-use rocket::form::validate::Contains;
 
 #[derive(Clone)]
 pub struct Client {
-    pub id: ClientId,
+    pub id: OAuthClientId,
     pub metadata: OAuthClientMetadata,
     pub jwks: String,
     pub info: ClientInfo,
@@ -22,7 +18,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(
-        id: ClientId,
+        id: OAuthClientId,
         metadata: OAuthClientMetadata,
         jwks: String,
         info: ClientInfo,
@@ -60,33 +56,34 @@ impl Client {
         input: OAuthClientCredentials,
         aud: &OAuthIssuerIdentifier,
     ) -> Result<(ClientAuth, Option<String>), OAuthError> {
-        let method = self.metadata.token_endpoint_auth_method;
-
-        match method {
-            OAuthEndpointAuthMethod::None => {
-                let client_auth = ClientAuth {
-                    method: "none".to_string(),
-                    alg: "".to_string(),
-                    kid: "".to_string(),
-                    jkt: "".to_string(),
-                };
-                Ok((client_auth, None))
-            }
-            OAuthEndpointAuthMethod::PrivateKeyJwt => {
-                match input {
-                    OAuthClientCredentials::JwtBearer(credentials) => {
-                        unimplemented!();
-                        // let result = self.jwt_verify(credentials.client_assertion, todo!()).await;
-                    }
-                    _ => Err(OAuthError::InvalidRequestError(
-                        "client_assertion_type required for ".to_string(),
-                    )),
-                }
-            }
-            _ => Err(OAuthError::InvalidClientMetadataError(
-                "Unsupported token_endpoint_auth_method".to_string(),
-            )),
-        }
+        unimplemented!()
+        // let method = self.metadata.token_endpoint_auth_method;
+        //
+        // match method {
+        //     OAuthEndpointAuthMethod::None => {
+        //         let client_auth = ClientAuth {
+        //             method: "none".to_string(),
+        //             alg: "".to_string(),
+        //             kid: "".to_string(),
+        //             jkt: "".to_string(),
+        //         };
+        //         Ok((client_auth, None))
+        //     }
+        //     OAuthEndpointAuthMethod::PrivateKeyJwt => {
+        //         match input {
+        //             OAuthClientCredentials::JwtBearer(credentials) => {
+        //                 unimplemented!();
+        //                 // let result = self.jwt_verify(credentials.client_assertion, todo!()).await;
+        //             }
+        //             _ => Err(OAuthError::InvalidRequestError(
+        //                 "client_assertion_type required for ".to_string(),
+        //             )),
+        //         }
+        //     }
+        //     _ => Err(OAuthError::InvalidClientMetadataError(
+        //         "Unsupported token_endpoint_auth_method".to_string(),
+        //     )),
+        // }
     }
 
     /**
@@ -95,7 +92,7 @@ impl Client {
      * the client stops advertising the key that it used to authenticate itself
      * during the initial token request.
      */
-    pub async fn validate_client_auth(&self, client_auth: ClientAuth) -> bool {
+    pub async fn validate_client_auth(&self, client_auth: &ClientAuth) -> bool {
         unimplemented!()
         // if client_auth.method == "none" {
         //     return match self.metadata.token_endpoint_auth_method {

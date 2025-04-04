@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::oauth_types::{
-    OAuthAccessToken, OAuthAuthorizationDetails, OAuthRefreshToken, OAuthTokenType,
+    OAuthAccessToken, OAuthAuthorizationDetails, OAuthRefreshToken, OAuthScope, OAuthTokenType,
 };
 
+use crate::oauth_provider::token::refresh_token::RefreshToken;
 use jsonwebtoken::TokenData;
 
 /// Success response from a token endpoint.
@@ -20,15 +21,15 @@ pub struct OAuthTokenResponse {
 
     /// Granted scopes (required if different from requested)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: Option<OAuthScope>,
 
     /// Refresh token that can be used to obtain new access tokens
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<OAuthRefreshToken>,
+    pub refresh_token: Option<RefreshToken>,
 
     /// Access token expiration in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_in: Option<u32>,
+    pub expires_in: Option<u64>,
 
     /// ID Token for OpenID Connect flows
     #[serde(skip_serializing_if = "Option::is_none")]

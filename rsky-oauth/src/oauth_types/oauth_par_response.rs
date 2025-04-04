@@ -10,7 +10,7 @@ pub struct OAuthParResponse {
     request_uri: String,
 
     /// The expiration time of the request URI in seconds
-    expires_in: u32,
+    expires_in: u64,
 }
 
 impl OAuthParResponse {
@@ -20,7 +20,7 @@ impl OAuthParResponse {
     /// Returns an error if the request URI is empty or if the expiration is zero.
     pub fn new(
         request_uri: impl Into<String>,
-        expires_in: u32,
+        expires_in: u64,
     ) -> Result<Self, OAuthParResponseError> {
         let request_uri = request_uri.into();
         if request_uri.is_empty() {
@@ -43,7 +43,7 @@ impl OAuthParResponse {
     }
 
     /// Get the expiration time in seconds.
-    pub fn expires_in(&self) -> u32 {
+    pub fn expires_in(&self) -> u64 {
         self.expires_in
     }
 

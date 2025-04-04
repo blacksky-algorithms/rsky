@@ -71,6 +71,7 @@ lazy_static! {
 extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
 use crate::oauth::provider::{build_oauth_provider, AuthProviderOptions};
+use crate::oauth::SharedReplayStore;
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use diesel::sql_types::Int4;
@@ -91,9 +92,10 @@ use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use rsky_oauth::oauth_provider::oauth_provider::OAuthProvider;
-use rsky_oauth::oauth_provider::routes::{get_routes, SharedOAuthProvider};
+use rsky_oauth::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::env;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct CORS;
@@ -300,8 +302,11 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     let shield = Shield::default().enable(NoSniff::Enable);
 
     let mut pds_routes = pds_routes();
-    let mut oauth_routes = rsky_oauth::oauth_provider::routes::get_routes();
+    let mut oauth_routes = crate::oauth::routes::get_routes();
     pds_routes.append(&mut oauth_routes);
+    let replay_store = SharedReplayStore {
+        replay_store: Arc::new(RwLock::new(ReplayStoreMemory::new())),
+    };
 
     rocket::custom(figment)
         .mount("/", pds_routes)
@@ -317,6 +322,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(app_view_agent)
         .manage(oauth_provider)
         .manage(account_manager)
+        .manage(replay_store)
 }
 
 fn pds_routes() -> Vec<Route> {

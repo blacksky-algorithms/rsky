@@ -33,3 +33,7 @@ impl TokenId {
         self.0.clone()
     }
 }
+
+pub fn generate_token_id() -> TokenId {
+    unimplemented!()
+}

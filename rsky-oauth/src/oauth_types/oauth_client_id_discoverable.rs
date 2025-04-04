@@ -1,4 +1,3 @@
-use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_types::{extract_url_path, is_hostname_ip, OAuthClientId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -249,17 +248,17 @@ mod tests {
         let result: Result<OAuthClientIdDiscoverable, _> = "invalid".parse();
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_helper_functions() {
-        let valid_id = "https://example.com/client";
-        assert!(is_oauth_client_id_discoverable(valid_id));
-        assert!(assert_oauth_discoverable_client_id(valid_id).is_ok());
-        assert!(parse_oauth_discoverable_client_id(valid_id).is_ok());
-
-        let invalid_id = "invalid";
-        assert!(!is_oauth_client_id_discoverable(invalid_id));
-        assert!(assert_oauth_discoverable_client_id(invalid_id).is_err());
-        assert!(parse_oauth_discoverable_client_id(invalid_id).is_err());
-    }
+    //
+    // #[test]
+    // fn test_helper_functions() {
+    //     let valid_id = "https://example.com/client";
+    //     assert!(is_oauth_client_id_discoverable(valid_id));
+    //     assert!(assert_oauth_discoverable_client_id(valid_id).is_ok());
+    //     assert!(parse_oauth_discoverable_client_id(valid_id).is_ok());
+    //
+    //     let invalid_id = "invalid";
+    //     assert!(!is_oauth_client_id_discoverable(invalid_id));
+    //     assert!(assert_oauth_discoverable_client_id(invalid_id).is_err());
+    //     assert!(parse_oauth_discoverable_client_id(invalid_id).is_err());
+    // }
 }

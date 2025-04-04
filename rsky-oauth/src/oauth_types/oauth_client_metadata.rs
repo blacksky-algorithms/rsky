@@ -183,62 +183,64 @@ fn default_auth_signing_alg() -> String {
 impl OAuthClientMetadata {
     /// Create new client metadata with required fields.
     pub fn new(redirect_uris: Vec<OAuthRedirectUri>) -> Result<Self, ClientMetadataError> {
-        if redirect_uris.is_empty() {
-            return Err(ClientMetadataError::NoRedirectUris);
-        }
-
-        Ok(Self {
-            redirect_uris,
-            response_types: default_response_types(),
-            grant_types: default_grant_types(),
-            scope: None,
-            token_endpoint_auth_method: OAuthEndpointAuthMethod::default(),
-            token_endpoint_auth_signing_alg: None,
-            userinfo_signed_response_alg: None,
-            userinfo_encrypted_response_alg: None,
-            jwks_uri: None,
-            jwks: None,
-            application_type: ApplicationType::default(),
-            subject_type: SubjectType::default(),
-            request_object_signing_alg: None,
-            id_token_signed_response_alg: None,
-            authorization_signed_response_alg: default_auth_signing_alg(),
-            authorization_encrypted_response_enc: None,
-            authorization_encrypted_response_alg: None,
-            client_id: None,
-            client_name: None,
-            client_uri: None,
-            policy_uri: None,
-            tos_uri: None,
-            logo_uri: None,
-            default_max_age: None,
-            require_auth_time: None,
-            contacts: None,
-            tls_client_certificate_bound_access_tokens: None,
-            dpop_bound_access_tokens: None,
-            authorization_details_types: None,
-        })
+        unimplemented!()
+        // if redirect_uris.is_empty() {
+        //     return Err(ClientMetadataError::NoRedirectUris);
+        // }
+        //
+        // Ok(Self {
+        //     redirect_uris,
+        //     response_types: default_response_types(),
+        //     grant_types: default_grant_types(),
+        //     scope: None,
+        //     token_endpoint_auth_method: OAuthEndpointAuthMethod::default(),
+        //     token_endpoint_auth_signing_alg: None,
+        //     userinfo_signed_response_alg: None,
+        //     userinfo_encrypted_response_alg: None,
+        //     jwks_uri: None,
+        //     jwks: None,
+        //     application_type: ApplicationType::default(),
+        //     subject_type: SubjectType::default(),
+        //     request_object_signing_alg: None,
+        //     id_token_signed_response_alg: None,
+        //     authorization_signed_response_alg: default_auth_signing_alg(),
+        //     authorization_encrypted_response_enc: None,
+        //     authorization_encrypted_response_alg: None,
+        //     client_id: None,
+        //     client_name: None,
+        //     client_uri: None,
+        //     policy_uri: None,
+        //     tos_uri: None,
+        //     logo_uri: None,
+        //     default_max_age: None,
+        //     require_auth_time: None,
+        //     contacts: None,
+        //     tls_client_certificate_bound_access_tokens: None,
+        //     dpop_bound_access_tokens: None,
+        //     authorization_details_types: None,
+        // })
     }
 
     /// Validate the metadata according to spec requirements.
     pub fn validate(&self) -> Result<(), ClientMetadataError> {
-        // Redirect URIs must not be empty
-        if self.redirect_uris.is_empty() {
-            return Err(ClientMetadataError::NoRedirectUris);
-        }
-
-        // If auth method requires signing key, verify alg is specified
-        if matches!(
-            self.token_endpoint_auth_method,
-            OAuthEndpointAuthMethod::PrivateKeyJwt
-        ) && self.token_endpoint_auth_signing_alg.is_none()
-        {
-            return Err(ClientMetadataError::MissingSigningAlgorithm);
-        }
-
-        // Other validation rules can be added here...
-
-        Ok(())
+        unimplemented!()
+        // // Redirect URIs must not be empty
+        // if self.redirect_uris.is_empty() {
+        //     return Err(ClientMetadataError::NoRedirectUris);
+        // }
+        //
+        // // If auth method requires signing key, verify alg is specified
+        // if matches!(
+        //     self.token_endpoint_auth_method,
+        //     OAuthEndpointAuthMethod::PrivateKeyJwt
+        // ) && self.token_endpoint_auth_signing_alg.is_none()
+        // {
+        //     return Err(ClientMetadataError::MissingSigningAlgorithm);
+        // }
+        //
+        // // Other validation rules can be added here...
+        //
+        // Ok(())
     }
 
     /// Convert to JSON string.
@@ -303,19 +305,20 @@ mod tests {
 
     #[test]
     fn test_metadata_validation() {
+        unimplemented!()
         // No redirect URIs
-        assert!(matches!(
-            OAuthClientMetadata::new(vec![]),
-            Err(ClientMetadataError::NoRedirectUris)
-        ));
-
-        // Missing signing algorithm
-        let mut metadata = OAuthClientMetadata::new(vec![test_redirect_uri()]).unwrap();
-        metadata.token_endpoint_auth_method = OAuthEndpointAuthMethod::PrivateKeyJwt;
-        assert!(matches!(
-            metadata.validate(),
-            Err(ClientMetadataError::MissingSigningAlgorithm)
-        ));
+        // assert!(matches!(
+        //     OAuthClientMetadata::new(vec![]),
+        //     Err(ClientMetadataError::NoRedirectUris)
+        // ));
+        //
+        // // Missing signing algorithm
+        // let mut metadata = OAuthClientMetadata::new(vec![test_redirect_uri()]).unwrap();
+        // metadata.token_endpoint_auth_method = OAuthEndpointAuthMethod::PrivateKeyJwt;
+        // assert!(matches!(
+        //     metadata.validate(),
+        //     Err(ClientMetadataError::MissingSigningAlgorithm)
+        // ));
     }
 
     #[test]

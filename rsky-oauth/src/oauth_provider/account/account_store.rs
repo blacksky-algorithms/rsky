@@ -1,7 +1,7 @@
 use crate::oauth_provider::account::account::Account;
-use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::oidc::sub::Sub;
+use crate::oauth_types::OAuthClientId;
 use std::fmt::Debug;
 
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct SignInCredentials {
 pub struct DeviceAccountInfo {
     pub remembered: bool,
     pub authenticated_at: u64,
-    pub authorized_clients: Vec<ClientId>,
+    pub authorized_clients: Vec<OAuthClientId>,
 }
 
 #[derive(Clone)]
@@ -38,7 +38,7 @@ pub trait AccountStore: Send + Sync {
         credentials: SignInCredentials,
         device_id: DeviceId,
     ) -> Option<AccountInfo>;
-    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: ClientId);
+    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: OAuthClientId);
     fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo>;
     fn remove_device_account(&self, device_id: DeviceId, sub: Sub);
     /**

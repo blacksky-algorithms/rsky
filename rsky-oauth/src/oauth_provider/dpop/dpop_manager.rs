@@ -1,7 +1,8 @@
 use crate::oauth_provider::dpop::dpop_nonce::{DpopNonce, DpopNonceInput};
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::token::token_claims::TokenClaims;
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use crate::oauth_types::OAuthAccessToken;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
 pub struct DpopManagerOptions {
     /**
@@ -52,24 +53,40 @@ impl DpopManager {
         proof: &str,
         htm: &str, // HTTP Method
         htu: &str, // HTTP URL
-        access_token: Option<String>,
-    ) -> Result<(), OAuthError> {
-        let decoding_key: DecodingKey;
+        access_token: Option<OAuthAccessToken>,
+    ) -> Result<CheckProofResult, OAuthError> {
+        let header = decode_header(proof).unwrap();
+        let jwk = header.jwk.unwrap();
+        let decoding_key = DecodingKey::from_jwk(&jwk).unwrap();
+
         let validation = Validation::new(Algorithm::HS256);
         let token_data = decode::<TokenClaims>(proof.as_str(), &decoding_key, &validation).unwrap();
-        //TODO Change proof to unknown and validate
 
         let payload = token_data.claims;
         let header = token_data.header;
-
-        if payload.jti.is_none() {
+        if let Some(typ) = header.typ {
+            if typ != "dpop+jwt" {
+                return Err(OAuthError::InvalidDpopProofError(
+                    "Invalid DPoP proof".to_string(),
+                ));
+            }
+        } else {
             return Err(OAuthError::InvalidDpopProofError(
-                "Invalid or missing jti property".to_string(),
+                "Invalid DPoP proof".to_string(),
             ));
         }
 
+        let payload_jti = match &payload.jti {
+            None => {
+                return Err(OAuthError::InvalidDpopProofError(
+                    "Invalid or missing jti property".to_string(),
+                ));
+            }
+            Some(jti) => jti.clone(),
+        };
+
         // Note rfc9110#section-9.1 states that the method name is case-sensitive
-        if let Some(payload_htm) = payload.htm {
+        if let Some(payload_htm) = &payload.htm {
             if payload_htm != htm {
                 return Err(OAuthError::InvalidDpopProofError(
                     "DPoP htm mismatch".to_string(),
@@ -83,8 +100,13 @@ impl DpopManager {
             )); //DPoP Nonce Error
         }
 
-        if let Some(payload_nonce) = payload.nonce {
-            if !self.dpop_nonce.clone().unwrap().check(payload_nonce) {
+        if let Some(payload_nonce) = &payload.nonce {
+            if !self
+                .dpop_nonce
+                .clone()
+                .unwrap()
+                .check(payload_nonce.clone())
+            {
                 return Err(OAuthError::InvalidDpopProofError(
                     "DPoP htm mismatch".to_string(),
                 )); //DPoP Nonce Error
@@ -101,10 +123,19 @@ impl DpopManager {
             )); //DPoP Nonce Error
         }
 
-        Ok(())
+        Ok(CheckProofResult {
+            payload,
+            jti: payload_jti,
+            jkt: String::from(""),
+        })
     }
 }
 
+pub struct CheckProofResult {
+    pub payload: TokenClaims,
+    pub jti: String,
+    pub jkt: String,
+}
 /**
  * @note
  * > The htu claim matches the HTTP URI value for the HTTP request in which the
@@ -119,3 +150,14 @@ fn normalize_htu(htu: String) -> Option<String> {
     //TODO
     Some(htu)
 }
+
+/**
+ * Calculates a JSON Web Key (JWK) Thumbprint URI
+ *
+ * @param jwk JSON Web Key.
+ * @param digestAlgorithm Digest Algorithm to use for calculating the thumbprint. Default is
+ *   "sha256".
+ *
+ * @see {@link https://www.rfc-editor.org/rfc/rfc9278 RFC9278}
+ */
+fn calculate_jwk_thumbprint() {}

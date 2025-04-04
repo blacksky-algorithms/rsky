@@ -1,9 +1,8 @@
-use crate::oauth_provider::client::client_id::ClientId;
 use crate::oauth_provider::constants::{
     CLIENT_ASSERTION_MAX_AGE, CODE_CHALLENGE_REPLAY_TIMEFRAME, DPOP_NONCE_MAX_AGE, JAR_MAX_AGE,
 };
 use crate::oauth_provider::replay::replay_store::ReplayStore;
-use crate::oauth_provider::signer::signer::SignerCreator;
+use crate::oauth_types::OAuthClientId;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -15,7 +14,7 @@ pub type ReplayManagerCreator =
     Box<dyn Fn(Arc<RwLock<dyn ReplayStore>>) -> ReplayManager + Send + Sync>;
 
 impl ReplayManager {
-    pub fn creator() -> SignerCreator {
+    pub fn creator() -> ReplayManagerCreator {
         Box::new(
             move |store: Arc<RwLock<dyn ReplayStore>>| -> ReplayManager {
                 ReplayManager::new(store)
@@ -27,7 +26,7 @@ impl ReplayManager {
         ReplayManager { replay_store }
     }
 
-    pub async fn unique_auth(&mut self, jti: String, client_id: &ClientId) -> bool {
+    pub async fn unique_auth(&mut self, jti: String, client_id: &OAuthClientId) -> bool {
         self.replay_store.blocking_write().unique(
             format!("Auth@{client_id}").as_str(),
             jti.as_str(),
@@ -35,7 +34,7 @@ impl ReplayManager {
         )
     }
 
-    pub async fn unique_jar(&mut self, jti: String, client_id: &ClientId) -> bool {
+    pub async fn unique_jar(&mut self, jti: String, client_id: &OAuthClientId) -> bool {
         self.replay_store.blocking_write().unique(
             format!("JAR@{client_id}").as_str(),
             jti.as_str(),

@@ -9,26 +9,17 @@ mod oauth_revoke;
 mod oauth_token;
 mod oauth_well_known;
 
-use crate::jwk::Keyset;
-use crate::oauth_provider::account::account_manager::AccountManager;
-use crate::oauth_provider::account::account_store::{AccountStore, SignInCredentials};
-use crate::oauth_provider::client::client_manager::ClientManager;
-use crate::oauth_provider::device::device_id::DeviceId;
-use crate::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderCreator};
-use crate::oauth_provider::request::request_manager::RequestManager;
-use crate::oauth_provider::request::request_uri::RequestUri;
-use crate::oauth_provider::token::token_manager::TokenManager;
-use crate::oauth_types::{
+use rocket::data::{FromData, ToByteUnit};
+use rocket::futures::TryFutureExt;
+use rocket::request::FromRequest;
+use rocket::{routes, Request, Route};
+use rsky_oauth::oauth_provider::account::account_store::SignInCredentials;
+use rsky_oauth::oauth_provider::device::device_id::DeviceId;
+use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
+use rsky_oauth::oauth_types::{
     OAuthAuthorizationRequestQuery, OAuthClientCredentials, OAuthClientId, OAuthRequestUri,
     OAuthTokenIdentification,
 };
-use rocket::data::{FromData, ToByteUnit};
-use rocket::futures::TryFutureExt;
-use rocket::http::Status;
-use rocket::request::{FromRequest, Outcome};
-use rocket::{routes, Request, Route};
-use std::sync::Arc;
-use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub struct SignInPayload {
     csrf_token: String,
@@ -70,40 +61,6 @@ impl<'r> FromRequest<'r> for DpopJkt {
         match req.headers().get_one("dpop") {
             None => rocket::request::Outcome::Success(DpopJkt(None)),
             Some(res) => rocket::request::Outcome::Success(DpopJkt(Some(res.to_string()))),
-        }
-    }
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for OAuthProvider {
-    type Error = ();
-
-    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match req.rocket().state::<SharedOAuthProvider>() {
-            None => Outcome::Error((Status::InternalServerError, ())),
-            Some(shared_account_manager) => {
-                let db = req.guard::<dyn AccountStore>().await.unwrap();
-                let account_manager_creator = shared_account_manager.account_manager.read().await;
-                let account_manager = account_manager_creator(Arc::new(db));
-                Outcome::Success(account_manager)
-            }
-        }
-    }
-}
-
-pub struct SharedOAuthProvider {
-    pub oauth_provider: Arc<RwLock<OAuthProviderCreator>>,
-    pub keyset: Arc<RwLock<Keyset>>,
-}
-
-impl SharedOAuthProvider {
-    pub fn new(
-        oauth_provider: Arc<RwLock<OAuthProviderCreator>>,
-        keyset: Arc<RwLock<Keyset>>,
-    ) -> Self {
-        Self {
-            oauth_provider,
-            keyset,
         }
     }
 }

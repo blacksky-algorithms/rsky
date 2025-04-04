@@ -1,8 +1,8 @@
 use crate::oauth_provider::client::client::AUTH_METHODS_SUPPORTED;
 use crate::oauth_provider::lib::util::crypto::VERIFY_ALGOS;
 use crate::oauth_types::{
-    HttpsUri, OAuthAuthorizationServerMetadata, OAuthCodeChallengeMethod, OAuthIssuerIdentifier,
-    WebUri,
+    HttpsUri, OAuthAuthorizationServerMetadata, OAuthCodeChallengeMethod, OAuthGrantType,
+    OAuthIssuerIdentifier, WebUri,
 };
 use serde::{Deserialize, Serialize};
 
@@ -89,8 +89,8 @@ pub fn build_metadata(
     ];
 
     let grant_types_supported = vec![
-        "authorization_code".to_string(),
-        "refresh_token".to_string(),
+        OAuthGrantType::AuthorizationCode,
+        OAuthGrantType::RefreshToken,
     ];
 
     let code_challenge_methods_supported = vec![

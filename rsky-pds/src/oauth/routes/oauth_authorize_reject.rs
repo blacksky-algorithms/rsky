@@ -1,13 +1,13 @@
-use crate::oauth_provider::device::device_manager::DeviceManager;
-use crate::oauth_provider::lib::http::request::{
-    validate_csrf_token, validate_fetch_site, validate_referer,
-};
-use crate::oauth_provider::request::request_uri::RequestUri;
-use crate::oauth_provider::routes::SharedOAuthProvider;
-use crate::oauth_types::OAuthClientId;
+use crate::oauth::SharedOAuthProvider;
 use rocket::http::Status;
 use rocket::request::FromRequest;
 use rocket::{get, Request, State};
+use rsky_oauth::oauth_provider::device::device_manager::DeviceManager;
+use rsky_oauth::oauth_provider::lib::http::request::{
+    validate_csrf_token, validate_fetch_site, validate_referer,
+};
+use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
+use rsky_oauth::oauth_types::OAuthClientId;
 
 pub struct AuthorizeReject {
     pub request_uri: RequestUri,

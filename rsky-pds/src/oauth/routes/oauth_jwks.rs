@@ -1,4 +1,4 @@
-use crate::oauth_provider::routes::SharedOAuthProvider;
+use crate::oauth::SharedOAuthProvider;
 use jsonwebtoken::jwk::Jwk;
 use rocket::serde::json::Json;
 use rocket::{get, State};
