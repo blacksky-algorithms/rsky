@@ -3,7 +3,9 @@ use crate::jwk::{
 };
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::signer::signed_token_payload::SignedTokenPayload;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthIssuerIdentifier,
 };
@@ -39,6 +41,7 @@ impl Signer {
             .blocking_read()
             .verify_jwt(signed_jwt, verify_options)
             .await
+            .unwrap()
     }
 
     pub async fn sign(&self, sign_header: Header, payload: JwtPayload) -> SignedJwt {
@@ -113,8 +116,8 @@ impl Signer {
 
 pub struct AccessTokenOptions {
     pub aud: Audience,
-    pub sub: String,
-    pub jti: String,
+    pub sub: Sub,
+    pub jti: TokenId,
     pub exp: i64,
     pub iat: Option<i64>,
     pub alg: Option<Algorithm>,

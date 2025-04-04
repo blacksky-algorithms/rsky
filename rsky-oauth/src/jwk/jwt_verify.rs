@@ -1,3 +1,4 @@
+use crate::jwk::JwtPayload;
 use jsonwebtoken::Header;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,6 @@ pub struct VerifyOptions {
 
 #[derive(Serialize, Deserialize)]
 pub struct VerifyResult {
-    pub payload: String,
+    pub payload: JwtPayload,
     pub protected_header: Header,
 }

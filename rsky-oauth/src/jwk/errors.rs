@@ -5,6 +5,7 @@ const ERR_JWT_INVALID: &str = "ERR_JWT_INVALID";
 const ERR_JWT_CREATE: &str = "ERR_JWT_CREATE";
 const ERR_JWT_VERIFY: &str = "ERR_JWT_VERIFY";
 
+#[derive(Debug)]
 pub enum JwkError {
     JwtCreateError,
     JwtVerifyError,

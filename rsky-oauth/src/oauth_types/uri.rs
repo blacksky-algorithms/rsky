@@ -63,7 +63,7 @@ impl ValidUri for DangerousUri {
 }
 
 /// Loopback URI (http://localhost, http://127.0.0.1, http://::1)
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct LoopbackUri(String);
 
 impl LoopbackUri {
@@ -98,7 +98,7 @@ impl ValidUri for LoopbackUri {
 }
 
 /// HTTPS URI
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct HttpsUri(String);
 
 impl HttpsUri {
@@ -151,7 +151,7 @@ impl ValidUri for HttpsUri {
 }
 
 /// Web URI (either LoopbackUri or HttpsUri)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Ord, Eq, Serialize, Deserialize, PartialOrd)]
 pub enum WebUri {
     Loopback(LoopbackUri),
     Https(HttpsUri),
@@ -181,8 +181,8 @@ impl Display for WebUri {
 impl WebUri {
     pub fn domain(&self) -> String {
         match self {
-            WebUri::Loopback(loopback_uri) => String::from("loopback"),
-            WebUri::Https(https_uri) => String::from("placeholder"),
+            WebUri::Loopback(_) => String::from("loopback"),
+            WebUri::Https(_) => String::from("placeholder"),
         }
     }
 }

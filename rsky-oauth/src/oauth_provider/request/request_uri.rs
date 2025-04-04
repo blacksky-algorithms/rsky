@@ -1,5 +1,4 @@
 use crate::oauth_provider::request::request_id::RequestId;
-use crate::oauth_types::OAuthRequestUri;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};

@@ -1,7 +1,6 @@
 use crate::jwk::{JwkError, JwtHeader, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
-use crate::oauth_provider::errors::OAuthError;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
-use jsonwebtoken::{DecodingKey, Header};
+use jsonwebtoken::Header;
 
 #[derive(Clone)]
 pub struct Keyset {

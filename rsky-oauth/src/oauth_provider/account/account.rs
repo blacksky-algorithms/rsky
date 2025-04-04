@@ -1,3 +1,4 @@
+use crate::jwk::Audience;
 use crate::oauth_provider::oidc::sub::Sub;
 
 #[derive(Clone)]
@@ -5,7 +6,7 @@ pub struct Account {
     ///Account ID
     pub sub: Sub,
     /// Resource server URL
-    pub aud: Vec<String>,
+    pub aud: Audience,
 
     /// OIDC inspired
     pub preferred_username: Option<String>,

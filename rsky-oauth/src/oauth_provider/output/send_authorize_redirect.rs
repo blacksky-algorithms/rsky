@@ -28,9 +28,7 @@
 //     pub reddirect: AuthorizationResponseParameters,
 // }
 
-use crate::oauth_types::OAuthClientCredentialsGrantTokenRequest;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Authorization Result
 ///

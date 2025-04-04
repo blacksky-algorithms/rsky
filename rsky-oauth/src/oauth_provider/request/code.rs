@@ -1,5 +1,5 @@
 use crate::oauth_provider::constants::{CODE_BYTES_LENGTH, CODE_PREFIX};
-use crate::oauth_provider::errors::OAuthError;
+use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 
 const CODE_LENGTH: usize = CODE_PREFIX.len() + CODE_BYTES_LENGTH * 2; //hex encoding
@@ -32,9 +32,9 @@ impl Code {
     }
 
     pub async fn generate_code() -> Code {
-        use rand::distributions::{Alphanumeric, DistString};
+        use rand::distr::Alphanumeric;
 
-        let string = Alphanumeric.sample_string(&mut rand::thread_rng(), CODE_LENGTH);
+        let string = Alphanumeric.sample_string(&mut rand::rng(), CODE_LENGTH);
         let code = Code::new(string).unwrap();
         code
     }

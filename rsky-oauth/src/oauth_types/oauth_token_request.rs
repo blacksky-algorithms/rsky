@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::oauth_types::{
     OAuthAuthorizationCodeGrantTokenRequest, OAuthClientCredentialsGrantTokenRequest,
-    OAuthPasswordGrantTokenRequest, OAuthRefreshTokenGrantTokenRequest,
+    OAuthGrantType, OAuthPasswordGrantTokenRequest, OAuthRefreshTokenGrantTokenRequest,
 };
 
 /// A token request that can be sent to the token endpoint.
@@ -75,6 +75,15 @@ impl OAuthTokenRequest {
         match self {
             Self::ClientCredentials(req) => Some(req),
             _ => None,
+        }
+    }
+
+    pub fn as_oauth_grant_type_enum(&self) -> OAuthGrantType {
+        match self {
+            OAuthTokenRequest::AuthorizationCode(_) => OAuthGrantType::AuthorizationCode,
+            OAuthTokenRequest::RefreshToken(_) => OAuthGrantType::RefreshToken,
+            OAuthTokenRequest::Password(_) => OAuthGrantType::Password,
+            OAuthTokenRequest::ClientCredentials(_) => OAuthGrantType::ClientCredentials,
         }
     }
 }

@@ -5,7 +5,6 @@ use crate::oauth_provider::request::request_id::RequestId;
 use crate::oauth_provider::request::request_store::{
     FoundRequestResult, RequestStore, UpdateRequestData,
 };
-use anyhow::bail;
 use std::collections::BTreeMap;
 
 pub struct RequestStoreMemory {

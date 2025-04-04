@@ -1,7 +1,6 @@
 use crate::jwk::Jwk;
-use crate::oauth_provider::constants::TOKEN_ID_PREFIX;
-use crate::oauth_provider::errors::OAuthError;
-use crate::oauth_provider::token::token_id::TokenIdError;
+use crate::oauth_provider::oidc::sub::Sub;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{OAuthClientId, OAuthScope};
 use chrono::NaiveDate;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -253,7 +252,7 @@ pub struct JwtPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aud: Option<Audience>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub: Option<String>,
+    pub sub: Option<Sub>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,7 +260,7 @@ pub struct JwtPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jti: Option<String>,
+    pub jti: Option<TokenId>,
 
     // Additional standard claims
     #[serde(skip_serializing_if = "Option::is_none")]

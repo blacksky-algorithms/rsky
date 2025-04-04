@@ -16,6 +16,7 @@ use crate::oauth_provider::dpop::dpop_nonce::DpopNonceInput;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::metadata::build_metadata::{build_metadata, CustomMetadata};
 use crate::oauth_provider::now_as_secs;
+use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_provider::oauth_verifier::{OAuthVerifier, OAuthVerifierOptions};
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::output::customization::Customization;
@@ -39,9 +40,10 @@ use crate::oauth_types::{
     OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientId, OAuthClientMetadata,
     OAuthIntrospectionResponse, OAuthIssuerIdentifier, OAuthParResponse,
     OAuthRefreshTokenGrantTokenRequest, OAuthTokenIdentification, OAuthTokenRequest,
-    OAuthTokenResponse, OAuthTokenType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    OAuthTokenResponse, OAuthTokenType, Prompt, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet};
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -168,6 +170,7 @@ pub struct OAuthProviderOptions {
     pub issuer: OAuthIssuerIdentifier,
     pub keyset: Option<Arc<RwLock<Keyset>>>,
     pub access_token_type: Option<AccessTokenType>,
+    pub oauth_hooks: Option<Arc<OAuthHooks>>,
 }
 
 pub struct OAuthProvider {
@@ -314,6 +317,7 @@ impl OAuthProvider {
                     issuer: creator_options.issuer.clone(),
                     keyset: creator_options.keyset.clone(),
                     access_token_type: creator_options.access_token_type.clone(),
+                    oauth_hooks: None,
                 };
                 OAuthProvider::new(options).unwrap()
             },
@@ -321,61 +325,63 @@ impl OAuthProvider {
     }
 
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
-        // Requires stores
-        let account_store = options.account_store;
-        let device_store = options.device_store;
-        let token_store = options.token_store;
-
-        // These are optional
-        let client_store = options.client_store;
-        let replay_store = options.replay_store;
-        let request_store = options.request_store;
-
-        let verifier_opts = OAuthVerifierOptions {
-            issuer: options.issuer.clone(),
-            keyset: options.keyset.unwrap(),
-            access_token_type: options.access_token_type,
-            redis: None,
-            replay_store,
-        };
-        let oauth_verifier = OAuthVerifier::new(verifier_opts);
-
-        let authentication_max_age = options
-            .authentication_max_age
-            .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
-        let metadata = build_metadata(options.issuer, options.metadata);
-        let customization = options.customization;
-
-        let account_manager = AccountManager::new(account_store);
-        let client_manager = ClientManager::new(
-            client_store,
-            oauth_verifier.keyset.clone(),
-            metadata.clone(),
-        );
-        let request_manager = RequestManager::new(
-            request_store,
-            oauth_verifier.signer.clone(),
-            metadata.clone(),
-            authentication_max_age,
-        );
-        let token_manager = TokenManager::new(
-            token_store,
-            oauth_verifier.signer.clone(),
-            oauth_verifier.access_token_type.clone(),
-            Some(authentication_max_age),
-        );
-
-        Ok(OAuthProvider {
-            oauth_verifier,
-            metadata,
-            customization,
-            authentication_max_age,
-            account_manager,
-            client_manager,
-            request_manager,
-            token_manager,
-            device_store,
-        })
+        unimplemented!()
+        // // Requires stores
+        // let account_store = options.account_store;
+        // let device_store = options.device_store;
+        // let token_store = options.token_store;
+        //
+        // // These are optional
+        // let client_store = options.client_store;
+        // let replay_store = options.replay_store;
+        // let request_store = options.request_store;
+        //
+        // let verifier_opts = OAuthVerifierOptions {
+        //     issuer: options.issuer.clone(),
+        //     keyset: options.keyset.unwrap(),
+        //     access_token_type: options.access_token_type,
+        //     redis: None,
+        //     replay_store,
+        // };
+        // let oauth_verifier = OAuthVerifier::new(verifier_opts);
+        //
+        // let authentication_max_age = options
+        //     .authentication_max_age
+        //     .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
+        // let metadata = build_metadata(options.issuer, options.metadata);
+        // let customization = options.customization;
+        //
+        // let account_manager = AccountManager::new(account_store);
+        // let client_manager = ClientManager::new(
+        //     client_store,
+        //     oauth_verifier.keyset.clone(),
+        //     metadata.clone(),
+        //     options.oauth_hooks,
+        // );
+        // let request_manager = RequestManager::new(
+        //     request_store,
+        //     oauth_verifier.signer.clone(),
+        //     metadata.clone(),
+        //     authentication_max_age,
+        // );
+        // let token_manager = TokenManager::new(
+        //     token_store,
+        //     oauth_verifier.signer.clone(),
+        //     oauth_verifier.access_token_type.clone(),
+        //     Some(authentication_max_age),
+        // );
+        //
+        // Ok(OAuthProvider {
+        //     oauth_verifier,
+        //     metadata,
+        //     customization,
+        //     authentication_max_age,
+        //     account_manager,
+        //     client_manager,
+        //     request_manager,
+        //     token_manager,
+        //     device_store,
+        // })
     }
 
     pub fn get_jwks(&self) -> Vec<Jwk> {
@@ -590,24 +596,40 @@ impl OAuthProvider {
         credentials: &OAuthClientCredentials,
         query: &OAuthAuthorizationRequestQuery,
     ) -> Result<AuthorizationResult, OAuthError> {
+        unimplemented!()
         // let issuer = self.oauth_verifier.issuer.clone();
         //
         // // If there is a chance to redirect the user to the client, let's do
         // // it by wrapping the error in an AccessDeniedError.
-        // if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
-        //     if params.redirect_uri.is_some() {
-        //         // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
-        //         return Err(OAuthError::AccessDeniedError("invalid_request".to_string()));
-        //     }
-        // }
         //
-        // let client = self
+        // let access_denied_redirect =
+        //     if let OAuthAuthorizationRequestQuery::Parameters(params) = query {
+        //         if params.redirect_uri.is_some() {
+        //             // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-11#section-4.1.2.1
+        //             Some(OAuthError::AccessDeniedError("invalid_request".to_string()))
+        //         } else {
+        //             None
+        //         }
+        //     } else {
+        //         None
+        //     };
+        //
+        // let client = match self
         //     .client_manager
         //     .get_client(&credentials.client_id())
-        //     .await?;
+        //     .await
+        // {
+        //     Ok(client) => client,
+        //     Err(e) => {
+        //         return match access_denied_redirect {
+        //             None => Err(e),
+        //             Some(access_denied_redirect) => Err(access_denied_redirect),
+        //         }
+        //     }
+        // };
         //
         // let request_info = self
-        //     .process_authorization_request(&client, &device_id, &query)
+        //     .process_authorization_request(client, device_id.clone(), query.clone())
         //     .await?;
         // let client_auth = request_info.client_auth;
         // let parameters = request_info.parameters;
@@ -635,12 +657,12 @@ impl OAuthProvider {
         //                 return Err(OAuthError::LoginRequiredError);
         //             }
         //             if sso_session.consent_required {
-        //                 return Err(OAuthError::ConsentRequiredError);
+        //                 return Err(OAuthError::ConsentRequiredError(parameters, "".to_string()));
         //             }
         //
         //             let code = self
         //                 .request_manager
-        //                 .set_authorized(client, uri, device_id, &sso_session.account)
+        //                 .set_authorized(&uri, device_id.clone(), sso_session.account.clone())
         //                 .await?;
         //
         //             return Ok(AuthorizationResult {});
@@ -648,7 +670,6 @@ impl OAuthProvider {
         //         _ => {}
         //     }
         // }
-        unimplemented!()
     }
 
     async fn inner_authorize(
@@ -845,41 +866,42 @@ impl OAuthProvider {
         request: OAuthTokenRequest,
         dpop_jkt: Option<String>,
     ) -> Result<OAuthTokenResponse, OAuthError> {
-        unimplemented!()
-        // let (client, client_auth) = self.authenticate_client(credentials).await?;
-        //
-        // // if let Some(grant_types_supported) = &self.metadata.grant_types_supported {
-        // //     if !grant_types_supported.contains(&request.grant_type) {
-        // //         return Err(OAuthError::InvalidGrantError(
-        // //             "Grant type TODO is not supported by the server".to_string(),
-        // //         ));
-        // //     }
-        // // }
-        //
-        // // if !client.metadata.grant_types.contains(&request.type_id()) {
-        // //     return Err(OAuthError::InvalidGrantError(
-        // //         "Grant type is not supported by the server".to_string(),
-        // //     ));
-        // // }
-        // //
-        // match request {
-        //     OAuthTokenRequest::AuthorizationCode(request) => {
-        //         self.code_grant(client, client_auth, request, dpop_jkt)
-        //             .await
-        //     }
-        //     OAuthTokenRequest::RefreshToken(request) => {
-        //         self.refresh_token_grant(client, client_auth, request, dpop_jkt)
-        //             .await
-        //     }
-        //     OAuthTokenRequest::Password(request) => Err(OAuthError::InvalidGrantError(
-        //         "Grant type TODO is not supported by the server".to_string(),
-        //     )),
-        //     OAuthTokenRequest::ClientCredentials(request) => Err(OAuthError::InvalidGrantError(
-        //         "Grant type TODO is not supported by the server".to_string(),
-        //     )),
-        // }
-        //
-        //
+        let (client, client_auth) = self.authenticate_client(credentials).await?;
+
+        if let Some(grant_types_supported) = &self.metadata.grant_types_supported {
+            if !grant_types_supported.contains(&request.as_oauth_grant_type_enum()) {
+                return Err(OAuthError::InvalidGrantError(
+                    "Grant type TODO is not supported by the server".to_string(),
+                ));
+            }
+        }
+
+        if !client
+            .metadata
+            .grant_types
+            .contains(&request.as_oauth_grant_type_enum())
+        {
+            return Err(OAuthError::InvalidGrantError(
+                "Grant type is not supported by the server".to_string(),
+            ));
+        }
+
+        match request {
+            OAuthTokenRequest::AuthorizationCode(request) => {
+                self.code_grant(client, client_auth, request, dpop_jkt)
+                    .await
+            }
+            OAuthTokenRequest::RefreshToken(request) => {
+                self.refresh_token_grant(client, client_auth, request, dpop_jkt)
+                    .await
+            }
+            OAuthTokenRequest::Password(request) => Err(OAuthError::InvalidGrantError(
+                "Grant type TODO is not supported by the server".to_string(),
+            )),
+            OAuthTokenRequest::ClientCredentials(request) => Err(OAuthError::InvalidGrantError(
+                "Grant type TODO is not supported by the server".to_string(),
+            )),
+        }
     }
 
     pub async fn code_grant(
@@ -1034,10 +1056,11 @@ impl OAuthProvider {
             self.oauth_verifier
                 .assert_token_type_allowed(token_type.clone(), AccessTokenType::ID)?;
 
-            return self
+            return Ok(self
                 .token_manager
                 .authenticate_token_id(token_type, token_id, dpop_jkt, verify_options)
-                .await;
+                .await?
+                .verify_token_claims_result);
         }
 
         self.oauth_verifier

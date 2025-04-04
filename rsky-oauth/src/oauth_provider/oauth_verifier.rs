@@ -1,7 +1,8 @@
-use crate::jwk::{Keyset, SignedJwt, SignedJwtError};
+use crate::jwk::{Keyset, SignedJwt};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::dpop::dpop_manager::DpopManager;
 use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::lib::util::authorization_header::AuthorizationHeader;
 use crate::oauth_provider::replay::replay_manager::ReplayManager;
 use crate::oauth_provider::replay::replay_store::ReplayStore;
 use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
@@ -10,8 +11,6 @@ use crate::oauth_provider::token::verify_token_claims::{
     verify_token_claims, VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
 };
 use crate::oauth_types::{OAuthAccessToken, OAuthIssuerIdentifier, OAuthTokenType};
-use std::any::Any;
-use std::clone;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -131,51 +130,66 @@ impl OAuthVerifier {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
-        unimplemented!()
-        // let signed_jwt = match SignedJwt::new(token.into_inner()) {
-        //     Ok(signed_jwt) => { signed_jwt}
-        //     Err(error) => {
-        //         return Err(OAuthError::InvalidTokenError(
-        //             token_type,
-        //             "Malformed token".to_string(),
-        //         ));
-        //     }
-        // };
-        //
-        // self.assert_token_type_allowed(token_type.clone(), AccessTokenType::JWT)?;
-        //
-        // let payload = self.signer.verify_access_token(token.clone(), None)?;
-        //
-        // verify_token_claims(
-        //     token,
-        //     payload.jti,
-        //     token_type,
-        //     dpop_jkt,
-        //     payload,
-        //     verify_options
-        // )
+        let signed_jwt = match SignedJwt::new(token.clone().into_inner()) {
+            Ok(signed_jwt) => signed_jwt,
+            Err(_) => {
+                return Err(OAuthError::InvalidTokenError(
+                    token_type,
+                    "Malformed token".to_string(),
+                ));
+            }
+        };
+
+        self.assert_token_type_allowed(token_type.clone(), AccessTokenType::JWT)?;
+
+        let payload = self
+            .signer
+            .blocking_write()
+            .verify_access_token(signed_jwt.clone(), None)
+            .await?
+            .payload;
+
+        verify_token_claims(
+            token,
+            payload.jti.clone(),
+            token_type,
+            dpop_jkt,
+            payload.as_token_claims(),
+            verify_options,
+        )
     }
 
     pub async fn authenticate_request(
-        &self,
+        &mut self,
         method: String,
         url: String,
         headers: (Option<String>, Option<String>),
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<VerifyTokenClaimsResult, OAuthError> {
-        unimplemented!()
-        // let (token_type, token) = parse_authorization_header(headers.0);
-        // let dpop_jkt = self
-        //     .check_dpop_proof(headers.1.unwrap(), method, url, Some(token.clone()))
-        //     .await;
-        //
-        // if token_type.type_id() == OAuthTokenType::DPoP.type_id() && dpop_jkt.is_none() {
+        let authorization_header = match AuthorizationHeader::new(headers.0.unwrap()) {
+            Ok(authorization_header) => authorization_header,
+            Err(_) => return Err(OAuthError::RuntimeError("".to_string())),
+        };
+        let token_type = authorization_header.token_type;
+        let token = authorization_header.oauth_access_token;
+
+        let dpop_jkt = self
+            .check_dpop_proof(
+                headers.1.unwrap().as_str(),
+                method.as_str(),
+                url.as_str(),
+                Some(token.clone()),
+            )
+            .await?;
+
+        // TODO Should never occur
+        // if token_type.as_ref() == "DPoP" && dpop_jkt.is_none() {
         //     return Err(OAuthError::InvalidDpopProofError(
         //         "DPoP proof required".to_string(),
         //     ));
         // }
-        //
-        // self.authenticate_token(token_type, token, dpop_jkt, verify_options)
-        //     .await
+
+        self.authenticate_token(token_type, token, Some(dpop_jkt), verify_options)
+            .await
     }
 }

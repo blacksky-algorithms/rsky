@@ -1,12 +1,14 @@
+use crate::jwk::Audience;
 use crate::oauth_provider::oidc::sub::Sub;
-use crate::oauth_types::OAuthScope;
+use crate::oauth_provider::token::verify_token_claims::VerifyTokenClaimsResult;
+use crate::oauth_types::{OAuthClientId, OAuthScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct TokenClaims {
     pub iss: Option<String>,
-    pub aud: Option<Vec<String>>,
+    pub aud: Option<Audience>,
     pub sub: Option<Sub>,
     pub exp: Option<u64>,
     pub nbf: Option<u64>,
@@ -23,7 +25,7 @@ pub struct TokenClaims {
     pub cnf: Option<Value>,
 
     // https://datatracker.ietf.org/doc/html/rfc7800
-    pub client_id: Option<String>,
+    pub client_id: Option<OAuthClientId>,
 
     pub scope: Option<OAuthScope>,
     pub nonce: Option<String>,

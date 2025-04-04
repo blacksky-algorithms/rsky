@@ -1,35 +1,50 @@
-use crate::jwk::Keyset;
+use crate::cached_getter::CachedGetter;
+use crate::jwk::{Jwk, Keyset};
 use crate::oauth_provider::client::client::Client;
-use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_types::{
     ApplicationType, OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientIdDiscoverable,
     OAuthClientIdLoopback, OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType,
     OAuthResponseType, SubjectType,
 };
+use crate::simple_store::SimpleStore;
+use crate::simple_store_memory::SimpleStoreMemory;
+use jsonwebtoken::jwk::JwkSet;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub type ClientManagerCreator =
-    Box<dyn Fn(Arc<RwLock<dyn ClientStore>>, Arc<RwLock<Keyset>>) -> ClientManager + Send + Sync>;
+pub type LoopbackMetadataGetter = Box<dyn Fn(String) -> OAuthClientMetadata>;
+
+pub type ClientManagerCreator = Box<
+    dyn Fn(Arc<RwLock<dyn ClientStore>>, Arc<RwLock<Keyset>>, OAuthHooks) -> ClientManager
+        + Send
+        + Sync,
+>;
 
 pub struct ClientManager {
-    // jwks: BTreeMap<String, Jwk>,
-    // metadata_getter: BTreeMap<String, OAuthClientMetadata>,
+    jwks: CachedGetter<String, JwkSet>,
+    metadata_getter: CachedGetter<String, OAuthClientMetadata>,
     server_metadata: OAuthAuthorizationServerMetadata,
     keyset: Arc<RwLock<Keyset>>,
     store: Arc<RwLock<dyn ClientStore>>,
-    // loopback_metadata: Option<LoopbackMetadataGetter>,
+    hooks: OAuthHooks,
+    loopback_metadata: Option<LoopbackMetadataGetter>,
+    client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
+    client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
 }
 
 impl ClientManager {
     pub fn creator(metadata: OAuthAuthorizationServerMetadata) -> ClientManagerCreator {
         Box::new(
             move |store: Arc<RwLock<dyn ClientStore>>,
-                  keyset: Arc<RwLock<Keyset>>|
-                  -> ClientManager { ClientManager::new(store, keyset, metadata) },
+                  keyset: Arc<RwLock<Keyset>>,
+                  hooks: OAuthHooks|
+                  -> ClientManager {
+                ClientManager::new(store, keyset, metadata.clone(), hooks)
+            },
         )
     }
 
@@ -37,32 +52,34 @@ impl ClientManager {
         store: Arc<RwLock<dyn ClientStore>>,
         keyset: Arc<RwLock<Keyset>>,
         server_metadata: OAuthAuthorizationServerMetadata,
+        hooks: OAuthHooks,
     ) -> Self {
         Self {
+            jwks: Default::default(),
+            metadata_getter: (),
             server_metadata,
             keyset,
             store,
+            hooks,
+            loopback_metadata: None,
+            client_jwks_cache: Arc::new(Default::default()),
+            client_metadata_cache: Arc::new(Default::default()),
         }
     }
 
     /**
      * @see {@link https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2 OIDC Client Registration}
      */
-    pub async fn get_client(&self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
+    pub async fn get_client(&mut self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
         unimplemented!()
         // let metadata = self.get_client_metadata(client_id).await?;
         //
-        // let jwks = match metadata.jwks_uri {
-        //     None => {
-        //         None
-        //     }
-        //     Some(jwks_uri) => {
-        //         unimplemented!()
-        //     }
-        // };
+        // let jwks: JwkSet;
         //
         // let partial_info: ClientInfo;
-        //
+        // let client_info = self.hooks.on_client_info.clone();
+        // client_info(client_id.clone());
+
         // Ok(Client::new(client_id.clone(), metadata, jwks, partial_info))
     }
 

@@ -1,4 +1,4 @@
-use crate::jwk::{SignedJwt, VerifyOptions};
+use crate::jwk::{Audience, SignedJwt, VerifyOptions};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_store::DeviceAccountInfo;
@@ -9,9 +9,9 @@ use crate::oauth_provider::constants::{
     UNAUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT, UNAUTHENTICATED_REFRESH_LIFETIME,
 };
 use crate::oauth_provider::device::device_id::DeviceId;
-use crate::oauth_provider::device::device_manager::DeviceManagerOptions;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
+use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::signer::signer::{AccessTokenOptions, Signer};
 use crate::oauth_provider::token::refresh_token::{generate_refresh_token, RefreshToken};
@@ -32,8 +32,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct AuthenticateTokenIdResult {
-    verify_token_claims_result: VerifyTokenClaimsResult,
-    token_info: TokenInfo,
+    pub verify_token_claims_result: VerifyTokenClaimsResult,
+    pub token_info: TokenInfo,
 }
 
 enum CreateTokenInput {
@@ -47,10 +47,19 @@ pub struct TokenManager {
     pub signer: Arc<RwLock<Signer>>,
     pub access_token_type: AccessTokenType,
     pub token_max_age: u64,
+    pub hooks: OAuthHooks,
 }
 
 pub type TokenManagerCreator = Box<
-    dyn Fn(Arc<RwLock<dyn TokenStore>>, Option<DeviceManagerOptions>) -> TokenManager + Send + Sync,
+    dyn Fn(
+            Arc<RwLock<dyn TokenStore>>,
+            Arc<RwLock<Signer>>,
+            AccessTokenType,
+            Option<u64>,
+            OAuthHooks,
+        ) -> TokenManager
+        + Send
+        + Sync,
 >;
 
 impl TokenManager {
@@ -59,9 +68,10 @@ impl TokenManager {
             move |store: Arc<RwLock<dyn TokenStore>>,
                   signer: Arc<RwLock<Signer>>,
                   access_token_type: AccessTokenType,
-                  max_age: Option<u64>|
+                  max_age: Option<u64>,
+                  hooks: OAuthHooks|
                   -> TokenManager {
-                TokenManager::new(store, signer, access_token_type, max_age)
+                TokenManager::new(store, signer, access_token_type, max_age, hooks)
             },
         )
     }
@@ -71,6 +81,7 @@ impl TokenManager {
         signer: Arc<RwLock<Signer>>,
         access_token_type: AccessTokenType,
         max_age: Option<u64>,
+        hooks: OAuthHooks,
     ) -> Self {
         let token_max_age = max_age.unwrap_or_else(|| TOKEN_MAX_AGE);
         TokenManager {
@@ -78,6 +89,7 @@ impl TokenManager {
             signer,
             access_token_type,
             token_max_age,
+            hooks,
         }
     }
 
@@ -89,14 +101,9 @@ impl TokenManager {
 
     fn use_jwt_access_token(&self, account: Account) -> bool {
         if self.access_token_type == AccessTokenType::AUTO {
-            return if account.aud.len() == 1 {
-                self.signer
-                    .blocking_read()
-                    .issuer
-                    .to_string()
-                    .eq(account.aud.get(0).unwrap())
-            } else {
-                false
+            return match account.aud {
+                Audience::Single(aud) => self.signer.blocking_read().issuer.to_string() == aud,
+                Audience::Multiple(_) => false,
             };
         }
         self.access_token_type == AccessTokenType::JWT
@@ -125,7 +132,7 @@ impl TokenManager {
             // Allow clients to bind their access tokens to a DPoP key during
             // token request if they didn't provide a "dpop_jkt" during the
             // authorization request.
-            if (dpop_jkt.is_some()) {
+            if dpop_jkt.is_some() {
                 parameters.dpop_jkt = dpop_jkt;
             }
         } else if parameters.dpop_jkt != dpop_jkt {
@@ -246,11 +253,11 @@ impl TokenManager {
             Some(token_info) => token_info,
         };
 
-        let account = token_info.account;
-        let data = token_info.data;
+        let account = token_info.account.clone();
+        let data = token_info.data.clone();
         let parameters = data.parameters;
 
-        if let Some(token_refresh_token) = token_info.current_refresh_token {
+        if let Some(token_refresh_token) = token_info.current_refresh_token.clone() {
             if token_refresh_token != refresh_token {
                 self.store.blocking_write().delete_token(token_info.id)?;
                 return Err(OAuthError::InvalidGrantError(
@@ -317,7 +324,9 @@ impl TokenManager {
             ));
         }
 
-        let authorization_details;
+        //TODO
+        // let authorization_details;
+        let authorization_details = Some(OAuthAuthorizationDetails::new());
 
         let next_token_id = generate_token_id();
         let next_refresh_token = generate_refresh_token().await;
@@ -354,10 +363,6 @@ impl TokenManager {
             false => {
                 // We don't specify the alg here. We suppose the Resource server will be
                 // able to verify the token using any alg.
-                let authorization_details = match authorization_details {
-                    None => None,
-                    Some(details) => Some(details.clone()),
-                };
                 let options = AccessTokenOptions {
                     aud: account.aud.clone(),
                     sub: account.sub.clone(),
@@ -366,25 +371,26 @@ impl TokenManager {
                     iat: Some(now as i64),
                     alg: None,
                     cnf: None,
-                    authorization_details: Some(authorization_details),
+                    authorization_details: authorization_details.clone(),
                 };
                 self.signer
                     .blocking_read()
                     .access_token(client.clone(), parameters.clone(), options)
                     .await
+                    .val()
             }
         };
 
-        self.build_token_response(
-            client,
-            access_token,
-            Some(next_refresh_token),
-            expires_at,
-            parameters,
-            account,
-            authorization_details,
-        )
-        .await
+        Ok(self
+            .build_token_response(
+                OAuthAccessToken::new(access_token).unwrap(),
+                Some(next_refresh_token),
+                expires_at,
+                parameters,
+                account,
+                authorization_details,
+            )
+            .await)
     }
 
     /**
@@ -410,9 +416,9 @@ impl TokenManager {
                 .blocking_read()
                 .verify(signed_jwt, Some(options))
                 .await;
-            let token_id = match TokenId::new(verify_result.payload) {
-                Ok(token_id) => token_id,
-                Err(_) => return Err(OAuthError::RuntimeError("".to_string())),
+            let token_id = match verify_result.payload.jti {
+                Some(token_id) => token_id,
+                None => return Err(OAuthError::RuntimeError("".to_string())),
             };
             self.store.blocking_write().delete_token(token_id)?;
             return Ok(());
@@ -451,7 +457,7 @@ impl TokenManager {
         };
 
         match self.validate_access(client, client_auth, &token_info).await {
-            Ok(res) => {}
+            Ok(_) => {}
             Err(e) => {
                 self.store.blocking_write().delete_token(token_info.id)?;
                 return Err(e);
@@ -559,7 +565,9 @@ impl TokenManager {
         dpop_jkt: Option<String>,
         verify_options: Option<VerifyTokenClaimsOptions>,
     ) -> Result<AuthenticateTokenIdResult, OAuthError> {
-        let token_info = self.get_token_info(token_type, token).await?;
+        let token_info = self
+            .get_token_info(token_type.clone(), token.clone())
+            .await?;
         let token_data = token_info.data.clone();
         let cnf = match token_data.parameters.dpop_jkt {
             None => None,
@@ -579,7 +587,15 @@ impl TokenManager {
             ..Default::default()
         };
 
-        let result = verify_token_claims(token, token_type, dpop_jkt, claims, verify_options)?;
+        let oauth_access_token = OAuthAccessToken::new(token.clone().val()).unwrap();
+        let result = verify_token_claims(
+            oauth_access_token,
+            token,
+            token_type,
+            dpop_jkt,
+            claims,
+            verify_options,
+        )?;
 
         Ok(AuthenticateTokenIdResult {
             verify_token_claims_result: result,

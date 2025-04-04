@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::oauth_types::{OAuthAuthorizationDetails, OAuthTokenType};
+use crate::oauth_types::{OAuthAuthorizationDetails, OAuthClientId, OAuthTokenType};
 
 /// Response from a token introspection endpoint.
 ///
@@ -26,7 +26,7 @@ pub struct ActiveTokenInfo {
 
     /// Client ID that requested the token
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
+    pub client_id: Option<OAuthClientId>,
 
     /// Username of the resource owner
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,8 +147,8 @@ impl ActiveTokenInfoBuilder {
     }
 
     /// Add client ID.
-    pub fn client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.info.client_id = Some(client_id.into());
+    pub fn client_id(mut self, client_id: OAuthClientId) -> Self {
+        self.info.client_id = Some(client_id);
         self
     }
 

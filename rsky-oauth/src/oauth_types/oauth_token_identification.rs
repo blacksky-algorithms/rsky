@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use urlencoding::decode;
 
 use crate::oauth_types::{
     AccessTokenError, OAuthAccessToken, OAuthRefreshToken, RefreshTokenError,

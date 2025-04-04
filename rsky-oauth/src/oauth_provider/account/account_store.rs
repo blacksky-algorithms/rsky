@@ -2,7 +2,6 @@ use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_types::OAuthClientId;
-use std::fmt::Debug;
 
 #[derive(Clone)]
 pub struct SignInCredentials {

@@ -86,23 +86,22 @@ impl DpopNonce {
     }
 
     pub fn from(input: Option<DpopNonceInput>, _step: Option<u64>) -> DpopNonce {
-        unimplemented!()
-        // let step = _step.unwrap_or(DPOP_NONCE_MAX_AGE / 3);
-        // match input {
-        //     None => {
-        //         let random_bytes = rand::rng().random::<[u8; 32]>();
-        //         let secret = random_bytes.to_vec();
-        //         DpopNonce::new(secret, step)
-        //     }
-        //     Some(dpop_nonce_input) => match dpop_nonce_input {
-        //         DpopNonceInput::String(res) => {
-        //             let secret = hex::decode(res).expect("Decoding failed");
-        //             DpopNonce::new(secret, step)
-        //         }
-        //         DpopNonceInput::Uint8Array(secret) => DpopNonce::new(secret, step),
-        //         DpopNonceInput::DpopNonce(res) => res,
-        //     },
-        // }
+        let step = _step.unwrap_or(DPOP_NONCE_MAX_AGE / 3);
+        match input {
+            None => {
+                let random_bytes = rand::rng().random::<[u8; 32]>();
+                let secret = random_bytes.to_vec();
+                DpopNonce::new(secret, step)
+            }
+            Some(dpop_nonce_input) => match dpop_nonce_input {
+                DpopNonceInput::String(res) => {
+                    let secret = hex::decode(res).expect("Decoding failed");
+                    DpopNonce::new(secret, step)
+                }
+                DpopNonceInput::Uint8Array(secret) => DpopNonce::new(secret, step),
+                DpopNonceInput::DpopNonce(res) => res,
+            },
+        }
     }
 }
 

@@ -4,6 +4,7 @@ use crate::oauth_provider::client::client_auth::ClientAuth;
 use crate::oauth_provider::constants::{AUTHORIZATION_INACTIVITY_TIMEOUT, PAR_EXPIRES_IN};
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
+use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::{RequestData, RequestDataAuthorized};
 use crate::oauth_provider::request::request_id::{generate_request_id, RequestId};
@@ -15,7 +16,7 @@ use crate::oauth_provider::request::request_uri::{
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_types::{
     OAuthAuthorizationRequestParameters, OAuthAuthorizationServerMetadata, OAuthClientId,
-    OAuthCodeChallengeMethod, OAuthGrantType, OAuthRequestUri, OAuthResponseType, Prompt,
+    OAuthCodeChallengeMethod, OAuthGrantType, OAuthResponseType, Prompt,
     CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
 use rocket::form::validate::Contains;
@@ -28,10 +29,14 @@ pub struct RequestManager {
     signer: Arc<RwLock<Signer>>,
     metadata: OAuthAuthorizationServerMetadata,
     token_max_age: u64,
+    hooks: OAuthHooks,
 }
 
-pub type RequestManagerCreator =
-    Box<dyn Fn(Arc<RwLock<dyn RequestStore>>, Arc<RwLock<Signer>>) -> RequestManager + Send + Sync>;
+pub type RequestManagerCreator = Box<
+    dyn Fn(Arc<RwLock<dyn RequestStore>>, Arc<RwLock<Signer>>, OAuthHooks) -> RequestManager
+        + Send
+        + Sync,
+>;
 
 impl RequestManager {
     pub fn creator(
@@ -40,9 +45,10 @@ impl RequestManager {
     ) -> RequestManagerCreator {
         Box::new(
             move |store: Arc<RwLock<dyn RequestStore>>,
-                  signer: Arc<RwLock<Signer>>|
+                  signer: Arc<RwLock<Signer>>,
+                  hooks: OAuthHooks|
                   -> RequestManager {
-                RequestManager::new(store, signer, metadata.clone(), token_max_age)
+                RequestManager::new(store, signer, metadata.clone(), token_max_age, hooks)
             },
         )
     }
@@ -52,12 +58,14 @@ impl RequestManager {
         signer: Arc<RwLock<Signer>>,
         metadata: OAuthAuthorizationServerMetadata,
         token_max_age: u64,
+        hooks: OAuthHooks,
     ) -> Self {
         RequestManager {
             store,
             signer,
             metadata,
             token_max_age,
+            hooks,
         }
     }
 

@@ -1,4 +1,4 @@
-use rocket::{Request, Response};
+use rocket::Request;
 
 pub fn validate_header_value(
     req: &Request,

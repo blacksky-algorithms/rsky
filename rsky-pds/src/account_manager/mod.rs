@@ -7,10 +7,12 @@ use crate::account_manager::helpers::auth::{
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::token::{find_by_qb, FindByQbOpts};
-use crate::account_manager::helpers::{authorization_request, repo, request};
+use crate::account_manager::helpers::{authorization_request, device_account, repo, request};
+use crate::account_manager::helpers::{token, used_refresh_token};
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
+use crate::schema::pds::token::current_refresh_token;
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
@@ -557,65 +559,117 @@ impl AccountStore for AccountManager {
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
-    ) -> Option<AccountInfo> {
+    ) -> std::result::Result<Option<AccountInfo>, OAuthError> {
         todo!()
     }
 
-    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: OAuthClientId) {
+    fn add_authorized_client(
+        &self,
+        device_id: DeviceId,
+        sub: Sub,
+        client_id: OAuthClientId,
+    ) -> std::result::Result<(), OAuthError> {
         todo!()
     }
 
-    fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo> {
+    fn get_device_account(
+        &self,
+        device_id: &DeviceId,
+        sub: Sub,
+    ) -> std::result::Result<Option<AccountInfo>, OAuthError> {
         todo!()
     }
 
-    fn remove_device_account(&self, device_id: DeviceId, sub: Sub) {
-        todo!()
+    fn remove_device_account(
+        &self,
+        device_id: DeviceId,
+        sub: Sub,
+    ) -> std::result::Result<(), OAuthError> {
+        match device_account::remove_qb(self.db.as_ref(), device_id, sub) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn list_device_accounts(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
+    fn list_device_accounts(
+        &self,
+        device_id: &DeviceId,
+    ) -> std::result::Result<Vec<AccountInfo>, OAuthError> {
         todo!()
     }
 }
 
 impl RequestStore for AccountManager {
-    fn create_request(&mut self, id: RequestId, data: RequestData) {
+    fn create_request(&mut self, id: RequestId, data: RequestData) -> Result<(), OAuthError> {
         authorization_request::create_qb(id, data, self.db.as_ref()).unwrap();
     }
 
-    fn read_request(&self, id: &RequestId) -> Option<&RequestData> {
+    fn read_request(
+        &self,
+        id: &RequestId,
+    ) -> std::result::Result<Option<&RequestData>, OAuthError> {
         unimplemented!()
     }
 
-    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError> {
-        todo!()
+    fn update_request(&self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError> {
+        match authorization_request::update_qb(self.db.as_ref(), id, data) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn delete_request(&mut self, id: RequestId) {
-        todo!()
+    fn delete_request(&mut self, id: RequestId) -> std::result::Result<(), OAuthError> {
+        match authorization_request::remove_by_id_qb(self.db.as_ref(), id) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn find_request_by_code(&self, code: Code) -> Option<FoundRequestResult> {
-        todo!()
+    fn find_request_by_code(
+        &self,
+        code: Code,
+    ) -> std::result::Result<Option<FoundRequestResult>, OAuthError> {
+        let row = authorization_request::find_by_code_qb(self.db.as_ref(), code)?;
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(authorization_request::row_to_found_request_result(
+                row,
+            ))),
+        }
     }
 }
 
 impl DeviceStore for AccountManager {
-    fn create_device(&mut self, device_id: DeviceId, data: DeviceData) {
-        device::create_device(device_id, data, self.db.as_ref()).unwrap()
+    fn create_device(&mut self, device_id: DeviceId, data: DeviceData) -> Result<(), OAuthError> {
+        match device::create_device(device_id, data, self.db.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn read_device(&self, device_id: DeviceId) -> Option<DeviceData> {
-        device::read_device(device_id, self.db.as_ref()).unwrap()
+    fn read_device(
+        &self,
+        device_id: DeviceId,
+    ) -> std::result::Result<Option<DeviceData>, OAuthError> {
+        match device::read_device(device_id, self.db.as_ref()) {
+            Ok(data) => Ok(data),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn update_device(&mut self, device_id: DeviceId, data: DeviceData) {
-        device::update_device(device_id, self.db.as_ref()).unwrap()
+    fn update_device(&mut self, device_id: DeviceId, data: DeviceData) -> Result<(), OAuthError> {
+        match device::update_device(device_id, self.db.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
-    fn delete_device(&mut self, device_id: DeviceId) {
+    fn delete_device(&mut self, device_id: DeviceId) -> Result<(), OAuthError> {
         // Will cascade to device_account (device_account_device_id_fk)
-        device::delete_device(device_id, self.db.as_ref()).unwrap()
+        match device::delete_device(device_id, self.db.as_ref()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 }
 
@@ -626,15 +680,45 @@ impl TokenStore for AccountManager {
         data: TokenData,
         refresh_token: Option<RefreshToken>,
     ) -> std::result::Result<(), OAuthError> {
-        todo!()
+        match refresh_token {
+            None => {
+                token::create_qb(self.db.as_ref(), token_id, data, refresh_token)?;
+                Ok(())
+            }
+            Some(refresh_token) => {
+                let count = used_refresh_token::count_qb(refresh_token.clone(), self.db.as_ref())?;
+                if count > 0 {
+                    return Err(OAuthError::RuntimeError(
+                        "Refresh token already in use".to_string(),
+                    ));
+                }
+
+                token::create_qb(self.db.as_ref(), token_id, data, Some(refresh_token))?;
+                Ok(())
+            }
+        }
     }
 
     fn read_token(&self, token_id: TokenId) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        todo!()
+        let opts = FindByQbOpts {
+            id: None,
+            code: None,
+            token_id: Some(token_id.val()),
+            current_refresh_token: None,
+        };
+        let row = token::find_by_qb(self.db.as_ref(), opts)?;
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row)),
+        }
     }
 
     fn delete_token(&mut self, token_id: TokenId) -> std::result::Result<(), OAuthError> {
-        todo!()
+        // Will cascade to used_refresh_token (used_refresh_token_fk)
+        match token::remove_qb(self.db.as_ref(), token_id) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        }
     }
 
     fn rotate_token(
@@ -651,8 +735,28 @@ impl TokenStore for AccountManager {
         &self,
         refresh_token: RefreshToken,
     ) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        // let used =
-        unimplemented!()
+        let used = used_refresh_token::find_by_token_qb(refresh_token.clone(), self.db.as_ref())?;
+
+        let search = match used {
+            None => FindByQbOpts {
+                id: None,
+                code: None,
+                token_id: None,
+                current_refresh_token: Some(refresh_token.val()),
+            },
+            Some(used) => FindByQbOpts {
+                id: Some(used.val()),
+                code: None,
+                token_id: None,
+                current_refresh_token: None,
+            },
+        };
+
+        let row = token::find_by_qb(self.db.as_ref(), search)?;
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row)),
+        }
     }
 
     fn find_token_by_code(&self, code: Code) -> std::result::Result<Option<TokenInfo>, OAuthError> {
