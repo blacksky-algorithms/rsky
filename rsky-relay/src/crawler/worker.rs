@@ -54,6 +54,7 @@ impl Worker {
         while self.update() {
             thread::yield_now();
         }
+        tracing::info!("shutting down crawler: {}", self.worker_id.0);
         self.shutdown()
     }
 
@@ -89,7 +90,6 @@ impl Worker {
                 }
             }
             Command::Shutdown => {
-                tracing::debug!("shutting down crawler: {}", self.worker_id.0);
                 return false;
             }
         }

@@ -53,6 +53,7 @@ impl Worker {
         while self.update() {
             thread::yield_now();
         }
+        tracing::info!("shutting down publisher: {}", self.worker_id.0);
         self.shutdown()
     }
 
@@ -84,7 +85,6 @@ impl Worker {
                 }
             }
             Command::Shutdown => {
-                tracing::debug!("shutting down publisher: {}", self.worker_id.0);
                 return false;
             }
         }

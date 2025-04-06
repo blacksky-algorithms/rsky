@@ -1,20 +1,20 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
-use bus::Bus;
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
 use thiserror::Error;
 
-use crate::SHUTDOWN;
 use crate::publisher::types::{
     Command, CommandSender, Config, LocalId, Status, StatusReceiver, WorkerId,
 };
 use crate::publisher::worker::{Worker, WorkerError};
-use crate::types::{MessageReceiver, SubscribeReposReceiver};
+use crate::types::SubscribeReposReceiver;
+use crate::{SHUTDOWN, ValidatorManager};
 
 const CAPACITY: usize = 1024;
+const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -36,22 +36,20 @@ struct WorkerHandle {
 pub struct Manager {
     workers: Box<[WorkerHandle]>,
     next_id: WorkerId,
-    message_rx: MessageReceiver,
-    bus: Bus<Arc<Vec<u8>>>,
     status_rx: StatusReceiver,
     subscribe_repos_rx: SubscribeReposReceiver,
 }
 
 impl Manager {
     pub fn new(
-        n_workers: usize, message_rx: MessageReceiver, subscribe_repos_rx: SubscribeReposReceiver,
+        n_workers: usize, validator: &mut ValidatorManager,
+        subscribe_repos_rx: SubscribeReposReceiver,
     ) -> Result<Self, ManagerError> {
-        let mut bus = Bus::new(CAPACITY);
         let (status_tx, status_rx) =
             magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY).unwrap());
         let workers = (0..n_workers)
             .map(|worker_id| {
-                let message_rx = bus.add_rx();
+                let message_rx = validator.subscribe();
                 let status_tx = status_tx.clone();
                 let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
                 let thread_handle = thread::spawn(move || {
@@ -63,15 +61,15 @@ impl Manager {
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: WorkerId(0),
-            message_rx,
-            bus,
             status_rx,
             subscribe_repos_rx,
         })
     }
 
     pub fn run(mut self) -> Result<(), ManagerError> {
-        while self.update()? {}
+        while self.update()? {
+            thread::sleep(SLEEP);
+        }
         self.shutdown()
     }
 
@@ -100,17 +98,6 @@ impl Manager {
         if let Ok(status) = self.status_rx.try_pop() {
             if !self.handle_status(status)? {
                 return Ok(false);
-            }
-        }
-
-        for _ in 0..32 {
-            match self.message_rx.try_recv_ref() {
-                Ok(msg) => {
-                    self.bus.try_broadcast(Arc::new(msg.data.clone().into())).unwrap();
-                }
-                Err(thingbuf::mpsc::errors::TryRecvError::Empty) => break,
-                Err(thingbuf::mpsc::errors::TryRecvError::Closed) => return Ok(false),
-                Err(_) => unreachable!(),
             }
         }
 

@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
 use hashbrown::HashMap;
 use http::Uri;
@@ -15,6 +16,7 @@ use crate::crawler::worker::{Worker, WorkerError};
 use crate::types::{Cursor, MessageSender, RequestCrawlReceiver};
 
 const CAPACITY: usize = 1024;
+const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -68,7 +70,9 @@ impl Manager {
     }
 
     pub fn run(mut self) -> Result<(), ManagerError> {
-        while self.update()? {}
+        while self.update()? {
+            thread::sleep(SLEEP);
+        }
         self.shutdown()
     }
 

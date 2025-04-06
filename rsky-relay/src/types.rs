@@ -1,9 +1,14 @@
 use std::net::TcpStream;
+use std::sync::LazyLock;
 
 use http::Uri;
 use rtrb::{Consumer, Producer};
+use sled::Db;
 use thingbuf::{Recycle, mpsc};
 use tungstenite::stream::MaybeTlsStream;
+
+pub static DB: LazyLock<Db> =
+    LazyLock::new(|| sled::Config::new().path("db").use_compression(true).open().unwrap());
 
 pub type RequestCrawlSender = Producer<RequestCrawl>;
 pub type RequestCrawlReceiver = Consumer<RequestCrawl>;

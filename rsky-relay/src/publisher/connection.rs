@@ -69,7 +69,7 @@ impl Connection {
 
     pub fn send(&mut self, input: &[u8]) -> Result<(), ConnectionError> {
         match self.client.send(Message::binary(input.to_vec())) {
-            Ok(()) => (),
+            Ok(()) => {},
             Err(tungstenite::Error::WriteBufferFull(msg)) => {
                 self.queue.push_back((Instant::now(), msg));
                 if self.queue.len() > MAX_LEN {
@@ -91,7 +91,7 @@ impl Connection {
     pub fn poll(&mut self) -> Result<(), ConnectionError> {
         while let Some((instant, msg)) = self.queue.pop_front() {
             match self.client.send(msg) {
-                Ok(()) => (),
+                Ok(()) => {},
                 Err(tungstenite::Error::WriteBufferFull(msg)) => {
                     self.queue.push_back((instant, msg));
                     break;

@@ -73,7 +73,10 @@ impl Connection {
             let bytes = match msg {
                 Message::Binary(bytes) => bytes,
                 Message::Close(_) => todo!(),
-                _ => unreachable!("{msg}"),
+                _ => {
+                    tracing::debug!("unknown message: {msg}");
+                    continue;
+                },
             };
 
             let mut slot = self.message_tx.try_send_ref()?;
