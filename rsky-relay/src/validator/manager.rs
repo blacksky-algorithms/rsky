@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bus::{Bus, BusReader};
+use hashbrown::HashMap;
 use sled::Tree;
 use thiserror::Error;
 use zerocopy::{CastError, FromBytes, Immutable, KnownLayout, SizeError, Unaligned};
@@ -37,6 +38,8 @@ impl<T: KnownLayout + Immutable + Unaligned + ?Sized> From<CastError<&[u8], T>> 
 
 pub struct Manager {
     message_rx: MessageReceiver,
+    cursors: HashMap<String, i64>,
+    crawlers: Tree,
     resolver: Resolver,
     queue: Tree,
     bus: Bus<Arc<Vec<u8>>>,
@@ -44,10 +47,12 @@ pub struct Manager {
 
 impl Manager {
     pub async fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
+        let cursors = HashMap::new();
+        let crawlers = DB.open_tree("crawlers")?;
         let resolver = Resolver::new().await?;
         let queue = DB.open_tree("queue")?;
         let bus = Bus::new(CAPACITY);
-        Ok(Self { message_rx, resolver, queue, bus })
+        Ok(Self { message_rx, cursors, crawlers, resolver, queue, bus })
     }
 
     pub fn subscribe(&mut self) -> BusReader<Arc<Vec<u8>>> {
@@ -55,8 +60,20 @@ impl Manager {
     }
 
     pub async fn run(mut self) -> Result<(), ManagerError> {
+        for res in self.crawlers.iter() {
+            let (hostname, cursor) = res?;
+            let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
+            let cursor = i64::from_be_bytes(cursor.as_ref().try_into().unwrap_or_default());
+            self.cursors.insert(hostname, cursor);
+        }
+        for res in self.queue.iter() {
+            let (did, _) = res?;
+            let did = unsafe { std::str::from_utf8_unchecked(&did) };
+            self.resolver.request(did);
+        }
         while self.update().await? {}
         tracing::info!("shutting down validator");
+        SHUTDOWN.store(true, Ordering::Relaxed);
         self.resolver.shutdown().await?;
         Ok(())
     }
@@ -66,10 +83,28 @@ impl Manager {
             return Ok(false);
         }
 
-        for _ in 0..32 {
+        let mut batch = sled::Batch::default();
+        for (hostname, cursor) in self.cursors.iter() {
+            batch.insert(hostname.as_bytes(), &cursor.to_be_bytes());
+        }
+        self.crawlers.apply_batch(batch)?;
+
+        for _ in 0..1024 {
             match self.message_rx.try_recv_ref() {
                 Ok(msg) => {
-                    let event = SubscribeReposEvent::parse(&msg.data)?;
+                    let Some(event) = SubscribeReposEvent::parse(&msg.data)? else {
+                        continue;
+                    };
+                    let id = event.id();
+                    if let Some(old) = self.cursors.insert(msg.hostname.clone(), id) {
+                        if old + 1 != id {
+                            tracing::debug!(
+                                "[{}] seq gap: {old} -> {id} ({})",
+                                msg.hostname,
+                                id - old - 1
+                            );
+                        }
+                    }
                     let did = event.did();
                     let commit = match event.commit() {
                         Ok(Some(commit)) => commit,
@@ -126,7 +161,9 @@ impl Manager {
                 let (len, rest) = Usize::ref_from_prefix(bytes)?;
                 let (data, rest) = <[u8]>::ref_from_prefix_with_elems(rest, len.get())?;
                 bytes = rest;
-                let event = SubscribeReposEvent::parse(data)?;
+                let Some(event) = SubscribeReposEvent::parse(&data)? else {
+                    continue;
+                };
                 let commit = event.commit().unwrap().unwrap(); // Already tried parsing
                 match utils::verify_commit_sig(&commit, key) {
                     Ok(res) => {

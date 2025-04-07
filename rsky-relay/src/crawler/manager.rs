@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::Duration;
+use std::{io, thread};
 
 use hashbrown::HashMap;
 use http::Uri;
@@ -13,13 +13,15 @@ use crate::crawler::types::{
     Command, CommandSender, Config, LocalId, Status, StatusReceiver, WorkerId,
 };
 use crate::crawler::worker::{Worker, WorkerError};
-use crate::types::{Cursor, MessageSender, RequestCrawlReceiver};
+use crate::types::{MessageSender, RequestCrawlReceiver};
 
 const CAPACITY: usize = 1024;
 const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
+    #[error("spawn error: {0}")]
+    SpawnError(#[from] io::Error),
     #[error("worker error: {0}")]
     WorkerError(#[from] WorkerError),
     #[error("rtrb error: {0}")]
@@ -50,16 +52,18 @@ impl Manager {
         let (status_tx, status_rx) =
             magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY).unwrap());
         let workers = (0..n_workers)
-            .map(|worker_id| {
+            .map(|worker_id| -> Result<_, ManagerError> {
                 let message_tx = message_tx.clone();
                 let status_tx = status_tx.clone();
                 let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
-                let thread_handle = thread::spawn(move || {
-                    Worker::new(WorkerId(worker_id), message_tx, status_tx, command_rx).run()
-                });
-                WorkerHandle { configs: Vec::new(), command_tx, thread_handle }
+                let thread_handle = thread::Builder::new()
+                    .name(format!("rsky-crawl-{worker_id}"))
+                    .spawn(move || {
+                        Worker::new(WorkerId(worker_id), message_tx, status_tx, command_rx).run()
+                    })?;
+                Ok(WorkerHandle { configs: Vec::new(), command_tx, thread_handle })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: WorkerId(0),
@@ -73,6 +77,8 @@ impl Manager {
         while self.update()? {
             thread::sleep(SLEEP);
         }
+        tracing::info!("shutting down crawler");
+        SHUTDOWN.store(true, Ordering::Relaxed);
         self.shutdown()
     }
 
@@ -88,8 +94,7 @@ impl Manager {
         Ok(())
     }
 
-    fn handle_status(&mut self, status: Status) -> Result<bool, ManagerError> {
-        match status {}
+    fn handle_status(&mut self, _status: Status) -> Result<bool, ManagerError> {
         Ok(true)
     }
 
@@ -108,7 +113,7 @@ impl Manager {
             if !self.configs.contains_key(&request_crawl.uri) {
                 let config = Config {
                     uri: request_crawl.uri.clone(),
-                    cursor: Cursor(0),
+                    hostname: request_crawl.hostname.clone(),
                     worker_id: self.next_id,
                     local_id: LocalId(self.workers[self.next_id.0].configs.len()),
                 };

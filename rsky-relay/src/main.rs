@@ -15,7 +15,7 @@ use rsky_relay::{
     CrawlerManager, MessageRecycle, PublisherManager, SHUTDOWN, Server, ValidatorManager,
 };
 
-const CAPACITY1: usize = 1 << 20;
+const CAPACITY1: usize = 1 << 16;
 const CAPACITY2: usize = 1 << 10;
 const WORKERS: usize = 4;
 
@@ -44,9 +44,9 @@ pub async fn main() -> Result<()> {
     let server = Server::new(request_crawl_tx, subscribe_repos_tx)?;
     thread::scope(move |s| {
         tokio::spawn(validator.run());
-        s.spawn(move || crawler.run());
-        s.spawn(move || publisher.run());
-        s.spawn(move || server.run());
+        thread::Builder::new().name("rsky-crawl".into()).spawn_scoped(s, move || crawler.run())?;
+        thread::Builder::new().name("rsky-pub".into()).spawn_scoped(s, move || publisher.run())?;
+        thread::Builder::new().name("rsky-server".into()).spawn_scoped(s, move || server.run())?;
         let mut signals =
             SignalsInfo::<WithOrigin>::new(TERM_SIGNALS).expect("failed to init signals");
         for signal_info in &mut signals {

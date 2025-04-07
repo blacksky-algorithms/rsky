@@ -7,8 +7,6 @@ use rtrb::{Consumer, Producer};
 use tungstenite::WebSocket;
 use tungstenite::stream::MaybeTlsStream;
 
-use crate::types::Cursor;
-
 pub type Client = WebSocket<MaybeTlsStream<TcpStream>>;
 pub type CommandSender = Producer<Command>;
 pub type CommandReceiver = Consumer<Command>;
@@ -23,7 +21,7 @@ pub struct LocalId(pub usize);
 #[derive(Debug, Clone)]
 pub struct Config {
     pub uri: Uri,
-    pub cursor: Cursor,
+    pub hostname: String,
     pub worker_id: WorkerId,
     pub local_id: LocalId,
 }

@@ -3,6 +3,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
 use bstr::BStr;
 use color_eyre::Result;
@@ -10,19 +11,26 @@ use color_eyre::eyre::eyre;
 use http::Uri;
 use httparse::{EMPTY_HEADER, Status};
 use serde::Deserialize;
+use sled::Tree;
 use thiserror::Error;
 use tungstenite::stream::MaybeTlsStream;
 use url::Url;
 
-use crate::types::{Cursor, RequestCrawlSender, SubscribeRepos, SubscribeReposSender};
+use crate::types::{Cursor, DB, RequestCrawlSender, SubscribeRepos, SubscribeReposSender};
 use crate::{RequestCrawl, SHUTDOWN};
+
+const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
+    #[error("rtrb error: {0}")]
+    PushError(#[from] rtrb::PushError<RequestCrawl>),
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    #[error("sled error: {0}")]
+    Sled(#[from] sled::Error),
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +58,7 @@ pub struct Server {
     listener: TcpListener,
     base_url: Url,
     buf: Vec<u8>,
+    crawlers: Tree,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -61,10 +70,30 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:9000")?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
-        Ok(Server { listener, base_url, buf: vec![0; 1024], request_crawl_tx, subscribe_repos_tx })
+        let crawlers = DB.open_tree("crawlers")?;
+        Ok(Server {
+            listener,
+            base_url,
+            buf: vec![0; 1024],
+            crawlers,
+            request_crawl_tx,
+            subscribe_repos_tx,
+        })
     }
 
     pub fn run(mut self) -> Result<(), ServerError> {
+        for res in self.crawlers.iter() {
+            let (hostname, cursor) = res?;
+            let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
+            let cursor = i64::from_be_bytes(cursor.as_ref().try_into().unwrap_or_default());
+            if let Ok(uri) = Uri::from_str(&format!(
+                "wss://{hostname}/xrpc/com.atproto.sync.subscribeRepos?cursor={cursor}"
+            )) {
+                tracing::debug!("starting crawl: {hostname} ({cursor})");
+                self.request_crawl_tx.push(RequestCrawl { uri, hostname })?;
+                thread::sleep(SLEEP);
+            }
+        }
         while self.update()? {
             thread::yield_now();
         }
@@ -110,7 +139,7 @@ impl Server {
                 let mut cursor = None;
                 for (key, value) in url.query_pairs() {
                     if key == "cursor" {
-                        cursor = u64::from_str(&value).ok();
+                        cursor = i64::from_str(&value).ok();
                     }
                 }
 
@@ -140,11 +169,16 @@ impl Server {
                 }
 
                 if let Some(hostname) = hostname {
+                    let cursor = self
+                        .crawlers
+                        .get(hostname.as_bytes())?
+                        .map(|v| i64::from_be_bytes(v.as_ref().try_into().unwrap_or_default()))
+                        .unwrap_or_default();
                     if let Ok(uri) = Uri::from_str(&format!(
-                        "wss://{hostname}/xrpc/com.atproto.sync.subscribeRepos"
+                        "wss://{hostname}/xrpc/com.atproto.sync.subscribeRepos?cursor={cursor}"
                     )) {
-                        tracing::debug!("received requestCrawl: {hostname}");
-                        self.request_crawl_tx.push(RequestCrawl { uri })?;
+                        tracing::debug!("received requestCrawl: {hostname} ({cursor})");
+                        self.request_crawl_tx.push(RequestCrawl { uri, hostname })?;
                         let mut stream = stream.0.take().unwrap();
                         stream.write_all(b"HTTP/1.1 200 OK\n")?;
                         stream.flush()?;

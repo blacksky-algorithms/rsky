@@ -49,7 +49,7 @@ pub enum AccountStatus {
 }
 
 impl fmt::Display for AccountStatus {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -133,6 +133,12 @@ pub struct SubscribeReposAccount {
     pub status: Option<AccountStatus>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeReposInfo {
+    pub name: String,
+    pub message: String,
+}
+
 #[derive(Debug)]
 pub enum SubscribeReposEvent {
     Commit(SubscribeReposCommit),
@@ -142,7 +148,7 @@ pub enum SubscribeReposEvent {
 }
 
 impl SubscribeReposEvent {
-    pub fn parse(data: &[u8]) -> Result<SubscribeReposEvent, ParseError> {
+    pub fn parse(data: &[u8]) -> Result<Option<SubscribeReposEvent>, ParseError> {
         #[derive(Debug, Deserialize)]
         pub struct Header {
             #[serde(rename(deserialize = "t"))]
@@ -163,13 +169,27 @@ impl SubscribeReposEvent {
             "#account" => {
                 SubscribeReposEvent::Account(serde_ipld_dagcbor::from_reader(&mut reader)?)
             }
+            "#info" => {
+                let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
+                tracing::debug!("received info: {} ({})", info.name, info.message);
+                return Ok(None);
+            }
             _ => {
-                tracing::debug!("Received unknown header {:?}", header.type_.as_str());
+                tracing::debug!("received unknown header {:?}", header.type_.as_str());
                 return Err(ParseError::UnknownType(header.type_));
             }
         };
 
-        Ok(body)
+        Ok(Some(body))
+    }
+
+    pub fn id(&self) -> i64 {
+        match self {
+            SubscribeReposEvent::Commit(commit) => commit.seq,
+            SubscribeReposEvent::Sync(sync) => sync.seq,
+            SubscribeReposEvent::Identity(identity) => identity.seq,
+            SubscribeReposEvent::Account(account) => account.seq,
+        }
     }
 
     pub fn did(&self) -> &str {

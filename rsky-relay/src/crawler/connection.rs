@@ -23,7 +23,7 @@ pub struct Connection {
     client: Client,
     config: Config,
     message_tx: MessageSender,
-    status_tx: StatusSender,
+    _status_tx: StatusSender,
 }
 
 impl AsFd for Connection {
@@ -51,7 +51,7 @@ impl Connection {
             }
             _ => {}
         }
-        Ok(Self { client, config, message_tx, status_tx })
+        Ok(Self { client, config, message_tx, _status_tx: status_tx })
     }
 
     pub fn close(&mut self) -> Result<(), ConnectionError> {
@@ -74,14 +74,14 @@ impl Connection {
                 Message::Binary(bytes) => bytes,
                 Message::Close(_) => todo!(),
                 _ => {
-                    tracing::debug!("unknown message: {msg}");
+                    tracing::debug!("[{}] unknown message: {msg}", self.config.hostname);
                     continue;
-                },
+                }
             };
 
             let mut slot = self.message_tx.try_send_ref()?;
             slot.data = bytes.into();
-            slot.uri = self.config.uri.clone();
+            slot.hostname = self.config.hostname.clone();
         }
         Ok(())
     }

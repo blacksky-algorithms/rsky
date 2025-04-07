@@ -16,7 +16,7 @@ use rsky_identity::types::DidDocument;
 
 use crate::types::DB;
 
-const POLL_TIMEOUT: Duration = Duration::from_micros(100);
+const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
@@ -77,7 +77,7 @@ impl Resolver {
     }
 
     pub fn expire(&mut self, did: &str) -> Result<bool, ResolverError> {
-        tracing::debug!("expiring did: {did}");
+        tracing::trace!("expiring did: {did}");
         Ok(self.cache.remove(did)?.is_some())
     }
 
@@ -99,6 +99,7 @@ impl Resolver {
         if self.inflight.contains(did) {
             return;
         }
+        tracing::trace!("fetching did: {did}");
         self.inflight.insert(did.to_owned());
         let req = self.client.get(&format!("{PLC_URL}/{did}"));
         self.futures.push(Box::pin(async move { req.send().await?.json().await }));

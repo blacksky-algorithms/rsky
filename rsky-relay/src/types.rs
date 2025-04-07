@@ -21,11 +21,12 @@ pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
 pub struct FeedId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Cursor(pub u64);
+pub struct Cursor(pub i64);
 
 #[derive(Debug)]
 pub struct RequestCrawl {
     pub uri: Uri,
+    pub hostname: String,
 }
 
 #[derive(Debug)]
@@ -37,7 +38,7 @@ pub struct SubscribeRepos {
 #[derive(Debug)]
 pub struct Message {
     pub data: Vec<u8>,
-    pub uri: Uri,
+    pub hostname: String,
 }
 
 #[derive(Debug)]
@@ -45,7 +46,7 @@ pub struct MessageRecycle;
 
 impl Recycle<Message> for MessageRecycle {
     fn new_element(&self) -> Message {
-        Message { data: Vec::new(), uri: Uri::from_static("example.com") }
+        Message { data: Vec::new(), hostname: String::new() }
     }
 
     fn recycle(&self, element: &mut Message) {
