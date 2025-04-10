@@ -368,11 +368,6 @@ pub struct CommitOp {
 pub struct CommitDataWithOps {
     #[serde(flatten)]
     pub commit_data: CommitData,
-<<<<<<< HEAD
-
-=======
-    
->>>>>>> 33f04ce (add new types)
     pub ops: Vec<CommitOp>,
     pub prev_data: Option<Cid>,
 }
