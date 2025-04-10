@@ -111,10 +111,13 @@ async fn inner_apply_writes(
             .await?;
 
         let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_commit(did.clone(), commit.clone())
-            .await?;
+        lock.sequence_commit(did.clone(), commit.clone()).await?;
         account_manager
-            .update_repo_root(did.to_string(), commit.commit_data.cid, commit.commit_data.rev)
+            .update_repo_root(
+                did.to_string(),
+                commit.commit_data.cid,
+                commit.commit_data.rev,
+            )
             .await?;
         Ok(())
     } else {

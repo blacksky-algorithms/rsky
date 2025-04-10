@@ -41,17 +41,15 @@ async fn inner_activate_account(
             db,
         );
         let sync_data = actor_store.get_sync_event_data().await?;
-        
+
         // @NOTE: we're over-emitting for now for backwards compatibility, can reduce this in the future
         let status = account_manager.get_account_status(&requester).await?;
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_account_evt(requester.clone(), status).await?;
-        
+
         let handle = account.handle.unwrap_or(INVALID_HANDLE.to_string());
-        lock.sequence_identity_evt(
-            requester.clone(),
-            Some(handle),
-        ).await?;
+        lock.sequence_identity_evt(requester.clone(), Some(handle))
+            .await?;
         lock.sequence_sync_evt(requester, sync_data).await?;
         Ok(())
     } else {

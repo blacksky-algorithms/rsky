@@ -170,10 +170,7 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
-        match lock
-            .sequence_commit(did.clone(), commit.clone())
-            .await
-        {
+        match lock.sequence_commit(did.clone(), commit.clone()).await {
             Ok(_) => {
                 tracing::debug!("Sequence commit succeeded");
             }
@@ -183,10 +180,15 @@ pub async fn server_create_account(
             }
         }
         match lock
-        .sequence_sync_evt(did.clone(), sync_evt_data_from_commit(commit.clone()).await?).await {
+            .sequence_sync_evt(
+                did.clone(),
+                sync_evt_data_from_commit(commit.clone()).await?,
+            )
+            .await
+        {
             Ok(_) => {
                 tracing::debug!("Sequence sync event data from commit succeeded");
-            },
+            }
             Err(error) => {
                 tracing::error!("Sequence sync event data from commit failed\n{error}");
                 return Err(ApiError::RuntimeError);

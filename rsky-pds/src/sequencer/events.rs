@@ -223,15 +223,23 @@ pub async fn format_seq_commit(
     let mut blocks_to_send = BlockMap::new();
     blocks_to_send.add_map(commit_data.commit_data.new_blocks)?;
     blocks_to_send.add_map(commit_data.commit_data.relevant_blocks)?;
-    let ops = commit_data.ops.iter().map(|op| {
-        let action = match op.action {
-            CommitAction::Create => CommitEvtOpAction::Create,
-            CommitAction::Update => CommitEvtOpAction::Update,
-            CommitAction::Delete => CommitEvtOpAction::Delete,
-        };
-        CommitEvtOp { action, path: op.path.clone(), cid: op.cid, prev: op.prev }
-    })
-    .collect::<Vec<_>>();
+    let ops = commit_data
+        .ops
+        .iter()
+        .map(|op| {
+            let action = match op.action {
+                CommitAction::Create => CommitEvtOpAction::Create,
+                CommitAction::Update => CommitEvtOpAction::Update,
+                CommitAction::Delete => CommitEvtOpAction::Delete,
+            };
+            CommitEvtOp {
+                action,
+                path: op.path.clone(),
+                cid: op.cid,
+                prev: op.prev,
+            }
+        })
+        .collect::<Vec<_>>();
     // Create the CAR file with all blocks
     let car_slice = blocks_to_car_file(Some(&commit_data.commit_data.cid), blocks_to_send).await?;
 
@@ -333,18 +341,14 @@ pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<model
 pub async fn sync_evt_data_from_commit(mut commit_data: CommitDataWithOps) -> Result<SyncEvtData> {
     let cid = vec![commit_data.commit_data.cid.clone()];
     match commit_data.commit_data.relevant_blocks.get_many(cid) {
-        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => {
-            Err(anyhow::anyhow!("commit block was not found, could not build sync event"))
-        },
-        Ok(blocks_and_missing) => {
-            Ok(SyncEvtData{
-                rev: commit_data.commit_data.rev,
-                cid: commit_data.commit_data.cid.clone(),
-                blocks: blocks_and_missing.blocks
-            })
-        },
-        Err(e) => {
-            Err(e.into())
-        },
+        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => Err(anyhow::anyhow!(
+            "commit block was not found, could not build sync event"
+        )),
+        Ok(blocks_and_missing) => Ok(SyncEvtData {
+            rev: commit_data.commit_data.rev,
+            cid: commit_data.commit_data.cid.clone(),
+            blocks: blocks_and_missing.blocks,
+        }),
+        Err(e) => Err(e.into()),
     }
 }
