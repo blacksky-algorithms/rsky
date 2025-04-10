@@ -16,7 +16,7 @@ use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::storage::CidAndRev;
 use rsky_repo::storage::RepoRootError::RepoRootNotFoundError;
-use rsky_repo::types::{CommitData, CommitDataWithOps};
+use rsky_repo::types::CommitData;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;

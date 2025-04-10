@@ -5,7 +5,7 @@ use crate::error::DataStoreError;
 use crate::mst::MST;
 use crate::storage::types::RepoStorage;
 use crate::types::{
-    CollectionContents, Commit, CommitData, CommitDataWithOps, RecordCreateOrUpdateOp,
+    CollectionContents, Commit, CommitData, RecordCreateOrUpdateOp,
     RecordWriteEnum, RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit,
 };
 use crate::util;

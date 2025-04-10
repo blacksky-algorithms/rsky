@@ -13,7 +13,7 @@ use libipld::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{PutRecordInput, PutRecordOutput};
-use rsky_repo::types::{CommitData, CommitDataWithOps, PreparedWrite};
+use rsky_repo::types::{CommitDataWithOps, PreparedWrite};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
 

@@ -14,7 +14,7 @@ use events::format_seq_sync_evt;
 use futures::{Stream, StreamExt};
 use rsky_common::time::SECOND;
 use rsky_common::{cbor_to_struct, wait};
-use rsky_repo::types::{CommitData, CommitDataWithOps, PreparedWrite};
+use rsky_repo::types::CommitDataWithOps;
 use std::cmp;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};

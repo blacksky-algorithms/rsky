@@ -26,7 +26,7 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{any, env};
+use std::env;
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
