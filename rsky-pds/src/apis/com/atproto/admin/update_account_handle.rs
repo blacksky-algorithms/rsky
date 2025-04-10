@@ -44,7 +44,8 @@ async fn inner_update_account_handle(
 
     match account {
         Some(account) if account.did != did => bail!("Handle already taken: {handle}"),
-        // @TODO: needs to finish this branch
+        // This makes the match case complete to make the compiler happy
+        // albeit this branch of code will never be reached
         Some(_) => (),
         None => {
             let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
