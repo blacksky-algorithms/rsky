@@ -23,10 +23,10 @@ use rsky_repo::types::{
 use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
+use std::env;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::env;
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
