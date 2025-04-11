@@ -253,7 +253,7 @@ pub async fn subscribe_repos<'a>(
                                     return;
                                 }
                             };
-                            yield Message::Binary(binary)
+                            yield Message::Binary(binary);
                         }
                     }
                 }
