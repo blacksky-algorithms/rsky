@@ -444,3 +444,158 @@ impl RepoSeq {
         }
     }
 }
+
+#[derive(
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+)]
+#[diesel(primary_key(id))]
+#[diesel(table_name = crate::schema::pds::token)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Token {
+    pub id: String,
+    pub did: String,
+    #[diesel(column_name = tokenId)]
+    #[serde(rename = "tokenId")]
+    pub token_id: String,
+    #[diesel(column_name = createdAt)]
+    #[serde(rename = "createdAt")]
+    pub created_at: bool,
+    #[diesel(column_name = updatedAt)]
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[diesel(column_name = expiresAt)]
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
+    #[diesel(column_name = clientId)]
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    #[diesel(column_name = clientAuth)]
+    #[serde(rename = "clientAuth")]
+    pub client_auth: String,
+    #[diesel(column_name = deviceId)]
+    #[serde(rename = "deviceId")]
+    pub device_id: Option<String>,
+    pub parameters: String,
+    pub details: Option<String>,
+    pub code: Option<String>,
+    #[diesel(column_name = currentRefreshToken)]
+    #[serde(rename = "currentRefreshToken")]
+    pub current_refresh_token: Option<String>,
+}
+
+#[derive(
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+)]
+#[diesel(primary_key(id))]
+#[diesel(table_name = crate::schema::pds::device)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Device {
+    pub id: String,
+    #[diesel(column_name = sessionId)]
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
+    #[diesel(column_name = userAgent)]
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    #[diesel(column_name = ipAddress)]
+    #[serde(rename = "ipAddress")]
+    pub ip_address: String,
+    #[diesel(column_name = lastSeenAt)]
+    #[serde(rename = "lastSeenAt")]
+    pub last_seen_at: String,
+}
+
+#[derive(
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+)]
+#[diesel(primary_key(did))]
+#[diesel(table_name = crate::schema::pds::device_account)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct DeviceAccount {
+    pub did: String,
+    #[diesel(column_name = deviceId)]
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    #[diesel(column_name = authenticatedAt)]
+    #[serde(rename = "authenticatedAt")]
+    pub authenticated_at: String,
+    pub remember: bool,
+    #[diesel(column_name = authorizedClients)]
+    #[serde(rename = "authorizedClients")]
+    pub authorized_clients: String,
+}
+
+#[derive(
+    Queryable,
+    Identifiable,
+    Insertable,
+    Selectable,
+    Clone,
+    Debug,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+)]
+#[diesel(primary_key(id))]
+#[diesel(table_name = crate::schema::pds::authorization_request)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct AuthorizationRequest {
+    pub id: String,
+    pub did: Option<String>,
+    #[diesel(column_name = deviceId)]
+    #[serde(rename = "deviceId")]
+    pub device_id: Option<String>,
+    #[diesel(column_name = clientId)]
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    #[diesel(column_name = clientAuth)]
+    #[serde(rename = "clientAuth")]
+    pub client_auth: String,
+    pub parameters: String,
+    #[diesel(column_name = expiresAt)]
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
+    pub code: Option<String>,
+}
+
+#[derive(
+    Queryable, Insertable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
+)]
+#[diesel(table_name = crate::schema::pds::used_refresh_token)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct UsedRefreshToken {
+    #[diesel(column_name = tokenId)]
+    #[serde(rename = "tokenId")]
+    pub token_id: String,
+    #[diesel(column_name = refreshToken)]
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: String,
+}
