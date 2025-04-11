@@ -8,10 +8,13 @@ use crate::oauth_types::{
 use jsonwebtoken::jwk::JwkSet;
 
 pub type OnClientInfo =
-    Box<dyn Fn(OAuthClientId, OAuthClientMetadata, Option<JwkSet>) -> ClientInfo>;
+    Box<dyn Fn(OAuthClientId, OAuthClientMetadata, Option<JwkSet>) -> ClientInfo + Send + Sync>;
 
-pub type OnAuthorizationDetails =
-    Box<dyn Fn(Client, OAuthAuthorizationRequestParameters, Account) -> OAuthAuthorizationDetails>;
+pub type OnAuthorizationDetails = Box<
+    dyn Fn(Client, OAuthAuthorizationRequestParameters, Account) -> OAuthAuthorizationDetails
+        + Send
+        + Sync,
+>;
 
 pub struct OAuthHooks {
     /**
@@ -21,12 +24,12 @@ pub struct OAuthHooks {
      * @throws {InvalidClientMetadataError} if the metadata is invalid
      * @see {@link InvalidClientMetadataError}
      */
-    pub on_client_info: OnClientInfo,
+    pub on_client_info: Option<OnClientInfo>,
     /**
      * Allows enriching the authorization details with additional information
      * when the tokens are issued.
      *
      * @see {@link https://datatracker.ietf.org/doc/html/rfc9396 | RFC 9396}
      */
-    pub on_authorization_details: OnAuthorizationDetails,
+    pub on_authorization_details: Option<OnAuthorizationDetails>,
 }

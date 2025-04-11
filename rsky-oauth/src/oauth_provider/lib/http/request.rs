@@ -1,3 +1,4 @@
+use crate::oauth_provider::lib::util::url::UrlReference;
 use rocket::Request;
 
 pub fn validate_header_value(
@@ -32,7 +33,26 @@ pub fn validate_fetch_site(req: &Request, allowed_values: Vec<&str>) -> Result<(
     validate_header_value(req, "sec-fetch-site", allowed_values)
 }
 
-pub fn validate_csrf_token(req: &Request, csrf_token: &str, cookie_name: &str, clear_cookie: bool) {
+// CORS ensure not cross origin
+pub fn validate_same_origin(req: &Request, origin: &str) -> Result<(), ()> {
+    match req.headers().get_one("origin") {
+        None => Err(()),
+        Some(header_origin) => {
+            if header_origin != origin {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+pub fn validate_csrf_token(
+    req: &Request,
+    csrf_token: &str,
+    cookie_name: &str,
+    clear_cookie: bool,
+) -> Result<(), ()> {
     let cookies = req.cookies();
     if cookies.get(cookie_name).is_none() {
         // No Cookie
@@ -42,14 +62,21 @@ pub fn validate_csrf_token(req: &Request, csrf_token: &str, cookie_name: &str, c
         //Invalid Cookie
     }
 
-    if clear_cookie {}
+    if clear_cookie {
+        unimplemented!()
+    }
+    unimplemented!()
 }
 
-pub fn validate_referer(req: &Request) {
+pub fn validate_referer(req: &Request, url_reference: UrlReference) -> Result<(), ()> {
     let headers = req.headers().clone();
     let referer = headers.get("referer").next();
     match referer {
-        None => {}
-        Some(referer) => {}
+        None => {
+            unimplemented!()
+        }
+        Some(referer) => {
+            unimplemented!()
+        }
     }
 }

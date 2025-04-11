@@ -1,10 +1,10 @@
+use crate::oauth_types::{
+    OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthResponseType, OAuthScope,
+    WebUri,
+};
+use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::oauth_types::{
-    OAuthClientId, OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthResponseType,
-    OAuthScope, WebUri,
-};
 
 /// OAuth Client Metadata.
 ///
@@ -49,7 +49,7 @@ pub struct OAuthClientMetadata {
 
     /// Client's JSON Web Key Set
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jwks: Option<serde_json::Value>,
+    pub jwks: Option<JwkSet>,
 
     /// Type of application (web or native)
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct OAuthClientMetadata {
 
     /// Client identifier (assigned by auth server)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<OAuthClientId>,
+    pub client_id: Option<String>,
 
     /// Human-readable client name
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,42 +183,41 @@ fn default_auth_signing_alg() -> String {
 impl OAuthClientMetadata {
     /// Create new client metadata with required fields.
     pub fn new(redirect_uris: Vec<OAuthRedirectUri>) -> Result<Self, ClientMetadataError> {
-        unimplemented!()
-        // if redirect_uris.is_empty() {
-        //     return Err(ClientMetadataError::NoRedirectUris);
-        // }
-        //
-        // Ok(Self {
-        //     redirect_uris,
-        //     response_types: default_response_types(),
-        //     grant_types: default_grant_types(),
-        //     scope: None,
-        //     token_endpoint_auth_method: OAuthEndpointAuthMethod::default(),
-        //     token_endpoint_auth_signing_alg: None,
-        //     userinfo_signed_response_alg: None,
-        //     userinfo_encrypted_response_alg: None,
-        //     jwks_uri: None,
-        //     jwks: None,
-        //     application_type: ApplicationType::default(),
-        //     subject_type: SubjectType::default(),
-        //     request_object_signing_alg: None,
-        //     id_token_signed_response_alg: None,
-        //     authorization_signed_response_alg: default_auth_signing_alg(),
-        //     authorization_encrypted_response_enc: None,
-        //     authorization_encrypted_response_alg: None,
-        //     client_id: None,
-        //     client_name: None,
-        //     client_uri: None,
-        //     policy_uri: None,
-        //     tos_uri: None,
-        //     logo_uri: None,
-        //     default_max_age: None,
-        //     require_auth_time: None,
-        //     contacts: None,
-        //     tls_client_certificate_bound_access_tokens: None,
-        //     dpop_bound_access_tokens: None,
-        //     authorization_details_types: None,
-        // })
+        if redirect_uris.is_empty() {
+            return Err(ClientMetadataError::NoRedirectUris);
+        }
+
+        Ok(Self {
+            redirect_uris,
+            response_types: default_response_types(),
+            grant_types: default_grant_types(),
+            scope: None,
+            token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::default()),
+            token_endpoint_auth_signing_alg: None,
+            userinfo_signed_response_alg: None,
+            userinfo_encrypted_response_alg: None,
+            jwks_uri: None,
+            jwks: None,
+            application_type: ApplicationType::default(),
+            subject_type: Some(SubjectType::default()),
+            request_object_signing_alg: None,
+            id_token_signed_response_alg: None,
+            authorization_signed_response_alg: default_auth_signing_alg(),
+            authorization_encrypted_response_enc: None,
+            authorization_encrypted_response_alg: None,
+            client_id: None,
+            client_name: None,
+            client_uri: None,
+            policy_uri: None,
+            tos_uri: None,
+            logo_uri: None,
+            default_max_age: None,
+            require_auth_time: None,
+            contacts: None,
+            tls_client_certificate_bound_access_tokens: None,
+            dpop_bound_access_tokens: None,
+            authorization_details_types: None,
+        })
     }
 
     /// Validate the metadata according to spec requirements.

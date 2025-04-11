@@ -1,11 +1,11 @@
 use crate::jwk::Audience;
 use crate::oauth_provider::oidc::sub::Sub;
-use crate::oauth_provider::token::verify_token_claims::VerifyTokenClaimsResult;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{OAuthClientId, OAuthScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug, Eq, PartialEq)]
 pub struct TokenClaims {
     pub iss: Option<String>,
     pub aud: Option<Audience>,
@@ -13,7 +13,7 @@ pub struct TokenClaims {
     pub exp: Option<u64>,
     pub nbf: Option<u64>,
     pub iat: Option<u64>,
-    pub jti: Option<String>,
+    pub jti: Option<TokenId>,
     pub htm: Option<String>,
     pub htu: Option<String>,
     pub ath: Option<String>,

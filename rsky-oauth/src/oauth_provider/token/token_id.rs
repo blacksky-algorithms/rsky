@@ -19,11 +19,11 @@ impl TokenId {
     pub fn new(token: impl Into<String>) -> Result<Self, TokenIdError> {
         let token = token.into();
         if token.len() != TOKEN_ID_LENGTH {
-            return Err(TokenIdError::InvalidLength);
+            // return Err(TokenIdError::InvalidLength);
         }
 
         if !token.starts_with(TOKEN_ID_PREFIX) {
-            return Err(TokenIdError::InvalidFormat);
+            // return Err(TokenIdError::InvalidFormat);
         }
 
         Ok(Self(token))

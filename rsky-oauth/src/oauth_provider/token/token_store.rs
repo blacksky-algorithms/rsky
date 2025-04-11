@@ -6,6 +6,8 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::token::refresh_token::RefreshToken;
 use crate::oauth_provider::token::token_data::TokenData;
 use crate::oauth_provider::token::token_id::TokenId;
+use std::future::Future;
+use std::pin::Pin;
 
 pub struct TokenInfo {
     pub id: TokenId,
@@ -27,17 +29,22 @@ pub trait TokenStore: Send + Sync {
         token_id: TokenId,
         data: TokenData,
         refresh_token: Option<RefreshToken>,
-    ) -> Result<(), OAuthError>;
-    fn read_token(&self, token_id: TokenId) -> Result<Option<TokenInfo>, OAuthError>;
-    fn delete_token(&mut self, token_id: TokenId) -> Result<(), OAuthError>;
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
+    fn read_token(
+        &self,
+        token_id: TokenId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>;
+    fn delete_token(
+        &mut self,
+        token_id: TokenId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
     fn rotate_token(
         &mut self,
         token_id: TokenId,
         new_token_id: TokenId,
         new_refresh_token: RefreshToken,
         new_data: NewTokenData,
-    ) -> Result<(), OAuthError>;
-
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
     /**
      * Find a token by its refresh token. Note that previous refresh tokens
      * should also return the token. The data model is responsible for storing
@@ -46,7 +53,9 @@ pub trait TokenStore: Send + Sync {
     fn find_token_by_refresh_token(
         &self,
         refresh_token: RefreshToken,
-    ) -> Result<Option<TokenInfo>, OAuthError>;
-
-    fn find_token_by_code(&self, code: Code) -> Result<Option<TokenInfo>, OAuthError>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>;
+    fn find_token_by_code(
+        &self,
+        code: Code,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>;
 }

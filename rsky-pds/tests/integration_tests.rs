@@ -131,3 +131,24 @@ async fn test_create_session() {
     let response_status = response.status();
     assert_eq!(response_status, Status::BadRequest);
 }
+
+#[tokio::test]
+async fn test_oauth_wellknown() {
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(&postgres).await;
+    let response = client
+        .get("/.well-known/oauth-authorization-server")
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
+}
+
+#[tokio::test]
+async fn test_oauth_jwks() {
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(&postgres).await;
+    let response = client.get("/oauth/jwks").dispatch().await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
+}

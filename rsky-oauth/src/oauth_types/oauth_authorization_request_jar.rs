@@ -31,7 +31,7 @@ impl Serialize for Jwt {
 // Custom visitor for deserialization
 struct JwtVisitor;
 
-impl<'de> Visitor<'de> for JwtVisitor {
+impl Visitor<'_> for JwtVisitor {
     type Value = Jwt;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

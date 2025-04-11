@@ -7,12 +7,11 @@ use crate::account_manager::helpers::auth::{
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::token::{find_by_qb, FindByQbOpts};
-use crate::account_manager::helpers::{authorization_request, device_account, repo, request};
+use crate::account_manager::helpers::{authorization_request, device_account, repo};
 use crate::account_manager::helpers::{token, used_refresh_token};
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
-use crate::models::models::EmailTokenPurpose;
-use crate::schema::pds::token::current_refresh_token;
+use crate::models::models::{AuthorizationRequest, EmailTokenPurpose};
 use anyhow::Result;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
@@ -51,6 +50,8 @@ use rsky_oauth::oauth_types::{OAuthClientId, OAuthClientMetadata};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -559,8 +560,8 @@ impl AccountStore for AccountManager {
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
-    ) -> std::result::Result<Option<AccountInfo>, OAuthError> {
-        todo!()
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync>> {
+        Box::pin(async move { unimplemented!() })
     }
 
     fn add_authorized_client(
@@ -568,108 +569,177 @@ impl AccountStore for AccountManager {
         device_id: DeviceId,
         sub: Sub,
         client_id: OAuthClientId,
-    ) -> std::result::Result<(), OAuthError> {
-        todo!()
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync>> {
+        Box::pin(async move { unimplemented!() })
     }
 
     fn get_device_account(
         &self,
-        device_id: &DeviceId,
+        device_id: DeviceId,
         sub: Sub,
-    ) -> std::result::Result<Option<AccountInfo>, OAuthError> {
-        todo!()
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync>> {
+        Box::pin(async move {
+            unimplemented!()
+            // match device_account::get_account_info(device_id, sub, self.db.as_ref()).await {
+            //     Ok(_) => Ok(()),
+            //     Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            // }
+        })
     }
 
     fn remove_device_account(
         &self,
         device_id: DeviceId,
         sub: Sub,
-    ) -> std::result::Result<(), OAuthError> {
-        match device_account::remove_qb(self.db.as_ref(), device_id, sub) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match device_account::remove_qb(device_id, sub, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn list_device_accounts(
         &self,
-        device_id: &DeviceId,
-    ) -> std::result::Result<Vec<AccountInfo>, OAuthError> {
-        todo!()
+        device_id: DeviceId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync>> {
+        let device_id = device_id.clone();
+        Box::pin(async move { unimplemented!() })
     }
 }
 
 impl RequestStore for AccountManager {
-    fn create_request(&mut self, id: RequestId, data: RequestData) -> Result<(), OAuthError> {
-        authorization_request::create_qb(id, data, self.db.as_ref()).unwrap();
+    fn create_request(
+        &mut self,
+        id: RequestId,
+        data: RequestData,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match authorization_request::create_qb(id, data, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => return Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn read_request(
         &self,
         id: &RequestId,
-    ) -> std::result::Result<Option<&RequestData>, OAuthError> {
-        unimplemented!()
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RequestData>, OAuthError>> + Send + Sync + '_>>
+    {
+        let id = id.clone();
+        Box::pin(async move {
+            match authorization_request::read_qb(id, self.db.as_ref()).await {
+                Ok(result) => match result {
+                    None => Ok(None),
+                    Some(result) => Ok(Some(authorization_request::row_to_request_data(result))),
+                },
+                Err(error) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
-    fn update_request(&self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError> {
-        match authorization_request::update_qb(self.db.as_ref(), id, data) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn update_request(
+        &mut self,
+        id: RequestId,
+        data: UpdateRequestData,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match authorization_request::update_qb(id, data, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
-    fn delete_request(&mut self, id: RequestId) -> std::result::Result<(), OAuthError> {
-        match authorization_request::remove_by_id_qb(self.db.as_ref(), id) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn delete_request(
+        &mut self,
+        id: RequestId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match authorization_request::remove_by_id_qb(id, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn find_request_by_code(
         &self,
         code: Code,
-    ) -> std::result::Result<Option<FoundRequestResult>, OAuthError> {
-        let row = authorization_request::find_by_code_qb(self.db.as_ref(), code)?;
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(authorization_request::row_to_found_request_result(
-                row,
-            ))),
-        }
+    ) -> Pin<Box<dyn Future<Output = Option<FoundRequestResult>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            let result = authorization_request::find_by_code_qb(self.db.as_ref(), code)
+                .await
+                .unwrap_or_else(|error| None);
+            match result {
+                None => None,
+                Some(result) => Some(authorization_request::row_to_found_request_result(result)),
+            }
+        })
     }
 }
 
 impl DeviceStore for AccountManager {
-    fn create_device(&mut self, device_id: DeviceId, data: DeviceData) -> Result<(), OAuthError> {
-        match device::create_device(device_id, data, self.db.as_ref()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn create_device(
+        &mut self,
+        device_id: DeviceId,
+        data: DeviceData,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match device::create_device(device_id, data, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError(
+                    "Failed to create device".to_string(),
+                )),
+            }
+        })
     }
 
     fn read_device(
         &self,
         device_id: DeviceId,
-    ) -> std::result::Result<Option<DeviceData>, OAuthError> {
-        match device::read_device(device_id, self.db.as_ref()) {
-            Ok(data) => Ok(data),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Option<DeviceData>, OAuthError>>
+                + Send
+                + Sync
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            match device::read_device(device_id, self.db.as_ref()).await {
+                Ok(data) => Ok(data),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
-    fn update_device(&mut self, device_id: DeviceId, data: DeviceData) -> Result<(), OAuthError> {
-        match device::update_device(device_id, self.db.as_ref()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn update_device(
+        &mut self,
+        device_id: DeviceId,
+        data: DeviceData,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), OAuthError>> + Send + Sync + '_>> {
+        //TODO
+        Box::pin(async move {
+            match device::update_device(device_id, data, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
-    fn delete_device(&mut self, device_id: DeviceId) -> Result<(), OAuthError> {
-        // Will cascade to device_account (device_account_device_id_fk)
-        match device::delete_device(device_id, self.db.as_ref()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn delete_device(
+        &mut self,
+        device_id: DeviceId,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match device::delete_device(device_id, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 }
 
@@ -679,46 +749,63 @@ impl TokenStore for AccountManager {
         token_id: TokenId,
         data: TokenData,
         refresh_token: Option<RefreshToken>,
-    ) -> std::result::Result<(), OAuthError> {
-        match refresh_token {
-            None => {
-                token::create_qb(self.db.as_ref(), token_id, data, refresh_token)?;
-                Ok(())
-            }
-            Some(refresh_token) => {
-                let count = used_refresh_token::count_qb(refresh_token.clone(), self.db.as_ref())?;
-                if count > 0 {
-                    return Err(OAuthError::RuntimeError(
-                        "Refresh token already in use".to_string(),
-                    ));
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match refresh_token {
+                None => {
+                    token::create_qb(self.db.as_ref(), token_id, data, refresh_token).unwrap();
+                    Ok(())
                 }
+                Some(refresh_token) => {
+                    let count =
+                        used_refresh_token::count_qb(refresh_token.clone(), self.db.as_ref())
+                            .await
+                            .unwrap();
+                    if count > 0 {
+                        return Err(OAuthError::RuntimeError(
+                            "Refresh token already in use".to_string(),
+                        ));
+                    }
 
-                token::create_qb(self.db.as_ref(), token_id, data, Some(refresh_token))?;
-                Ok(())
+                    token::create_qb(self.db.as_ref(), token_id, data, Some(refresh_token))
+                        .unwrap();
+                    Ok(())
+                }
             }
-        }
+        })
     }
 
-    fn read_token(&self, token_id: TokenId) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        let opts = FindByQbOpts {
-            id: None,
-            code: None,
-            token_id: Some(token_id.val()),
-            current_refresh_token: None,
-        };
-        let row = token::find_by_qb(self.db.as_ref(), opts)?;
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(row)),
-        }
+    fn read_token(
+        &self,
+        token_id: TokenId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        Box::pin(async move {
+            let opts = FindByQbOpts {
+                id: None,
+                code: None,
+                token_id: Some(token_id.val()),
+                current_refresh_token: None,
+            };
+            let row = token::find_by_qb(self.db.as_ref(), opts).await.unwrap();
+            match row {
+                None => Ok(None),
+                Some(row) => Ok(Some(row)),
+            }
+        })
     }
 
-    fn delete_token(&mut self, token_id: TokenId) -> std::result::Result<(), OAuthError> {
-        // Will cascade to used_refresh_token (used_refresh_token_fk)
-        match token::remove_qb(self.db.as_ref(), token_id) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        }
+    fn delete_token(
+        &mut self,
+        token_id: TokenId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            // Will cascade to used_refresh_token (used_refresh_token_fk)
+            match token::remove_qb(self.db.as_ref(), token_id) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn rotate_token(
@@ -727,49 +814,61 @@ impl TokenStore for AccountManager {
         new_token_id: TokenId,
         new_refresh_token: RefreshToken,
         new_data: NewTokenData,
-    ) -> std::result::Result<(), OAuthError> {
-        todo!()
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move { todo!() })
     }
 
     fn find_token_by_refresh_token(
         &self,
         refresh_token: RefreshToken,
-    ) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        let used = used_refresh_token::find_by_token_qb(refresh_token.clone(), self.db.as_ref())?;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        Box::pin(async move {
+            let used =
+                used_refresh_token::find_by_token_qb(refresh_token.clone(), self.db.as_ref())
+                    .await
+                    .unwrap();
 
-        let search = match used {
-            None => FindByQbOpts {
-                id: None,
-                code: None,
-                token_id: None,
-                current_refresh_token: Some(refresh_token.val()),
-            },
-            Some(used) => FindByQbOpts {
-                id: Some(used.val()),
-                code: None,
-                token_id: None,
-                current_refresh_token: None,
-            },
-        };
+            let search = match used {
+                None => FindByQbOpts {
+                    id: None,
+                    code: None,
+                    token_id: None,
+                    current_refresh_token: Some(refresh_token.val()),
+                },
+                Some(used) => FindByQbOpts {
+                    id: Some(used.val()),
+                    code: None,
+                    token_id: None,
+                    current_refresh_token: None,
+                },
+            };
 
-        let row = token::find_by_qb(self.db.as_ref(), search)?;
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(row)),
-        }
+            let row = token::find_by_qb(self.db.as_ref(), search).await.unwrap();
+            match row {
+                None => Ok(None),
+                Some(row) => Ok(Some(row)),
+            }
+        })
     }
 
-    fn find_token_by_code(&self, code: Code) -> std::result::Result<Option<TokenInfo>, OAuthError> {
-        let opts = FindByQbOpts {
-            id: None,
-            code: Some(code.val()),
-            token_id: None,
-            current_refresh_token: None,
-        };
-        match find_by_qb(self.db.as_ref(), opts) {
-            Ok(token_info) => Ok(token_info),
-            Err(error) => Err(OAuthError::RuntimeError("DB Exception".to_string())),
-        }
+    fn find_token_by_code(
+        &self,
+        code: Code,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        Box::pin(async move {
+            let opts = FindByQbOpts {
+                id: None,
+                code: Some(code.val()),
+                token_id: None,
+                current_refresh_token: None,
+            };
+            match find_by_qb(self.db.as_ref(), opts).await {
+                Ok(token_info) => Ok(token_info),
+                Err(error) => Err(OAuthError::RuntimeError("DB Exception".to_string())),
+            }
+        })
     }
 }
 

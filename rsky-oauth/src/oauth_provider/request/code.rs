@@ -1,10 +1,10 @@
 use crate::oauth_provider::constants::{CODE_BYTES_LENGTH, CODE_PREFIX};
-use rand::distr::{Alphanumeric, SampleString};
+use rand::distr::SampleString;
 use serde::{Deserialize, Serialize};
 
 const CODE_LENGTH: usize = CODE_PREFIX.len() + CODE_BYTES_LENGTH * 2; //hex encoding
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Eq, Clone, PartialEq)]
 pub struct Code(String);
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl Code {
         use rand::distr::Alphanumeric;
 
         let string = Alphanumeric.sample_string(&mut rand::rng(), CODE_LENGTH);
-        let code = Code::new(string).unwrap();
-        code
+
+        Code::new(string).unwrap()
     }
 }

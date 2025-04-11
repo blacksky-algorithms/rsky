@@ -1,2 +1,2 @@
-mod jose_key;
-mod util;
+pub mod jose_key;
+pub mod util;

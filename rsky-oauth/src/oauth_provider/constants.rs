@@ -18,7 +18,7 @@ pub const REQUEST_ID_BYTES_LENGTH: usize = 16; // 128 bits
 pub const CODE_PREFIX: &str = "cod-";
 pub const CODE_BYTES_LENGTH: usize = 32;
 
-pub const SECOND: u64 = 1;
+pub const SECOND: u64 = 1000;
 pub const MINUTE: u64 = 60 * SECOND;
 pub const HOUR: u64 = 60 * MINUTE;
 pub const DAY: u64 = 24 * HOUR;

@@ -1,6 +1,11 @@
+use rocket::http::Status;
+use rocket::response::Responder;
+use rocket::{response, Request, Response};
 use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::oauth_provider::OAuthProviderCreator;
 use rsky_oauth::oauth_provider::replay::replay_store::ReplayStore;
+use rsky_oauth::oauth_types::OAuthParResponse;
+use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -28,4 +33,55 @@ impl SharedOAuthProvider {
 
 pub struct SharedReplayStore {
     pub replay_store: Arc<RwLock<dyn ReplayStore>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OAuthResponse<T: serde::Serialize> {
+    pub body: T,
+    pub status: Status,
+}
+
+impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let mut response = Response::build();
+
+        response.raw_header("Access-Control-Allow-Origin", "*");
+        response.raw_header("Access-Control-Allow-Headers", "*");
+
+        // https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1
+        response.raw_header("Cache-Control", "no-store");
+        response.raw_header("Pragma", "no-cache");
+
+        // https://datatracker.ietf.org/doc/html/rfc9449#section-8.2
+        //TODO DPOP
+        response.raw_header("DPoP-Nonce", "TODO");
+        response.raw_header_adjoin("Access-Control-Expose-Headers", "DPoP-Nonce");
+
+        match request.headers().get_one("accept") {
+            None => {
+                let mut response = Response::build();
+                response.status(Status { code: 406u16 });
+                return response.ok();
+            }
+            Some(accept_header) => {
+                if accept_header != "application/json" {
+                    let mut response = Response::build();
+                    response.status(Status { code: 406u16 });
+                    return response.ok();
+                }
+            }
+        }
+
+        let y = match serde_json::to_string(&self.body) {
+            Ok(y) => y,
+            Err(e) => {
+                let mut response = Response::build();
+                response.status(Status { code: 500u16 });
+                return response.ok();
+            }
+        };
+        response.sized_body(y.len(), Cursor::new(y));
+        response.status(self.status);
+        response.ok()
+    }
 }

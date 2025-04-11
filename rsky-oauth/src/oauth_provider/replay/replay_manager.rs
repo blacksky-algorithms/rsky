@@ -2,6 +2,7 @@ use crate::oauth_provider::constants::{
     CLIENT_ASSERTION_MAX_AGE, CODE_CHALLENGE_REPLAY_TIMEFRAME, DPOP_NONCE_MAX_AGE, JAR_MAX_AGE,
 };
 use crate::oauth_provider::replay::replay_store::ReplayStore;
+use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::OAuthClientId;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -42,7 +43,7 @@ impl ReplayManager {
         )
     }
 
-    pub async fn unique_dpop(&mut self, jti: String, client_id: Option<String>) -> bool {
+    pub async fn unique_dpop(&mut self, jti: TokenId, client_id: Option<String>) -> bool {
         let namespace = match client_id {
             Some(res) => {
                 format!("DPoP@{res}")
@@ -51,7 +52,7 @@ impl ReplayManager {
         };
         self.replay_store.blocking_write().unique(
             namespace.as_str(),
-            jti.as_str(),
+            jti.val().as_str(),
             as_time_frame(DPOP_NONCE_MAX_AGE as f64),
         )
     }

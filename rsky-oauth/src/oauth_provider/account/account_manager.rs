@@ -20,7 +20,7 @@ impl AccountManager {
         Self { store }
     }
 
-    pub fn sign_in(
+    pub async fn sign_in(
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
@@ -29,24 +29,40 @@ impl AccountManager {
             .store
             .blocking_read()
             .authenticate_account(credentials, device_id)
+            .await
         {
-            None => Err(OAuthError::InvalidRequestError(
+            Ok(result) => match result {
+                None => Err(OAuthError::InvalidRequestError(
+                    "Invalid credentials".to_string(),
+                )),
+                Some(account_info) => Ok(account_info),
+            },
+            Err(_) => Err(OAuthError::InvalidRequestError(
                 "Invalid credentials".to_string(),
             )),
-            Some(account_info) => Ok(account_info),
         }
     }
 
-    pub fn get(&self, device_id: &DeviceId, sub: Sub) -> Result<AccountInfo, OAuthError> {
+    pub async fn get(&self, device_id: &DeviceId, sub: Sub) -> Result<AccountInfo, OAuthError> {
         match self
             .store
             .blocking_read()
-            .get_device_account(device_id, sub)
+            .get_device_account(device_id.clone(), sub)
+            .await
         {
-            None => Err(OAuthError::InvalidRequestError(
-                "Account not found".to_string(),
-            )),
-            Some(account_info) => Ok(account_info),
+            Ok(result) => match result {
+                None => {
+                    return Err(OAuthError::InvalidRequestError(
+                        "Account not found".to_string(),
+                    ))
+                }
+                Some(account_info) => Ok(account_info),
+            },
+            Err(_) => {
+                return Err(OAuthError::InvalidRequestError(
+                    "Account not found".to_string(),
+                ))
+            }
         }
     }
 
@@ -65,8 +81,13 @@ impl AccountManager {
         }
     }
 
-    pub fn list(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
-        let results = self.store.blocking_read().list_device_accounts(device_id);
+    pub async fn list(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
+        let results = self
+            .store
+            .blocking_read()
+            .list_device_accounts(device_id.clone())
+            .await
+            .unwrap();
         let mut x = Vec::new();
         for res in results {
             if res.info.remembered {

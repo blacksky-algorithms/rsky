@@ -1,11 +1,9 @@
-use crate::oauth_provider::device;
 use crate::oauth_provider::device::device_data::DeviceData;
 use crate::oauth_provider::device::device_details::{extract_device_details, DeviceDetails};
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::device::device_store::DeviceStore;
 use crate::oauth_provider::device::session_id::{generate_session_id, SessionId};
 use crate::oauth_provider::errors::OAuthError;
-use rocket::http::Cookie;
 use rocket::yansi::Paint;
 use rocket::{Request, Response};
 use std::sync::Arc;
@@ -164,7 +162,8 @@ impl DeviceManager {
                 last_seen_at: 0,
             },
         };
-        self.store
+        let _ = self
+            .store
             .blocking_write()
             .update_device(device_id.clone(), data);
         self.set_cookie(req, res, device_id, session_id)
@@ -175,7 +174,12 @@ impl DeviceManager {
     }
 
     async fn refresh(&self, req: Request<'_>, device_id: DeviceId, session_id: SessionId) {
-        let data = self.store.blocking_read().read_device(device_id);
+        let data = self
+            .store
+            .blocking_read()
+            .read_device(device_id)
+            .await
+            .unwrap();
         if data.is_none() {
             return self.create(&req).await;
         }
@@ -210,7 +214,7 @@ impl DeviceManager {
         if device.is_none() || session.is_none() {
             // If the device cookie is valid, let's cleanup the DB
             if let Some(device) = device {
-                self.store.blocking_write().delete_device(device.0)
+                self.store.blocking_write().delete_device(device.0).await?
             }
         }
 

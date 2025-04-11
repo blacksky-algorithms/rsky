@@ -16,7 +16,7 @@ pub struct VerifyOptions {
     pub required_claims: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Eq, PartialEq, Deserialize, Debug)]
 pub struct VerifyResult {
     pub payload: JwtPayload,
     pub protected_header: Header,

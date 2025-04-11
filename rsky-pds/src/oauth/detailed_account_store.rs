@@ -1,13 +1,16 @@
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
-use crate::lexicon::lexicons::ProfileViewBasic;
-use crate::read_after_write::viewer::LocalViewerCreator;
+use crate::read_after_write::viewer::{LocalViewer, LocalViewerCreator};
+use rsky_lexicon::app::bsky::actor::ProfileViewBasic;
 use rsky_oauth::oauth_provider::account::account_store::{
     AccountInfo, AccountStore, SignInCredentials,
 };
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
+use rsky_oauth::oauth_provider::errors::OAuthError;
 use rsky_oauth::oauth_provider::oidc::sub::Sub;
 use rsky_oauth::oauth_types::OAuthClientId;
+use std::future::Future;
+use std::pin::Pin;
 
 /**
  * Although the {@link AccountManager} class implements the {@link AccountStore}
@@ -53,20 +56,22 @@ impl DetailedAccountStore {
         }
     }
 
-    fn get_profile(&self, did: &str) -> Option<ProfileViewBasic> {
+    async fn get_profile(&self, did: &str) -> Option<ProfileViewBasic> {
         unimplemented!()
+        //local_viewer.get_profile_basic().await.unwrap()
     }
 
-    fn enrich_account_info(&self, account_info: AccountInfo) -> AccountInfo {
+    async fn enrich_account_info(&self, account_info: AccountInfo) -> AccountInfo {
         let mut enriched_account_info = account_info.clone();
         if account_info.account.picture.is_none() || account_info.account.name.is_none() {
-            let profile = self.get_profile(account_info.account.sub.get().as_str());
+            let profile = self
+                .get_profile(account_info.account.sub.get().as_str())
+                .await;
             match profile {
                 None => {}
                 Some(profile) => {
-                    unimplemented!()
-                    // enriched_account_info.account.picture = Some(profile.properties.avatar.format);
-                    // enriched_account_info.account.name = Some(profile.properties.display_name.)
+                    enriched_account_info.account.picture = profile.avatar;
+                    enriched_account_info.account.name = profile.display_name;
                 }
             }
         }
@@ -79,40 +84,78 @@ impl AccountStore for DetailedAccountStore {
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
-    ) -> Option<AccountInfo> {
-        let account_info = self
-            .account_manager
-            .authenticate_account(credentials, device_id);
-        match account_info {
-            None => None,
-            Some(account_info) => Some(self.enrich_account_info(account_info)),
-        }
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        Box::pin(async move {
+            let result = self
+                .account_manager
+                .authenticate_account(credentials, device_id)
+                .await?;
+            match result {
+                None => Ok(None),
+                Some(account_info) => Ok(Some(self.enrich_account_info(account_info).await)),
+            }
+        })
     }
 
-    fn add_authorized_client(&self, device_id: DeviceId, sub: Sub, client_id: OAuthClientId) {
-        self.account_manager
-            .add_authorized_client(device_id, sub, client_id)
+    fn add_authorized_client(
+        &self,
+        device_id: DeviceId,
+        sub: Sub,
+        client_id: OAuthClientId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            self.account_manager
+                .add_authorized_client(device_id, sub, client_id)
+                .await
+        })
     }
 
-    fn get_device_account(&self, device_id: &DeviceId, sub: Sub) -> Option<AccountInfo> {
-        let account_info = self.account_manager.get_device_account(device_id, sub);
-        match account_info {
-            None => None,
-            Some(account_info) => Some(self.enrich_account_info(account_info)),
-        }
+    fn get_device_account(
+        &self,
+        device_id: DeviceId,
+        sub: Sub,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        let device_id = device_id.clone();
+        Box::pin(async move {
+            let result = self
+                .account_manager
+                .get_device_account(device_id, sub)
+                .await?;
+            match result {
+                None => Ok(None),
+                Some(account_info) => Ok(Some(self.enrich_account_info(account_info).await)),
+            }
+        })
     }
 
-    fn remove_device_account(&self, device_id: DeviceId, sub: Sub) {
-        self.account_manager.remove_device_account(device_id, sub)
+    fn remove_device_account(
+        &self,
+        device_id: DeviceId,
+        sub: Sub,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            self.account_manager
+                .remove_device_account(device_id, sub)
+                .await
+        })
     }
 
-    fn list_device_accounts(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
-        let account_infos = self.account_manager.list_device_accounts(device_id);
-        let mut enriched_account_infos = vec![];
-        for account_info in account_infos {
-            let enriched_account_info = self.enrich_account_info(account_info);
-            enriched_account_infos.push(enriched_account_info);
-        }
-        enriched_account_infos
+    fn list_device_accounts(
+        &self,
+        device_id: DeviceId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        let device_id = device_id.clone();
+        Box::pin(async move {
+            let account_infos = self.account_manager.list_device_accounts(device_id).await?;
+            let mut enriched_account_infos = vec![];
+            for account_info in account_infos {
+                let enriched_account_info = self.enrich_account_info(account_info).await;
+                enriched_account_infos.push(enriched_account_info);
+            }
+            Ok(enriched_account_infos)
+        })
     }
 }

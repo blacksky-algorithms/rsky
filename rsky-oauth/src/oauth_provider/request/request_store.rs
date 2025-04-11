@@ -6,6 +6,8 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::RequestData;
 use crate::oauth_provider::request::request_id::RequestId;
 use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthClientId};
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Default, Clone)]
 pub struct UpdateRequestData {
@@ -24,13 +26,30 @@ pub struct FoundRequestResult {
 }
 
 pub trait RequestStore: Send + Sync {
-    fn create_request(&mut self, id: RequestId, data: RequestData);
+    fn create_request(
+        &mut self,
+        id: RequestId,
+        data: RequestData,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
     /**
      * Note that expired requests **can** be returned to yield a different error
      * message than if the request was not found.
      */
-    fn read_request(&self, id: &RequestId) -> Option<&RequestData>;
-    fn update_request(&mut self, id: RequestId, data: UpdateRequestData) -> Result<(), OAuthError>;
-    fn delete_request(&mut self, id: RequestId);
-    fn find_request_by_code(&self, code: Code) -> Option<FoundRequestResult>;
+    fn read_request(
+        &self,
+        id: &RequestId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RequestData>, OAuthError>> + Send + Sync + '_>>;
+    fn update_request(
+        &mut self,
+        id: RequestId,
+        data: UpdateRequestData,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
+    fn delete_request(
+        &mut self,
+        id: RequestId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>>;
+    fn find_request_by_code(
+        &self,
+        code: Code,
+    ) -> Pin<Box<dyn Future<Output = Option<FoundRequestResult>> + Send + Sync + '_>>;
 }

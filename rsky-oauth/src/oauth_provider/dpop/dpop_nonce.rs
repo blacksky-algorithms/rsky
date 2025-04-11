@@ -1,8 +1,10 @@
 use crate::oauth_provider::constants::DPOP_NONCE_MAX_AGE;
+use crate::oauth_provider::lib::current_epoch;
 use hex::ToHex;
 use rand::Rng;
 use ring::digest;
 use ring::digest::digest;
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 #[derive(Clone)]
@@ -23,30 +25,31 @@ pub enum DpopNonceInput {
 }
 
 impl DpopNonce {
-    pub fn new(secret: Vec<u8>, step: u64) -> Self {
+    pub fn new(secret: Vec<u8>, step: u64) -> Result<Self, DpopNonceError> {
         if secret.len() != 32 {
-            panic!("Expected 32 bytes")
+            return Err(DpopNonceError::InvalidRequestParams(
+                "Expected 32 bytes".to_string(),
+            ));
         }
         if step > DPOP_NONCE_MAX_AGE / 3 {
-            panic!("Invalid step")
+            return Err(DpopNonceError::InvalidRequestParams(
+                "Invalid step".to_string(),
+            ));
         }
 
-        let current_time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("timestamp in millis since UNIX epoch")
-            .as_millis() as u64;
+        let current_time = current_epoch();
         let counter = current_time / step;
         let prev = compute(counter - 1);
         let now = compute(counter);
         let next = compute(counter + 1);
-        DpopNonce {
+        Ok(DpopNonce {
             secret,
             counter,
             prev,
             now,
             next,
             step,
-        }
+        })
     }
 
     pub fn next(&mut self) -> String {
@@ -81,11 +84,14 @@ impl DpopNonce {
         self.counter = counter;
     }
 
-    pub fn check(&self, nonce: String) -> bool {
+    pub fn check(&self, nonce: &str) -> bool {
         self.next == nonce || self.now == nonce || self.prev == nonce
     }
 
-    pub fn from(input: Option<DpopNonceInput>, _step: Option<u64>) -> DpopNonce {
+    pub fn from(
+        input: Option<DpopNonceInput>,
+        _step: Option<u64>,
+    ) -> Result<DpopNonce, DpopNonceError> {
         let step = _step.unwrap_or(DPOP_NONCE_MAX_AGE / 3);
         match input {
             None => {
@@ -99,7 +105,7 @@ impl DpopNonce {
                     DpopNonce::new(secret, step)
                 }
                 DpopNonceInput::Uint8Array(secret) => DpopNonce::new(secret, step),
-                DpopNonceInput::DpopNonce(res) => res,
+                DpopNonceInput::DpopNonce(res) => Ok(res),
             },
         }
     }
@@ -121,3 +127,47 @@ fn num_to_64_bits(num: u64) -> [u8; 8] {
     let b8: u8 = (num & 0xff) as u8;
     [b1, b2, b3, b4, b5, b6, b7, b8]
 }
+
+/// Errors that can occur when creating a DpopNonce
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DpopNonceError {
+    InvalidRequestParams(String),
+}
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::oauth_types::OAuthAccessToken;
+//
+//     #[test]
+//     fn test_new_dpop_nonce() {
+//         let dpop_nonce = DpopNonce::new("valid_token").unwrap();
+//         assert_eq!(token.as_ref(), "valid_token");
+//     }
+//
+//     #[test]
+//     fn test_new_empty_token() {
+//         assert!(matches!(
+//             OAuthAccessToken::new(""),
+//             Err(AccessTokenError::Empty)
+//         ));
+//     }
+//
+//     #[test]
+//     fn test_display() {
+//         let token = OAuthAccessToken::new("test_token").unwrap();
+//         assert_eq!(token.to_string(), "test_token");
+//     }
+//
+//     #[test]
+//     fn test_into_inner() {
+//         let token = OAuthAccessToken::new("test_token").unwrap();
+//         assert_eq!(token.into_inner(), "test_token");
+//     }
+//
+//     #[test]
+//     fn test_as_ref() {
+//         let token = OAuthAccessToken::new("test_token").unwrap();
+//         assert_eq!(token.as_ref(), "test_token");
+//     }
+// }

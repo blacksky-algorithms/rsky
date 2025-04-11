@@ -1,7 +1,8 @@
 use crate::jwk::Audience;
 use crate::oauth_provider::oidc::sub::Sub;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     ///Account ID
     pub sub: Sub,

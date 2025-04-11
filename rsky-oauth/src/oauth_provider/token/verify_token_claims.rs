@@ -73,7 +73,7 @@ pub fn verify_token_claims(
         }
     }
 
-    if claims.exp.unwrap() * 1000 <= date_reference as u64 {
+    if claims.exp.unwrap() * 1000 <= date_reference {
         return Err(OAuthError::InvalidTokenError(
             token_type,
             "Token expired".to_string(),

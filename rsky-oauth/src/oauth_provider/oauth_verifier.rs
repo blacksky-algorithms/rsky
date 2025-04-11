@@ -46,7 +46,7 @@ pub struct OAuthVerifierOptions {
      * protection will use memory storage.
      */
     pub redis: Option<String>,
-    pub replay_store: Arc<RwLock<dyn ReplayStore>>,
+    pub replay_store: Option<Arc<RwLock<dyn ReplayStore>>>,
 }
 
 pub struct OAuthVerifier {
@@ -61,17 +61,20 @@ pub struct OAuthVerifier {
 
 impl OAuthVerifier {
     pub fn new(opts: OAuthVerifierOptions) -> Self {
-        let replay_store = match opts.redis {
-            None => Arc::new(RwLock::new(ReplayStoreMemory::new())),
-            Some(redis) => {
-                unimplemented!()
-            }
+        let replay_store = match opts.replay_store {
+            None => match opts.redis {
+                None => Arc::new(RwLock::new(ReplayStoreMemory::new())),
+                Some(redis) => {
+                    unimplemented!()
+                }
+            },
+            Some(replay_store) => replay_store,
         };
         OAuthVerifier {
             issuer: opts.issuer.clone(),
             keyset: opts.keyset.clone(),
             access_token_type: AccessTokenType::JWT,
-            dpop_manager: DpopManager::new(None),
+            dpop_manager: DpopManager::new(None).unwrap(),
             replay_manager: ReplayManager::new(replay_store),
             signer: Arc::new(RwLock::new(Signer::new(
                 opts.issuer.clone(),
@@ -81,7 +84,7 @@ impl OAuthVerifier {
         }
     }
 
-    pub fn next_dpop_nonce(&self) {
+    pub fn next_dpop_nonce(self) {
         self.dpop_manager.next_nonce();
     }
 
@@ -181,13 +184,6 @@ impl OAuthVerifier {
                 Some(token.clone()),
             )
             .await?;
-
-        // TODO Should never occur
-        // if token_type.as_ref() == "DPoP" && dpop_jkt.is_none() {
-        //     return Err(OAuthError::InvalidDpopProofError(
-        //         "DPoP proof required".to_string(),
-        //     ));
-        // }
 
         self.authenticate_token(token_type, token, Some(dpop_jkt), verify_options)
             .await

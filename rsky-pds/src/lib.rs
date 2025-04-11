@@ -91,7 +91,6 @@ use rocket::{Request, Response};
 use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
-use rsky_oauth::oauth_provider::oauth_provider::OAuthProvider;
 use rsky_oauth::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::env;
@@ -287,10 +286,14 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     //Setup OAuth Provider
     let oauth_provider = build_oauth_provider(AuthProviderOptions {
         issuer: OAuthIssuerIdentifier::new(
-            env::var("OAuthIssuerIdentifier").unwrap_or("https://todo.com".to_owned()),
+            env::var("OAuthIssuerIdentifier").unwrap_or("https://pds.ripperoni.com".to_owned()),
         )
         .unwrap(),
-    });
+        dpop_secret: None,
+        customization: None,
+        redis: None,
+    })
+    .await;
 
     //Setup Account Manager
     let account_manager = SharedAccountManager {

@@ -1,9 +1,8 @@
 //! OAuth Client ID type.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-
-use serde::{Deserialize, Serialize};
 
 /// A validated OAuth client ID.
 ///
@@ -31,6 +30,11 @@ impl OAuthClientId {
 
     pub fn val(&self) -> String {
         self.0.clone()
+    }
+
+    /// Get the underlying client ID string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 }
 

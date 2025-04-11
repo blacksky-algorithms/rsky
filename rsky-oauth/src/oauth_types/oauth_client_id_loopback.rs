@@ -271,8 +271,12 @@ mod tests {
 
     #[test]
     fn test_helper_functions() {
-        assert!(is_oauth_client_id_loopback("http://localhost"));
-        assert!(!is_oauth_client_id_loopback("https://example.com"));
+        assert!(is_oauth_client_id_loopback(
+            &OAuthClientId::new("http://localhost").unwrap()
+        ));
+        assert!(!is_oauth_client_id_loopback(
+            &OAuthClientId::new("https://example.com").unwrap()
+        ));
 
         assert!(assert_oauth_loopback_client_id("http://localhost").is_ok());
         assert!(assert_oauth_loopback_client_id("invalid").is_err());

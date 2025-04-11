@@ -46,11 +46,11 @@ pub mod pds {
         pds.authorization_request (id) {
             id -> Varchar,
             did -> Nullable<Varchar>,
-            device_id -> Nullable<Varchar>,
-            client_id -> Varchar,
-            cleint_auth -> Varchar,
+            deviceId -> Nullable<Varchar>,
+            clientId -> Varchar,
+            clientAuth -> Varchar,
             parameters -> Varchar,
-            expires_at -> Varchar,
+            expiresAt -> Int8,
             code -> Nullable<Varchar>,
         }
     }
@@ -80,20 +80,20 @@ pub mod pds {
     diesel::table! {
         pds.device (id) {
             id -> Varchar,
-            session_id -> Nullable<Varchar>,
-            user_agent -> Nullable<Varchar>,
-            ip_address -> Varchar,
-            last_seen_at -> Varchar,
+            sessionId -> Nullable<Varchar>,
+            userAgent -> Nullable<Varchar>,
+            ipAddress -> Varchar,
+            lastSeenAt -> Varchar,
         }
     }
 
     diesel::table! {
-        pds.device_account (device_id, did) {
+        pds.device_account (deviceId, did) {
             did -> Varchar,
-            device_id -> Varchar,
-            authenticated_at -> Varchar,
+            deviceId -> Varchar,
+            authenticatedAt -> Varchar,
             remember -> Bool,
-            authorized_clients -> Varchar,
+            authorizedClients -> Varchar,
         }
     }
 
@@ -198,24 +198,24 @@ pub mod pds {
         pds.token (id) {
             id -> Varchar,
             did -> Varchar,
-            token_id -> Varchar,
-            created_at -> Bool,
-            updated_at -> Varchar,
-            expires_at -> Varchar,
-            client_id -> Varchar,
-            client_auth -> Varchar,
-            device_id -> Nullable<Varchar>,
+            tokenId -> Varchar,
+            createdAt -> Bool,
+            updatedAt -> Varchar,
+            expiresAt -> Int8,
+            clientId -> Varchar,
+            clientAuth -> Varchar,
+            deviceId -> Nullable<Varchar>,
             parameters -> Varchar,
             details -> Nullable<Varchar>,
             code -> Nullable<Varchar>,
-            current_refresh_token -> Nullable<Varchar>,
+            currentRefreshToken -> Nullable<Varchar>,
         }
     }
 
     diesel::table! {
-        pds.used_refresh_token (refresh_token) {
-            refresh_token -> Varchar,
-            token_id -> Varchar,
+        pds.used_refresh_token (refreshToken) {
+            refreshToken -> Varchar,
+            tokenId -> Varchar,
         }
     }
 

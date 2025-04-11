@@ -262,7 +262,7 @@ mod tests {
         let now = Utc::now().timestamp();
         let response = OAuthIntrospectionResponse::active()
             .scope("read write")
-            .client_id("test_client")
+            .client_id(OAuthClientId::new("test_client").unwrap())
             .username("test_user")
             .token_type(OAuthTokenType::Bearer)
             .audience("https://api.example.com")
@@ -274,7 +274,10 @@ mod tests {
         assert!(response.is_active());
         let info = response.token_info().unwrap();
         assert_eq!(info.scope, Some("read write".to_string()));
-        assert_eq!(info.client_id, Some("test_client".to_string()));
+        assert_eq!(
+            info.client_id,
+            Some(OAuthClientId::new("test_client").unwrap())
+        );
         assert_eq!(info.username, Some("test_user".to_string()));
         assert_eq!(info.token_type, Some(OAuthTokenType::Bearer));
         assert!(matches!(info.aud, Some(TokenAudience::Single(_))));
@@ -305,7 +308,7 @@ mod tests {
     fn test_serialization() {
         let response = OAuthIntrospectionResponse::active()
             .scope("read")
-            .client_id("client123")
+            .client_id(OAuthClientId::new("client123").unwrap())
             .build();
 
         let json = response.to_json().unwrap();
@@ -323,7 +326,7 @@ mod tests {
     fn test_display() {
         let response = OAuthIntrospectionResponse::active()
             .subject("user123")
-            .client_id("client123")
+            .client_id(OAuthClientId::new("client123").unwrap())
             .build();
         assert!(response.to_string().contains("user123"));
         assert!(response.to_string().contains("client123"));

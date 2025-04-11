@@ -39,7 +39,7 @@ pub enum JwtError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JwtHeader {
     /// Algorithm used to sign the token
-    pub alg: String,
+    pub alg: Option<String>,
 
     /// JWT Set URL, optional
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,7 +210,7 @@ impl JwtToken {
         let alg = algorithm_as_string(token_data.header.alg);
         Ok((
             JwtHeader {
-                alg,
+                alg: Some(alg),
                 jku: token_data.header.jku,
                 jwk: None, // TODO: convert from raw JWK
                 kid: token_data.header.kid,
@@ -254,11 +254,11 @@ pub struct JwtPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<Sub>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp: Option<i64>,
+    pub exp: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nbf: Option<i64>,
+    pub nbf: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub iat: Option<i64>,
+    pub iat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jti: Option<TokenId>,
 
@@ -495,7 +495,7 @@ mod tests {
     fn test_serialization() {
         let mut payload = JwtPayload {
             iss: Some("issuer".to_string()),
-            sub: Some("subject".to_string()),
+            sub: Some(Sub::new("subject").unwrap()),
             aud: Some(Audience::Single("audience".to_string())),
             birthdate: Some("2000-01-01".to_string()),
             ..Default::default()
@@ -613,7 +613,7 @@ mod tests {
 pub struct SignedJwt(String);
 
 /// Errors that can occur when working with token identification.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SignedJwtError {
     #[error("Invalid format")]
     InvalidFormat,

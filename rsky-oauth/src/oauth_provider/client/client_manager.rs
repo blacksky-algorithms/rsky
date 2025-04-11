@@ -1,86 +1,119 @@
-use crate::cached_getter::CachedGetter;
-use crate::jwk::{Jwk, Keyset};
+use crate::cached_getter::{CachedGetter, GetCachedOptions};
+use crate::jwk::Keyset;
 use crate::oauth_provider::client::client::Client;
+use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_types::{
     ApplicationType, OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientIdDiscoverable,
     OAuthClientIdLoopback, OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType,
-    OAuthResponseType, SubjectType,
+    OAuthRedirectUri, OAuthResponseType, SubjectType,
 };
 use crate::simple_store::SimpleStore;
 use crate::simple_store_memory::SimpleStoreMemory;
 use jsonwebtoken::jwk::JwkSet;
-use std::collections::BTreeMap;
+use reqwest::RequestBuilder;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use url::Url;
 
-pub type LoopbackMetadataGetter = Box<dyn Fn(String) -> OAuthClientMetadata>;
-
-pub type ClientManagerCreator = Box<
-    dyn Fn(Arc<RwLock<dyn ClientStore>>, Arc<RwLock<Keyset>>, OAuthHooks) -> ClientManager
-        + Send
-        + Sync,
->;
+pub type LoopbackMetadataGetter =
+    Box<dyn Fn(OAuthClientIdLoopback) -> OAuthClientMetadata + Send + Sync>;
 
 pub struct ClientManager {
     jwks: CachedGetter<String, JwkSet>,
-    metadata_getter: CachedGetter<String, OAuthClientMetadata>,
     server_metadata: OAuthAuthorizationServerMetadata,
     keyset: Arc<RwLock<Keyset>>,
-    store: Arc<RwLock<dyn ClientStore>>,
-    hooks: OAuthHooks,
+    store: Option<Arc<RwLock<dyn ClientStore>>>,
+    metadata_getter: CachedGetter<String, OAuthClientMetadata>,
     loopback_metadata: Option<LoopbackMetadataGetter>,
-    client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
-    client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
+    hooks: Arc<OAuthHooks>,
 }
 
 impl ClientManager {
-    pub fn creator(metadata: OAuthAuthorizationServerMetadata) -> ClientManagerCreator {
-        Box::new(
-            move |store: Arc<RwLock<dyn ClientStore>>,
-                  keyset: Arc<RwLock<Keyset>>,
-                  hooks: OAuthHooks|
-                  -> ClientManager {
-                ClientManager::new(store, keyset, metadata.clone(), hooks)
-            },
-        )
-    }
-
     pub fn new(
-        store: Arc<RwLock<dyn ClientStore>>,
-        keyset: Arc<RwLock<Keyset>>,
         server_metadata: OAuthAuthorizationServerMetadata,
-        hooks: OAuthHooks,
+        keyset: Arc<RwLock<Keyset>>,
+        hooks: Arc<OAuthHooks>,
+        store: Option<Arc<RwLock<dyn ClientStore>>>,
+        loopback_metadata: Option<LoopbackMetadataGetter>,
+        client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
+        client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
     ) -> Self {
+        let jwks: CachedGetter<String, JwkSet> = CachedGetter::new(
+            // Box::new(
+            //     |id: String,
+            //            options: Option<GetCachedOptions>,
+            //            stored_value: Option<JwkSet>|
+            //            -> JwkSet {
+            //         let res = build_json_get_request(id, options).await.send();
+            //         fetch_jwks_handler(res)
+            //     },
+            // ),
+            client_jwks_cache,
+            None,
+        );
+        let metadata_getter: CachedGetter<String, OAuthClientMetadata> = CachedGetter::new(
+            // Box::new(
+            //     async move |id: String,
+            //                 options: Option<GetCachedOptions>,
+            //                 stored_value: Option<OAuthClientMetadata>|
+            //                 -> OAuthClientMetadata {
+            //         let res = build_json_get_request(id.to_string(), options)
+            //             .send()
+            //             .await
+            //             .unwrap();
+            //         fetch_metadata_handler(res)
+            //     },
+            // ),
+            client_metadata_cache,
+            None,
+        );
         Self {
-            jwks: Default::default(),
-            metadata_getter: (),
+            jwks,
             server_metadata,
             keyset,
             store,
+            metadata_getter,
+            loopback_metadata,
             hooks,
-            loopback_metadata: None,
-            client_jwks_cache: Arc::new(Default::default()),
-            client_metadata_cache: Arc::new(Default::default()),
         }
     }
 
     /**
      * @see {@link https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2 OIDC Client Registration}
      */
-    pub async fn get_client(&mut self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
-        unimplemented!()
-        // let metadata = self.get_client_metadata(client_id).await?;
-        //
-        // let jwks: JwkSet;
-        //
-        // let partial_info: ClientInfo;
-        // let client_info = self.hooks.on_client_info.clone();
-        // client_info(client_id.clone());
+    pub async fn get_client(&self, client_id: &OAuthClientId) -> Result<Client, OAuthError> {
+        let metadata = self.get_client_metadata(client_id).await?;
 
-        // Ok(Client::new(client_id.clone(), metadata, jwks, partial_info))
+        let jwks = match &metadata.jwks_uri {
+            None => None,
+            Some(jwks_uri) => Some(self.jwks.get(&jwks_uri.to_string(), None).await),
+        };
+
+        let partial_info = match &self.hooks.on_client_info {
+            None => None,
+            Some(on_client_info) => Some(on_client_info(client_id.clone(), metadata.clone(), None)),
+        };
+        let is_first_party;
+        let is_trusted;
+        match partial_info {
+            None => {
+                is_first_party = false;
+                is_trusted = is_first_party;
+            }
+            Some(partial_info) => {
+                is_first_party = partial_info.is_first_party;
+                is_trusted = partial_info.is_trusted;
+            }
+        }
+        let partial_info = ClientInfo {
+            is_first_party,
+            is_trusted,
+        };
+
+        Ok(Client::new(client_id.clone(), metadata, jwks, partial_info))
     }
 
     async fn get_client_metadata(
@@ -102,8 +135,17 @@ impl ClientManager {
         &self,
         client_id: OAuthClientIdLoopback,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        // if  {  }
         unimplemented!()
+        // match &self.loopback_metadata {
+        //     None => Err(OAuthError::InvalidClientMetadataError(
+        //         "Loopback clients are not allowed".to_string(),
+        //     )),
+        //     Some(loopback_metadata) => {
+        //         let metadata = loopback_metadata(client_id.clone());
+        //         self.validate_client_metadata(client_id.as_str(), metadata)
+        //             .await
+        //     }
+        // }
     }
 
     async fn get_discoverable_client_metadata(
@@ -112,13 +154,16 @@ impl ClientManager {
     ) -> Result<OAuthClientMetadata, OAuthError> {
         unimplemented!()
         // let metadata_url = client_id.as_url();
-
-        // let metadata = self.metadata_getter.get(metadata_url.as_str()).await;
-
-        // Note: we do *not* re-validate the metadata here, as the metadata is
-        // validated within the getter. This is to avoid double validation.
         //
-        // return this.validateClientMetadata(metadataUrl.href, metadata)
+        // let metadata = self
+        //     .metadata_getter
+        //     .get(&metadata_url.to_string(), None)
+        //     .await;
+        //
+        // // Note: we do *not* re-validate the metadata here, as the metadata is
+        // // validated within the getter. This is to avoid double validation.
+        // //
+        // // return this.validateClientMetadata(metadataUrl.href, metadata)
         // Ok(metadata)
     }
 
@@ -126,8 +171,16 @@ impl ClientManager {
         &self,
         client_id: &OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        let metadata = self.store.blocking_read().find_client(client_id.clone())?;
-        self.validate_client_metadata(&client_id, metadata).await
+        match &self.store {
+            None => Err(OAuthError::InvalidClientMetadataError(
+                "Invalid client ID".to_string(),
+            )),
+            Some(store) => {
+                let metadata = store.blocking_read().find_client(client_id.clone())?;
+                self.validate_client_metadata(client_id.as_str(), metadata)
+                    .await
+            }
+        }
     }
 
     /**
@@ -138,7 +191,7 @@ impl ClientManager {
      */
     async fn validate_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: &str,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if metadata.jwks.is_some() && metadata.jwks_uri.is_some() {
@@ -154,7 +207,7 @@ impl ClientManager {
             || metadata.userinfo_encrypted_response_alg.is_some()
         {
             return Err(OAuthError::InvalidClientMetadataError(
-                "Unsupported parameter".to_string(),
+                "Unsupported client metadata parameter".to_string(),
             ));
         }
 
@@ -183,7 +236,7 @@ impl ClientManager {
 
         if !scopes.contains(&"atproto".to_string()) {
             return Err(OAuthError::InvalidClientMetadataError(
-                "Missing atproto scope".to_string(),
+                "Missing \"atproto\" scope".to_string(),
             ));
         }
 
@@ -255,7 +308,7 @@ impl ClientManager {
         }
 
         if let Some(metadata_client_id) = metadata.client_id.clone() {
-            if metadata_client_id != client_id.clone() {
+            if metadata_client_id != client_id {
                 return Err(OAuthError::InvalidClientMetadataError(
                     "client_id does not match".to_string(),
                 ));
@@ -281,23 +334,43 @@ impl ClientManager {
             }
             Some(method) => method.clone(),
         };
-        // match method {
-        //     OAuthEndpointAuthMethod::None => {
-        //         if metadata.token_endpoint_auth_signing_alg.is_some() {
-        //             return Err(OAuthError::InvalidClientMetadataError("token_endpoint_auth_method none must not have token_endpoint_auth_signing_alg".to_string()));
-        //         }
-        //     }
-        //     OAuthEndpointAuthMethod::PrivateKeyJwt => {
-        //         if metadata.jwks.is_none() && metadata.jwks_uri.is_none() {
-        //             return Err(OAuthError::InvalidClientMetadataError("private_key_jwt auth method requires jwks or jwks_uri".to_string()));
-        //         }
-        //
-        //         if let Some(jwks) = metadata.jwks {
-        //
-        //         }
-        //     }
-        //     _ => {}
-        // }
+        match method {
+            OAuthEndpointAuthMethod::None => {
+                if metadata.token_endpoint_auth_signing_alg.is_some() {
+                    return Err(OAuthError::InvalidClientMetadataError("token_endpoint_auth_method \"none\" must not have token_endpoint_auth_signing_alg".to_string()));
+                }
+            }
+            OAuthEndpointAuthMethod::PrivateKeyJwt => {
+                if metadata.jwks.is_none() && metadata.jwks_uri.is_none() {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "private_key_jwt auth method requires jwks or jwks_uri".to_string(),
+                    ));
+                }
+                if let Some(jwks) = &metadata.jwks {
+                    if jwks.keys.is_empty() {
+                        return Err(OAuthError::InvalidClientMetadataError(
+                            "private_key_jwt auth method requires at least one key in jwks"
+                                .to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "private_key_jwt auth method requires at least one key in jwks".to_string(),
+                    ));
+                }
+                if metadata.token_endpoint_auth_signing_alg.is_none() {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "Missing token_endpoint_auth_signing_alg client metadata".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                let method = method.as_str();
+                return Err(OAuthError::InvalidClientMetadataError(
+                    format!("{method} is not a supported \"token_endpoint_auth_method\". Use \"private_key_jwt\" or \"none\"."),
+                ));
+            }
+        }
 
         if metadata.authorization_encrypted_response_enc.is_some() {
             return Err(OAuthError::InvalidClientMetadataError(
@@ -355,13 +428,80 @@ impl ClientManager {
             // > Implicit Grant Type MUST only register URLs using the https
             // > scheme as redirect_uris; they MUST NOT use localhost as the
             // > hostname.
-            for redirect_uri in metadata.redirect_uris.clone() {}
+            for redirect_uri in metadata.redirect_uris.clone() {
+                match redirect_uri {
+                    OAuthRedirectUri::Https(redirect_uri) => {
+                        let url = Url::parse(redirect_uri.as_str()).unwrap();
+                        if url.host_str().unwrap() == "localhost" {
+                            return Err(OAuthError::InvalidClientMetadataError(
+                                "Web clients must not use localhost as the hostname".to_string(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(OAuthError::InvalidClientMetadataError(
+                            "Web clients must use HTTPS redirect URIs".to_string(),
+                        ));
+                    }
+                }
+            }
         }
 
-        if let Ok(client_loopback_id) = OAuthClientIdLoopback::new(client_id.val()) {
-            self.validate_loopback_client_metadata(client_id, metadata)
-        } else if let Ok(discoverable_client_id) = OAuthClientIdDiscoverable::new(client_id.val()) {
-            return self.validate_discoverable_client_metadata(client_id, metadata);
+        for redirect_uri in metadata.redirect_uris.clone() {
+            let url = Url::parse(redirect_uri.as_str()).unwrap();
+
+            if !url.username().is_empty() || url.password().is_some() {
+                // Is this a valid concern? Should we allow credentials in the URI?
+                return Err(OAuthError::InvalidRedirectUriError(format!(
+                    "Redirect URI {url} must not contain credentials"
+                )));
+            }
+
+            let host = url.host_str().unwrap();
+
+            // FIRST: Loopback redirect URI exception (only for native apps)
+            if host == "localhost" {
+                // https://datatracker.ietf.org/doc/html/rfc8252#section-8.3
+                //
+                // > While redirect URIs using localhost (i.e.,
+                // > "http://localhost:{port}/{path}") function similarly to loopback IP
+                // > redirects described in Section 7.3, the use of localhost is NOT
+                // > RECOMMENDED. Specifying a redirect URI with the loopback IP literal
+                // > rather than localhost avoids inadvertently listening on network
+                // > interfaces other than the loopback interface. It is also less
+                // > susceptible to client-side firewalls and misconfigured host name
+                // > resolution on the user's device.
+                return Err(OAuthError::InvalidRedirectUriError(format!(
+                    "Loopback redirect URI {url} is not allowed (use explicit IPs instead)"
+                )));
+            }
+
+            if host == "127.0.0.1" || host == "[::1]" {
+                // Only allowed for native apps
+                if metadata.application_type != ApplicationType::Native {
+                    return Err(OAuthError::InvalidRedirectUriError(
+                        "Loopback redirect URIs are only allowed for native apps".to_string(),
+                    ));
+                }
+
+                if !redirect_uri.is_https() {
+                    // https://datatracker.ietf.org/doc/html/rfc8252#section-7.3
+                    //
+                    // > Loopback redirect URIs use the "http" scheme and are constructed
+                    // > with the loopback IP literal and whatever port the client is
+                    // > listening on. That is, "http://127.0.0.1:{port}/{path}" for IPv4,
+                    // > and "http://[::1]:{port}/{path}" for IPv6.
+                    return Err(OAuthError::InvalidRedirectUriError(format!(
+                        "Loopback redirect URI {url} must use HTTP"
+                    )));
+                }
+            }
+        }
+
+        if let Ok(_) = OAuthClientIdLoopback::new(client_id) {
+            self.validate_loopback_client_metadata(metadata)
+        } else if let Ok(client_id) = OAuthClientIdDiscoverable::new(client_id) {
+            return self.validate_discoverable_client_metadata(&client_id, metadata);
         } else {
             Ok(metadata)
         }
@@ -369,7 +509,6 @@ impl ClientManager {
 
     fn validate_loopback_client_metadata(
         &self,
-        client_id: &OAuthClientId,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if metadata.client_uri.is_some() {
@@ -378,21 +517,27 @@ impl ClientManager {
             ));
         }
 
-        if metadata.application_type == ApplicationType::Native {
+        if metadata.application_type != ApplicationType::Native {
             return Err(OAuthError::InvalidClientMetadataError(
                 "Loopback clients must have application_type \"native\"".to_string(),
             ));
         }
 
         if let Some(method) = metadata.token_endpoint_auth_method {
-            return Err(OAuthError::InvalidClientMetadataError(
-                "Loopback clients are not allowed to use \"token_endpoint_auth_method\""
-                    .to_string(),
-            ));
+            let method = method.as_str();
+            if method != "none" {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    format!("Loopback clients are not allowed to use \"token_endpoint_auth_method\" {method}"),
+                ));
+            }
         }
 
         for redirect_uri in metadata.redirect_uris.clone() {
-            //TODO
+            if !redirect_uri.is_loopback() {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    "Loopback clients must use loopback direct URIS".to_string(),
+                ));
+            }
         }
 
         Ok(metadata)
@@ -400,7 +545,7 @@ impl ClientManager {
 
     fn validate_discoverable_client_metadata(
         &self,
-        client_id: &OAuthClientId,
+        client_id: &OAuthClientIdDiscoverable,
         metadata: OAuthClientMetadata,
     ) -> Result<OAuthClientMetadata, OAuthError> {
         if metadata.client_id.is_none() {
@@ -408,6 +553,35 @@ impl ClientManager {
             return Err(OAuthError::InvalidClientMetadataError(
                 "client_id is required for discoverable clients".to_string(),
             ));
+        }
+
+        let client_id_url = Url::parse(client_id.clone().to_string().as_str()).unwrap();
+
+        if let Some(client_uri) = metadata.client_uri.clone() {
+            // https://drafts.aaronpk.com/draft-parecki-oauth-client-id-metadata-document/draft-parecki-oauth-client-id-metadata-document.html
+            //
+            // The client_uri must be a parent of the client_id URL. This might be
+            // relaxed in the future.
+            let client_uri_url = Url::parse(client_uri.clone().to_string().as_str()).unwrap();
+
+            if client_uri_url.origin() != client_id_url.origin() {
+                return Err(OAuthError::InvalidClientMetadataError(
+                    "client_uri must have the same origin as the client_id".to_string(),
+                ));
+            }
+
+            if client_id_url.path() != client_uri_url.path() {
+                let path = if client_uri_url.path().ends_with("/") {
+                    client_uri_url.path().to_string()
+                } else {
+                    (client_uri_url.path().to_string() + "/")
+                };
+                if !client_id_url.path().starts_with(path.as_str()) {
+                    return Err(OAuthError::InvalidClientMetadataError(
+                        "client_uri must be a parent URL of the client_id".to_string(),
+                    ));
+                }
+            }
         }
 
         if let Some(method) = metadata.token_endpoint_auth_method {
@@ -441,9 +615,59 @@ impl ClientManager {
         }
 
         for redirect_uri in metadata.redirect_uris.clone() {
-            //TODO
+            match redirect_uri {
+                OAuthRedirectUri::Https(redirect_uri) => {
+                    // https://datatracker.ietf.org/doc/html/rfc8252#section-8.4
+                    //
+                    // > In addition to the collision-resistant properties, requiring a
+                    // > URI scheme based on a domain name that is under the control of
+                    // > the app can help to prove ownership in the event of a dispute
+                    // > where two apps claim the same private-use URI scheme (where one
+                    // > app is acting maliciously).
+                    //
+                    // Although this only applies to "native" clients (extract being from
+                    // rfc8252), we apply this rule to "web" clients as well.
+                    let url = Url::parse(redirect_uri.as_str()).unwrap();
+                    if url.host_str().unwrap() != client_id_url.host_str().unwrap() {
+                        let client_uri = metadata.client_uri.unwrap();
+                        return Err(OAuthError::InvalidRedirectUriError(
+                            format!("Redirect URI {url} must be under the same domain as client_id {client_uri}"),
+                        ));
+                    }
+                }
+                OAuthRedirectUri::PrivateUse(redirect_uri) => {
+                    // https://datatracker.ietf.org/doc/html/rfc8252#section-8.4
+                    //
+                    // > In addition to the collision-resistant properties, requiring a
+                    // > URI scheme based on a domain name that is under the control of
+                    // > the app can help to prove ownership in the event of a dispute
+                    // > where two apps claim the same private-use URI scheme (where one
+                    // > app is acting maliciously).
+
+                    // https://drafts.aaronpk.com/draft-parecki-oauth-client-id-metadata-document/draft-parecki-oauth-client-id-metadata-document.html
+                    //
+                    // Fully qualified domain name (FQDN) of the client_id, in reverse
+                    // order. This could be relaxed to allow same apex domain names, or
+                    // parent domains, but for now we require an exact match.
+                    //TODO
+                }
+                _ => {}
+            }
         }
 
         Ok(metadata)
     }
+}
+
+pub fn build_json_get_request(uri: String, options: Option<GetCachedOptions>) -> RequestBuilder {
+    let client = reqwest::Client::new();
+    client.get(uri).header("accept", "application/json")
+}
+
+pub fn fetch_jwks_handler(res: reqwest::Response) -> JwkSet {
+    unimplemented!()
+}
+
+pub fn fetch_metadata_handler(res: reqwest::Response) -> OAuthClientMetadata {
+    unimplemented!()
 }

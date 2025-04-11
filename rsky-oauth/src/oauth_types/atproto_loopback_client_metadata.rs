@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::oauth_types::{OAuthClientIdLoopback, OAuthRedirectUri, OAuthScope, OAuthScopeError};
+use crate::oauth_types::{
+    OAuthClientIdLoopback, OAuthClientMetadata, OAuthRedirectUri, OAuthScope, OAuthScopeError,
+};
 
 /// Creates client metadata for a loopback client.
 ///
@@ -99,6 +101,40 @@ pub enum ClientError {
 
     #[error("Duplicate redirect URI")]
     DuplicateRedirectUri,
+}
+
+pub fn atproto_loopback_client_metadata(client_id: OAuthClientIdLoopback) -> OAuthClientMetadata {
+    OAuthClientMetadata {
+        redirect_uris: vec![],
+        response_types: vec![],
+        grant_types: vec![],
+        scope: None,
+        token_endpoint_auth_method: None,
+        token_endpoint_auth_signing_alg: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        jwks_uri: None,
+        jwks: None,
+        application_type: Default::default(),
+        subject_type: None,
+        request_object_signing_alg: None,
+        id_token_signed_response_alg: None,
+        authorization_signed_response_alg: "".to_string(),
+        authorization_encrypted_response_enc: None,
+        authorization_encrypted_response_alg: None,
+        client_id: None,
+        client_name: None,
+        client_uri: None,
+        policy_uri: None,
+        tos_uri: None,
+        logo_uri: None,
+        default_max_age: None,
+        require_auth_time: None,
+        contacts: None,
+        tls_client_certificate_bound_access_tokens: None,
+        dpop_bound_access_tokens: None,
+        authorization_details_types: None,
+    }
 }
 
 #[cfg(test)]

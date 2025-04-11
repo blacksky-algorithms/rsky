@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Sub(String);
 
 impl Sub {
-    pub fn new(id: String) -> Result<Self, SubError> {
+    pub fn new(id: impl Into<String>) -> Result<Self, SubError> {
+        let id = id.into();
         if id.len() < 1 {
             Err(SubError::TypeError("Sub cannot be empty".to_string()))
         } else {
@@ -17,6 +18,7 @@ impl Sub {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub enum SubError {
     TypeError(String),
 }

@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 /// This includes OAuth2 standard response types and OpenID Connect composite response types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthResponseType {
+    #[serde(rename = "code")]
     /// Authorization Code Grant type (OAuth2)
     Code,
+    #[serde(rename = "token")]
     /// Implicit Grant type (OAuth2)
     Token,
+    #[serde(rename = "none")]
     /// No response type (OpenID Connect)
     None,
     /// Code, ID token, and access token (OpenID Connect)

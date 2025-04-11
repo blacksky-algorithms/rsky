@@ -1,4 +1,4 @@
-use crate::jwk::{Audience, SignedJwt, VerifyOptions};
+use crate::jwk::{Audience, JwkError, Key, SignedJwt, VerifyOptions, VerifyResult};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_store::DeviceAccountInfo;
@@ -27,6 +27,7 @@ use crate::oauth_types::{
     OAuthPasswordGrantTokenRequest, OAuthRefreshTokenGrantTokenRequest, OAuthTokenIdentification,
     OAuthTokenResponse, OAuthTokenType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
+use jsonwebtoken::Validation;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -47,7 +48,7 @@ pub struct TokenManager {
     pub signer: Arc<RwLock<Signer>>,
     pub access_token_type: AccessTokenType,
     pub token_max_age: u64,
-    pub hooks: OAuthHooks,
+    pub oauth_hooks: Arc<OAuthHooks>,
 }
 
 pub type TokenManagerCreator = Box<
@@ -56,7 +57,7 @@ pub type TokenManagerCreator = Box<
             Arc<RwLock<Signer>>,
             AccessTokenType,
             Option<u64>,
-            OAuthHooks,
+            Arc<OAuthHooks>,
         ) -> TokenManager
         + Send
         + Sync,
@@ -69,7 +70,7 @@ impl TokenManager {
                   signer: Arc<RwLock<Signer>>,
                   access_token_type: AccessTokenType,
                   max_age: Option<u64>,
-                  hooks: OAuthHooks|
+                  hooks: Arc<OAuthHooks>|
                   -> TokenManager {
                 TokenManager::new(store, signer, access_token_type, max_age, hooks)
             },
@@ -81,7 +82,7 @@ impl TokenManager {
         signer: Arc<RwLock<Signer>>,
         access_token_type: AccessTokenType,
         max_age: Option<u64>,
-        hooks: OAuthHooks,
+        oauth_hooks: Arc<OAuthHooks>,
     ) -> Self {
         let token_max_age = max_age.unwrap_or_else(|| TOKEN_MAX_AGE);
         TokenManager {
@@ -89,7 +90,7 @@ impl TokenManager {
             signer,
             access_token_type,
             token_max_age,
-            hooks,
+            oauth_hooks,
         }
     }
 
@@ -243,7 +244,8 @@ impl TokenManager {
         let token_info = match self
             .store
             .blocking_read()
-            .find_token_by_refresh_token(refresh_token.clone())?
+            .find_token_by_refresh_token(refresh_token.clone())
+            .await?
         {
             None => {
                 return Err(OAuthError::InvalidGrantError(
@@ -259,13 +261,19 @@ impl TokenManager {
 
         if let Some(token_refresh_token) = token_info.current_refresh_token.clone() {
             if token_refresh_token != refresh_token {
-                self.store.blocking_write().delete_token(token_info.id)?;
+                self.store
+                    .blocking_write()
+                    .delete_token(token_info.id)
+                    .await?;
                 return Err(OAuthError::InvalidGrantError(
                     "refresh token replayed".to_string(),
                 ));
             }
         } else {
-            self.store.blocking_write().delete_token(token_info.id)?;
+            self.store
+                .blocking_write()
+                .delete_token(token_info.id)
+                .await?;
             return Err(OAuthError::InvalidGrantError(
                 "refresh token replayed".to_string(),
             ));
@@ -280,7 +288,10 @@ impl TokenManager {
             .contains(&OAuthGrantType::RefreshToken)
         {
             // In case the client metadata was updated after the token was issued
-            self.store.blocking_write().delete_token(token_info.id)?;
+            self.store
+                .blocking_write()
+                .delete_token(token_info.id)
+                .await?;
             return Err(OAuthError::InvalidGrantError(
                 "This client is not allowed to use the".to_string(),
             ));
@@ -292,7 +303,10 @@ impl TokenManager {
                     return Err(OAuthError::InvalidDpopKeyBindingError);
                 }
             } else {
-                self.store.blocking_write().delete_token(token_info.id)?;
+                self.store
+                    .blocking_write()
+                    .delete_token(token_info.id)
+                    .await?;
                 return Err(OAuthError::InvalidDpopProofError(
                     "DPoP proof required".to_string(),
                 ));
@@ -306,7 +320,10 @@ impl TokenManager {
             AUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT
         };
         if last_activity + inactivity_timeout < now_as_secs() {
-            self.store.blocking_write().delete_token(token_info.id)?;
+            self.store
+                .blocking_write()
+                .delete_token(token_info.id)
+                .await?;
             return Err(OAuthError::InvalidGrantError(
                 "Refresh token exceeded inactivity timeout".to_string(),
             ));
@@ -318,7 +335,10 @@ impl TokenManager {
             AUTHENTICATED_REFRESH_LIFETIME
         };
         if data.created_at + lifetime < now_as_secs() {
-            self.store.blocking_write().delete_token(token_info.id)?;
+            self.store
+                .blocking_write()
+                .delete_token(token_info.id)
+                .await?;
             return Err(OAuthError::InvalidGrantError(
                 "Refresh token expired".to_string(),
             ));
@@ -351,12 +371,15 @@ impl TokenManager {
             expires_at,
             updated_at: now,
         };
-        self.store.blocking_write().rotate_token(
-            token_info.id,
-            next_token_id.clone(),
-            next_refresh_token.clone(),
-            new_token_data,
-        )?;
+        self.store
+            .blocking_write()
+            .rotate_token(
+                token_info.id,
+                next_token_id.clone(),
+                next_refresh_token.clone(),
+                new_token_data,
+            )
+            .await?;
 
         let access_token = match !self.use_jwt_access_token(account.clone()) {
             true => next_token_id.val(),
@@ -367,17 +390,21 @@ impl TokenManager {
                     aud: account.aud.clone(),
                     sub: account.sub.clone(),
                     jti: next_token_id,
-                    exp: expires_at as i64,
-                    iat: Some(now as i64),
+                    exp: expires_at,
+                    iat: Some(now),
                     alg: None,
                     cnf: None,
                     authorization_details: authorization_details.clone(),
                 };
-                self.signer
+                match self
+                    .signer
                     .blocking_read()
                     .access_token(client.clone(), parameters.clone(), options)
                     .await
-                    .val()
+                {
+                    Ok(res) => res.val(),
+                    Err(_) => return Err(OAuthError::RuntimeError("".to_string())),
+                }
             }
         };
 
@@ -399,41 +426,40 @@ impl TokenManager {
     pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
         let token = token.token.clone();
         if let Ok(token_id) = TokenId::new(token.as_str()) {
-            self.store.blocking_write().delete_token(token_id)?;
+            self.store.blocking_write().delete_token(token_id).await?;
         } else if let Ok(signed_jwt) = SignedJwt::new(token.as_str()) {
-            let options = VerifyOptions {
-                audience: None,
-                clock_tolerance: None,
-                issuer: None,
-                max_token_age: None,
-                subject: None,
-                typ: None,
-                current_date: None,
-                required_claims: vec!["jti".to_string()],
+            let mut options = Validation::default();
+            options.required_spec_claims.insert("jti".to_string());
+            let signer = self.signer.read().await;
+            let verify_result = match signer.verify(signed_jwt, Some(options)).await {
+                Ok(res) => res,
+                Err(error) => return Err(OAuthError::RuntimeError("".to_string())),
             };
-            let verify_result = self
-                .signer
-                .blocking_read()
-                .verify(signed_jwt, Some(options))
-                .await;
             let token_id = match verify_result.payload.jti {
                 Some(token_id) => token_id,
                 None => return Err(OAuthError::RuntimeError("".to_string())),
             };
-            self.store.blocking_write().delete_token(token_id)?;
+            self.store.blocking_write().delete_token(token_id).await?;
             return Ok(());
         } else if let Ok(refresh_token) = RefreshToken::new(token.as_str()) {
             let token_info = self
                 .store
                 .blocking_read()
-                .find_token_by_refresh_token(refresh_token)?;
+                .find_token_by_refresh_token(refresh_token)
+                .await?;
             if let Some(token_info) = token_info {
-                self.store.blocking_write().delete_token(token_info.id)?;
+                self.store
+                    .blocking_write()
+                    .delete_token(token_info.id)
+                    .await?;
             }
         } else if let Ok(code) = Code::new(token.as_str()) {
-            let token_info = self.store.blocking_read().find_token_by_code(code)?;
+            let token_info = self.store.blocking_read().find_token_by_code(code).await?;
             if let Some(token_info) = token_info {
-                self.store.blocking_write().delete_token(token_info.id)?;
+                self.store
+                    .blocking_write()
+                    .delete_token(token_info.id)
+                    .await?;
             }
         }
         Ok(())
@@ -459,7 +485,10 @@ impl TokenManager {
         match self.validate_access(client, client_auth, &token_info).await {
             Ok(_) => {}
             Err(e) => {
-                self.store.blocking_write().delete_token(token_info.id)?;
+                self.store
+                    .blocking_write()
+                    .delete_token(token_info.id)
+                    .await?;
                 return Err(e);
             }
         }
@@ -479,7 +508,7 @@ impl TokenManager {
         let token_val = token.token.clone();
 
         if let Ok(token_id) = TokenId::new(token_val.as_str()) {
-            return self.store.blocking_read().read_token(token_id);
+            return self.store.blocking_read().read_token(token_id).await;
         }
 
         if let Ok(signed_jwt) = SignedJwt::new(token_val.as_str()) {
@@ -493,7 +522,7 @@ impl TokenManager {
                 Err(_) => return Ok(None),
             };
 
-            let token_info = match self.store.blocking_read().read_token(payload.jti)? {
+            let token_info = match self.store.blocking_read().read_token(payload.jti).await? {
                 None => return Ok(None),
                 Some(token_info) => token_info,
             };
@@ -517,7 +546,8 @@ impl TokenManager {
             let token_info = self
                 .store
                 .blocking_read()
-                .find_token_by_refresh_token(refresh_token)?;
+                .find_token_by_refresh_token(refresh_token)
+                .await?;
             return if let Some(token_info) = token_info {
                 if token_info.current_refresh_token.is_none() {
                     Ok(None)
@@ -538,7 +568,7 @@ impl TokenManager {
         token_type: OAuthTokenType,
         token_id: TokenId,
     ) -> Result<TokenInfo, OAuthError> {
-        let token_info = self.store.blocking_read().read_token(token_id)?;
+        let token_info = self.store.blocking_read().read_token(token_id).await?;
 
         match token_info {
             None => Err(OAuthError::InvalidTokenError(
