@@ -1,4 +1,5 @@
 use crate::account_manager::helpers::account::AccountStatus;
+use crate::actor_store::repo::types::SyncEvtData;
 use crate::models::models;
 use anyhow::Result;
 use lexicon_cid::Cid;
@@ -7,10 +8,7 @@ use rsky_common::struct_to_cbor;
 use rsky_lexicon::com::atproto::sync::AccountStatus as LexiconAccountStatus;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::car::blocks_to_car_file;
-use rsky_repo::cid_set::CidSet;
-use rsky_repo::types::{CommitData, PreparedWrite};
-use rsky_repo::util::format_data_key;
-use rsky_syntax::aturi::AtUri;
+use rsky_repo::types::{CommitAction, CommitDataWithOps};
 use serde::de::Error as DeserializerError;
 use serde::{Deserialize, Deserializer};
 use std::fmt;
@@ -39,6 +37,7 @@ pub struct CommitEvtOp {
     pub action: CommitEvtOpAction,
     pub path: String,
     pub cid: Option<Cid>,
+    pub prev: Option<Cid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -55,6 +54,7 @@ pub struct CommitEvt {
     pub blocks: Vec<u8>,
     pub ops: Vec<CommitEvtOp>,
     pub blobs: Vec<Cid>,
+    pub prev_data: Option<Cid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -78,8 +78,18 @@ pub struct AccountEvt {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct TombstoneEvt {
+pub struct SyncEvt {
     pub did: String,
+    pub blocks: Vec<u8>,
+    pub rev: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TypedSyncEvt {
+    pub r#type: String, // 'commit'
+    pub seq: i64,
+    pub time: String,
+    pub evt: SyncEvt,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -107,6 +117,7 @@ impl Default for TypedCommitEvt {
                 blocks: vec![],
                 ops: vec![],
                 blobs: vec![],
+                prev_data: None,
             },
         }
     }
@@ -150,22 +161,15 @@ pub struct TypedAccountEvt {
     pub evt: AccountEvt,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct TypedTombstoneEvt {
-    pub r#type: String, // 'tombstone'
-    pub seq: i64,
-    pub time: String,
-    pub evt: TombstoneEvt,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum SeqEvt {
     TypedCommitEvt(TypedCommitEvt),
-    TypedHandleEvt(TypedHandleEvt),
+    // TypedHandleEvt(TypedHandleEvt),
     TypedIdentityEvt(TypedIdentityEvt),
     TypedAccountEvt(TypedAccountEvt),
-    TypedTombstoneEvt(TypedTombstoneEvt),
+    // TypedTombstoneEvt(TypedTombstoneEvt),
+    TypedSyncEvt(TypedSyncEvt),
 }
 
 impl<'de> Deserialize<'de> for SeqEvt {
@@ -183,16 +187,13 @@ impl<'de> Deserialize<'de> for SeqEvt {
                 Some("commit") => Ok(SeqEvt::TypedCommitEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
-                Some("handle") => Ok(SeqEvt::TypedHandleEvt(
+                Some("sync") => Ok(SeqEvt::TypedSyncEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 Some("identity") => Ok(SeqEvt::TypedIdentityEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 Some("account") => Ok(SeqEvt::TypedAccountEvt(
-                    serde_json::from_value(value).map_err(DeserializerError::custom)?,
-                )),
-                Some("tombstone") => Ok(SeqEvt::TypedTombstoneEvt(
                     serde_json::from_value(value).map_err(DeserializerError::custom)?,
                 )),
                 _ => Err(DeserializerError::custom("Unknown event type")),
@@ -207,77 +208,54 @@ impl SeqEvt {
     pub fn seq(&self) -> i64 {
         match self {
             SeqEvt::TypedCommitEvt(this) => this.seq,
-            SeqEvt::TypedHandleEvt(this) => this.seq,
             SeqEvt::TypedIdentityEvt(this) => this.seq,
             SeqEvt::TypedAccountEvt(this) => this.seq,
-            SeqEvt::TypedTombstoneEvt(this) => this.seq,
+            SeqEvt::TypedSyncEvt(this) => this.seq,
         }
     }
 }
 
 pub async fn format_seq_commit(
     did: String,
-    commit_data: CommitData,
-    writes: Vec<PreparedWrite>,
+    commit_data: CommitDataWithOps,
 ) -> Result<models::RepoSeq> {
-    let too_big: bool;
-    let mut ops: Vec<CommitEvtOp> = Vec::new();
-    let mut blobs = CidSet::new(None);
-    let car_slice: Vec<u8>;
-
     let mut blocks_to_send = BlockMap::new();
-    blocks_to_send.add_map(commit_data.new_blocks)?;
-    blocks_to_send.add_map(commit_data.relevant_blocks)?;
-
-    if writes.len() > 200 || blocks_to_send.byte_size()? > 1000000 {
-        too_big = true;
-        let mut just_root = BlockMap::new();
-        just_root.add(blocks_to_send.get(commit_data.cid))?;
-        car_slice = blocks_to_car_file(Some(&commit_data.cid), just_root).await?;
-    } else {
-        too_big = false;
-        for w in writes {
-            let uri = AtUri::new(w.uri().clone(), None)?;
-            let path = format_data_key(uri.get_collection(), uri.get_rkey());
-            let cid: Option<Cid>;
-            let action: CommitEvtOpAction;
-            match w {
-                PreparedWrite::Create(w) => {
-                    cid = Some(w.cid);
-                    for blob in w.blobs {
-                        blobs.add(blob.cid);
-                    }
-                    action = CommitEvtOpAction::Create;
-                }
-                PreparedWrite::Update(w) => {
-                    cid = Some(w.cid);
-                    for blob in w.blobs {
-                        blobs.add(blob.cid);
-                    }
-                    action = CommitEvtOpAction::Update;
-                }
-                PreparedWrite::Delete(_) => {
-                    cid = None;
-                    action = CommitEvtOpAction::Delete;
-                }
+    blocks_to_send.add_map(commit_data.commit_data.new_blocks)?;
+    blocks_to_send.add_map(commit_data.commit_data.relevant_blocks)?;
+    let ops = commit_data
+        .ops
+        .iter()
+        .map(|op| {
+            let action = match op.action {
+                CommitAction::Create => CommitEvtOpAction::Create,
+                CommitAction::Update => CommitEvtOpAction::Update,
+                CommitAction::Delete => CommitEvtOpAction::Delete,
+            };
+            CommitEvtOp {
+                action,
+                path: op.path.clone(),
+                cid: op.cid,
+                prev: op.prev,
             }
-            ops.push(CommitEvtOp { action, path, cid });
-        }
-        car_slice = blocks_to_car_file(Some(&commit_data.cid), blocks_to_send).await?;
-    }
+        })
+        .collect::<Vec<_>>();
+    // Create the CAR file with all blocks
+    let car_slice = blocks_to_car_file(Some(&commit_data.commit_data.cid), blocks_to_send).await?;
 
     let evt = CommitEvt {
         rebase: false,
-        too_big,
+        too_big: false, // always false in Sync 1.1
         repo: did.clone(),
-        commit: commit_data.cid,
-        prev: commit_data.prev,
-        rev: commit_data.rev,
-        since: commit_data.since,
-        ops,
+        commit: commit_data.commit_data.cid,
+        prev: commit_data.commit_data.prev,
+        rev: commit_data.commit_data.rev,
+        since: commit_data.commit_data.since,
         blocks: car_slice,
-        blobs: blobs.to_list(),
+        ops,
+        blobs: vec![],
+        prev_data: commit_data.prev_data,
     };
+
     Ok(models::RepoSeq::new(
         did,
         "append".to_string(),
@@ -330,6 +308,8 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
             AccountStatus::Suspended => LexiconAccountStatus::Suspended,
             AccountStatus::Deleted => LexiconAccountStatus::Deleted,
             AccountStatus::Deactivated => LexiconAccountStatus::Deactivated,
+            AccountStatus::Desynchronized => LexiconAccountStatus::Desynchronized,
+            AccountStatus::Throttled => LexiconAccountStatus::Throttled,
             _ => panic!("Conditional failed and allowed an invalid account status."),
         });
     }
@@ -342,12 +322,32 @@ pub async fn format_seq_account_evt(did: String, status: AccountStatus) -> Resul
     ))
 }
 
-pub async fn format_seq_tombstone(did: String) -> Result<models::RepoSeq> {
-    let evt = TombstoneEvt { did: did.clone() };
-    Ok(models::RepoSeq::new(
+pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<models::RepoSeq> {
+    let blocks = blocks_to_car_file(Some(&data.cid), data.blocks).await?;
+    let evt = SyncEvt {
         did,
-        "tombstone".to_string(),
+        rev: data.rev,
+        blocks,
+    };
+    Ok(models::RepoSeq::new(
+        evt.did.clone(),
+        "sync".to_string(),
         struct_to_cbor(&evt)?,
         rsky_common::now(),
     ))
+}
+
+pub async fn sync_evt_data_from_commit(mut commit_data: CommitDataWithOps) -> Result<SyncEvtData> {
+    let cid = vec![commit_data.commit_data.cid.clone()];
+    match commit_data.commit_data.relevant_blocks.get_many(cid) {
+        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => Err(anyhow::anyhow!(
+            "commit block was not found, could not build sync event"
+        )),
+        Ok(blocks_and_missing) => Ok(SyncEvtData {
+            rev: commit_data.commit_data.rev,
+            cid: commit_data.commit_data.cid.clone(),
+            blocks: blocks_and_missing.blocks,
+        }),
+        Err(e) => Err(e.into()),
+    }
 }

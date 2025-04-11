@@ -151,6 +151,24 @@ impl PreparedWrite {
             PreparedWrite::Delete(w) => &w.swap_cid,
         }
     }
+
+    pub fn action(&self) -> &WriteOpAction {
+        match self {
+            PreparedWrite::Create(w) => &w.action,
+            PreparedWrite::Update(w) => &w.action,
+            PreparedWrite::Delete(w) => &w.action,
+        }
+    }
+}
+
+impl From<&PreparedWrite> for CommitAction {
+    fn from(value: &PreparedWrite) -> Self {
+        match value {
+            &PreparedWrite::Create(_) => CommitAction::Create,
+            &PreparedWrite::Update(_) => CommitAction::Update,
+            &PreparedWrite::Delete(_) => CommitAction::Delete,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -168,6 +186,26 @@ impl fmt::Display for WriteOpAction {
             WriteOpAction::Create => write!(f, "create"),
             WriteOpAction::Update => write!(f, "update"),
             WriteOpAction::Delete => write!(f, "delete"),
+        }
+    }
+}
+
+impl From<WriteOpAction> for CommitAction {
+    fn from(value: WriteOpAction) -> Self {
+        match value {
+            WriteOpAction::Create => CommitAction::Create,
+            WriteOpAction::Update => CommitAction::Update,
+            WriteOpAction::Delete => CommitAction::Delete,
+        }
+    }
+}
+
+impl From<&WriteOpAction> for CommitAction {
+    fn from(value: &WriteOpAction) -> Self {
+        match value {
+            &WriteOpAction::Create => CommitAction::Create,
+            &WriteOpAction::Update => CommitAction::Update,
+            &WriteOpAction::Delete => CommitAction::Delete,
         }
     }
 }
@@ -309,6 +347,36 @@ pub struct CommitData {
     pub new_blocks: BlockMap,
     pub relevant_blocks: BlockMap,
     pub removed_cids: CidSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum CommitAction {
+    Create,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CommitOp {
+    pub action: CommitAction,
+    pub path: String,
+    pub cid: Option<Cid>,
+    pub prev: Option<Cid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CommitDataWithOps {
+    #[serde(flatten)]
+    pub commit_data: CommitData,
+    pub ops: Vec<CommitOp>,
+    pub prev_data: Option<Cid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct SyncEvtData {
+    pub cid: Cid,
+    pub rev: String,
+    pub blocks: BlockMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

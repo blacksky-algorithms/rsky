@@ -21,7 +21,6 @@ async fn inner_update_account_handle(
     account_manager: AccountManager,
 ) -> Result<()> {
     let UpdateAccountHandleInput { did, handle } = body.into_inner();
-
     let opts = HandleValidationOpts {
         handle,
         did: Some(did.clone()),
@@ -45,6 +44,8 @@ async fn inner_update_account_handle(
 
     match account {
         Some(account) if account.did != did => bail!("Handle already taken: {handle}"),
+        // This makes the match case complete to make the compiler happy
+        // albeit this branch of code will never be reached
         Some(_) => (),
         None => {
             let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
@@ -59,8 +60,6 @@ async fn inner_update_account_handle(
     }
     let mut lock = sequencer.sequencer.write().await;
     lock.sequence_identity_evt(did.clone(), Some(handle.clone()))
-        .await?;
-    lock.sequence_handle_update(did.clone(), handle.clone())
         .await?;
     Ok(())
 }
