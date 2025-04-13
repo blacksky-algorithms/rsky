@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 # external
 bstr = "1"
-bus = "2"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 cid = { version = "0.11", features = ["serde-codec"] }
@@ -19,8 +18,8 @@ httparse = "1.10"
 k256 = "0.13"
 magnetic = "2"
 mimalloc = "0.1"
+mio = { version = "1", features = ["os-ext", "os-poll"] }
 multibase = "0.9"
-nix = { version = "0.29", features = ["event", "socket"] }
 p256 = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
 rs-car-sync = "0.4"
@@ -38,12 +37,11 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing = { version = "0.1", features = ["release_max_level_debug"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
+urlencoding = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 
 # internal
 rsky-common = { workspace = true }
-rsky-crypto = { workspace = true }
 rsky-identity = { workspace = true }
-rsky-lexicon = { workspace = true }

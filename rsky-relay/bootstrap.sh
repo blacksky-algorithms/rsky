@@ -35,3 +35,5 @@ curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"verpa.us-west.
 curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"witchesbutter.us-west.host.bsky.network"}' 'http://localhost:9000/xrpc/com.atproto.sync.requestCrawl'
 curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"woodear.us-west.host.bsky.network"}' 'http://localhost:9000/xrpc/com.atproto.sync.requestCrawl'
 curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"atproto.brid.gy"}' 'http://localhost:9000/xrpc/com.atproto.sync.requestCrawl'
+curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"esnoticia.online"}' 'http://localhost:9000/xrpc/com.atproto.sync.requestCrawl'
+curl -X POST -H 'Content-Type: application/json' -d '{"hostname":"at.app.wafrn.net"}' 'http://localhost:9000/xrpc/com.atproto.sync.requestCrawl'

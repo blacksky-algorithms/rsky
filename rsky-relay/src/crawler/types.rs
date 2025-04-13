@@ -1,36 +1,22 @@
-use std::net::TcpStream;
-
-use http::Uri;
-use magnetic::buffer::dynamic::DynamicBufferP2;
-use magnetic::mpsc::{MPSCConsumer, MPSCProducer};
 use rtrb::{Consumer, Producer};
-use tungstenite::WebSocket;
-use tungstenite::stream::MaybeTlsStream;
+use serde::Deserialize;
 
-pub type Client = WebSocket<MaybeTlsStream<TcpStream>>;
+use crate::types::Cursor;
+
 pub type CommandSender = Producer<Command>;
 pub type CommandReceiver = Consumer<Command>;
-pub type StatusSender = MPSCProducer<Status, DynamicBufferP2<Status>>;
-pub type StatusReceiver = MPSCConsumer<Status, DynamicBufferP2<Status>>;
+pub type RequestCrawlSender = Producer<RequestCrawl>;
+pub type RequestCrawlReceiver = Consumer<RequestCrawl>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WorkerId(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LocalId(pub usize);
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub uri: Uri,
+#[derive(Debug, Deserialize)]
+pub struct RequestCrawl {
     pub hostname: String,
-    pub worker_id: WorkerId,
-    pub local_id: LocalId,
+    #[serde(skip)]
+    pub cursor: Option<Cursor>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Command {
-    Connect(Config),
+    Connect(RequestCrawl),
     Shutdown,
 }
-
-#[derive(Debug, Clone)]
-pub enum Status {}

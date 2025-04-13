@@ -1,30 +1,33 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, SystemTimeError, UNIX_EPOCH};
 
-use bus::{Bus, BusReader};
 use hashbrown::HashMap;
-use sled::Tree;
+use sled::{Batch, Tree};
 use thiserror::Error;
 use zerocopy::{CastError, FromBytes, Immutable, KnownLayout, SizeError, Unaligned};
 
 use crate::SHUTDOWN;
-use crate::types::{DB, MessageReceiver};
+use crate::types::{Cursor, DB, MessageReceiver, TimedMessage};
 use crate::validator::resolver::{Resolver, ResolverError};
-use crate::validator::types::{ParseError, SubscribeReposEvent};
+use crate::validator::types::{ParseError, SerializeError, SubscribeReposEvent};
 use crate::validator::utils;
 
 type Usize = zerocopy::Usize<zerocopy::BigEndian>;
 
-const CAPACITY: usize = 1 << 16;
+const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
+    #[error("serialize error: {0}")]
+    Serialize(#[from] SerializeError),
     #[error("resolver error: {0}")]
     Resolver(#[from] ResolverError),
     #[error("size error")]
     SizeError,
+    #[error("time error: {0}")]
+    Time(#[from] SystemTimeError),
     #[error("sled error: {0}")]
     Sled(#[from] sled::Error),
 }
@@ -38,70 +41,93 @@ impl<T: KnownLayout + Immutable + Unaligned + ?Sized> From<CastError<&[u8], T>> 
 
 pub struct Manager {
     message_rx: MessageReceiver,
-    cursors: HashMap<String, i64>,
-    crawlers: Tree,
+    cursors: HashMap<String, Cursor>,
     resolver: Resolver,
     queue: Tree,
-    bus: Bus<Arc<Vec<u8>>>,
+    crawlers: Tree,
+    firehose: Tree,
 }
 
 impl Manager {
-    pub async fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
+    pub fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
         let cursors = HashMap::new();
-        let crawlers = DB.open_tree("crawlers")?;
-        let resolver = Resolver::new().await?;
+        let resolver = Resolver::new()?;
         let queue = DB.open_tree("queue")?;
-        let bus = Bus::new(CAPACITY);
-        Ok(Self { message_rx, cursors, crawlers, resolver, queue, bus })
-    }
-
-    pub fn subscribe(&mut self) -> BusReader<Arc<Vec<u8>>> {
-        self.bus.add_rx()
+        let crawlers = DB.open_tree("crawlers")?;
+        let firehose = DB.open_tree("firehose")?;
+        let this = Self { message_rx, cursors, resolver, queue, crawlers, firehose };
+        this.expire()?;
+        Ok(this)
     }
 
     pub async fn run(mut self) -> Result<(), ManagerError> {
-        for res in self.crawlers.iter() {
+        for res in &self.crawlers {
             let (hostname, cursor) = res?;
             let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
-            let cursor = i64::from_be_bytes(cursor.as_ref().try_into().unwrap_or_default());
-            self.cursors.insert(hostname, cursor);
+            self.cursors.insert(hostname, cursor.into());
         }
-        for res in self.queue.iter() {
+        for res in &self.queue {
             let (did, _) = res?;
             let did = unsafe { std::str::from_utf8_unchecked(&did) };
             self.resolver.request(did);
         }
-        while self.update().await? {}
+        let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
+        while self.update(&mut seq).await? {}
         tracing::info!("shutting down validator");
         SHUTDOWN.store(true, Ordering::Relaxed);
-        self.resolver.shutdown().await?;
         Ok(())
     }
 
-    async fn update(&mut self) -> Result<bool, ManagerError> {
+    fn expire(&self) -> Result<(), ManagerError> {
+        let mut batch: Option<Batch> = None;
+        for res in &self.firehose {
+            let (cursor, data) = res?;
+            let msg = TimedMessage::ref_from_bytes(&data)?;
+            let time = UNIX_EPOCH + Duration::from_secs(msg.timestamp.get());
+            if time.elapsed()? > KEY_TTL {
+                batch.get_or_insert_default().remove(cursor);
+            } else {
+                break;
+            }
+        }
+        if let Some(batch) = batch {
+            self.firehose.apply_batch(batch)?;
+        }
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_lines)]
+    async fn update(&mut self, seq: &mut Cursor) -> Result<bool, ManagerError> {
         if SHUTDOWN.load(Ordering::Relaxed) {
             return Ok(false);
         }
 
-        let mut batch = sled::Batch::default();
-        for (hostname, cursor) in self.cursors.iter() {
-            batch.insert(hostname.as_bytes(), &cursor.to_be_bytes());
-        }
-        self.crawlers.apply_batch(batch)?;
+        self.expire()?;
 
         for _ in 0..1024 {
             match self.message_rx.try_recv_ref() {
                 Ok(msg) => {
-                    let Some(event) = SubscribeReposEvent::parse(&msg.data)? else {
+                    let Ok(Some(event)) = SubscribeReposEvent::parse(&msg.data) else {
                         continue;
                     };
-                    let id = event.id();
-                    if let Some(old) = self.cursors.insert(msg.hostname.clone(), id) {
-                        if old + 1 != id {
+                    let curr = event.seq();
+                    if let Some(prev) = self.cursors.get(&msg.hostname) {
+                        let prev: u64 = (*prev).into();
+                        let curr: u64 = curr.into();
+                        if prev >= curr {
+                            if prev > curr {
+                                tracing::debug!(
+                                    "[{}] old msg: {curr} -> {prev} ({})",
+                                    msg.hostname,
+                                    prev - curr
+                                );
+                            }
+                            continue;
+                        } else if prev + 1 != curr {
                             tracing::debug!(
-                                "[{}] seq gap: {old} -> {id} ({})",
+                                "[{}] seq gap: {prev} -> {curr} ({})",
                                 msg.hostname,
-                                id - old - 1
+                                curr - prev - 1
                             );
                         }
                     }
@@ -110,7 +136,9 @@ impl Manager {
                         Ok(Some(commit)) => commit,
                         Ok(None) => {
                             self.resolver.expire(did)?;
-                            self.bus.try_broadcast(Arc::new(msg.data.clone().into())).unwrap();
+                            let data = event.serialize(msg.data.len(), seq.next())?;
+                            self.firehose.insert(*seq, data)?;
+                            self.cursors.insert(msg.hostname.clone(), curr);
                             continue;
                         }
                         Err(err) => {
@@ -122,9 +150,9 @@ impl Manager {
                         match utils::verify_commit_sig(&commit, key) {
                             Ok(res) => {
                                 if res {
-                                    self.bus
-                                        .try_broadcast(Arc::new(msg.data.clone().into()))
-                                        .unwrap();
+                                    let data = event.serialize(msg.data.len(), seq.next())?;
+                                    self.firehose.insert(*seq, data)?;
+                                    self.cursors.insert(msg.hostname.clone(), curr);
                                 } else {
                                     tracing::debug!("invalid signature: {commit:?} ({key:?})");
                                 }
@@ -142,6 +170,7 @@ impl Manager {
                             buf.extend_from_slice(&msg.data);
                             Some(buf)
                         })?;
+                        self.cursors.insert(msg.hostname.clone(), curr);
                     }
                 }
                 Err(thingbuf::mpsc::errors::TryRecvError::Empty) => {}
@@ -161,14 +190,16 @@ impl Manager {
                 let (len, rest) = Usize::ref_from_prefix(bytes)?;
                 let (data, rest) = <[u8]>::ref_from_prefix_with_elems(rest, len.get())?;
                 bytes = rest;
-                let Some(event) = SubscribeReposEvent::parse(&data)? else {
+                let Some(event) = SubscribeReposEvent::parse(data)? else {
                     continue;
                 };
+                #[expect(clippy::unwrap_used)]
                 let commit = event.commit().unwrap().unwrap(); // Already tried parsing
                 match utils::verify_commit_sig(&commit, key) {
                     Ok(res) => {
                         if res {
-                            self.bus.try_broadcast(Arc::new(data.into())).unwrap();
+                            let data = event.serialize(data.len(), seq.next())?;
+                            self.firehose.insert(*seq, data)?;
                         } else {
                             tracing::debug!("invalid signature: {commit:?} ({key:?})");
                         }
@@ -177,12 +208,27 @@ impl Manager {
                         tracing::debug!("signature error: {err} ({key:?})");
                     }
                 }
-                if bytes.len() == 0 {
+                if bytes.is_empty() {
                     break;
                 }
             }
         }
 
         Ok(true)
+    }
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        let mut batch = sled::Batch::default();
+        for (hostname, cursor) in &self.cursors {
+            batch.insert(hostname.as_bytes(), *cursor);
+        }
+        if let Err(err) = self.crawlers.apply_batch(batch) {
+            tracing::warn!("unable to persist cursors: {err}\n{:#?}", self.cursors);
+        }
+        if let Err(err) = DB.flush() {
+            tracing::warn!("unable to persist cursors: {err}\n{:#?}", self.cursors);
+        }
     }
 }

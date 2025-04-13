@@ -27,7 +27,13 @@
     clippy::unused_result_ok,
     clippy::unwrap_used
 )]
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::missing_safety_doc)]
+#![allow(
+    clippy::cargo_common_metadata,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc,
+    clippy::multiple_crate_versions
+)]
 
 mod crawler;
 mod publisher;
@@ -42,5 +48,5 @@ pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub use crawler::Manager as CrawlerManager;
 pub use publisher::Manager as PublisherManager;
 pub use server::Server;
-pub use types::{MessageRecycle, RequestCrawl};
+pub use types::MessageRecycle;
 pub use validator::Manager as ValidatorManager;

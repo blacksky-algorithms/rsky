@@ -2,16 +2,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::{io, thread};
 
-use magnetic::Consumer;
-use magnetic::buffer::dynamic::DynamicBufferP2;
 use thiserror::Error;
 
-use crate::publisher::types::{
-    Command, CommandSender, Config, LocalId, Status, StatusReceiver, WorkerId,
-};
+use crate::SHUTDOWN;
+use crate::publisher::types::{Command, CommandSender, SubscribeReposReceiver};
 use crate::publisher::worker::{Worker, WorkerError};
-use crate::types::SubscribeReposReceiver;
-use crate::{SHUTDOWN, ValidatorManager};
 
 const CAPACITY: usize = 1024;
 const SLEEP: Duration = Duration::from_millis(10);
@@ -19,55 +14,47 @@ const SLEEP: Duration = Duration::from_millis(10);
 #[derive(Debug, Error)]
 pub enum ManagerError {
     #[error("spawn error: {0}")]
-    SpawnError(#[from] io::Error),
+    Spawn(#[from] io::Error),
     #[error("worker error: {0}")]
-    WorkerError(#[from] WorkerError),
+    Worker(#[from] WorkerError),
     #[error("rtrb error: {0}")]
-    PushError(#[from] rtrb::PushError<Command>),
+    Push(#[from] Box<rtrb::PushError<Command>>),
     #[error("join error")]
-    JoinError,
+    Join,
+}
+
+impl From<rtrb::PushError<Command>> for ManagerError {
+    fn from(value: rtrb::PushError<Command>) -> Self {
+        Box::new(value).into()
+    }
 }
 
 #[derive(Debug)]
 struct WorkerHandle {
-    pub configs: Vec<Config>,
     pub command_tx: CommandSender,
     pub thread_handle: thread::JoinHandle<Result<(), WorkerError>>,
 }
 
 pub struct Manager {
     workers: Box<[WorkerHandle]>,
-    next_id: WorkerId,
-    status_rx: StatusReceiver,
+    next_id: usize,
     subscribe_repos_rx: SubscribeReposReceiver,
 }
 
 impl Manager {
     pub fn new(
-        n_workers: usize, validator: &mut ValidatorManager,
-        subscribe_repos_rx: SubscribeReposReceiver,
+        n_workers: usize, subscribe_repos_rx: SubscribeReposReceiver,
     ) -> Result<Self, ManagerError> {
-        let (status_tx, status_rx) =
-            magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY).unwrap());
         let workers = (0..n_workers)
             .map(|worker_id| -> Result<_, ManagerError> {
-                let message_rx = validator.subscribe();
-                let status_tx = status_tx.clone();
                 let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
                 let thread_handle = thread::Builder::new()
                     .name(format!("rsky-pub-{worker_id}"))
-                    .spawn(move || {
-                        Worker::new(WorkerId(worker_id), message_rx, status_tx, command_rx).run()
-                    })?;
-                Ok(WorkerHandle { configs: Vec::new(), command_tx, thread_handle })
+                    .spawn(move || Worker::new(worker_id, command_rx)?.run())?;
+                Ok(WorkerHandle { command_tx, thread_handle })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            workers: workers.into_boxed_slice(),
-            next_id: WorkerId(0),
-            status_rx,
-            subscribe_repos_rx,
-        })
+        Ok(Self { workers: workers.into_boxed_slice(), next_id: 0, subscribe_repos_rx })
     }
 
     pub fn run(mut self) -> Result<(), ManagerError> {
@@ -84,15 +71,11 @@ impl Manager {
             worker.command_tx.push(Command::Shutdown)?;
         }
         for (id, worker) in self.workers.into_iter().enumerate() {
-            if let Err(err) = worker.thread_handle.join().map_err(|_| ManagerError::JoinError)? {
+            if let Err(err) = worker.thread_handle.join().map_err(|_| ManagerError::Join)? {
                 tracing::warn!("publisher worker {id} error: {err}");
             }
         }
         Ok(())
-    }
-
-    fn handle_status(&mut self, _status: Status) -> Result<bool, ManagerError> {
-        Ok(true)
     }
 
     fn update(&mut self) -> Result<bool, ManagerError> {
@@ -100,21 +83,9 @@ impl Manager {
             return Ok(false);
         }
 
-        if let Ok(status) = self.status_rx.try_pop() {
-            if !self.handle_status(status)? {
-                return Ok(false);
-            }
-        }
-
         if let Ok(subscribe_repos) = self.subscribe_repos_rx.pop() {
-            let config = Config {
-                stream: subscribe_repos.stream,
-                cursor: subscribe_repos.cursor,
-                worker_id: self.next_id,
-                local_id: LocalId(self.workers[self.next_id.0].configs.len()),
-            };
-            self.next_id = WorkerId((self.next_id.0 + 1) % self.workers.len());
-            self.workers[config.worker_id.0].command_tx.push(Command::Connect(config)).unwrap();
+            self.workers[self.next_id].command_tx.push(Command::Connect(subscribe_repos))?;
+            self.next_id = (self.next_id + 1) % self.workers.len();
         }
 
         Ok(true)

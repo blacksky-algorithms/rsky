@@ -1,83 +1,89 @@
-use std::sync::Arc;
-use std::thread;
+use std::os::fd::AsRawFd;
+use std::time::Duration;
+use std::{io, thread};
 
-use bus::BusReader;
-#[cfg(target_os = "linux")]
-use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
+use sled::Tree;
 use thiserror::Error;
+use tungstenite::Bytes;
 
 use crate::publisher::connection::{Connection, ConnectionError};
-use crate::publisher::types::{Command, CommandReceiver, LocalId, StatusSender, WorkerId};
+use crate::publisher::types::{Command, CommandReceiver};
+use crate::types::{Cursor, DB};
 
-#[cfg(target_os = "linux")]
-const EPOLL_FLAGS: EpollFlags = EpollFlags::EPOLLOUT;
+const INTEREST: Interest = Interest::WRITABLE;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
     #[error("connection error: {0}")]
     ConnectionError(#[from] ConnectionError),
+    #[error("sled error: {0}")]
+    Sled(#[from] sled::Error),
 }
 
 pub struct Worker {
-    worker_id: WorkerId,
+    id: usize,
     connections: Vec<Option<Connection>>,
-    message_rx: BusReader<Arc<Vec<u8>>>,
-    status_tx: StatusSender,
     command_rx: CommandReceiver,
-    #[cfg(target_os = "linux")]
-    epoll: Epoll,
-    #[cfg(target_os = "linux")]
-    events: Vec<EpollEvent>,
+    firehose: Tree,
+    poll: Poll,
+    events: Events,
 }
 
 impl Worker {
-    pub fn new(
-        worker_id: WorkerId, message_rx: BusReader<Arc<Vec<u8>>>, status_tx: StatusSender,
-        command_rx: CommandReceiver,
-    ) -> Self {
-        Self {
-            worker_id,
-            connections: Vec::new(),
-            message_rx,
-            status_tx,
-            command_rx,
-            #[cfg(target_os = "linux")]
-            #[expect(clippy::expect_used)]
-            epoll: Epoll::new(EpollCreateFlags::empty()).expect("failed to create epoll"),
-            #[cfg(target_os = "linux")]
-            events: vec![EpollEvent::empty(); 1024],
-        }
+    pub fn new(id: usize, command_rx: CommandReceiver) -> Result<Self, WorkerError> {
+        let firehose = DB.open_tree("firehose")?;
+        let poll = Poll::new()?;
+        let events = Events::with_capacity(1024);
+        Ok(Self { id, connections: Vec::new(), command_rx, firehose, poll, events })
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
-        while self.update() {
+        let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
+        while self.update(&mut seq)? {
             thread::yield_now();
         }
-        tracing::info!("shutting down publisher: {}", self.worker_id.0);
-        self.shutdown()
+        tracing::info!("shutting down publisher: {}", self.id);
+        self.shutdown();
+        Ok(())
     }
 
-    pub fn shutdown(mut self) -> Result<(), WorkerError> {
+    pub fn shutdown(mut self) {
         for conn in self.connections.iter_mut().filter_map(|x| x.as_mut()) {
             if let Err(err) = conn.close() {
                 tracing::warn!("publisher conn close error: {err}");
             }
         }
-        Ok(())
     }
 
-    fn handle_command(&mut self, command: Command) -> bool {
+    fn handle_command(&mut self, command: Command, seq: Cursor) -> bool {
         match command {
             Command::Connect(config) => {
-                let local_id = config.local_id;
-                match Connection::connect(config, self.status_tx.clone()) {
+                tracing::info!(
+                    "[{}] starting publish: {} ({:?})",
+                    self.id,
+                    config.addr,
+                    config.cursor
+                );
+                match Connection::connect(config.addr, config.stream, config.cursor.unwrap_or(seq))
+                {
                     Ok(conn) => {
-                        #[cfg(target_os = "linux")]
+                        let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(
+                            || {
+                                let idx = self.connections.len();
+                                self.connections.push(None);
+                                idx
+                            },
+                        );
                         #[expect(clippy::expect_used)]
-                        self.epoll
-                            .add(&conn, EpollEvent::new(EPOLL_FLAGS, local_id.0 as _))
-                            .expect("failed to add connection");
-                        self.connections.push(Some(conn));
+                        self.poll
+                            .registry()
+                            .register(&mut SourceFd(&conn.as_raw_fd()), Token(idx), INTEREST)
+                            .expect("unable to register");
+                        self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
                         tracing::warn!("unable to subscribeRepos: {err}");
@@ -91,74 +97,54 @@ impl Worker {
         true
     }
 
-    fn update(&mut self) -> bool {
+    fn update(&mut self, seq: &mut Cursor) -> Result<bool, WorkerError> {
         for _ in 0..32 {
             if let Ok(command) = self.command_rx.pop() {
-                if !self.handle_command(command) {
-                    return false;
+                if !self.handle_command(command, *seq) {
+                    return Ok(false);
                 }
             }
 
+            for msg in self.firehose.range((*seq + 1)..=(*seq + 32)) {
+                let (k, v) = msg?;
+                *seq = k.into();
+                self.send(*seq, &Bytes::from_owner(v).slice(8..));
+            }
+
+            let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
             for _ in 0..32 {
-                match self.message_rx.try_recv() {
-                    Ok(msg) => {
-                        self.send(&*msg);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                if !self.connections.iter().any(|c| c.is_some()) {
-                    continue;
-                }
-
-                let mut events = std::mem::take(&mut self.events);
-                unsafe { events.set_len(events.capacity()) }
                 #[expect(clippy::expect_used)]
-                let len = self.epoll.wait(&mut events, 1u8).expect("failed to wait for epoll");
-                if len == 0 {
-                    continue;
-                }
-                unsafe { events.set_len(len) }
-
+                self.poll
+                    .poll(&mut events, Some(Duration::from_millis(1)))
+                    .expect("failed to poll");
                 for ev in &events {
-                    #[expect(clippy::cast_possible_truncation)]
-                    if !self.poll(LocalId(ev.data() as usize)) {
-                        return false;
-                    }
-                }
-                self.events = events;
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            {
-                for local_id in 0..self.connections.len() {
-                    if !self.poll(LocalId(local_id)) {
-                        return false;
+                    if !self.poll(*seq, ev.token().0) {
+                        return Ok(false);
                     }
                 }
             }
+            self.events = events;
         }
 
-        for local_id in 0..self.connections.len() {
-            if !self.poll(LocalId(local_id)) {
-                return false;
+        for idx in 0..self.connections.len() {
+            if !self.poll(*seq, idx) {
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
-    fn send(&mut self, input: &[u8]) -> bool {
-        for conn in self.connections.iter_mut() {
+    fn send(&mut self, seq: Cursor, data: &Bytes) -> bool {
+        for conn in &mut self.connections {
             if let Some(inner) = conn.as_mut() {
-                if let Err(_) = inner.send(input) {
-                    #[cfg(target_os = "linux")]
+                if let Err(err) = inner.send(seq, data.clone()) {
+                    tracing::info!("[{}] disconnected: {err}", inner.addr);
                     #[expect(clippy::expect_used)]
-                    self.epoll.delete(inner).expect("failed to delete connection");
+                    self.poll
+                        .registry()
+                        .deregister(&mut SourceFd(&inner.as_raw_fd()))
+                        .expect("failed to deregister");
                     *conn = None;
                 }
             }
@@ -166,13 +152,16 @@ impl Worker {
         true
     }
 
-    fn poll(&mut self, local_id: LocalId) -> bool {
-        if let Some(conn) = &mut self.connections[local_id.0] {
-            if let Err(_) = conn.poll() {
-                #[cfg(target_os = "linux")]
+    fn poll(&mut self, seq: Cursor, idx: usize) -> bool {
+        if let Some(conn) = &mut self.connections[idx] {
+            if let Err(err) = conn.poll(seq, &self.firehose) {
+                tracing::info!("[{}] disconnected: {err}", conn.addr);
                 #[expect(clippy::expect_used)]
-                self.epoll.delete(conn).expect("failed to delete connection");
-                self.connections[local_id.0] = None;
+                self.poll
+                    .registry()
+                    .deregister(&mut SourceFd(&conn.as_raw_fd()))
+                    .expect("failed to deregister");
+                self.connections[idx] = None;
             }
         }
         true

@@ -1,6 +1,7 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
-use std::fmt;
-use std::io::Cursor;
+use std::io::Write;
+use std::{fmt, io};
 
 use chrono::{DateTime, Utc};
 use cid::Cid;
@@ -8,6 +9,8 @@ use rs_car_sync::{CarDecodeError, CarReader};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_cbor::tags::Tagged;
 use thiserror::Error;
+
+use crate::types::Cursor;
 
 const CBOR_TAG_CID: u64 = 42;
 const MULTIBASE_IDENTITY: u8 = 0;
@@ -28,6 +31,16 @@ pub enum ParseError {
     UnknownType(String),
 }
 
+#[derive(Debug, Error)]
+pub enum SerializeError {
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("header error: {0}")]
+    Header(#[from] ciborium::ser::Error<std::io::Error>),
+    #[error("body error: {0}")]
+    Body(#[from] serde_ipld_dagcbor::EncodeError<std::io::Error>),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -37,7 +50,7 @@ pub enum Action {
 }
 
 /// If active=false, this optional field indicates a reason for why the account is not active.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountStatus {
     Takendown,
@@ -50,11 +63,11 @@ pub enum AccountStatus {
 
 impl fmt::Display for AccountStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Commit {
     pub did: String,
     pub rev: String,
@@ -66,11 +79,16 @@ pub struct Commit {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubscribeReposCommitOperation {
     pub action: Action,
     pub path: String,
     pub cid: Option<Cid>,
-    #[serde(default = "default_resource", deserialize_with = "deserialize_option_cid_v1")]
+    #[serde(
+        default = "default_resource",
+        deserialize_with = "deserialize_option_cid_v1",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prev_data: Option<Cid>,
 }
 
@@ -79,7 +97,7 @@ pub struct SubscribeReposCommitOperation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeReposCommit {
-    pub seq: i64,
+    pub seq: u64,
     pub rebase: bool,
     pub too_big: bool,
     pub repo: String,
@@ -91,7 +109,11 @@ pub struct SubscribeReposCommit {
     pub blocks: Vec<u8>,
     pub ops: Vec<SubscribeReposCommitOperation>,
     pub blobs: Vec<String>,
-    #[serde(default = "default_resource", deserialize_with = "deserialize_option_cid_v1")]
+    #[serde(
+        default = "default_resource",
+        deserialize_with = "deserialize_option_cid_v1",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prev_data: Option<Cid>,
     pub time: DateTime<Utc>,
 }
@@ -102,7 +124,7 @@ pub struct SubscribeReposCommit {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeReposSync {
-    pub seq: i64,
+    pub seq: u64,
     pub did: String,
     #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
@@ -114,7 +136,7 @@ pub struct SubscribeReposSync {
 /// hosting endpoint. Serves as a prod to all downstream services to refresh their identity cache.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposIdentity {
-    pub seq: i64,
+    pub seq: u64,
     pub did: String,
     pub time: DateTime<Utc>,
     pub handle: Option<String>,
@@ -126,7 +148,7 @@ pub struct SubscribeReposIdentity {
 /// Eg, a Relay takedown would emit a takedown with active=false, even if the PDS is still active.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeReposAccount {
-    pub seq: i64,
+    pub seq: u64,
     pub did: String,
     pub time: DateTime<Utc>,
     pub active: bool,
@@ -139,6 +161,7 @@ pub struct SubscribeReposInfo {
     pub message: String,
 }
 
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SubscribeReposEvent {
     Commit(SubscribeReposCommit),
@@ -147,65 +170,117 @@ pub enum SubscribeReposEvent {
     Account(SubscribeReposAccount),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Header<'a> {
+    #[serde(rename = "t")]
+    pub type_: Cow<'a, str>,
+    #[serde(rename = "op")]
+    pub operation_: u8,
+}
+
 impl SubscribeReposEvent {
-    pub fn parse(data: &[u8]) -> Result<Option<SubscribeReposEvent>, ParseError> {
-        #[derive(Debug, Deserialize)]
-        pub struct Header {
-            #[serde(rename(deserialize = "t"))]
-            pub type_: String,
-            #[serde(rename(deserialize = "op"))]
-            pub _operation: u8,
-        }
+    pub fn parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        let mut reader = io::Cursor::new(data);
 
-        let mut reader = Cursor::new(data);
-
-        let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
-        let body = match header.type_.as_str() {
-            "#commit" => SubscribeReposEvent::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
-            "#sync" => SubscribeReposEvent::Sync(serde_ipld_dagcbor::from_reader(&mut reader)?),
-            "#identity" => {
-                SubscribeReposEvent::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?)
+        let header = match ciborium::de::from_reader::<Header<'static>, _>(&mut reader) {
+            Ok(header) => header,
+            Err(err) => {
+                tracing::debug!("header parse error: {err}");
+                return Err(err.into());
             }
-            "#account" => {
-                SubscribeReposEvent::Account(serde_ipld_dagcbor::from_reader(&mut reader)?)
-            }
+        };
+        let body = match header.type_.as_ref() {
+            "#commit" => Self::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
+            "#sync" => Self::Sync(serde_ipld_dagcbor::from_reader(&mut reader)?),
+            "#identity" => Self::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
+            "#account" => Self::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#info" => {
                 let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
                 tracing::debug!("received info: {} ({})", info.name, info.message);
                 return Ok(None);
             }
             _ => {
-                tracing::debug!("received unknown header {:?}", header.type_.as_str());
-                return Err(ParseError::UnknownType(header.type_));
+                tracing::debug!("received unknown header {:?}", header.type_.as_ref());
+                return Err(ParseError::UnknownType(header.type_.into_owned()));
             }
         };
 
         Ok(Some(body))
     }
 
-    pub fn id(&self) -> i64 {
+    pub fn serialize(self, capacity: usize, seq: Cursor) -> Result<Vec<u8>, SerializeError> {
+        let mut writer = io::Cursor::new(Vec::with_capacity(capacity));
+        #[expect(clippy::cast_sign_loss)]
+        let time = self.time().timestamp() as u64;
+        writer.write_all(&time.to_be_bytes())?;
+
+        let header = Header { operation_: 1, type_: Cow::Borrowed(self.type_()) };
+        ciborium::ser::into_writer(&header, &mut writer)?;
+
         match self {
-            SubscribeReposEvent::Commit(commit) => commit.seq,
-            SubscribeReposEvent::Sync(sync) => sync.seq,
-            SubscribeReposEvent::Identity(identity) => identity.seq,
-            SubscribeReposEvent::Account(account) => account.seq,
+            Self::Commit(mut commit) => {
+                commit.seq = seq.get();
+                serde_ipld_dagcbor::to_writer(&mut writer, &commit)?;
+            }
+            Self::Sync(mut sync) => {
+                sync.seq = seq.get();
+                serde_ipld_dagcbor::to_writer(&mut writer, &sync)?;
+            }
+            Self::Identity(mut identity) => {
+                identity.seq = seq.get();
+                serde_ipld_dagcbor::to_writer(&mut writer, &identity)?;
+            }
+            Self::Account(mut account) => {
+                account.seq = seq.get();
+                serde_ipld_dagcbor::to_writer(&mut writer, &account)?;
+            }
+        };
+
+        Ok(writer.into_inner())
+    }
+
+    pub const fn type_(&self) -> &'static str {
+        match self {
+            Self::Commit(_) => "#commit",
+            Self::Sync(_) => "#sync",
+            Self::Identity(_) => "#identity",
+            Self::Account(_) => "#account",
+        }
+    }
+
+    pub fn seq(&self) -> Cursor {
+        match self {
+            Self::Commit(commit) => commit.seq,
+            Self::Sync(sync) => sync.seq,
+            Self::Identity(identity) => identity.seq,
+            Self::Account(account) => account.seq,
+        }
+        .into()
+    }
+
+    pub const fn time(&self) -> DateTime<Utc> {
+        match self {
+            Self::Commit(commit) => commit.time,
+            Self::Sync(sync) => sync.time,
+            Self::Identity(identity) => identity.time,
+            Self::Account(account) => account.time,
         }
     }
 
     pub fn did(&self) -> &str {
         match self {
-            SubscribeReposEvent::Commit(commit) => &commit.repo,
-            SubscribeReposEvent::Sync(sync) => &sync.did,
-            SubscribeReposEvent::Identity(identity) => &identity.did,
-            SubscribeReposEvent::Account(account) => &account.did,
+            Self::Commit(commit) => &commit.repo,
+            Self::Sync(sync) => &sync.did,
+            Self::Identity(identity) => &identity.did,
+            Self::Account(account) => &account.did,
         }
     }
 
     pub fn commit(&self) -> Result<Option<Commit>, ParseError> {
         let mut blocks = match self {
-            SubscribeReposEvent::Commit(commit) => commit.blocks.as_slice(),
-            SubscribeReposEvent::Sync(sync) => sync.blocks.as_slice(),
-            SubscribeReposEvent::Identity(_) | SubscribeReposEvent::Account(_) => {
+            Self::Commit(commit) => commit.blocks.as_slice(),
+            Self::Sync(sync) => sync.blocks.as_slice(),
+            Self::Identity(_) | Self::Account(_) => {
                 return Ok(None);
             }
         };
@@ -234,9 +309,8 @@ where
                 bz.remove(0);
             }
 
-            Ok(Cid::try_from(bz).map_err(|e| {
-                serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
-            })?)
+            Ok(Cid::try_from(bz)
+                .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Cid: {e}")))?)
         }
         Some(_) => Err(serde::de::Error::custom("unexpected tag")),
     }
@@ -278,7 +352,7 @@ where
                 }
 
                 Ok(Some(Cid::try_from(bz).map_err(|e| {
-                    serde::de::Error::custom(format!("Failed to deserialize Cid: {}", e))
+                    serde::de::Error::custom(format!("Failed to deserialize Cid: {e}"))
                 })?))
             }
             Some(_) => Err(serde::de::Error::custom("unexpected tag")),
@@ -286,6 +360,6 @@ where
     }
 }
 
-pub fn default_resource() -> Option<Cid> {
+pub const fn default_resource() -> Option<Cid> {
     None
 }

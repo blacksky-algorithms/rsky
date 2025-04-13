@@ -22,6 +22,7 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
 const PLC_URL: &str = "https://plc.directory";
+const DOC_PATH: &str = "/.well-known/did.json";
 
 type RequestFuture = Pin<Box<dyn Future<Output = reqwest::Result<DidDocument>> + Send>>;
 
@@ -59,7 +60,7 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub async fn new() -> Result<Self, ResolverError> {
+    pub fn new() -> Result<Self, ResolverError> {
         let cache = DB.open_tree("keys")?;
         let client = Client::builder()
             .timeout(REQ_TIMEOUT)
@@ -71,12 +72,7 @@ impl Resolver {
         Ok(Self { client, cache, inflight, futures: pending })
     }
 
-    pub async fn shutdown(&mut self) -> Result<(), ResolverError> {
-        self.cache.flush_async().await?;
-        Ok(())
-    }
-
-    pub fn expire(&mut self, did: &str) -> Result<bool, ResolverError> {
+    pub fn expire(&self, did: &str) -> Result<bool, ResolverError> {
         tracing::trace!("expiring did: {did}");
         Ok(self.cache.remove(did)?.is_some())
     }
@@ -84,7 +80,7 @@ impl Resolver {
     pub fn resolve(&mut self, did: &str) -> Result<Option<[u8; 35]>, ResolverError> {
         if let Some(bytes) = self.cache.get(did)? {
             let doc = Document::ref_from_bytes(&bytes)?;
-            let time = SystemTime::UNIX_EPOCH + Duration::from_secs(doc.timestamp.get());
+            let time = UNIX_EPOCH + Duration::from_secs(doc.timestamp.get());
             if time.elapsed()? > KEY_TTL {
                 self.cache.remove(did)?;
             } else {
@@ -100,8 +96,20 @@ impl Resolver {
             return;
         }
         tracing::trace!("fetching did: {did}");
-        self.inflight.insert(did.to_owned());
-        let req = self.client.get(&format!("{PLC_URL}/{did}"));
+        let req = if did.starts_with("did:plc:") {
+            self.inflight.insert(did.to_owned());
+            self.client.get(format!("{PLC_URL}/{did}"))
+        } else if let Some(id) = did.strip_prefix("did:web:") {
+            let Ok(hostname) = urlencoding::decode(id) else {
+                tracing::debug!("invalid did: {did}");
+                return;
+            };
+            self.inflight.insert(did.to_owned());
+            self.client.get(format!("https://{hostname}/{DOC_PATH}"))
+        } else {
+            tracing::debug!("invalid did: {did}");
+            return;
+        };
         self.futures.push(Box::pin(async move { req.send().await?.json().await }));
     }
 
@@ -122,9 +130,8 @@ impl Resolver {
                                 };
                                 self.cache.insert(&response.id, doc.as_bytes())?;
                                 return Ok(Some((response.id, key)));
-                            } else {
-                                tracing::debug!("key len error");
                             }
+                            tracing::debug!("key len error");
                         } else {
                             tracing::debug!(
                                 "multibase decode error: {}",

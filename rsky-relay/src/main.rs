@@ -38,9 +38,9 @@ pub async fn main() -> Result<()> {
         thingbuf::mpsc::blocking::with_recycle(CAPACITY1, MessageRecycle);
     let (request_crawl_tx, request_crawl_rx) = rtrb::RingBuffer::new(CAPACITY2);
     let (subscribe_repos_tx, subscribe_repos_rx) = rtrb::RingBuffer::new(CAPACITY2);
-    let mut validator = ValidatorManager::new(message_rx).await?;
-    let crawler = CrawlerManager::new(WORKERS, message_tx, request_crawl_rx)?;
-    let publisher = PublisherManager::new(WORKERS, &mut validator, subscribe_repos_rx)?;
+    let validator = ValidatorManager::new(message_rx)?;
+    let crawler = CrawlerManager::new(WORKERS, &message_tx, request_crawl_rx)?;
+    let publisher = PublisherManager::new(WORKERS, subscribe_repos_rx)?;
     let server = Server::new(request_crawl_tx, subscribe_repos_tx)?;
     thread::scope(move |s| {
         tokio::spawn(validator.run());
