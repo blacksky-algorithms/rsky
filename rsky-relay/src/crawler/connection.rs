@@ -17,7 +17,7 @@ pub enum ConnectionError {
     #[error("tungstenite error: {0}")]
     Tungstenite(#[from] tungstenite::Error),
     #[error("thingbuf error: {0}")]
-    Thingbuf(#[from] mpsc::errors::TrySendError),
+    Thingbuf(#[from] mpsc::errors::Closed),
 }
 
 pub struct Connection {
@@ -66,8 +66,14 @@ impl Connection {
         Ok(())
     }
 
-    pub fn poll(&mut self) -> Result<(), ConnectionError> {
+    // false: not polled
+    // true: polled
+    pub fn poll(&mut self) -> Result<bool, ConnectionError> {
         for _ in 0..1024 {
+            if self.message_tx.remaining() < 16 {
+                return Ok(false);
+            }
+
             let msg = match self.client.read() {
                 Ok(msg) => msg,
                 Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -91,10 +97,10 @@ impl Connection {
                 }
             };
 
-            let mut slot = self.message_tx.try_send_ref()?;
+            let mut slot = self.message_tx.send_ref()?;
             slot.data = bytes;
             slot.hostname.clone_from(&self.hostname);
         }
-        Ok(())
+        Ok(true)
     }
 }

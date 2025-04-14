@@ -172,10 +172,10 @@ pub enum SubscribeReposEvent {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Header<'a> {
-    #[serde(rename = "t")]
+    #[serde(rename = "t", default)]
     pub type_: Cow<'a, str>,
     #[serde(rename = "op")]
-    pub operation_: u8,
+    pub operation_: i8,
 }
 
 impl SubscribeReposEvent {
@@ -189,6 +189,9 @@ impl SubscribeReposEvent {
                 return Err(err.into());
             }
         };
+        if header.operation_ == -1 {
+            return Ok(None);
+        }
         let body = match header.type_.as_ref() {
             "#commit" => Self::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#sync" => Self::Sync(serde_ipld_dagcbor::from_reader(&mut reader)?),

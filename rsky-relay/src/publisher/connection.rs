@@ -5,13 +5,17 @@ use std::os::fd::{AsRawFd, RawFd};
 use sled::Tree;
 use thiserror::Error;
 use tungstenite::handshake::server::NoCallback;
+use tungstenite::protocol::CloseFrame;
+use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Bytes, HandshakeError, Message, ServerHandshake, WebSocket};
+use tungstenite::{Bytes, HandshakeError, Message, ServerHandshake, Utf8Bytes, WebSocket};
 
 use crate::types::Cursor;
 
-const OUTDATED: &[u8] = b"\xa2ate#infobop\x01\xa2dnamenOutdatedCursorgmessagex8Requested cursor exceeded limit. Possibly missing events.";
-const FUTURE: &[u8] = b"\xa1bop \xa2eerrorlFutureCursorgmessageuCursor in the future.";
+const OUTDATED_MSG: &[u8] = b"\xa2ate#infobop\x01\xa2dnamenOutdatedCursorgmessagex8Requested cursor exceeded limit. Possibly missing events.";
+const FUTURE_MSG: &[u8] = b"\xa1bop \xa2eerrorlFutureCursorgmessageuCursor in the future.";
+const FUTURE_CLOSE: CloseFrame =
+    CloseFrame { code: CloseCode::Policy, reason: Utf8Bytes::from_static("FutureCursor") };
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -59,12 +63,14 @@ impl Connection {
         Ok(Self { addr, client, cursor })
     }
 
-    pub fn close(&mut self) -> Result<(), ConnectionError> {
-        self.client.close(None)?;
+    pub fn close(&mut self, code: CloseFrame) -> Result<(), ConnectionError> {
+        self.client.close(Some(code))?;
         self.client.flush()?;
         Ok(())
     }
 
+    /// false: not sent
+    /// true: sent
     pub fn send(&mut self, mut seq: Cursor, data: Bytes) -> Result<bool, ConnectionError> {
         if self.cursor != seq {
             return Ok(false);
@@ -83,22 +89,27 @@ impl Connection {
         }
     }
 
-    pub fn poll(&mut self, mut seq: Cursor, firehose: &Tree) -> Result<(), ConnectionError> {
-        if self.cursor.get() > seq.get() {
-            self.send(self.cursor, Bytes::from_static(FUTURE))?;
-            return self.close();
+    /// false: closed
+    /// true: not closed
+    pub fn poll(&mut self, mut seq: Cursor, firehose: &Tree) -> Result<bool, ConnectionError> {
+        if self.cursor.get() != 0 && self.cursor.get() > seq.get() + 1 {
+            self.send(self.cursor, Bytes::from_static(FUTURE_MSG))?;
+            self.close(FUTURE_CLOSE)?;
+            return Ok(false);
         }
         for msg in firehose.range(self.cursor..=seq) {
             let (k, v) = msg?;
             seq = k.into();
             if self.cursor != seq {
-                self.send(self.cursor, Bytes::from_static(OUTDATED))?;
+                if self.cursor.get() != 0 {
+                    self.send(self.cursor, Bytes::from_static(OUTDATED_MSG))?;
+                }
                 self.cursor = seq;
             }
             if !self.send(seq, Bytes::from_owner(v).slice(8..))? {
                 break;
             }
         }
-        Ok(())
+        Ok(true)
     }
 }

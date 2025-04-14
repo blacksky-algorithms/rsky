@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 # external
 bstr = "1"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 cid = { version = "0.11", features = ["serde-codec"] }
@@ -16,6 +17,7 @@ hashbrown = "0.15"
 http = "1"
 httparse = "1.10"
 k256 = "0.13"
+lru = "0.14"
 magnetic = "2"
 mimalloc = "0.1"
 mio = { version = "1", features = ["os-ext", "os-poll"] }

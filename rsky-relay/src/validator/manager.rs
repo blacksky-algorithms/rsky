@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTimeError, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use hashbrown::HashMap;
 use sled::{Batch, Tree};
 use thiserror::Error;
@@ -41,7 +42,7 @@ impl<T: KnownLayout + Immutable + Unaligned + ?Sized> From<CastError<&[u8], T>> 
 
 pub struct Manager {
     message_rx: MessageReceiver,
-    cursors: HashMap<String, Cursor>,
+    cursors: HashMap<String, (Cursor, DateTime<Utc>)>,
     resolver: Resolver,
     queue: Tree,
     crawlers: Tree,
@@ -64,7 +65,7 @@ impl Manager {
         for res in &self.crawlers {
             let (hostname, cursor) = res?;
             let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
-            self.cursors.insert(hostname, cursor.into());
+            self.cursors.insert(hostname, (cursor.into(), DateTime::default()));
         }
         for res in &self.queue {
             let (did, _) = res?;
@@ -111,7 +112,9 @@ impl Manager {
                         continue;
                     };
                     let curr = event.seq();
-                    if let Some(prev) = self.cursors.get(&msg.hostname) {
+                    let mut time = event.time();
+                    if let Some((prev, old)) = self.cursors.get(&msg.hostname) {
+                        time = time.max(*old);
                         let prev: u64 = (*prev).into();
                         let curr: u64 = curr.into();
                         if prev >= curr {
@@ -124,7 +127,7 @@ impl Manager {
                             }
                             continue;
                         } else if prev + 1 != curr {
-                            tracing::debug!(
+                            tracing::trace!(
                                 "[{}] seq gap: {prev} -> {curr} ({})",
                                 msg.hostname,
                                 curr - prev - 1
@@ -138,7 +141,7 @@ impl Manager {
                             self.resolver.expire(did)?;
                             let data = event.serialize(msg.data.len(), seq.next())?;
                             self.firehose.insert(*seq, data)?;
-                            self.cursors.insert(msg.hostname.clone(), curr);
+                            self.cursors.insert(msg.hostname.clone(), (curr, time));
                             continue;
                         }
                         Err(err) => {
@@ -152,7 +155,7 @@ impl Manager {
                                 if res {
                                     let data = event.serialize(msg.data.len(), seq.next())?;
                                     self.firehose.insert(*seq, data)?;
-                                    self.cursors.insert(msg.hostname.clone(), curr);
+                                    self.cursors.insert(msg.hostname.clone(), (curr, time));
                                 } else {
                                     tracing::debug!("invalid signature: {commit:?} ({key:?})");
                                 }
@@ -170,7 +173,7 @@ impl Manager {
                             buf.extend_from_slice(&msg.data);
                             Some(buf)
                         })?;
-                        self.cursors.insert(msg.hostname.clone(), curr);
+                        self.cursors.insert(msg.hostname.clone(), (curr, time));
                     }
                 }
                 Err(thingbuf::mpsc::errors::TryRecvError::Empty) => {}
@@ -181,7 +184,7 @@ impl Manager {
             let Some((did, key)) = self.resolver.poll().await? else {
                 continue;
             };
-            let Some(msgs) = self.queue.remove(&did)? else {
+            let Some(msgs) = self.queue.remove(did)? else {
                 tracing::debug!("missing queue for did: {did}");
                 continue;
             };
@@ -195,7 +198,7 @@ impl Manager {
                 };
                 #[expect(clippy::unwrap_used)]
                 let commit = event.commit().unwrap().unwrap(); // Already tried parsing
-                match utils::verify_commit_sig(&commit, key) {
+                match utils::verify_commit_sig(&commit, *key) {
                     Ok(res) => {
                         if res {
                             let data = event.serialize(data.len(), seq.next())?;
@@ -221,7 +224,8 @@ impl Manager {
 impl Drop for Manager {
     fn drop(&mut self) {
         let mut batch = sled::Batch::default();
-        for (hostname, cursor) in &self.cursors {
+        for (hostname, (cursor, time)) in &self.cursors {
+            tracing::info!("[{hostname}] persisting cursor: {time}");
             batch.insert(hostname.as_bytes(), *cursor);
         }
         if let Err(err) = self.crawlers.apply_batch(batch) {

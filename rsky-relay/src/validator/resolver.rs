@@ -1,9 +1,12 @@
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use hashbrown::HashSet;
+use lru::LruCache;
 use reqwest::Client;
 use sled::Tree;
 use thiserror::Error;
@@ -16,9 +19,12 @@ use rsky_identity::types::DidDocument;
 
 use crate::types::DB;
 
-const POLL_TIMEOUT: Duration = Duration::from_micros(10);
-const REQ_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_TIMEOUT: Duration = Duration::from_micros(1);
+const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
+const MAX_INFLIGHT: usize = 64;
+
+const KEY_CAP: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1 << 16) };
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
 const PLC_URL: &str = "https://plc.directory";
@@ -53,7 +59,9 @@ impl<T: KnownLayout + Immutable + Unaligned + ?Sized> From<CastError<&[u8], T>> 
 }
 
 pub struct Resolver {
-    cache: Tree,
+    cache: LruCache<String, [u8; 35]>,
+    keys: Tree,
+    queue: VecDeque<String>,
     client: Client,
     inflight: HashSet<String>,
     futures: FuturesUnordered<RequestFuture>,
@@ -61,29 +69,36 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new() -> Result<Self, ResolverError> {
-        let cache = DB.open_tree("keys")?;
+        let cache = LruCache::new(KEY_CAP);
+        let keys = DB.open_tree("keys")?;
+        let queue = VecDeque::new();
         let client = Client::builder()
             .timeout(REQ_TIMEOUT)
             .tcp_keepalive(Some(TCP_KEEPALIVE))
             .https_only(true)
             .build()?;
         let inflight = HashSet::new();
-        let pending = FuturesUnordered::new();
-        Ok(Self { client, cache, inflight, futures: pending })
+        let futures = FuturesUnordered::new();
+        Ok(Self { cache, keys, queue, client, inflight, futures })
     }
 
-    pub fn expire(&self, did: &str) -> Result<bool, ResolverError> {
+    pub fn expire(&mut self, did: &str) -> Result<bool, ResolverError> {
         tracing::trace!("expiring did: {did}");
-        Ok(self.cache.remove(did)?.is_some())
+        self.cache.pop(did);
+        Ok(self.keys.remove(did)?.is_some())
     }
 
     pub fn resolve(&mut self, did: &str) -> Result<Option<[u8; 35]>, ResolverError> {
-        if let Some(bytes) = self.cache.get(did)? {
+        if let Some(key) = self.cache.get(did) {
+            return Ok(Some(*key));
+        }
+        if let Some(bytes) = self.keys.get(did)? {
             let doc = Document::ref_from_bytes(&bytes)?;
             let time = UNIX_EPOCH + Duration::from_secs(doc.timestamp.get());
             if time.elapsed()? > KEY_TTL {
-                self.cache.remove(did)?;
+                self.keys.remove(did)?;
             } else {
+                self.cache.put(did.to_owned(), doc.key);
                 return Ok(Some(doc.key));
             }
         }
@@ -92,28 +107,40 @@ impl Resolver {
     }
 
     pub fn request(&mut self, did: &str) {
-        if self.inflight.contains(did) {
-            return;
-        }
-        tracing::trace!("fetching did: {did}");
-        let req = if did.starts_with("did:plc:") {
-            self.inflight.insert(did.to_owned());
-            self.client.get(format!("{PLC_URL}/{did}"))
-        } else if let Some(id) = did.strip_prefix("did:web:") {
-            let Ok(hostname) = urlencoding::decode(id) else {
+        fn send(this: &Resolver, did: &str) {
+            tracing::trace!("fetching did: {did}");
+            let req = if did.starts_with("did:plc:") {
+                this.client.get(format!("{PLC_URL}/{did}"))
+            } else if let Some(id) = did.strip_prefix("did:web:") {
+                let Ok(hostname) = urlencoding::decode(id) else {
+                    tracing::debug!("invalid did: {did}");
+                    return;
+                };
+                this.client.get(format!("https://{hostname}/{DOC_PATH}"))
+            } else {
                 tracing::debug!("invalid did: {did}");
                 return;
             };
-            self.inflight.insert(did.to_owned());
-            self.client.get(format!("https://{hostname}/{DOC_PATH}"))
-        } else {
-            tracing::debug!("invalid did: {did}");
+            this.futures.push(Box::pin(async move { req.send().await?.json().await }));
+        }
+
+        if !self.inflight.insert(did.to_owned()) {
             return;
-        };
-        self.futures.push(Box::pin(async move { req.send().await?.json().await }));
+        }
+        self.queue.push_back(did.to_owned());
+        loop {
+            if self.futures.len() == MAX_INFLIGHT {
+                break;
+            }
+            if let Some(did) = self.queue.pop_front() {
+                send(self, &did);
+            } else {
+                break;
+            }
+        }
     }
 
-    pub async fn poll(&mut self) -> Result<Option<(String, [u8; 35])>, ResolverError> {
+    pub async fn poll(&mut self) -> Result<Option<(&String, &[u8; 35])>, ResolverError> {
         if let Ok(Some(res)) = timeout(POLL_TIMEOUT, self.futures.next()).await {
             match res {
                 Ok(response) => {
@@ -128,8 +155,9 @@ impl Resolver {
                                         .into(),
                                     key,
                                 };
-                                self.cache.insert(&response.id, doc.as_bytes())?;
-                                return Ok(Some((response.id, key)));
+                                self.keys.insert(&response.id, doc.as_bytes())?;
+                                self.cache.put(response.id, key);
+                                return Ok(self.cache.peek_mru());
                             }
                             tracing::debug!("key len error");
                         } else {

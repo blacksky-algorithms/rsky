@@ -23,6 +23,7 @@ pub enum WorkerError {
 pub struct Worker {
     id: usize,
     connections: Vec<Option<Connection>>,
+    next_idx: usize,
     message_tx: MessageSender,
     command_rx: CommandReceiver,
     poll: Poll,
@@ -35,7 +36,7 @@ impl Worker {
     ) -> Result<Self, WorkerError> {
         let poll = Poll::new()?;
         let events = Events::with_capacity(1024);
-        Ok(Self { id, connections: Vec::new(), message_tx, command_rx, poll, events })
+        Ok(Self { id, connections: Vec::new(), next_idx: 0, message_tx, command_rx, poll, events })
     }
 
     #[expect(clippy::unnecessary_wraps)]
@@ -101,24 +102,29 @@ impl Worker {
                 }
             }
 
+            if self.message_tx.remaining() < 16 {
+                break;
+            }
+
             let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
-            for _ in 0..32 {
+            'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
                 self.poll
                     .poll(&mut events, Some(Duration::from_millis(1)))
                     .expect("failed to poll");
                 for ev in &events {
                     if !self.poll(ev.token().0) {
-                        return false;
+                        break 'outer;
                     }
                 }
             }
             self.events = events;
         }
 
-        for idx in 0..self.connections.len() {
-            if !self.poll(idx) {
-                return false;
+        for _ in 0..self.connections.len() {
+            self.next_idx = (self.next_idx + 1) % self.connections.len();
+            if !self.poll(self.next_idx) {
+                break;
             }
         }
 
@@ -127,16 +133,21 @@ impl Worker {
 
     fn poll(&mut self, idx: usize) -> bool {
         if let Some(conn) = &mut self.connections[idx] {
-            if let Err(err) = conn.poll() {
-                tracing::info!("[{}] disconnected: {err}", conn.hostname);
-                #[expect(clippy::expect_used)]
-                self.poll
-                    .registry()
-                    .deregister(&mut SourceFd(&conn.as_raw_fd()))
-                    .expect("failed to deregister");
-                self.connections[idx] = None;
+            match conn.poll() {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(err) => {
+                    tracing::info!("[{}] disconnected: {err}", conn.hostname);
+                    #[expect(clippy::expect_used)]
+                    self.poll
+                        .registry()
+                        .deregister(&mut SourceFd(&conn.as_raw_fd()))
+                        .expect("failed to deregister");
+                    self.connections[idx] = None;
+                }
             }
         }
+
         true
     }
 }

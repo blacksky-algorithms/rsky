@@ -2,9 +2,9 @@ use std::fmt;
 use std::ops::{Add, Sub};
 use std::sync::LazyLock;
 
+use bytes::Bytes;
 use sled::{Db, IVec, Mode};
 use thingbuf::{Recycle, mpsc};
-use tungstenite::Bytes;
 use zerocopy::big_endian::U64;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -32,6 +32,7 @@ impl Recycle<Message> for MessageRecycle {
 
     fn recycle(&self, element: &mut Message) {
         element.data.clear();
+        element.hostname.clear();
     }
 }
 

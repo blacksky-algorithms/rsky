@@ -2,17 +2,22 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 use std::{io, thread};
 
+use bytes::Bytes;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use sled::Tree;
 use thiserror::Error;
-use tungstenite::Bytes;
+use tungstenite::Utf8Bytes;
+use tungstenite::protocol::CloseFrame;
+use tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::publisher::connection::{Connection, ConnectionError};
 use crate::publisher::types::{Command, CommandReceiver};
 use crate::types::{Cursor, DB};
 
 const INTEREST: Interest = Interest::WRITABLE;
+const SHUTDOWN_FRAME: CloseFrame =
+    CloseFrame { code: CloseCode::Restart, reason: Utf8Bytes::from_static("RelayRestart") };
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -27,6 +32,7 @@ pub enum WorkerError {
 pub struct Worker {
     id: usize,
     connections: Vec<Option<Connection>>,
+    next_idx: usize,
     command_rx: CommandReceiver,
     firehose: Tree,
     poll: Poll,
@@ -38,7 +44,7 @@ impl Worker {
         let firehose = DB.open_tree("firehose")?;
         let poll = Poll::new()?;
         let events = Events::with_capacity(1024);
-        Ok(Self { id, connections: Vec::new(), command_rx, firehose, poll, events })
+        Ok(Self { id, connections: Vec::new(), next_idx: 0, command_rx, firehose, poll, events })
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
@@ -53,7 +59,7 @@ impl Worker {
 
     pub fn shutdown(mut self) {
         for conn in self.connections.iter_mut().filter_map(|x| x.as_mut()) {
-            if let Err(err) = conn.close() {
+            if let Err(err) = conn.close(SHUTDOWN_FRAME) {
                 tracing::warn!("publisher conn close error: {err}");
             }
         }
@@ -112,23 +118,24 @@ impl Worker {
             }
 
             let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
-            for _ in 0..32 {
+            'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
                 self.poll
                     .poll(&mut events, Some(Duration::from_millis(1)))
                     .expect("failed to poll");
                 for ev in &events {
                     if !self.poll(*seq, ev.token().0) {
-                        return Ok(false);
+                        break 'outer;
                     }
                 }
             }
             self.events = events;
         }
 
-        for idx in 0..self.connections.len() {
-            if !self.poll(*seq, idx) {
-                return Ok(false);
+        for _ in 0..self.connections.len() {
+            self.next_idx = (self.next_idx + 1) % self.connections.len();
+            if !self.poll(*seq, self.next_idx) {
+                break;
             }
         }
 
@@ -154,16 +161,23 @@ impl Worker {
 
     fn poll(&mut self, seq: Cursor, idx: usize) -> bool {
         if let Some(conn) = &mut self.connections[idx] {
-            if let Err(err) = conn.poll(seq, &self.firehose) {
-                tracing::info!("[{}] disconnected: {err}", conn.addr);
-                #[expect(clippy::expect_used)]
-                self.poll
-                    .registry()
-                    .deregister(&mut SourceFd(&conn.as_raw_fd()))
-                    .expect("failed to deregister");
-                self.connections[idx] = None;
+            match conn.poll(seq, &self.firehose) {
+                Ok(true) => return true,
+                Ok(false) => {
+                    tracing::info!("[{}] closed due to invalid cursor", conn.addr);
+                }
+                Err(err) => {
+                    tracing::info!("[{}] disconnected: {err}", conn.addr);
+                }
             }
+            #[expect(clippy::expect_used)]
+            self.poll
+                .registry()
+                .deregister(&mut SourceFd(&conn.as_raw_fd()))
+                .expect("failed to deregister");
+            self.connections[idx] = None;
         }
+
         true
     }
 }
