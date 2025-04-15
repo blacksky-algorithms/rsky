@@ -10,6 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_cbor::tags::Tagged;
 use thiserror::Error;
 
+use rsky_common::tid::TID;
+
 use crate::types::Cursor;
 
 const CBOR_TAG_CID: u64 = 42;
@@ -70,7 +72,7 @@ impl fmt::Display for AccountStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Commit {
     pub did: String,
-    pub rev: String,
+    pub rev: TID,
     pub data: Cid,
     pub prev: Option<Cid>,
     pub version: u8, // Should be 3
@@ -179,7 +181,7 @@ pub struct Header<'a> {
 }
 
 impl SubscribeReposEvent {
-    pub fn parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+    pub fn parse(data: &[u8], hostname: &str) -> Result<Option<Self>, ParseError> {
         let mut reader = io::Cursor::new(data);
 
         let header = match ciborium::de::from_reader::<Header<'static>, _>(&mut reader) {
@@ -199,7 +201,7 @@ impl SubscribeReposEvent {
             "#account" => Self::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#info" => {
                 let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
-                tracing::debug!("received info: {} ({})", info.name, info.message);
+                tracing::debug!("[{hostname}] received info: {} ({})", info.name, info.message);
                 return Ok(None);
             }
             _ => {

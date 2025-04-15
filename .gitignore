@@ -12,6 +12,9 @@ NOTE.md
 Rocket.toml
 *.pem
 **/data/
+db/
+*.db
+*.db-journal
 
 # dotenv environment variable files
 .env

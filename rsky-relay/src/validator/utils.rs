@@ -16,7 +16,7 @@ pub enum VerificationError {
     Key(#[from] p256::ecdsa::Error),
 }
 
-pub fn verify_commit_sig(commit: &Commit, key: [u8; 35]) -> Result<bool, VerificationError> {
+pub fn verify_commit_sig(commit: &Commit, key: &[u8; 35]) -> Result<bool, VerificationError> {
     let encoded = serde_ipld_dagcbor::to_vec(commit)?;
     match &key[0..2] {
         P256_DID_PREFIX => {

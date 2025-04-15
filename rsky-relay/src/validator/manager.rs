@@ -7,13 +7,13 @@ use sled::{Batch, Tree};
 use thiserror::Error;
 use zerocopy::{CastError, FromBytes, Immutable, KnownLayout, SizeError, Unaligned};
 
+use rsky_common::tid::TID;
+
 use crate::SHUTDOWN;
 use crate::types::{Cursor, DB, MessageReceiver, TimedMessage};
 use crate::validator::resolver::{Resolver, ResolverError};
 use crate::validator::types::{ParseError, SerializeError, SubscribeReposEvent};
 use crate::validator::utils;
-
-type Usize = zerocopy::Usize<zerocopy::BigEndian>;
 
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
@@ -43,20 +43,25 @@ impl<T: KnownLayout + Immutable + Unaligned + ?Sized> From<CastError<&[u8], T>> 
 pub struct Manager {
     message_rx: MessageReceiver,
     cursors: HashMap<String, (Cursor, DateTime<Utc>)>,
+    commits: HashMap<String, TID>,
     resolver: Resolver,
     queue: Tree,
     crawlers: Tree,
+    did_revs: Tree,
     firehose: Tree,
 }
 
 impl Manager {
     pub fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
         let cursors = HashMap::new();
+        let commits = HashMap::new();
         let resolver = Resolver::new()?;
         let queue = DB.open_tree("queue")?;
         let crawlers = DB.open_tree("crawlers")?;
+        let did_revs = DB.open_tree("did_revs")?;
         let firehose = DB.open_tree("firehose")?;
-        let this = Self { message_rx, cursors, resolver, queue, crawlers, firehose };
+        let this =
+            Self { message_rx, cursors, commits, resolver, queue, crawlers, did_revs, firehose };
         this.expire()?;
         Ok(this)
     }
@@ -67,10 +72,17 @@ impl Manager {
             let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
             self.cursors.insert(hostname, (cursor.into(), DateTime::default()));
         }
+        for res in &self.did_revs {
+            let (did, rev) = res?;
+            let did = unsafe { String::from_utf8_unchecked(did.to_vec()) };
+            let rev = unsafe { String::from_utf8_unchecked(rev.to_vec()) };
+            self.commits.insert(did, TID(rev));
+        }
         for res in &self.queue {
-            let (did, _) = res?;
-            let did = unsafe { std::str::from_utf8_unchecked(&did) };
-            self.resolver.request(did);
+            let (key, _) = res?;
+            let key = unsafe { std::str::from_utf8_unchecked(&key) };
+            #[expect(clippy::unwrap_used)]
+            self.resolver.resolve(key.split('>').next().unwrap())?;
         }
         let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
         while self.update(&mut seq).await? {}
@@ -108,9 +120,11 @@ impl Manager {
         for _ in 0..1024 {
             match self.message_rx.try_recv_ref() {
                 Ok(msg) => {
-                    let Ok(Some(event)) = SubscribeReposEvent::parse(&msg.data) else {
+                    let Ok(Some(event)) = SubscribeReposEvent::parse(&msg.data, &msg.hostname)
+                    else {
                         continue;
                     };
+
                     let curr = event.seq();
                     let mut time = event.time();
                     if let Some((prev, old)) = self.cursors.get(&msg.hostname) {
@@ -134,11 +148,15 @@ impl Manager {
                             );
                         }
                     }
+
                     let did = event.did();
                     let commit = match event.commit() {
                         Ok(Some(commit)) => commit,
                         Ok(None) => {
-                            self.resolver.expire(did)?;
+                            if let SubscribeReposEvent::Identity(event) = &event {
+                                tracing::trace!("identity event: {event:?}");
+                                self.resolver.expire(did, time);
+                            }
                             let data = event.serialize(msg.data.len(), seq.next())?;
                             self.firehose.insert(*seq, data)?;
                             self.cursors.insert(msg.hostname.clone(), (curr, time));
@@ -149,12 +167,34 @@ impl Manager {
                             continue;
                         }
                     };
-                    if let Some(key) = self.resolver.resolve(did)? {
+
+                    let rev = &commit.rev;
+                    if let Some(prev) = self.commits.get(did) {
+                        if !prev.older_than(rev) {
+                            tracing::debug!(
+                                "[{did}] old msg: {rev} -> {prev} ({})",
+                                rev.timestamp() - prev.timestamp()
+                            );
+                            continue;
+                        }
+                    }
+
+                    if let Some((pds, key)) = self.resolver.resolve(did)? {
+                        if let Some(pds) = pds {
+                            if msg.hostname != pds {
+                                tracing::debug!(
+                                    "[{did}] hostname mismatch: {} (expected: {pds})",
+                                    msg.hostname
+                                );
+                                continue;
+                            }
+                        }
                         match utils::verify_commit_sig(&commit, key) {
-                            Ok(res) => {
-                                if res {
+                            Ok(valid) => {
+                                if valid {
                                     let data = event.serialize(msg.data.len(), seq.next())?;
                                     self.firehose.insert(*seq, data)?;
+                                    self.commits.insert(commit.did, commit.rev);
                                     self.cursors.insert(msg.hostname.clone(), (curr, time));
                                 } else {
                                     tracing::debug!("invalid signature: {commit:?} ({key:?})");
@@ -165,14 +205,9 @@ impl Manager {
                             }
                         }
                     } else {
-                        self.queue.fetch_and_update(did, |prev| {
-                            let prev = prev.unwrap_or_default();
-                            let mut buf = Vec::with_capacity(prev.len() + 8 + msg.data.len());
-                            buf.extend_from_slice(prev);
-                            buf.extend_from_slice(&msg.data.len().to_be_bytes());
-                            buf.extend_from_slice(&msg.data);
-                            Some(buf)
-                        })?;
+                        self.queue
+                            .insert(format!("{did}>{}>{curr}", msg.hostname), msg.data.to_vec())?;
+                        self.commits.insert(commit.did, commit.rev);
                         self.cursors.insert(msg.hostname.clone(), (curr, time));
                     }
                 }
@@ -181,39 +216,46 @@ impl Manager {
                 Err(_) => unreachable!(),
             }
 
-            let Some((did, key)) = self.resolver.poll().await? else {
-                continue;
-            };
-            let Some(msgs) = self.queue.remove(did)? else {
-                tracing::debug!("missing queue for did: {did}");
-                continue;
-            };
-            let mut bytes = msgs.as_ref();
-            loop {
-                let (len, rest) = Usize::ref_from_prefix(bytes)?;
-                let (data, rest) = <[u8]>::ref_from_prefix_with_elems(rest, len.get())?;
-                bytes = rest;
-                let Some(event) = SubscribeReposEvent::parse(data)? else {
-                    continue;
-                };
+            let mut batch: Option<Batch> = None;
+            for did in self.resolver.poll().await? {
                 #[expect(clippy::unwrap_used)]
-                let commit = event.commit().unwrap().unwrap(); // Already tried parsing
-                match utils::verify_commit_sig(&commit, *key) {
-                    Ok(res) => {
-                        if res {
-                            let data = event.serialize(data.len(), seq.next())?;
-                            self.firehose.insert(*seq, data)?;
-                        } else {
-                            tracing::debug!("invalid signature: {commit:?} ({key:?})");
+                let (pds, key) = self.resolver.resolve(&did)?.unwrap();
+                for res in self.queue.scan_prefix(&did) {
+                    let (k, data) = res?;
+                    #[expect(clippy::unwrap_used)]
+                    let hostname =
+                        unsafe { std::str::from_utf8_unchecked(&k) }.split('>').nth(1).unwrap();
+                    if let Some(pds) = pds {
+                        if hostname != pds {
+                            tracing::debug!(
+                                "[{did}] hostname mismatch: {hostname} (expected: {pds})"
+                            );
+                            continue;
                         }
                     }
-                    Err(err) => {
-                        tracing::debug!("signature error: {err} ({key:?})");
+                    batch.get_or_insert_default().remove(k);
+
+                    #[expect(clippy::unwrap_used)]
+                    let event = SubscribeReposEvent::parse(&data, "")?.unwrap(); // Already tried parsing
+                    #[expect(clippy::unwrap_used)]
+                    let commit = event.commit()?.unwrap(); // Already tried parsing
+                    match utils::verify_commit_sig(&commit, key) {
+                        Ok(res) => {
+                            if res {
+                                let data = event.serialize(data.len(), seq.next())?;
+                                self.firehose.insert(*seq, data)?;
+                            } else {
+                                tracing::debug!("invalid signature: {commit:?} ({key:?})");
+                            }
+                        }
+                        Err(err) => {
+                            tracing::debug!("signature error: {err} ({key:?})");
+                        }
                     }
                 }
-                if bytes.is_empty() {
-                    break;
-                }
+            }
+            if let Some(batch) = batch {
+                self.queue.apply_batch(batch)?;
             }
         }
 
@@ -231,8 +273,17 @@ impl Drop for Manager {
         if let Err(err) = self.crawlers.apply_batch(batch) {
             tracing::warn!("unable to persist cursors: {err}\n{:#?}", self.cursors);
         }
+
+        let mut batch = sled::Batch::default();
+        for (did, commit) in self.commits.drain() {
+            batch.insert(did.into_bytes(), commit.0.into_bytes());
+        }
+        if let Err(err) = self.did_revs.apply_batch(batch) {
+            tracing::warn!("unable to persist commits: {err}");
+        }
+
         if let Err(err) = DB.flush() {
-            tracing::warn!("unable to persist cursors: {err}\n{:#?}", self.cursors);
+            tracing::warn!("unable to flush db: {err}");
         }
     }
 }
