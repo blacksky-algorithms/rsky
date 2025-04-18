@@ -2,7 +2,9 @@ use crate::simple_store::SimpleStore;
 use crate::simple_store_memory::SimpleStoreMemory;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::Hash;
+use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -33,10 +35,19 @@ pub struct GetCachedOptions {
     pub allow_stale: bool,
 }
 
+pub trait Getter<K, V>: Send + Sync {
+    fn get<'a>(
+        &'a self,
+        key: K,
+        options: Option<GetCachedOptions>,
+        stored_value: Option<V>,
+    ) -> Pin<Box<dyn Future<Output = V> + Send + Sync + 'a>>;
+}
+
 pub struct CachedGetterOptions<K, V> {
-    pub is_stale: Option<Box<dyn Fn(K, V) -> bool + Send + Sync>>,
-    pub on_store_error: Option<Box<dyn Fn(K, V) -> bool + Send + Sync>>,
-    pub delete_on_error: Option<Box<dyn Fn(K, V) -> bool + Send + Sync>>,
+    pub is_stale: Option<Pin<Box<dyn Fn(K, V) -> bool + Send + Sync>>>,
+    pub on_store_error: Option<Pin<Box<dyn Fn(K, V) -> bool + Send + Sync>>>,
+    pub delete_on_error: Option<Pin<Box<dyn Fn(K, V) -> bool + Send + Sync>>>,
 }
 
 pub struct PendingItem<V> {
@@ -49,6 +60,7 @@ where
     K: Debug + Eq + Hash + Send + Sync + Clone,
     V: Debug + Clone + Send + Sync,
 {
+    getter: Arc<RwLock<dyn Getter<K, V>>>,
     pending: Arc<RwLock<HashMap<K, PendingItem<V>>>>,
     store: Arc<RwLock<SimpleStoreMemory<K, V>>>,
     options: Option<CachedGetterOptions<K, V>>,
@@ -62,10 +74,12 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
     CachedGetter<K, V>
 {
     pub fn new(
+        getter: Arc<RwLock<dyn Getter<K, V>>>,
         store: Arc<RwLock<SimpleStoreMemory<K, V>>>,
         options: Option<CachedGetterOptions<K, V>>,
     ) -> Self {
         Self {
+            getter,
             pending: Arc::new(RwLock::new(HashMap::new())),
             store,
             options,
@@ -77,39 +91,39 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
             None => None,
             Some(options) => match &options.is_stale {
                 None => None,
-                Some(is_stale) => Some(is_stale.clone()),
+                Some(is_stale) => Some(is_stale),
             },
         };
 
-        let allow_stored = Box::new(|value: V| -> bool {
-            unimplemented!()
-            // return match options {
-            //     None => match is_stale {
-            //         None => true,
-            //         Some(is_stale) => is_stale(key.clone(), value),
-            //     },
-            //     Some(options) => {
-            //         if options.no_cache {
-            //             return false;
-            //         }
-            //         if options.allow_stale {
-            //             return true;
-            //         }
-            //         match is_stale {
-            //             None => true,
-            //             Some(is_stale) => is_stale(key.clone(), value),
-            //         }
-            //     }
-            // };
+        let allow_stored = Box::pin(|value: V| -> bool {
+            return match options.clone() {
+                None => match is_stale {
+                    None => true,
+                    Some(is_stale) => is_stale(key.clone(), value),
+                },
+                Some(options) => {
+                    if options.no_cache {
+                        return false;
+                    }
+                    if options.allow_stale {
+                        return true;
+                    }
+                    match is_stale {
+                        None => true,
+                        Some(is_stale) => is_stale(key.clone(), value),
+                    }
+                }
+            };
         });
 
-        match self.pending.blocking_read().get(&key) {
+        let pending = self.pending.read().await;
+        match pending.get(&key) {
             None => {}
             Some(pending) => {
                 if pending.is_fresh {
                     return pending.value.clone();
                 }
-                if allow_stored(pending.value.clone()) {
+                if allow_stored.clone()(pending.value.clone()) {
                     return pending.value.clone();
                 }
             }
@@ -119,7 +133,7 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
         match &stored_value {
             None => {}
             Some(stored_value) => {
-                if allow_stored(stored_value.clone()) {
+                if allow_stored.clone()(stored_value.clone()) {
                     let x = PendingItem::<V> {
                         value: stored_value.clone(),
                         is_fresh: false,
@@ -129,25 +143,18 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
             }
         }
 
-        // let res = (self.getter)(key.clone(), options, stored_value.as_ref());
-        unimplemented!()
+        let getter = self.getter.read().await;
+        getter.get(key.clone(), options, stored_value).await
     }
 
     pub async fn get_stored(&self, key: &K, options: Option<GetCachedOptions>) -> Option<V> {
-        self.store
-            .blocking_read()
-            .get(key)
-            .await
-            .unwrap_or_else(|_| None)
+        let mut store = self.store.read().await;
+        store.get(key).await.unwrap_or_else(|_| None)
     }
 
     pub async fn set_stored(&self, key: K, value: V) {
-        match self
-            .store
-            .blocking_write()
-            .set(key.clone(), value.clone())
-            .await
-        {
+        let mut store = self.store.write().await;
+        match store.set(key.clone(), value.clone()).await {
             Ok(_) => {}
             Err(_) => {
                 if let Some(options) = &self.options {
@@ -160,6 +167,7 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
     }
 
     pub async fn del_stored(&self, key: &K) {
-        self.store.blocking_write().del(key).await.unwrap()
+        let mut store = self.store.write().await;
+        store.del(key).await.unwrap()
     }
 }

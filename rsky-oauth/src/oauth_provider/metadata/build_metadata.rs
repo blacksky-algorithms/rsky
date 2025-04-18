@@ -1,8 +1,8 @@
 use crate::oauth_provider::client::client::AUTH_METHODS_SUPPORTED;
 use crate::oauth_provider::lib::util::crypto::VERIFY_ALGOS;
 use crate::oauth_types::{
-    HttpsUri, OAuthAuthorizationServerMetadata, OAuthCodeChallengeMethod, OAuthGrantType,
-    OAuthIssuerIdentifier, WebUri,
+    OAuthAuthorizationServerMetadata, OAuthCodeChallengeMethod, OAuthGrantType,
+    OAuthIssuerIdentifier, ValidUri, WebUri,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,13 +40,15 @@ pub fn build_metadata(
 
     let _issuer = issuer.clone();
     let base = _issuer.into_inner();
-    let jwks_uri = WebUri::Https(HttpsUri::new(base.clone() + "/oauth/jwks"));
-    let authorization_endpoint = WebUri::Https(HttpsUri::new(base.clone() + "/oauth/authorize"));
-    let token_endpoint = WebUri::Https(HttpsUri::new(base.clone() + "/oauth/token"));
-    let revocation_endpoint = WebUri::Https(HttpsUri::new(base.clone() + "/oauth/revoke"));
-    let introspection_endpoint = WebUri::Https(HttpsUri::new(base.clone() + "/oauth/introspect"));
+    let jwks_uri = WebUri::validate((base.clone() + "/oauth/jwks").as_str()).unwrap();
+    let authorization_endpoint =
+        WebUri::validate((base.clone() + "/oauth/authorize").as_str()).unwrap();
+    let token_endpoint = WebUri::validate((base.clone() + "/oauth/token").as_str()).unwrap();
+    let revocation_endpoint = WebUri::validate((base.clone() + "/oauth/revoke").as_str()).unwrap();
+    let introspection_endpoint =
+        WebUri::validate((base.clone() + "/oauth/introspect").as_str()).unwrap();
     let pushed_authorization_request_endpoint =
-        WebUri::Https(HttpsUri::new(base.clone() + "/oauth/par"));
+        WebUri::validate((base.clone() + "/oauth/par").as_str()).unwrap();
 
     let mut scopes_supported = vec!["atproto".to_string()];
     if let Some(custom_metadata) = custom_metadata {
@@ -168,5 +170,123 @@ pub fn build_metadata(
         userinfo_endpoint: None,
         end_session_endpoint: None,
         registration_endpoint: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::yansi::Paint;
+
+    #[test]
+    fn test_build_metadata() {
+        let issuer = OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap();
+        let custom_metadata: Option<CustomMetadata> = Some(CustomMetadata {
+            scopes_supported: Some(vec![
+                "transition:generic".to_string(),
+                "transition:chat.bsky".to_string(),
+            ]),
+            authorization_details_type_supported: None,
+            protected_resources: Some(vec![WebUri::validate(issuer.as_ref()).unwrap()]),
+        });
+        let result = build_metadata(issuer.clone(), custom_metadata);
+        let expected = OAuthAuthorizationServerMetadata {
+            issuer,
+            claims_supported: None,
+            claims_locales_supported: None,
+            claims_parameter_supported: None,
+            request_parameter_supported: Some(true),
+            request_uri_parameter_supported: Some(true),
+            require_request_uri_registration: Some(true),
+            scopes_supported: Some(vec![
+                "atproto".to_string(),
+                "transition:generic".to_string(),
+                "transition:chat.bsky".to_string(),
+            ]),
+            subject_types_supported: Some(vec!["public".to_string()]),
+            response_types_supported: Some(vec!["code".to_string()]),
+            response_modes_supported: Some(vec![
+                "query".to_string(),
+                "fragment".to_string(),
+                "form_post".to_string(),
+            ]),
+            grant_types_supported: Some(vec![
+                OAuthGrantType::AuthorizationCode,
+                OAuthGrantType::RefreshToken,
+            ]),
+            code_challenge_methods_supported: Some(vec![OAuthCodeChallengeMethod::S256]),
+            ui_locales_supported: Some(vec!["en-US".to_string()]),
+            id_token_signing_alg_values_supported: None,
+            display_values_supported: Some(vec![
+                "page".to_string(),
+                "popup".to_string(),
+                "touch".to_string(),
+            ]),
+            request_object_signing_alg_values_supported: Some(vec![
+                "none".to_string(),
+                "RS256".to_string(),
+                "RS384".to_string(),
+                "RS512".to_string(),
+                "PS256".to_string(),
+                "PS384".to_string(),
+                "PS512".to_string(),
+                "ES256".to_string(),
+                "ES256K".to_string(),
+                "ES384".to_string(),
+                "ES512".to_string(),
+            ]),
+            authorization_response_iss_parameter_supported: Some(true),
+            authorization_details_types_supported: None,
+            request_object_encryption_alg_values_supported: Some(vec![]),
+            request_object_encryption_enc_values_supported: Some(vec![]),
+            jwks_uri: Some(WebUri::validate("https://pds.ripperoni.com/oauth/jwks").unwrap()),
+            authorization_endpoint: WebUri::validate("https://pds.ripperoni.com/oauth/authorize")
+                .unwrap(),
+            token_endpoint: WebUri::validate("https://pds.ripperoni.com/oauth/token").unwrap(),
+            token_endpoint_auth_methods_supported: Some(vec![
+                "none".to_string(),
+                "private_key_jwt".to_string(),
+            ]),
+            token_endpoint_auth_signing_alg_values_supported: Some(vec![
+                "RS256".to_string(),
+                "RS384".to_string(),
+                "RS512".to_string(),
+                "PS256".to_string(),
+                "PS384".to_string(),
+                "PS512".to_string(),
+                "ES256".to_string(),
+                "ES256K".to_string(),
+                "ES384".to_string(),
+                "ES512".to_string(),
+            ]),
+            revocation_endpoint: Some(
+                WebUri::validate("https://pds.ripperoni.com/oauth/revoke").unwrap(),
+            ),
+            introspection_endpoint: Some(
+                WebUri::validate("https://pds.ripperoni.com/oauth/introspect").unwrap(),
+            ),
+            pushed_authorization_request_endpoint: Some(
+                WebUri::validate("https://pds.ripperoni.com/oauth/par").unwrap(),
+            ),
+            require_pushed_authorization_requests: Some(true),
+            userinfo_endpoint: None,
+            end_session_endpoint: None,
+            registration_endpoint: None,
+            dpop_signing_alg_values_supported: Some(vec![
+                "RS256".to_string(),
+                "RS384".to_string(),
+                "RS512".to_string(),
+                "PS256".to_string(),
+                "PS384".to_string(),
+                "PS512".to_string(),
+                "ES256".to_string(),
+                "ES256K".to_string(),
+                "ES384".to_string(),
+                "ES512".to_string(),
+            ]),
+            protected_resources: Some(vec![WebUri::validate("https://pds.ripperoni.com").unwrap()]),
+            client_id_metadata_document_supported: Some(true),
+        };
+        assert_eq!(result, expected)
     }
 }

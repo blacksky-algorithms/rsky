@@ -3,7 +3,7 @@ use crate::models::models;
 use crate::schema::pds::used_refresh_token::dsl as RefreshSchema;
 use anyhow::Result;
 use diesel::*;
-use diesel::{insert_into, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{insert_into, QueryDsl, RunQueryDsl, SelectableHelper};
 use rsky_oauth::oauth_provider::token::refresh_token::RefreshToken;
 
 pub async fn insert_qb(refresh_token: RefreshToken, token_id: u64, db: &DbConn) -> Result<()> {
@@ -23,17 +23,18 @@ pub async fn insert_qb(refresh_token: RefreshToken, token_id: u64, db: &DbConn) 
 pub async fn find_by_token_qb(
     refresh_token: RefreshToken,
     db: &DbConn,
-) -> Result<Option<RefreshToken>> {
+) -> Result<Option<models::UsedRefreshToken>> {
     let refresh_token = refresh_token.val();
-    // db.run(move |conn| {
-    //     RefreshSchema::used_refresh_token
-    //         .filter(RefreshSchema::refreshToken.eq(refresh_token))
-    //         .select(models::UsedRefreshToken::as_select())
-    //         .first(conn)
-    //         .optional()
-    // })
-    // .await
-    unimplemented!()
+    let result = db
+        .run(move |conn| {
+            RefreshSchema::used_refresh_token
+                .filter(RefreshSchema::refreshToken.eq(refresh_token))
+                .select(models::UsedRefreshToken::as_select())
+                .first(conn)
+                .optional()
+        })
+        .await?;
+    Ok(result)
 }
 
 pub async fn count_qb(refresh_token: RefreshToken, db: &DbConn) -> Result<u64> {

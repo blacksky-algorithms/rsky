@@ -67,7 +67,8 @@ pub fn get_routes() -> Vec<Route> {
         oauth_authorize_sign_in::oauth_authorize_sign_in,
         oauth_authorize_accept::oauth_authorize_accept,
         oauth_authorize_reject::oauth_authorize_reject,
-        oauth_revoke::get_oauth_revoke
+        oauth_revoke::get_oauth_revoke,
+        oauth_well_known::oauth_well_known_resources
     ]
 }
 

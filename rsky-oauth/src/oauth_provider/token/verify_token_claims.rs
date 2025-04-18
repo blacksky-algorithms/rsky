@@ -4,11 +4,13 @@ use crate::oauth_provider::token::token_claims::TokenClaims;
 use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{OAuthAccessToken, OAuthTokenType};
 
+#[derive(Debug, Eq, PartialEq)]
 pub struct VerifyTokenClaimsOptions {
     pub audience: Option<Vec<String>>,
     pub scope: Option<Vec<String>>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub struct VerifyTokenClaimsResult {
     pub token: OAuthAccessToken,
     pub token_id: TokenId,

@@ -210,7 +210,8 @@ impl fmt::Display for OAuthTokenRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_types::OAuthRefreshToken;
+    use crate::oauth_provider::request::code::Code;
+    use crate::oauth_types::{OAuthRedirectUri, OAuthRefreshToken};
 
     // Helper function to create test authorization code request
     fn test_auth_code_request() -> OAuthAuthorizationCodeGrantTokenRequest {
@@ -218,8 +219,8 @@ mod tests {
         let valid_code_verifier = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJ-";
 
         OAuthAuthorizationCodeGrantTokenRequest::new(
-            "test_code",
-            "https://example.com/callback",
+            Code::generate(),
+            OAuthRedirectUri::new("https://example.com/callback").unwrap(),
             Some(valid_code_verifier),
         )
         .unwrap()

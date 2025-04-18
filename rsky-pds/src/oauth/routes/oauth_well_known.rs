@@ -3,7 +3,11 @@ use crate::oauth::{SharedOAuthProvider, SharedReplayStore};
 use rocket::serde::json::Json;
 use rocket::{get, State};
 use rsky_oauth::oauth_provider::errors::OAuthError;
-use rsky_oauth::oauth_types::OAuthAuthorizationServerMetadata;
+use rsky_oauth::oauth_types::{
+    BearerMethod, HttpsUri, OAuthAuthorizationServerMetadata, OAuthIssuerIdentifier,
+    OAuthProtectedResourceMetadata, ValidUri, WebUri,
+};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -24,4 +28,23 @@ pub async fn oauth_well_known(
         Some(shared_replay_store.replay_store.clone()),
     );
     Ok(Json(oauth_provider.metadata.clone()))
+}
+
+#[get("/.well-known/oauth-protected-resource")]
+pub async fn oauth_well_known_resources() -> Json<OAuthProtectedResourceMetadata> {
+    let result = OAuthProtectedResourceMetadata {
+        resource: WebUri::validate("https://pds.ripperoni.com").unwrap(),
+        authorization_servers: Some(vec![OAuthIssuerIdentifier::from_str(
+            "https://pds.ripperoni.com",
+        )
+        .unwrap()]),
+        jwks_uri: None,
+        scopes_supported: Some(vec![]),
+        bearer_methods_supported: Some(vec![BearerMethod::Header]),
+        resource_signing_alg_values_supported: None,
+        resource_documentation: Some(WebUri::validate("https://atproto.com").unwrap()),
+        resource_policy_uri: None,
+        resource_tos_uri: None,
+    };
+    Json(result)
 }

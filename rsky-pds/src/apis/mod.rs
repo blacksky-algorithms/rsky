@@ -38,10 +38,7 @@ pub async fn bsky_api_get_forwarder(
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.access.credentials.did;
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(res) => {
             let headers = res.headers.expect("Upstream responded without headers.");
@@ -69,10 +66,7 @@ pub async fn bsky_api_post_forwarder(
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.access.credentials.did;
 
     let res = pipethrough_procedure_post(&req, requester, Some(body)).await?;
     let headers = res.headers.expect("Upstream responded without headers.");

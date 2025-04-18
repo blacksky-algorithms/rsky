@@ -7,12 +7,10 @@ use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oauth_hooks::OAuthHooks;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::{RequestData, RequestDataAuthorized};
-use crate::oauth_provider::request::request_id::{generate_request_id, RequestId};
+use crate::oauth_provider::request::request_id::RequestId;
 use crate::oauth_provider::request::request_info::RequestInfo;
 use crate::oauth_provider::request::request_store::{RequestStore, UpdateRequestData};
-use crate::oauth_provider::request::request_uri::{
-    decode_request_uri, encode_request_uri, RequestUri,
-};
+use crate::oauth_provider::request::request_uri::RequestUri;
 use crate::oauth_provider::signer::signer::Signer;
 use crate::oauth_types::{
     OAuthAuthorizationRequestParameters, OAuthAuthorizationServerMetadata, OAuthClientId,
@@ -84,7 +82,7 @@ impl RequestManager {
             .expect("timestamp in micros since UNIX epoch")
             .as_micros() as u64
             + PAR_EXPIRES_IN;
-        let id = generate_request_id().await;
+        let id = RequestId::generate();
 
         let data = RequestData {
             client_id: client.id.clone(),
@@ -95,9 +93,10 @@ impl RequestManager {
             sub: None,
             code: None,
         };
-        let _ = self.store.blocking_write().create_request(id.clone(), data);
+        let mut store = self.store.write().await;
+        store.create_request(id.clone(), data).await?;
 
-        let uri = encode_request_uri(id.clone());
+        let uri = RequestUri::encode(id.clone());
 
         Ok(RequestInfo {
             id,
@@ -148,6 +147,7 @@ impl RequestManager {
                 return Err(OAuthError::AccessDeniedError(
                     parameters,
                     "Unsupported response_type".to_string(),
+                    None,
                 ));
             }
         }
@@ -159,20 +159,23 @@ impl RequestManager {
                 return Err(OAuthError::AccessDeniedError(
                     parameters,
                     "Unsupported grant_type \"authorization_code\"".to_string(),
+                    None,
                 ));
             }
         }
 
         if let Some(scope) = parameters.scope.clone() {
-            // Currently, the implementation requires all the scopes to be statically
-            // defined in the server metadata. In the future, we might add support
-            // for dynamic scopes.
-            if let Some(scopes_supported) = &self.metadata.scopes_supported {
-                if !scopes_supported.contains(scope.as_ref().to_string()) {
-                    return Err(OAuthError::InvalidParametersError(
-                        parameters,
-                        "Scope is not supported by this server".to_string(),
-                    ));
+            for scope in scope.iter() {
+                // Currently, the implementation requires all the scopes to be statically
+                // defined in the server metadata. In the future, we might add support
+                // for dynamic scopes.
+                if let Some(scopes_supported) = &self.metadata.scopes_supported {
+                    if !scopes_supported.contains(scope.to_string()) {
+                        return Err(OAuthError::InvalidParametersError(
+                            parameters,
+                            "Scope is not supported by this sserver".to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -184,7 +187,8 @@ impl RequestManager {
                 for detail in authorization_details {
                     if !details_types_supported.contains(detail.type_().to_string()) {
                         return Err(OAuthError::InvalidAuthorizationDetailsError(
-                            "Unsupportedd authorization_details type".to_string(),
+                            parameters,
+                            "Unsupported authorization_details type".to_string(),
                         ));
                     }
                 }
@@ -335,7 +339,9 @@ impl RequestManager {
                     Prompt::None => {
                         return Err(OAuthError::ConsentRequiredError(
                             parameters,
-                            "Public clients are not allowed to use silent-sign-on".to_string(),
+                            Some(
+                                "Public clients are not allowed to use silent-sign-on".to_string(),
+                            ),
                         ));
                     }
                     _ => {
@@ -355,8 +361,9 @@ impl RequestManager {
         client_id: OAuthClientId,
         device_id: DeviceId,
     ) -> Result<RequestInfo, OAuthError> {
-        let id: RequestId = decode_request_uri(&uri);
-        let request_data = match self.store.blocking_read().read_request(&id).await {
+        let id: RequestId = RequestUri::decode(&uri);
+        let store = self.store.read().await;
+        let request_data = match store.read_request(&id).await {
             Ok(result) => match result {
                 None => {
                     return Err(OAuthError::InvalidRequestError(
@@ -376,31 +383,35 @@ impl RequestManager {
             ..Default::default()
         };
 
+        let mut store = self.store.write().await;
         if request_data.sub.is_some() || request_data.code.is_some() {
             // If an account was linked to the request, the next step is to exchange
             // the code for a token.
-            self.store.blocking_write().delete_request(id).await?;
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 request_data.parameters,
                 "This request was already authorized".to_string(),
+                None,
             ));
         }
 
         if request_data.expires_at < 1u64 {
-            self.store.blocking_write().delete_request(id).await?;
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 request_data.parameters,
                 "This request has expired".to_string(),
+                None,
             ));
         } else {
             updates.expires_at = Some(1u64);
         }
 
         if request_data.client_id != client_id.clone() {
-            let _ = self.store.blocking_write().delete_request(id);
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 request_data.parameters,
                 "This request was initiated for another client".to_string(),
+                None,
             ));
         }
 
@@ -410,19 +421,16 @@ impl RequestManager {
             }
             Some(data_device_id) => {
                 if data_device_id != device_id {
-                    let _ = self.store.blocking_write().delete_request(id);
+                    store.delete_request(id).await?;
                     return Err(OAuthError::AccessDeniedError(
                         request_data.parameters,
                         "This request was initiated for another device".to_string(),
+                        None,
                     ));
                 }
             }
         }
-
-        self.store
-            .blocking_write()
-            .update_request(id.clone(), updates.clone())
-            .await?;
+        store.update_request(id.clone(), updates.clone()).await?;
 
         Ok(RequestInfo {
             id,
@@ -440,9 +448,10 @@ impl RequestManager {
         device_id: &DeviceId,
         account: &Account,
     ) -> Result<Code, OAuthError> {
-        let id = decode_request_uri(uri);
+        let id = RequestUri::decode(uri);
 
-        let data = match self.store.blocking_read().read_request(&id).await {
+        let store = self.store.read().await;
+        let data = match store.read_request(&id).await {
             Ok(result) => match result {
                 None => {
                     return Err(OAuthError::InvalidRequestError(
@@ -459,42 +468,50 @@ impl RequestManager {
         };
 
         if data.expires_at < 1u64 {
-            let _ = self.store.blocking_write().delete_request(id);
+            let mut store = self.store.write().await;
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 data.parameters,
                 "This request has expired".to_string(),
+                None,
             ));
         }
 
         let data_device_id = match &data.device_id {
             None => {
-                let _ = self.store.blocking_write().delete_request(id);
+                let mut store = self.store.write().await;
+                store.delete_request(id).await?;
                 return Err(OAuthError::AccessDeniedError(
                     data.parameters,
                     "This request was not initiated".to_string(),
+                    None,
                 ));
             }
             Some(device_id) => device_id.clone(),
         };
 
         if &data_device_id != device_id {
-            let _ = self.store.blocking_write().delete_request(id);
+            let mut store = self.store.write().await;
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 data.parameters,
                 "This request was initiated from another device".to_string(),
+                None,
             ));
         }
 
         if data.sub.is_some() || data.code.is_some() {
-            let _ = self.store.blocking_write().delete_request(id);
+            let mut store = self.store.write().await;
+            store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 data.parameters,
                 "This request was already authorized".to_string(),
+                None,
             ));
         }
 
         // Only response_type=code is supported
-        let code = Code::generate_code().await;
+        let code = Code::generate();
 
         // Bind the request to the account, preventing it from being used again.
         let update_request_data = UpdateRequestData {
@@ -504,10 +521,8 @@ impl RequestManager {
             expires_at: Some(AUTHORIZATION_INACTIVITY_TIMEOUT),
             ..Default::default()
         };
-        self.store
-            .blocking_write()
-            .update_request(id, update_request_data)
-            .await?;
+        let mut store = self.store.write().await;
+        store.update_request(id, update_request_data).await?;
 
         Ok(code)
     }
@@ -522,7 +537,8 @@ impl RequestManager {
         client_auth: ClientAuth,
         code: Code,
     ) -> Result<RequestDataAuthorized, OAuthError> {
-        let request = match self.store.blocking_read().find_request_by_code(code).await {
+        let store = self.store.read().await;
+        let request = match store.find_request_by_code(code).await {
             None => return Err(OAuthError::InvalidGrantError("Invalid code".to_string())),
             Some(result) => result,
         };
@@ -532,10 +548,8 @@ impl RequestManager {
             Ok(data) => data,
             Err(e) => {
                 // Should never happen: maybe the store implementation is faulty ?
-                self.store
-                    .blocking_write()
-                    .delete_request(request.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_request(request.id).await?;
                 return Err(OAuthError::RuntimeError(
                     "Unexpected request state".to_string(),
                 ));
@@ -544,14 +558,16 @@ impl RequestManager {
 
         if authorized_request.client_id != client.id {
             // Note: do not reveal the original client ID to the client using an invalid id
-            let _ = self.store.blocking_write().delete_request(request.id);
+            let mut store = self.store.write().await;
+            store.delete_request(request.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "The code was not issued to client".to_string(),
             ));
         }
 
         if authorized_request.expires_at < 1u64 {
-            let _ = self.store.blocking_write().delete_request(request.id);
+            let mut store = self.store.write().await;
+            store.delete_request(request.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "This code has expired".to_string(),
             ));
@@ -565,7 +581,8 @@ impl RequestManager {
             // method (the token created will be bound to the current clientAuth).
         } else {
             if client_auth.method != authorized_request.client_auth.method {
-                let _ = self.store.blocking_write().delete_request(request.id);
+                let mut store = self.store.write().await;
+                store.delete_request(request.id).await?;
                 return Err(OAuthError::InvalidGrantError(
                     "Invalid client authentication".to_string(),
                 ));
@@ -575,7 +592,8 @@ impl RequestManager {
                 .validate_client_auth(&authorized_request.client_auth)
                 .await
             {
-                let _ = self.store.blocking_write().delete_request(request.id);
+                let mut store = self.store.write().await;
+                store.delete_request(request.id).await?;
                 return Err(OAuthError::InvalidGrantError(
                     "Invalid client authentication".to_string(),
                 ));
@@ -586,7 +604,28 @@ impl RequestManager {
     }
 
     pub async fn delete(&mut self, request_uri: &RequestUri) {
-        let id = decode_request_uri(request_uri);
-        let _ = self.store.blocking_write().delete_request(id);
+        let id = RequestUri::decode(request_uri);
+        let mut store = self.store.write().await;
+        store.delete_request(id).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_token_expiry() {
+        // let token_id = TokenId::new("tok-dwadwdaddwadwdad").unwrap();
+        // assert_eq!(token_id.into_inner(), "tok-dwadwdaddwadwdad");
+        // let token_id = TokenId::generate();
+        // let val = token_id.into_inner();
+        // TokenId::new(val).unwrap();
+        //
+        // let invalid_format_token_id = TokenId::new("aaaadwadwdaddwadwdad").unwrap_err();
+        // assert_eq!(invalid_format_token_id, TokenIdError::InvalidFormat);
+        //
+        // let invalid_length = TokenId::new("tok-dwadwda").unwrap_err();
+        // assert_eq!(invalid_length, TokenIdError::InvalidLength);
     }
 }

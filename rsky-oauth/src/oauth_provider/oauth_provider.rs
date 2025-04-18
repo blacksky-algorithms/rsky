@@ -1,4 +1,5 @@
 use crate::jwk::Keyset;
+use crate::jwk_jose::jose_key::{Jwk, JwkSet};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_manager::AccountManager;
@@ -12,6 +13,7 @@ use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::constants::{AUTHENTICATION_MAX_AGE, TOKEN_MAX_AGE};
 use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::device::device_store::DeviceStore;
+use crate::oauth_provider::dpop::dpop_manager::DpopManagerOptions;
 use crate::oauth_provider::dpop::dpop_nonce::DpopNonceInput;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::metadata::build_metadata::{build_metadata, CustomMetadata};
@@ -34,7 +36,7 @@ use crate::oauth_provider::request::request_store::RequestStore;
 use crate::oauth_provider::request::request_store_memory::RequestStoreMemory;
 use crate::oauth_provider::request::request_uri::RequestUri;
 use crate::oauth_provider::token::token_id::TokenId;
-use crate::oauth_provider::token::token_manager::TokenManager;
+use crate::oauth_provider::token::token_manager::{CreateTokenInput, TokenManager};
 use crate::oauth_provider::token::token_store::TokenStore;
 use crate::oauth_provider::token::verify_token_claims::{
     VerifyTokenClaimsOptions, VerifyTokenClaimsResult,
@@ -49,7 +51,6 @@ use crate::oauth_types::{
     OAuthTokenResponse, OAuthTokenType, Prompt, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
 use crate::simple_store_memory::SimpleStoreMemory;
-use jsonwebtoken::jwk::{Jwk, JwkSet};
 use rocket::form::validate::Contains;
 use rocket::http::Status;
 use rocket::response::Responder;
@@ -59,12 +60,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub trait OAuthProviderStore:
-    ClientStore + AccountStore + DeviceStore + TokenStore + RequestStore + ReplayStore
-{
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OAuthProviderSession {
     pub account: Account,
     pub info: DeviceAccountInfo,
@@ -87,7 +83,7 @@ pub struct RejectRequestResponse {
     pub error_string: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Eq)]
 pub struct SignInResponse {
     pub account: Account,
     pub consent_required: bool,
@@ -181,14 +177,6 @@ pub struct OAuthProviderOptions {
      */
     pub redis: Option<String>,
 
-    /**
-     * This will be used as the default store for all the stores. If a store is
-     * not provided, this store will be used instead. If the `store` does not
-     * implement a specific store, a runtime error will be thrown. Make sure that
-     * this store implements all the interfaces not provided in the other
-     * `<name>Store` options.
-     */
-    pub store: Option<Arc<RwLock<dyn OAuthProviderStore>>>,
     pub account_store: Arc<RwLock<dyn AccountStore>>,
     pub device_store: Arc<RwLock<dyn DeviceStore>>,
     pub client_store: Option<Arc<RwLock<dyn ClientStore>>>,
@@ -282,15 +270,6 @@ pub struct OAuthProviderCreatorParams {
     pub redis: Option<String>,
 
     /**
-     * This will be used as the default store for all the stores. If a store is
-     * not provided, this store will be used instead. If the `store` does not
-     * implement a specific store, a runtime error will be thrown. Make sure that
-     * this store implements all the interfaces not provided in the other
-     * `<name>Store` options.
-     */
-    pub store: Option<Arc<RwLock<dyn OAuthProviderStore>>>,
-
-    /**
      * In order to speed up the client fetching process, you can provide a cache
      * to store HTTP responses.
      *
@@ -365,7 +344,6 @@ impl OAuthProvider {
                     customization: options.customization.clone(),
                     safe_fetch: false,
                     redis: options.redis.clone(),
-                    store: None,
                     account_store: account_store.clone(),
                     device_store: device_store.clone(),
                     client_store: client_store.clone(),
@@ -393,7 +371,6 @@ impl OAuthProvider {
 
         //safefetch wrap
         let redis = options.redis;
-        let store = options.store;
 
         // Requires stores
         let account_store = options.account_store;
@@ -410,12 +387,20 @@ impl OAuthProvider {
 
         //loopback metadata different
 
+        let dpop_options = match options.dpop_secret {
+            None => None,
+            Some(dpop_secret) => Some(DpopManagerOptions {
+                dpop_secret: Some(dpop_secret),
+                dpop_step: options.dpop_step,
+            }),
+        };
         let verifier_opts = OAuthVerifierOptions {
             issuer: options.issuer.clone(),
             keyset: options.keyset.unwrap(),
             access_token_type: options.access_token_type,
             redis: None,
             replay_store,
+            dpop_options: None,
         };
         let oauth_verifier = OAuthVerifier::new(verifier_opts);
 
@@ -708,6 +693,7 @@ impl OAuthProvider {
                     Some(OAuthError::AccessDeniedError(
                         params.clone(),
                         "invalid_request".to_string(),
+                        None,
                     ))
                 } else {
                     None
@@ -752,19 +738,19 @@ impl OAuthProvider {
                 let sso_sessions: Vec<OAuthProviderSession> =
                     sessions.into_iter().filter(|s| s.matches_hint).collect();
                 if sso_sessions.is_empty() {
-                    return Err(OAuthError::LoginRequiredError);
+                    return Err(OAuthError::LoginRequiredError(parameters, None));
                 }
 
                 if sso_sessions.len() > 1 {
-                    return Err(OAuthError::AccountSelectionRequiredError);
+                    return Err(OAuthError::AccountSelectionRequiredError(parameters, None));
                 }
 
                 let sso_session = sso_sessions.first().unwrap();
                 if sso_session.login_required {
-                    return Err(OAuthError::LoginRequiredError);
+                    return Err(OAuthError::LoginRequiredError(parameters, None));
                 }
                 if sso_session.consent_required {
-                    return Err(OAuthError::ConsentRequiredError(parameters, "".to_string()));
+                    return Err(OAuthError::ConsentRequiredError(parameters, None));
                 }
 
                 let code = self
@@ -811,6 +797,7 @@ impl OAuthProvider {
                                 return Err(OAuthError::AccessDeniedError(
                                     parameters,
                                     "invalid_request".to_string(),
+                                    None,
                                 ));
                             }
                         };
@@ -969,7 +956,11 @@ impl OAuthProvider {
             Ok(res) => res,
             Err(e) => {
                 self.delete_request(uri).await?;
-                return Err(OAuthError::AccessDeniedError(parameters, "".to_string()));
+                return Err(OAuthError::AccessDeniedError(
+                    parameters,
+                    "".to_string(),
+                    None,
+                ));
             }
         };
         let account = result.account;
@@ -977,7 +968,7 @@ impl OAuthProvider {
 
         // The user is trying to authorize without a fresh login
         if self.login_required(&info) {
-            return Err(OAuthError::LoginRequiredError);
+            return Err(OAuthError::LoginRequiredError(parameters, None));
         }
 
         let code = match self
@@ -988,12 +979,17 @@ impl OAuthProvider {
             Ok(res) => res,
             Err(e) => {
                 self.delete_request(uri).await?;
-                return Err(OAuthError::AccessDeniedError(parameters, "".to_string()));
+                return Err(OAuthError::AccessDeniedError(
+                    parameters,
+                    "".to_string(),
+                    None,
+                ));
             }
         };
 
         self.account_manager
-            .add_authorized_client(device_id, account, client, client_auth);
+            .add_authorized_client(device_id, account, client, client_auth)
+            .await;
 
         Ok(AuthorizationResultRedirect {
             issuer: self.oauth_verifier.issuer.clone(),
@@ -1092,7 +1088,7 @@ impl OAuthProvider {
         input: OAuthAuthorizationCodeGrantTokenRequest,
         dpop_jkt: Option<String>,
     ) -> Result<OAuthTokenResponse, OAuthError> {
-        let code = match Code::new(input.code()) {
+        let code = match Code::new(input.code().clone().into_inner()) {
             Ok(code) => code,
             Err(_) => return Err(OAuthError::InvalidRequestError("Invalid code".to_string())),
         };
@@ -1143,7 +1139,7 @@ impl OAuthProvider {
                 Some((request_data_authorized.device_id, account_info.info)),
                 request_data_authorized.parameters,
                 None, // input,
-                dpop_jkt,
+                CreateTokenInput::Authorization(input),
             )
             .await
     }
@@ -1163,7 +1159,7 @@ impl OAuthProvider {
     /**
      * @see {@link https://datatracker.ietf.org/doc/html/rfc7009#section-2.1 rfc7009}
      */
-    pub async fn revoke(&mut self, token: &OAuthTokenIdentification) -> Result<(), OAuthError> {
+    pub async fn revoke(&mut self, token: OAuthTokenIdentification) -> Result<(), OAuthError> {
         // @TODO this should also remove the account-device association (or, at least, mark it as expired)
         self.token_manager.revoke(token).await
     }
@@ -1251,19 +1247,743 @@ impl OAuthProvider {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_verify() {}
-
-    #[tokio::test]
-    async fn test_sign() {}
-
-    #[tokio::test]
-    async fn test_access_token() {}
-
-    #[tokio::test]
-    async fn test_verify_access_token() {}
-}
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::jwk::{Audience, Key};
+//     use crate::jwk_jose::jose_key::{JoseKey, Jwk};
+//     use crate::oauth_provider::account::account_store::AccountInfo;
+//     use crate::oauth_provider::client::client_info::ClientInfo;
+//     use crate::oauth_provider::device::device_data::DeviceData;
+//     use crate::oauth_provider::device::device_store::PartialDeviceData;
+//     use crate::oauth_provider::token::refresh_token::RefreshToken;
+//     use crate::oauth_provider::token::token_data::TokenData;
+//     use crate::oauth_provider::token::token_store::{NewTokenData, TokenInfo};
+//     use crate::oauth_types::{
+//         Display, HttpsUri, OAuthClientCredentialsJwtBearer, OAuthClientCredentialsNone,
+//         OAuthCodeChallengeMethod, OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri,
+//         OAuthRefreshToken, OAuthResponseType, OAuthScope, ResponseMode, TokenTypeHint, ValidUri,
+//         WebUri,
+//     };
+//     use std::future::Future;
+//     use std::pin::Pin;
+//     use biscuit::jwk::{AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, EllipticCurveKeyType, KeyOperations, PublicKeyUse};
+//
+//     struct TestStore {}
+//
+//     impl AccountStore for TestStore {
+//         fn authenticate_account(
+//             &self,
+//             credentials: SignInCredentials,
+//             device_id: DeviceId,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//
+//         fn add_authorized_client(
+//             &self,
+//             device_id: DeviceId,
+//             sub: Sub,
+//             client_id: OAuthClientId,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn get_device_account(
+//             &self,
+//             device_id: DeviceId,
+//             sub: Sub,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//
+//         fn remove_device_account(
+//             &self,
+//             device_id: DeviceId,
+//             sub: Sub,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn list_device_accounts(
+//             &self,
+//             device_id: DeviceId,
+//         ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//     }
+//
+//     impl DeviceStore for TestStore {
+//         fn create_device(
+//             &mut self,
+//             device_id: DeviceId,
+//             data: DeviceData,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn read_device(
+//             &self,
+//             device_id: DeviceId,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<DeviceData>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//
+//         fn update_device(
+//             &mut self,
+//             device_id: DeviceId,
+//             data: PartialDeviceData,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn delete_device(
+//             &mut self,
+//             device_id: DeviceId,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//     }
+//
+//     impl TokenStore for TestStore {
+//         fn create_token(
+//             &mut self,
+//             token_id: TokenId,
+//             data: TokenData,
+//             refresh_token: Option<RefreshToken>,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn read_token(
+//             &self,
+//             token_id: TokenId,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//
+//         fn delete_token(
+//             &mut self,
+//             token_id: TokenId,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn rotate_token(
+//             &mut self,
+//             token_id: TokenId,
+//             new_token_id: TokenId,
+//             new_refresh_token: RefreshToken,
+//             new_data: NewTokenData,
+//         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+//             todo!()
+//         }
+//
+//         fn find_token_by_refresh_token(
+//             &self,
+//             refresh_token: RefreshToken,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//
+//         fn find_token_by_code(
+//             &self,
+//             code: Code,
+//         ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+//         {
+//             todo!()
+//         }
+//     }
+//
+//     async fn create_oauth_provider() -> OAuthProvider {
+//         let keyset = Arc::new(RwLock::new(build_keyset().await));
+//         let oauth_hooks = OAuthHooks {
+//             on_client_info: Some(Box::new(
+//                 |client_id: OAuthClientId,
+//                  oauth_client_metadata: OAuthClientMetadata,
+//                  jwks: Option<JwkSet>|
+//                  -> ClientInfo {
+//                     ClientInfo {
+//                         is_first_party: client_id
+//                             == OAuthClientId::new("https://pds.ripperoni.com/client-metadata.json")
+//                                 .unwrap(),
+//                         // @TODO make client client list configurable:
+//                         is_trusted: false,
+//                     }
+//                 },
+//             )),
+//             on_authorization_details: None,
+//         };
+//         let issuer = OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap();
+//         let custom_metadata = build_custom_metadata(issuer.clone());
+//         let options = OAuthProviderOptions {
+//             authentication_max_age: None,
+//             token_max_age: None,
+//             metadata: Some(custom_metadata),
+//             customization: None,
+//             safe_fetch: false,
+//             redis: None,
+//             account_store: Arc::new(RwLock::new(TestStore {})),
+//             device_store: Arc::new(RwLock::new(TestStore {})),
+//             client_store: None,
+//             replay_store: None,
+//             request_store: None,
+//             token_store: Arc::new(RwLock::new(TestStore {})),
+//             client_jwks_cache: Arc::new(Default::default()),
+//             client_metadata_cache: Arc::new(Default::default()),
+//             loopback_metadata: None,
+//             dpop_secret: None,
+//             dpop_step: None,
+//             issuer: issuer.clone(),
+//             keyset: Some(keyset),
+//             access_token_type: Some(AccessTokenType::ID),
+//             oauth_hooks: Arc::new(oauth_hooks),
+//         };
+//         OAuthProvider::new(options).unwrap()
+//     }
+//
+//     fn build_custom_metadata(issuer: OAuthIssuerIdentifier) -> CustomMetadata {
+//         CustomMetadata {
+//             scopes_supported: Some(vec![
+//                 "transition:generic".to_string(),
+//                 "transition:chat.bsky".to_string(),
+//             ]),
+//             authorization_details_type_supported: None,
+//             protected_resources: Some(vec![WebUri::validate(issuer.as_ref()).unwrap()]),
+//         }
+//     }
+//
+//     #[tokio::test]
+//     async fn test_get_jwks() {
+//         let oauth_provider = create_oauth_provider().await;
+//         let result = oauth_provider.get_jwks().await;
+//
+//         let jwk = Jwk {
+//             common: CommonParameters {
+//                 public_key_use: Some(PublicKeyUse::Signature),
+//                 key_operations: Some(vec![KeyOperations::Sign]),
+//                 key_algorithm: Some(KeyAlgorithm::PS256),
+//                 key_id: Some("test".to_string()),
+//                 x509_url: None,
+//                 x509_chain: None,
+//                 x509_sha1_fingerprint: None,
+//                 x509_sha256_fingerprint: None,
+//             },
+//             algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+//                 key_type: EllipticCurveKeyType::EC,
+//                 curve: EllipticCurve::P256,
+//                 x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
+//                 y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
+//             }),
+//         };
+//
+//         assert_eq!(result, vec![jwk]);
+//     }
+//
+//     #[tokio::test]
+//     async fn test_pushed_authorization_request() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let credentials = OAuthClientCredentialsJwtBearer::new(
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap(),
+//             "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJWSEw4aHhxbVFoQlVRUDBZSGNfZ1Z5YnFCREtTeDg3RTU5dnp0SUdqSk1BIiwieSI6ImFCQmpJMnBsZFIyOTM5UEJFby03Y1hBWlRyNUhyQ1hHeWx6VGkxSkN5cGMifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjA1MTgzLCJqdGkiOiJoNmVzazFxMmk4OnlkcGg0d2lpeGhpaiIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3BhciIsIm5vbmNlIjoid1hOQV8zbzdyRndfenZ5ek4wcDFWblFkTzJlSEN6cksxcGJQa3diTWpPYyJ9.kiNqo-6CmJzee-5MMuCNcRft_J3eVvdfC91mO2MvsBeNaeSmC8TR6PM8KCeCx8DM2wexmTNgDc8a85fvW82uzA",
+//         )
+//         .unwrap();
+//         let parameters = OAuthAuthorizationRequestParameters {
+//             client_id: OAuthClientId::new(
+//                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+//             )
+//             .unwrap(),
+//             state: Some("1ZXHAvyXLYoYV90WDHDVcg".to_string()),
+//             redirect_uri: Some(
+//                 OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
+//             ),
+//             scope: Some(OAuthScope::new("atproto transition:generic").unwrap()),
+//             response_type: OAuthResponseType::Code,
+//             code_challenge: Some("iR8-lgCjZHJvuQmdxdq3wTPlDCJ902KGKRjjyQF0UTQ".to_string()),
+//             code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+//             dpop_jkt: None,
+//             response_mode: Some(ResponseMode::Fragment),
+//             nonce: None,
+//             max_age: None,
+//             claims: None,
+//             login_hint: Some("ripperoni.com".to_string()),
+//             ui_locales: None,
+//             id_token_hint: None,
+//             display: Some(Display::Page),
+//             prompt: None,
+//             authorization_details: None,
+//         };
+//         let authorization_request = OAuthAuthorizationRequestPar::Parameters(parameters);
+//         let dpop_jkt = Some("".to_string());
+//         oauth_provider
+//             .pushed_authorization_request(
+//                 OAuthClientCredentials::JwtBearer(credentials),
+//                 authorization_request,
+//                 dpop_jkt,
+//             )
+//             .await
+//             .unwrap();
+//     }
+//
+//     #[tokio::test]
+//     async fn test_authorize() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let device_id = DeviceId::generate();
+//         let credentials = OAuthClientCredentials::JwtBearer(
+//             OAuthClientCredentialsJwtBearer::new(OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap(), "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJFTEpEcHJfazF1Mlhza0w3SjVOb1NmVlJvUGgyeGpKY3d6OWIybTBPZzBjIiwieSI6Ild2RTdHdTRSVFFHQ2std2hic1ZZakpiaWlWLU82MmgxVXBxY25BMDR2VzAifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjIwMTM0LCJqdGkiOiJoNmV6ZmI5emJjOjJ3Zzh2eWNuamMweHAiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6ImhnbTFOV0pqSS00cm8zdFhTejNfaE1mMGpmTlZRb0prSFNORWwxUU9PNlEifQ.Qvj1kj91a7Rz4LTCgYo90_6kmBKa7OaXQvD7nrDyhYWgNoiCUEY4pZ20amfFRXsDv1YE4MLP0Qk4mqJgmZCc4Q")
+//                 .unwrap(),
+//         );
+//         let parameters = OAuthAuthorizationRequestParameters {
+//             client_id: OAuthClientId::new(
+//                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+//             )
+//             .unwrap(),
+//             state: Some("1ZXHAvyXLYoYV90WDHDVcg".to_string()),
+//             redirect_uri: Some(
+//                 OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
+//             ),
+//             scope: Some(OAuthScope::new("atproto transition:generic").unwrap()),
+//             response_type: OAuthResponseType::Code,
+//             code_challenge: Some("iR8-lgCjZHJvuQmdxdq3wTPlDCJ902KGKRjjyQF0UTQ".to_string()),
+//             code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+//             dpop_jkt: None,
+//             response_mode: Some(ResponseMode::Fragment),
+//             nonce: None,
+//             max_age: None,
+//             claims: None,
+//             login_hint: Some("ripperoni.com".to_string()),
+//             ui_locales: None,
+//             id_token_hint: None,
+//             display: Some(Display::Page),
+//             prompt: None,
+//             authorization_details: None,
+//         };
+//         let query = OAuthAuthorizationRequestQuery::from_parameters(parameters.clone());
+//         let result = oauth_provider
+//             .authorize(&device_id, &credentials, &query)
+//             .await
+//             .unwrap();
+//         let expected = AuthorizationResult::Authorize(AuthorizationResultAuthorize {
+//             issuer: OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap(),
+//             client: Client::new(
+//                 OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json")
+//                     .unwrap(),
+//                 OAuthClientMetadata {
+//                     redirect_uris: vec![],
+//                     response_types: vec![],
+//                     grant_types: vec![],
+//                     scope: None,
+//                     token_endpoint_auth_method: None,
+//                     token_endpoint_auth_signing_alg: None,
+//                     userinfo_signed_response_alg: None,
+//                     userinfo_encrypted_response_alg: None,
+//                     jwks_uri: None,
+//                     jwks: None,
+//                     application_type: Default::default(),
+//                     subject_type: None,
+//                     request_object_signing_alg: None,
+//                     id_token_signed_response_alg: None,
+//                     authorization_signed_response_alg: "".to_string(),
+//                     authorization_encrypted_response_enc: None,
+//                     authorization_encrypted_response_alg: None,
+//                     client_id: None,
+//                     client_name: None,
+//                     client_uri: None,
+//                     policy_uri: None,
+//                     tos_uri: None,
+//                     logo_uri: None,
+//                     default_max_age: None,
+//                     require_auth_time: None,
+//                     contacts: None,
+//                     tls_client_certificate_bound_access_tokens: None,
+//                     dpop_bound_access_tokens: None,
+//                     authorization_details_types: None,
+//                 },
+//                 None,
+//                 Default::default(),
+//             ),
+//             parameters,
+//             authorize: Authorize {
+//                 uri: RequestUri::new(
+//                     "urn:ietf:params:oauth:request_uri:req-f776c3fd9760348fc92e1600448b71a9",
+//                 )
+//                 .unwrap(),
+//                 scope_details: None,
+//                 sessions: vec![],
+//             },
+//         });
+//         assert_eq!(result, expected);
+//     }
+//
+//     #[tokio::test]
+//     async fn test_get_sessions() {
+//         let oauth_provider = create_oauth_provider().await;
+//         let id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let metadata = OAuthClientMetadata {
+//             redirect_uris: vec![
+//                 OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap()
+//             ],
+//             response_types: vec![OAuthResponseType::Code],
+//             grant_types: vec![
+//                 OAuthGrantType::AuthorizationCode,
+//                 OAuthGrantType::RefreshToken,
+//             ],
+//             scope: Some(OAuthScope::new("atproto transition:generic").unwrap()),
+//             token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::None),
+//             token_endpoint_auth_signing_alg: None,
+//             userinfo_signed_response_alg: None,
+//             userinfo_encrypted_response_alg: None,
+//             jwks_uri: None,
+//             jwks: None,
+//             application_type: ApplicationType::Web,
+//             subject_type: None,
+//             request_object_signing_alg: None,
+//             id_token_signed_response_alg: None,
+//             authorization_signed_response_alg: "".to_string(),
+//             authorization_encrypted_response_enc: None,
+//             authorization_encrypted_response_alg: None,
+//             client_id: None,
+//             client_name: None,
+//             client_uri: None,
+//             policy_uri: None,
+//             tos_uri: None,
+//             logo_uri: None,
+//             default_max_age: None,
+//             require_auth_time: None,
+//             contacts: None,
+//             tls_client_certificate_bound_access_tokens: None,
+//             dpop_bound_access_tokens: Some(true),
+//             authorization_details_types: None,
+//         };
+//         let info = ClientInfo {
+//             is_first_party: false,
+//             is_trusted: false,
+//         };
+//         let client = Client::new(id, metadata, None, info);
+//         let device_id = DeviceId::generate();
+//         let parameters = OAuthAuthorizationRequestParameters {
+//             client_id: OAuthClientId::new(
+//                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+//             )
+//             .unwrap(),
+//             state: None,
+//             redirect_uri: None,
+//             scope: None,
+//             response_type: OAuthResponseType::Code,
+//             code_challenge: None,
+//             code_challenge_method: None,
+//             dpop_jkt: None,
+//             response_mode: None,
+//             nonce: None,
+//             max_age: None,
+//             claims: None,
+//             login_hint: None,
+//             ui_locales: None,
+//             id_token_hint: None,
+//             display: None,
+//             prompt: None,
+//             authorization_details: None,
+//         };
+//         let result = oauth_provider
+//             .get_sessions(&client, &device_id, &parameters)
+//             .await
+//             .unwrap();
+//         let expected = vec![];
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_sign_in() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let device_id = DeviceId::generate();
+//         let uri = RequestUri::new("").unwrap();
+//         let client_id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let credentials = SignInCredentials {
+//             username: "".to_string(),
+//             password: "".to_string(),
+//             remember: None,
+//             email_otp: None,
+//         };
+//         let result = oauth_provider
+//             .sign_in(device_id, uri, client_id, credentials)
+//             .await
+//             .unwrap();
+//         let expected = SignInResponse {
+//             account: Account {
+//                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+//                 aud: Audience::Single("".to_string()),
+//                 preferred_username: None,
+//                 email: None,
+//                 email_verified: None,
+//                 picture: None,
+//                 name: None,
+//             },
+//             consent_required: false,
+//         };
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_accept_request() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let device_id = DeviceId::generate();
+//         let uri = RequestUri::new(
+//             "urn:ietf:params:oauth:request_uri:req-f776c3fd9760348fc92e1600448b71a9",
+//         )
+//         .unwrap();
+//         let client_id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let sub = Sub::new("sub").unwrap();
+//         let result = oauth_provider
+//             .accept_request(device_id, uri, client_id.clone(), sub)
+//             .await
+//             .unwrap();
+//         let expected = AuthorizationResultRedirect {
+//             issuer: OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap(),
+//             parameters: OAuthAuthorizationRequestParameters {
+//                 client_id: client_id.clone(),
+//                 state: None,
+//                 redirect_uri: None,
+//                 scope: None,
+//                 response_type: OAuthResponseType::Code,
+//                 code_challenge: None,
+//                 code_challenge_method: None,
+//                 dpop_jkt: None,
+//                 response_mode: None,
+//                 nonce: None,
+//                 max_age: None,
+//                 claims: None,
+//                 login_hint: None,
+//                 ui_locales: None,
+//                 id_token_hint: None,
+//                 display: None,
+//                 prompt: None,
+//                 authorization_details: None,
+//             },
+//             redirect: AuthorizationResponseParameters {
+//                 code: None,
+//                 id_token: None,
+//                 access_token: None,
+//                 token_type: None,
+//                 expires_in: None,
+//                 response: None,
+//                 session_state: None,
+//                 error: None,
+//                 error_description: None,
+//                 error_uri: None,
+//             },
+//         };
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_reject_request() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let device_id = DeviceId::generate();
+//         let uri = RequestUri::new("").unwrap();
+//         let client_id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let result = oauth_provider
+//             .reject_request(device_id.clone(), uri.clone(), client_id.clone())
+//             .await
+//             .unwrap();
+//         let expected = AuthorizationResultRedirect {
+//             issuer: OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap(),
+//             parameters: OAuthAuthorizationRequestParameters {
+//                 client_id: client_id.clone(),
+//                 state: None,
+//                 redirect_uri: None,
+//                 scope: None,
+//                 response_type: OAuthResponseType::Code,
+//                 code_challenge: None,
+//                 code_challenge_method: None,
+//                 dpop_jkt: None,
+//                 response_mode: None,
+//                 nonce: None,
+//                 max_age: None,
+//                 claims: None,
+//                 login_hint: None,
+//                 ui_locales: None,
+//                 id_token_hint: None,
+//                 display: None,
+//                 prompt: None,
+//                 authorization_details: None,
+//             },
+//             redirect: AuthorizationResponseParameters {
+//                 code: None,
+//                 id_token: None,
+//                 access_token: None,
+//                 token_type: None,
+//                 expires_in: None,
+//                 response: None,
+//                 session_state: None,
+//                 error: None,
+//                 error_description: None,
+//                 error_uri: None,
+//             },
+//         };
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_code_grant() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let client = create_client();
+//         let client_auth = ClientAuth {
+//             method: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
+//             alg: "".to_string(),
+//             kid: "".to_string(),
+//             jkt: "".to_string(),
+//         };
+//         let input = OAuthAuthorizationCodeGrantTokenRequest::new(
+//             Code::generate(),
+//             OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
+//             None::<String>,
+//         )
+//         .unwrap();
+//         let dpop_jkt: Option<String> = Some("".to_string());
+//         let result = oauth_provider
+//             .code_grant(client, client_auth, input, dpop_jkt)
+//             .await
+//             .unwrap();
+//         let expected = OAuthTokenResponse {
+//             access_token: OAuthAccessToken::new("").unwrap(),
+//             token_type: OAuthTokenType::DPoP,
+//             scope: None,
+//             refresh_token: None,
+//             expires_in: None,
+//             id_token: None,
+//             authorization_details: None,
+//             additional_fields: Default::default(),
+//         };
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_refresh_token_grant() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let client = create_client();
+//         let client_auth = ClientAuth {
+//             method: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
+//             alg: "".to_string(),
+//             kid: "".to_string(),
+//             jkt: "".to_string(),
+//         };
+//         let input = OAuthRefreshTokenGrantTokenRequest::new(OAuthRefreshToken::new("").unwrap());
+//         let dpop_jkt: Option<String> = Some("".to_string());
+//         let result = oauth_provider
+//             .refresh_token_grant(client, client_auth, input, dpop_jkt)
+//             .await
+//             .unwrap();
+//         let expected = OAuthTokenResponse {
+//             access_token: OAuthAccessToken::new("").unwrap(),
+//             token_type: OAuthTokenType::DPoP,
+//             scope: None,
+//             refresh_token: None,
+//             expires_in: None,
+//             id_token: None,
+//             authorization_details: None,
+//             additional_fields: Default::default(),
+//         };
+//         assert_eq!(result, expected)
+//     }
+//
+//     #[tokio::test]
+//     async fn test_revoke() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let token = OAuthTokenIdentification::new("", None).unwrap();
+//         oauth_provider.revoke(token).await.unwrap();
+//     }
+//
+//     #[tokio::test]
+//     async fn test_introspect() {
+//         let mut oauth_provider = create_oauth_provider().await;
+//         let client_id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let client_assertion = "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJFTEpEcHJfazF1Mlhza0w3SjVOb1NmVlJvUGgyeGpKY3d6OWIybTBPZzBjIiwieSI6Ild2RTdHdTRSVFFHQ2std2hic1ZZakpiaWlWLU82MmgxVXBxY25BMDR2VzAifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjIwMTM0LCJqdGkiOiJoNmV6ZmI5emJjOjJ3Zzh2eWNuamMweHAiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6ImhnbTFOV0pqSS00cm8zdFhTejNfaE1mMGpmTlZRb0prSFNORWwxUU9PNlEifQ.Qvj1kj91a7Rz4LTCgYo90_6kmBKa7OaXQvD7nrDyhYWgNoiCUEY4pZ20amfFRXsDv1YE4MLP0Qk4mqJgmZCc4Q";
+//         let credentials = OAuthClientCredentials::JwtBearer(
+//             OAuthClientCredentialsJwtBearer::new(client_id, client_assertion).unwrap(),
+//         );
+//
+//         let token =
+//             OAuthTokenIdentification::new("test", Some(TokenTypeHint::AccessToken)).unwrap();
+//         let result = oauth_provider.introspect(credentials, token).await.unwrap();
+//         let expected = OAuthIntrospectionResponse::Inactive;
+//         assert_eq!(result, expected);
+//     }
+//
+//     fn create_client() -> Client {
+//         let id =
+//             OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json").unwrap();
+//         let metadata = OAuthClientMetadata {
+//             redirect_uris: vec![],
+//             response_types: vec![],
+//             grant_types: vec![],
+//             scope: None,
+//             token_endpoint_auth_method: None,
+//             token_endpoint_auth_signing_alg: None,
+//             userinfo_signed_response_alg: None,
+//             userinfo_encrypted_response_alg: None,
+//             jwks_uri: None,
+//             jwks: None,
+//             application_type: Default::default(),
+//             subject_type: None,
+//             request_object_signing_alg: None,
+//             id_token_signed_response_alg: None,
+//             authorization_signed_response_alg: "".to_string(),
+//             authorization_encrypted_response_enc: None,
+//             authorization_encrypted_response_alg: None,
+//             client_id: None,
+//             client_name: None,
+//             client_uri: None,
+//             policy_uri: None,
+//             tos_uri: None,
+//             logo_uri: None,
+//             default_max_age: None,
+//             require_auth_time: None,
+//             contacts: None,
+//             tls_client_certificate_bound_access_tokens: None,
+//             dpop_bound_access_tokens: None,
+//             authorization_details_types: None,
+//         };
+//         let jwks = JwkSet { keys: vec![] };
+//         let info = ClientInfo {
+//             is_first_party: false,
+//             is_trusted: false,
+//         };
+//         Client::new(id, metadata, None, info)
+//     }
+//
+//     async fn build_keyset() -> Keyset {
+//         let mut keys = Vec::new();
+//         let jwk = Jwk {
+//             common: CommonParameters {
+//                 public_key_use: Some(PublicKeyUse::Signature),
+//                 key_operations: Some(vec![KeyOperations::Sign]),
+//                 key_algorithm: Some(KeyAlgorithm::PS256),
+//                 key_id: Some("test".to_string()),
+//                 x509_url: None,
+//                 x509_chain: None,
+//                 x509_sha1_fingerprint: None,
+//                 x509_sha256_fingerprint: None,
+//             },
+//             algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+//                 key_type: EllipticCurveKeyType::EC,
+//                 curve: EllipticCurve::P256,
+//                 x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
+//                 y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
+//             }),
+//         };
+//         let key = JoseKey::from_jwk(jwk, None).await;
+//         keys.push(Box::new(key) as Box<dyn Key>);
+//         Keyset::new(keys)
+//     }
+// }

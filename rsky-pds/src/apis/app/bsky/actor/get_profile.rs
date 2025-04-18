@@ -25,10 +25,7 @@ pub async fn inner_get_profile(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<ProfileViewDetailed>, ApiError> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.access.credentials.did;
     match requester {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(requester) => {

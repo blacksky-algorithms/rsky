@@ -21,7 +21,7 @@ pub struct SignInCredentials {
     pub email_otp: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct DeviceAccountInfo {
     pub remembered: bool,
     pub authenticated_at: u64,

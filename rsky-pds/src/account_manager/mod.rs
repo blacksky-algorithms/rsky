@@ -9,10 +9,11 @@ use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
 use crate::account_manager::helpers::token::{find_by_qb, FindByQbOpts};
 use crate::account_manager::helpers::{authorization_request, device_account, repo};
 use crate::account_manager::helpers::{token, used_refresh_token};
+use crate::apis::ApiError::AuthRequiredError;
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
 use crate::models::models::{AuthorizationRequest, EmailTokenPurpose};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use futures::try_join;
@@ -32,9 +33,9 @@ use rsky_oauth::oauth_provider::account::account_store::{
 use rsky_oauth::oauth_provider::client::client_store::ClientStore;
 use rsky_oauth::oauth_provider::device::device_data::DeviceData;
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
-use rsky_oauth::oauth_provider::device::device_store::DeviceStore;
+use rsky_oauth::oauth_provider::device::device_store::{DeviceStore, PartialDeviceData};
 use rsky_oauth::oauth_provider::errors::OAuthError;
-use rsky_oauth::oauth_provider::oauth_provider::OAuthProviderStore;
+use rsky_oauth::oauth_provider::now_as_secs;
 use rsky_oauth::oauth_provider::oidc::sub::Sub;
 use rsky_oauth::oauth_provider::request::code::Code;
 use rsky_oauth::oauth_provider::request::request_data::RequestData;
@@ -49,6 +50,7 @@ use rsky_oauth::oauth_provider::token::token_store::{NewTokenData, TokenInfo, To
 use rsky_oauth::oauth_types::{OAuthClientId, OAuthClientMetadata};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
+use std::convert::identity;
 use std::env;
 use std::future::Future;
 use std::pin::Pin;
@@ -372,6 +374,60 @@ impl AccountManager {
         auth::revoke_refresh_token(id, self.db.as_ref()).await
     }
 
+    // Login
+    // ----------
+    pub async fn login(
+        &self,
+        identifier: String,
+        password: String,
+    ) -> Result<(ActorAccount, Option<String>, bool)> {
+        let identifier_normalized = identifier.to_lowercase();
+        let user = if identifier_normalized.contains("@") {
+            self.get_account_by_email(
+                identifier_normalized.as_str(),
+                Some(AvailabilityFlags {
+                    include_taken_down: Some(true),
+                    include_deactivated: Some(true),
+                }),
+            )
+            .await?
+        } else {
+            self.get_account(
+                identifier_normalized.as_str(),
+                Some(AvailabilityFlags {
+                    include_taken_down: Some(true),
+                    include_deactivated: Some(true),
+                }),
+            )
+            .await?
+        };
+
+        let user = match user {
+            None => {
+                bail!("Invalid identifier or password");
+            }
+            Some(user) => user,
+        };
+        let is_soft_deleted = user.takedown_ref.is_some();
+        let mut app_password: Option<String> = None;
+        let valid_account_pass = self
+            .verify_account_password(user.did.as_str(), &password)
+            .await?;
+        if !valid_account_pass {
+            // takendown/suspended accounts cannot login with app password
+            if is_soft_deleted {
+                bail!("Invalid identifier or password");
+            }
+            app_password = self
+                .verify_app_password(user.did.as_str(), password.as_str())
+                .await?;
+            if app_password.is_none() {
+                bail!("Invalid identifier or password");
+            }
+        }
+        Ok((user, app_password, is_soft_deleted))
+    }
+
     // Invites
     // ----------
 
@@ -560,8 +616,31 @@ impl AccountStore for AccountManager {
         &self,
         credentials: SignInCredentials,
         device_id: DeviceId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync>> {
-        Box::pin(async move { unimplemented!() })
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
+        let identifier = credentials.username;
+        let password = credentials.password;
+        let remember = credentials.remember;
+        Box::pin(async move {
+            let (user, app_password, is_soft_deleted) =
+                self.login(identifier, password).await.unwrap();
+            if app_password.is_some() {
+                return Err(OAuthError::InvalidRequestError(
+                    "App passwords are not allowed".to_string(),
+                ));
+            }
+            let did = Sub::new(user.did).unwrap();
+            device_account::create_or_update(
+                self.db.as_ref(),
+                device_id.clone(),
+                did.clone(),
+                remember.unwrap_or(false),
+            )
+            .await
+            .unwrap();
+
+            self.get_device_account(device_id, did).await
+        })
     }
 
     fn add_authorized_client(
@@ -569,21 +648,28 @@ impl AccountStore for AccountManager {
         device_id: DeviceId,
         sub: Sub,
         client_id: OAuthClientId,
-    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync>> {
-        Box::pin(async move { unimplemented!() })
+    ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            match device_account::add_authorized_client(self.db.as_ref(), device_id, sub, client_id)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn get_device_account(
         &self,
         device_id: DeviceId,
         sub: Sub,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
         Box::pin(async move {
-            unimplemented!()
-            // match device_account::get_account_info(device_id, sub, self.db.as_ref()).await {
-            //     Ok(_) => Ok(()),
-            //     Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-            // }
+            match device_account::get_account_info(device_id, sub, self.db.as_ref()).await {
+                Ok(account_info) => Ok(account_info),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
         })
     }
 
@@ -603,9 +689,15 @@ impl AccountStore for AccountManager {
     fn list_device_accounts(
         &self,
         device_id: DeviceId,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+    {
         let device_id = device_id.clone();
-        Box::pin(async move { unimplemented!() })
+        Box::pin(async move {
+            match device_account::list_remembered_devices(self.db.as_ref(), device_id).await {
+                Ok(account_infos) => Ok(account_infos),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 }
 
@@ -719,15 +811,15 @@ impl DeviceStore for AccountManager {
     fn update_device(
         &mut self,
         device_id: DeviceId,
-        data: DeviceData,
+        data: PartialDeviceData,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), OAuthError>> + Send + Sync + '_>> {
-        //TODO
-        Box::pin(async move {
-            match device::update_device(device_id, data, self.db.as_ref()).await {
-                Ok(_) => Ok(()),
-                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-            }
-        })
+        unimplemented!()
+        // Box::pin(async move {
+        //     match device::update_device(device_id, data, self.db.as_ref()).await {
+        //         Ok(_) => Ok(()),
+        //         Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+        //     }
+        // })
     }
 
     fn delete_device(
@@ -753,7 +845,9 @@ impl TokenStore for AccountManager {
         Box::pin(async move {
             match refresh_token {
                 None => {
-                    token::create_qb(self.db.as_ref(), token_id, data, refresh_token).unwrap();
+                    token::create_qb(self.db.as_ref(), token_id, data, refresh_token)
+                        .await
+                        .unwrap();
                     Ok(())
                 }
                 Some(refresh_token) => {
@@ -768,6 +862,7 @@ impl TokenStore for AccountManager {
                     }
 
                     token::create_qb(self.db.as_ref(), token_id, data, Some(refresh_token))
+                        .await
                         .unwrap();
                     Ok(())
                 }
@@ -801,7 +896,7 @@ impl TokenStore for AccountManager {
     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
         Box::pin(async move {
             // Will cascade to used_refresh_token (used_refresh_token_fk)
-            match token::remove_qb(self.db.as_ref(), token_id) {
+            match token::remove_qb(self.db.as_ref(), token_id).await {
                 Ok(_) => Ok(()),
                 Err(_) => Err(OAuthError::RuntimeError("".to_string())),
             }
@@ -815,7 +910,21 @@ impl TokenStore for AccountManager {
         new_refresh_token: RefreshToken,
         new_data: NewTokenData,
     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-        Box::pin(async move { todo!() })
+        unimplemented!()
+        // Box::pin(async move {
+        //     let (id, current_refresh_token) = token::for_rotate(self.db.as_ref(), token_id).await?;
+        //
+        //     used_refresh_token::insert_qb(self.db.as_ref(), token_id, current_refresh_token).await?;
+        //
+        //     let count = used_refresh_token::count_qb(new_refresh_token, self.db.as_ref()).await?;
+        //
+        //     if count > 0 {
+        //         // Do NOT throw (we don't want the transaction to be rolled back)
+        //     } else {
+        //         token::rotate_qb(self.db.as_ref(), new_token_id, new_refresh_token, new_data).await?;
+        //     }
+        //     Ok(())
+        // })
     }
 
     fn find_token_by_refresh_token(
@@ -837,7 +946,7 @@ impl TokenStore for AccountManager {
                     current_refresh_token: Some(refresh_token.val()),
                 },
                 Some(used) => FindByQbOpts {
-                    id: Some(used.val()),
+                    id: Some(used.token_id),
                     code: None,
                     token_id: None,
                     current_refresh_token: None,
@@ -860,7 +969,7 @@ impl TokenStore for AccountManager {
         Box::pin(async move {
             let opts = FindByQbOpts {
                 id: None,
-                code: Some(code.val()),
+                code: Some(code.into_inner()),
                 token_id: None,
                 current_refresh_token: None,
             };
@@ -873,10 +982,7 @@ impl TokenStore for AccountManager {
 }
 
 impl ClientStore for AccountManager {
-    fn find_client(
-        &self,
-        client_id: OAuthClientId,
-    ) -> std::result::Result<OAuthClientMetadata, OAuthError> {
+    fn find_client(&self, client_id: OAuthClientId) -> Result<OAuthClientMetadata, OAuthError> {
         unimplemented!()
     }
 }

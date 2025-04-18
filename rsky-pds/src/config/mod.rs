@@ -19,6 +19,25 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ModServiceConfig {
+    pub url: String,
+    pub did: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportServiceConfig {
+    pub url: String,
+    pub did: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BskyAppViewConfig {
+    pub url: String,
+    pub did: String,
+    pub cdn_url_pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct OAuthConfig {
     pub issuer: OAuthIssuerIdentifier,
     pub provider: Option<Customization>,
@@ -30,6 +49,14 @@ pub struct ServiceConfig {
     pub url: String,
     pub did: String,
     pub cdn_url_pattern: Option<String>, // for BksyAppViewConfig, otherwise None
+    pub dev_mode: bool,
+    pub contact_email_addresss: Option<String>,
+    pub blob_upload_limit: i64,
+    pub terms_of_service_url: Option<String>,
+    pub privacy_policy_url: Option<String>,
+    pub version: Option<String>,
+    pub port: i32,
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +148,14 @@ pub fn env_to_cfg() -> ServerConfig {
                 "if bsky appview service url is configured, must configure its did as well.",
             ),
             cdn_url_pattern: env_str("PDS_BSKY_APP_VIEW_CDN_URL_PATTERN"),
+            dev_mode: false,
+            contact_email_addresss: None,
+            blob_upload_limit: 0,
+            terms_of_service_url: None,
+            privacy_policy_url: None,
+            version: None,
+            port: 0,
+            hostname: hostname.clone(),
         }),
     };
     let mod_service_cfg: Option<ServiceConfig> = match env_str("PDS_MOD_SERVICE_URL") {
@@ -130,6 +165,14 @@ pub fn env_to_cfg() -> ServerConfig {
             did: env_str("PDS_MOD_SERVICE_DID")
                 .expect("if mod service url is configured, must configure its did as well."),
             cdn_url_pattern: None,
+            dev_mode: false,
+            contact_email_addresss: None,
+            blob_upload_limit: 0,
+            terms_of_service_url: None,
+            privacy_policy_url: None,
+            version: None,
+            port: 0,
+            hostname: hostname.clone(),
         }),
     };
     let mut report_service_cfg: Option<ServiceConfig> = match env_str("PDS_REPORT_SERVICE_URL") {
@@ -139,6 +182,14 @@ pub fn env_to_cfg() -> ServerConfig {
             did: env_str("PDS_REPORT_SERVICE_DID")
                 .expect("if mod service url is configured, must configure its did as well."),
             cdn_url_pattern: None,
+            dev_mode: false,
+            contact_email_addresss: None,
+            blob_upload_limit: 0,
+            terms_of_service_url: None,
+            privacy_policy_url: None,
+            version: None,
+            port: 0,
+            hostname,
         }),
     };
 

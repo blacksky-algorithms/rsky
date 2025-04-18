@@ -76,6 +76,7 @@ use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use diesel::sql_types::Int4;
 use dotenvy::dotenv;
+use rand::{random, Rng};
 use rocket::data::{Limits, ToByteUnit};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::figment::{
@@ -91,6 +92,7 @@ use rocket::{Request, Response};
 use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
+use rsky_oauth::oauth_provider::dpop::dpop_nonce::DpopNonceInput;
 use rsky_oauth::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
 use rsky_oauth::oauth_types::OAuthIssuerIdentifier;
 use std::env;
@@ -283,13 +285,14 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         })),
     };
 
+    let dpop_secret = random::<[u8; 32]>();
     //Setup OAuth Provider
     let oauth_provider = build_oauth_provider(AuthProviderOptions {
         issuer: OAuthIssuerIdentifier::new(
             env::var("OAuthIssuerIdentifier").unwrap_or("https://pds.ripperoni.com".to_owned()),
         )
         .unwrap(),
-        dpop_secret: None,
+        dpop_secret: Some(DpopNonceInput::Uint8Array(Vec::from(dpop_secret))),
         customization: None,
         redis: None,
     })

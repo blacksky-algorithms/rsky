@@ -13,7 +13,7 @@ async fn inner_request_email_update(
     auth: AccessStandardIncludeChecks,
     account_manager: AccountManager,
 ) -> Result<RequestEmailUpdateOutput> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     let account = account_manager
         .get_account(
             &did,

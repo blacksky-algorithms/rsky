@@ -57,14 +57,14 @@ impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
         response.raw_header("DPoP-Nonce", "TODO");
         response.raw_header_adjoin("Access-Control-Expose-Headers", "DPoP-Nonce");
 
-        match request.headers().get_one("accept") {
+        match request.headers().get_one("Accept") {
             None => {
                 let mut response = Response::build();
                 response.status(Status { code: 406u16 });
                 return response.ok();
             }
             Some(accept_header) => {
-                if accept_header != "application/json" {
+                if accept_header != "application/json" && accept_header != "*/*" {
                     let mut response = Response::build();
                     response.status(Status { code: 406u16 });
                     return response.ok();
@@ -82,6 +82,6 @@ impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
         };
         response.sized_body(y.len(), Cursor::new(y));
         response.status(self.status);
-        response.ok()
+        Ok(response.finalize())
     }
 }

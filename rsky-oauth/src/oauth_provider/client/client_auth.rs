@@ -2,7 +2,7 @@ use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_types::CLIENT_ASSERTION_TYPE_JWT_BEARER;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct ClientAuth {
     pub method: String,
     pub alg: String,

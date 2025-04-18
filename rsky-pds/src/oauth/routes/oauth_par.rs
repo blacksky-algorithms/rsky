@@ -212,7 +212,7 @@ pub async fn oauth_par(
         .check_dpop_proof(
             body.dpop.as_str(),
             body.method.as_str(),
-            body.url.as_str(),
+            ("https://pds.ripperoni.com".to_string() + body.url.as_str()).as_str(),
             None,
         )
         .await?;

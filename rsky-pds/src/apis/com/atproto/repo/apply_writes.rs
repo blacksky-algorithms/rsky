@@ -50,7 +50,7 @@ async fn inner_apply_writes(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != auth.access.credentials.did.unwrap() {
             bail!("AuthRequiredError")
         }
         let did: &String = &did;

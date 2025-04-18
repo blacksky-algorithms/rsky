@@ -1,3 +1,4 @@
+use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_info::ClientInfo;
@@ -5,7 +6,6 @@ use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthClientId,
     OAuthClientMetadata,
 };
-use jsonwebtoken::jwk::JwkSet;
 
 pub type OnClientInfo =
     Box<dyn Fn(OAuthClientId, OAuthClientMetadata, Option<JwkSet>) -> ClientInfo + Send + Sync>;

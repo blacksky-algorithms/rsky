@@ -4,7 +4,7 @@ use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthClientId};
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct RequestData {
     pub client_id: OAuthClientId,
     pub client_auth: ClientAuth,

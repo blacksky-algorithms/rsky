@@ -25,12 +25,8 @@ impl AccountManager {
         credentials: SignInCredentials,
         device_id: DeviceId,
     ) -> Result<AccountInfo, OAuthError> {
-        match self
-            .store
-            .blocking_read()
-            .authenticate_account(credentials, device_id)
-            .await
-        {
+        let store = self.store.read().await;
+        match store.authenticate_account(credentials, device_id).await {
             Ok(result) => match result {
                 None => Err(OAuthError::InvalidRequestError(
                     "Invalid credentials".to_string(),
@@ -44,12 +40,8 @@ impl AccountManager {
     }
 
     pub async fn get(&self, device_id: &DeviceId, sub: Sub) -> Result<AccountInfo, OAuthError> {
-        match self
-            .store
-            .blocking_read()
-            .get_device_account(device_id.clone(), sub)
-            .await
-        {
+        let store = self.store.read().await;
+        match store.get_device_account(device_id.clone(), sub).await {
             Ok(result) => match result {
                 None => {
                     return Err(OAuthError::InvalidRequestError(
@@ -66,7 +58,7 @@ impl AccountManager {
         }
     }
 
-    pub fn add_authorized_client(
+    pub async fn add_authorized_client(
         &self,
         device_id: DeviceId,
         account: Account,
@@ -75,19 +67,17 @@ impl AccountManager {
     ) {
         // "Loopback" clients are not distinguishable from one another.
         if !is_oauth_client_id_loopback(&client.id) {
-            self.store
-                .blocking_write()
-                .add_authorized_client(device_id, account.sub, client.id);
+            let mut store = self.store.write().await;
+            store
+                .add_authorized_client(device_id, account.sub, client.id)
+                .await
+                .unwrap();
         }
     }
 
     pub async fn list(&self, device_id: &DeviceId) -> Vec<AccountInfo> {
-        let results = self
-            .store
-            .blocking_read()
-            .list_device_accounts(device_id.clone())
-            .await
-            .unwrap();
+        let store = self.store.read().await;
+        let results = store.list_device_accounts(device_id.clone()).await.unwrap();
         let mut x = Vec::new();
         for res in results {
             if res.info.remembered {

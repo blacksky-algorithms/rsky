@@ -80,7 +80,7 @@ pub async fn import_repo(
     s3_config: &State<SdkConfig>,
     db: DbConn,
 ) -> Result<(), ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
     let mut actor_store = ActorStore::new(
         requester.clone(),
         S3BlobStore::new(requester.clone(), s3_config),

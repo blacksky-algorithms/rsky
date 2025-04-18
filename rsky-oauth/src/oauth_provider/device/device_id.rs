@@ -1,9 +1,11 @@
 use crate::oauth_provider::constants::{DEVICE_ID_BYTES_LENGTH, DEVICE_ID_PREFIX};
+use rand::distr::Alphanumeric;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-const DEVICE_ID_LENGTH: usize = DEVICE_ID_PREFIX.len() + DEVICE_ID_BYTES_LENGTH * 2;
+const DEVICE_ID_LENGTH: usize = DEVICE_ID_PREFIX.len() + DEVICE_ID_BYTES_LENGTH;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceId(String);
@@ -26,6 +28,16 @@ impl DeviceId {
     /// Get the underlying issuer URL string.
     pub fn into_inner(self) -> String {
         self.0
+    }
+
+    pub fn generate() -> DeviceId {
+        let token: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(DEVICE_ID_BYTES_LENGTH)
+            .map(char::from)
+            .collect();
+        let val = DEVICE_ID_PREFIX.to_string() + token.as_str();
+        DeviceId::new(val).unwrap()
     }
 }
 
@@ -54,9 +66,4 @@ impl FromStr for DeviceId {
 pub enum DeviceIdError {
     #[error("Invalid format")]
     Invalid,
-}
-
-//TODO generate hex id
-pub async fn generate_device_id() -> DeviceId {
-    DeviceId("test".to_string())
 }

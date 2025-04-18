@@ -9,6 +9,7 @@ use crate::oauth_provider::token::token_id::TokenId;
 use std::future::Future;
 use std::pin::Pin;
 
+#[derive(Debug, Eq, PartialEq)]
 pub struct TokenInfo {
     pub id: TokenId,
     pub data: TokenData,

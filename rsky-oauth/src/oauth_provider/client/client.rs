@@ -1,3 +1,5 @@
+use crate::jwk::VerifyOptions;
+use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_provider::client::client_auth::ClientAuth;
 use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::constants::{CLIENT_ASSERTION_MAX_AGE, JAR_MAX_AGE};
@@ -5,14 +7,15 @@ use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::lib::util::redirect_uri::compare_redirect_uri;
 use crate::oauth_provider::now_as_secs;
 use crate::oauth_provider::token::token_claims::TokenClaims;
+use crate::oauth_provider::token::token_data::TokenData;
 use crate::oauth_types::{
     OAuthAuthorizationRequestParameters, OAuthClientCredentials, OAuthClientId,
     OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType, OAuthIssuerIdentifier,
     OAuthRedirectUri, OAuthResponseType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
-use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{Algorithm, TokenData, Validation};
+use biscuit::Validation;
 use rocket::form::validate::Len;
+use rocket::yansi::Paint;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -26,7 +29,7 @@ pub const AUTH_METHODS_SUPPORTED: [&str; 2] = ["none", "private_key_jwt"];
 pub struct Client {
     pub id: OAuthClientId,
     pub metadata: OAuthClientMetadata,
-    pub jwks: JwkSet,
+    pub jwks: Option<JwkSet>,
     pub info: ClientInfo,
 }
 
@@ -39,8 +42,8 @@ impl Client {
     ) -> Self {
         Client {
             id,
-            metadata: metadata.clone(),
-            jwks: jwks.unwrap(),
+            metadata,
+            jwks,
             info,
         }
     }
@@ -55,121 +58,122 @@ impl Client {
         ),
         OAuthError,
     > {
-        match &self.metadata.request_object_signing_alg {
-            None => {
-                // https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2
-                // > The default, if omitted, is that any algorithm supported by the OP
-                // > and the RP MAY be used.
-                let mut validation = Validation::new(Algorithm::ES256);
-                validation.reject_tokens_expiring_in_less_than =
-                    (JAR_MAX_AGE / 1000) + now_as_secs();
-                let data = self.jwt_verify(jar.to_string(), validation).await;
-                Ok((
-                    OAuthAuthorizationRequestParameters {
-                        client_id: self.id.clone(),
-                        state: None,
-                        redirect_uri: None,
-                        scope: None,
-                        response_type: OAuthResponseType::Code,
-                        code_challenge: None,
-                        code_challenge_method: None,
-                        dpop_jkt: None,
-                        response_mode: None,
-                        nonce: None,
-                        max_age: None,
-                        claims: None,
-                        login_hint: None,
-                        ui_locales: None,
-                        id_token_hint: None,
-                        display: None,
-                        prompt: None,
-                        authorization_details: None,
-                    },
-                    Some((
-                        data.header.kid.unwrap(),
-                        format!("{:?}", data.header.alg),
-                        data.header.typ.unwrap(), //TODO
-                    )),
-                ))
-            }
-            Some(request_object_signing_alg) => {
-                if request_object_signing_alg == "none" {
-                    let mut validation = Validation::new(Algorithm::ES256);
-                    validation.reject_tokens_expiring_in_less_than =
-                        (JAR_MAX_AGE / 1000) + now_as_secs();
-                    let data = self.jwt_verify(jar.to_string(), validation).await;
-                    Ok((
-                        OAuthAuthorizationRequestParameters {
-                            client_id: self.id.clone(),
-                            state: None,
-                            redirect_uri: None,
-                            scope: None,
-                            response_type: OAuthResponseType::Code,
-                            code_challenge: None,
-                            code_challenge_method: None,
-                            dpop_jkt: None,
-                            response_mode: None,
-                            nonce: None,
-                            max_age: None,
-                            claims: None,
-                            login_hint: None,
-                            ui_locales: None,
-                            id_token_hint: None,
-                            display: None,
-                            prompt: None,
-                            authorization_details: None,
-                        },
-                        Some((
-                            data.header.kid.unwrap(),
-                            format!("{:?}", data.header.alg),
-                            data.header.typ.unwrap(), //TODO
-                        )),
-                    ))
-                } else {
-                    let mut validation = Validation::new(Algorithm::ES256);
-                    validation.reject_tokens_expiring_in_less_than =
-                        (JAR_MAX_AGE / 1000) + now_as_secs();
-                    validation
-                        .algorithms
-                        .push(Algorithm::from_str(request_object_signing_alg).unwrap());
-                    let data = self.jwt_verify(jar.to_string(), validation).await;
-                    Ok((
-                        OAuthAuthorizationRequestParameters {
-                            client_id: self.id.clone(),
-                            state: None,
-                            redirect_uri: None,
-                            scope: None,
-                            response_type: OAuthResponseType::Code,
-                            code_challenge: None,
-                            code_challenge_method: None,
-                            dpop_jkt: None,
-                            response_mode: None,
-                            nonce: None,
-                            max_age: None,
-                            claims: None,
-                            login_hint: None,
-                            ui_locales: None,
-                            id_token_hint: None,
-                            display: None,
-                            prompt: None,
-                            authorization_details: None,
-                        },
-                        Some((
-                            data.header.kid.unwrap(),
-                            format!("{:?}", data.header.alg),
-                            data.header.typ.unwrap(), //TODO
-                        )),
-                    ))
-                }
-            }
-        }
+        // match &self.metadata.request_object_signing_alg {
+        //     None => {
+        //         // https://openid.net/specs/openid-connect-registration-1_0.html#rfc.section.2
+        //         // > The default, if omitted, is that any algorithm supported by the OP
+        //         // > and the RP MAY be used.
+        //         let mut validation = Validation::new(Algorithm::ES256);
+        //         validation.reject_tokens_expiring_in_less_than =
+        //             (JAR_MAX_AGE / 1000) + now_as_secs();
+        //         let data = self.jwt_verify(jar.to_string(), validation).await;
+        //         Ok((
+        //             OAuthAuthorizationRequestParameters {
+        //                 client_id: self.id.clone(),
+        //                 state: None,
+        //                 redirect_uri: None,
+        //                 scope: None,
+        //                 response_type: OAuthResponseType::Code,
+        //                 code_challenge: None,
+        //                 code_challenge_method: None,
+        //                 dpop_jkt: None,
+        //                 response_mode: None,
+        //                 nonce: None,
+        //                 max_age: None,
+        //                 claims: None,
+        //                 login_hint: None,
+        //                 ui_locales: None,
+        //                 id_token_hint: None,
+        //                 display: None,
+        //                 prompt: None,
+        //                 authorization_details: None,
+        //             },
+        //             Some((
+        //                 data.header.kid.unwrap(),
+        //                 format!("{:?}", data.header.alg),
+        //                 data.header.typ.unwrap(), //TODO
+        //             )),
+        //         ))
+        //     }
+        //     Some(request_object_signing_alg) => {
+        //         if request_object_signing_alg == "none" {
+        //             let mut validation = Validation::new(Algorithm::ES256);
+        //             validation.reject_tokens_expiring_in_less_than =
+        //                 (JAR_MAX_AGE / 1000) + now_as_secs();
+        //             let data = self.jwt_verify(jar.to_string(), validation).await;
+        //             Ok((
+        //                 OAuthAuthorizationRequestParameters {
+        //                     client_id: self.id.clone(),
+        //                     state: None,
+        //                     redirect_uri: None,
+        //                     scope: None,
+        //                     response_type: OAuthResponseType::Code,
+        //                     code_challenge: None,
+        //                     code_challenge_method: None,
+        //                     dpop_jkt: None,
+        //                     response_mode: None,
+        //                     nonce: None,
+        //                     max_age: None,
+        //                     claims: None,
+        //                     login_hint: None,
+        //                     ui_locales: None,
+        //                     id_token_hint: None,
+        //                     display: None,
+        //                     prompt: None,
+        //                     authorization_details: None,
+        //                 },
+        //                 Some((
+        //                     data.header.kid.unwrap(),
+        //                     format!("{:?}", data.header.alg),
+        //                     data.header.typ.unwrap(), //TODO
+        //                 )),
+        //             ))
+        //         } else {
+        //             let mut validation = Validation::new(Algorithm::ES256);
+        //             validation.reject_tokens_expiring_in_less_than =
+        //                 (JAR_MAX_AGE / 1000) + now_as_secs();
+        //             validation
+        //                 .algorithms
+        //                 .push(Algorithm::from_str(request_object_signing_alg).unwrap());
+        //             let data = self.jwt_verify(jar.to_string(), validation).await;
+        //             Ok((
+        //                 OAuthAuthorizationRequestParameters {
+        //                     client_id: self.id.clone(),
+        //                     state: None,
+        //                     redirect_uri: None,
+        //                     scope: None,
+        //                     response_type: OAuthResponseType::Code,
+        //                     code_challenge: None,
+        //                     code_challenge_method: None,
+        //                     dpop_jkt: None,
+        //                     response_mode: None,
+        //                     nonce: None,
+        //                     max_age: None,
+        //                     claims: None,
+        //                     login_hint: None,
+        //                     ui_locales: None,
+        //                     id_token_hint: None,
+        //                     display: None,
+        //                     prompt: None,
+        //                     authorization_details: None,
+        //                 },
+        //                 Some((
+        //                     data.header.kid.unwrap(),
+        //                     format!("{:?}", data.header.alg),
+        //                     data.header.typ.unwrap(), //TODO
+        //                 )),
+        //             ))
+        //         }
+        //     }
+        // }
+        unimplemented!()
     }
 
     async fn jwt_verify_unsecured(&self, token: String, options: String) {
         unimplemented!()
     }
 
-    async fn jwt_verify(&self, token: String, validation: Validation) -> TokenData<TokenClaims> {
+    async fn jwt_verify(&self, token: String, validation: VerifyOptions) -> TokenData {
         unimplemented!()
     }
 
@@ -183,63 +187,64 @@ impl Client {
         input: OAuthClientCredentials,
         aud: &OAuthIssuerIdentifier,
     ) -> Result<(ClientAuth, Option<String>), OAuthError> {
-        let method = self.metadata.token_endpoint_auth_method.unwrap();
-
-        /**
-         * @see {@link https://www.iana.org/assignments/oauth-parameters/oauth-parameters.xhtml#token-endpoint-auth-method}
-         */
-        match method {
-            OAuthEndpointAuthMethod::None => {
-                let client_auth = ClientAuth {
-                    method: "none".to_string(),
-                    alg: "".to_string(),
-                    kid: "".to_string(),
-                    jkt: "".to_string(),
-                };
-                Ok((client_auth, None))
-            }
-            OAuthEndpointAuthMethod::PrivateKeyJwt => match input {
-                OAuthClientCredentials::JwtBearer(credentials) => {
-                    let mut validation = Validation::new(Algorithm::HS256);
-                    validation.sub = Some(self.id.val());
-                    validation.reject_tokens_expiring_in_less_than =
-                        (CLIENT_ASSERTION_MAX_AGE / 1000) + now_as_secs();
-                    let mut audience = HashSet::new();
-                    audience.insert(aud.to_string());
-                    validation.aud = Some(audience);
-                    let mut required_claims = HashSet::new();
-                    required_claims.insert(String::from("jti"));
-                    validation.required_spec_claims = required_claims;
-                    let result = self
-                        .jwt_verify(credentials.client_assertion, validation)
-                        .await;
-
-                    let kid = match result.header.kid.clone() {
-                        None => {
-                            return Err(OAuthError::InvalidClientError(
-                                "\"kid\" required in client_assertion".to_string(),
-                            ))
-                        }
-                        Some(kid) => kid,
-                    };
-
-                    let client_auth = ClientAuth {
-                        method: CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
-                        alg: format!("{:?}", result.header.alg),
-                        kid,
-                        jkt: "todo".to_string(),
-                    };
-                    let jti = result.claims.jti.unwrap();
-                    Ok((client_auth, Some(jti.val())))
-                }
-                _ => Err(OAuthError::InvalidRequestError(
-                    "client_assertion_type required for ".to_string(),
-                )),
-            },
-            _ => Err(OAuthError::InvalidClientMetadataError(
-                "Unsupported token_endpoint_auth_method".to_string(),
-            )),
-        }
+        // let method = self.metadata.token_endpoint_auth_method.unwrap();
+        //
+        // /**
+        //  * @see {@link https://www.iana.org/assignments/oauth-parameters/oauth-parameters.xhtml#token-endpoint-auth-method}
+        //  */
+        // match method {
+        //     OAuthEndpointAuthMethod::None => {
+        //         let client_auth = ClientAuth {
+        //             method: "none".to_string(),
+        //             alg: "".to_string(),
+        //             kid: "".to_string(),
+        //             jkt: "".to_string(),
+        //         };
+        //         Ok((client_auth, None))
+        //     }
+        //     OAuthEndpointAuthMethod::PrivateKeyJwt => match input {
+        //         OAuthClientCredentials::JwtBearer(credentials) => {
+        //             let mut validation = Validation::new(Algorithm::HS256);
+        //             validation.sub = Some(self.id.val());
+        //             validation.reject_tokens_expiring_in_less_than =
+        //                 (CLIENT_ASSERTION_MAX_AGE / 1000) + now_as_secs();
+        //             let mut audience = HashSet::new();
+        //             audience.insert(aud.to_string());
+        //             validation.aud = Some(audience);
+        //             let mut required_claims = HashSet::new();
+        //             required_claims.insert(String::from("jti"));
+        //             validation.required_spec_claims = required_claims;
+        //             let result = self
+        //                 .jwt_verify(credentials.client_assertion, validation)
+        //                 .await;
+        //
+        //             let kid = match result.header.kid.clone() {
+        //                 None => {
+        //                     return Err(OAuthError::InvalidClientError(
+        //                         "\"kid\" required in client_assertion".to_string(),
+        //                     ))
+        //                 }
+        //                 Some(kid) => kid,
+        //             };
+        //
+        //             let client_auth = ClientAuth {
+        //                 method: CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
+        //                 alg: format!("{:?}", result.header.alg),
+        //                 kid,
+        //                 jkt: "todo".to_string(),
+        //             };
+        //             let jti = result.claims.jti.unwrap();
+        //             Ok((client_auth, Some(jti.val())))
+        //         }
+        //         _ => Err(OAuthError::InvalidRequestError(
+        //             "client_assertion_type required for ".to_string(),
+        //         )),
+        //     },
+        //     _ => Err(OAuthError::InvalidClientMetadataError(
+        //         "Unsupported token_endpoint_auth_method".to_string(),
+        //     )),
+        // }
+        unimplemented!()
     }
 
     /**
@@ -297,11 +302,34 @@ impl Client {
         if let Some(scope) = parameters.scope.clone() {
             // Any scope requested by the client must be registered in the client
             // metadata.
+            let declared_scopes: Vec<String> = scope.iter().map(|x| x.to_string()).collect();
+
+            if declared_scopes.is_empty() {
+                return Err(OAuthError::InvalidScopeError(
+                    parameters,
+                    "Client has no declared scopes in its metadata".to_string(),
+                ));
+            }
+
+            for scope in parameters
+                .scope
+                .clone()
+                .unwrap()
+                .iter()
+                .map(|val| val.to_string())
+            {
+                if !declared_scopes.contains(&scope) {
+                    return Err(OAuthError::InvalidScopeError(
+                        parameters,
+                        format!("Scope \"{scope}\" is not declared in the client metadata"),
+                    ));
+                }
+            }
+        } else {
             return Err(OAuthError::InvalidScopeError(
                 parameters,
                 "Client has no declared scopes in its metadata".to_string(),
             ));
-            //todo
         }
 
         if !self
@@ -369,13 +397,14 @@ impl Client {
             match self.metadata.authorization_details_types.clone() {
                 None => {
                     return Err(OAuthError::InvalidAuthorizationDetailsError(
+                        parameters,
                         "Client Metadata does not declare any authorization_details".to_string(),
                     ))
                 }
                 Some(authorization_details_types) => {
                     for detail in authorization_details {
                         if !authorization_details_types.contains(&detail.type_().to_string()) {
-                            return Err(OAuthError::InvalidAuthorizationDetailsError("Client Metadata does not declare any authorization_details of type".to_string()));
+                            return Err(OAuthError::InvalidAuthorizationDetailsError(parameters, "Client Metadata does not declare any authorization_details of type".to_string()));
                         }
                     }
                 }
@@ -397,6 +426,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwk_jose::jose_key::JwkSet;
     use crate::oauth_types::OAuthClientCredentialsNone;
 
     fn create_client() -> Client {
@@ -432,17 +462,17 @@ mod tests {
             dpop_bound_access_tokens: None,
             authorization_details_types: None,
         };
-        let jwks = Some(JwkSet { keys: vec![] });
+        let jwks = JwkSet { keys: vec![] };
         let info = ClientInfo {
             is_first_party: false,
             is_trusted: false,
         };
-        Client::new(id, metadata, jwks, info)
+        Client::new(id, metadata, None, info)
     }
     #[tokio::test]
     async fn test_decode_request_object() {
         let client = create_client();
-        let jar = "";
+        let jar = "{}";
         let res = client.decode_request_object(jar).await.unwrap();
         // let text = "rsky.com".to_string();
         // let result = validate_url(&text);
@@ -455,7 +485,7 @@ mod tests {
         let input = OAuthClientCredentials::None(OAuthClientCredentialsNone::new(
             OAuthClientId::new("client123").unwrap(),
         ));
-        let aud = OAuthIssuerIdentifier::new("OAuthIssuerIdentifier").unwrap();
+        let aud = OAuthIssuerIdentifier::new("https://rsky.com").unwrap();
         client.verify_credentials(input, &aud).await.unwrap();
     }
 
@@ -490,7 +520,7 @@ mod tests {
     async fn test_validate_client_auth() {
         let client = create_client();
         let client_auth = ClientAuth {
-            method: "".to_string(),
+            method: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
             alg: "".to_string(),
             kid: "".to_string(),
             jkt: "".to_string(),

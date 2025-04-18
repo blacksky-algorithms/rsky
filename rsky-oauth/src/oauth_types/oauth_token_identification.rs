@@ -157,11 +157,11 @@ impl fmt::Display for Token {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthTokenIdentification {
     /// The token to identify
-    pub token: String,
+    token: String,
 
     /// A hint about the type of token
     #[serde(rename = "token_type_hint", skip_serializing_if = "Option::is_none")]
-    pub token_type_hint: Option<TokenTypeHint>,
+    token_type_hint: Option<TokenTypeHint>,
 }
 
 impl OAuthTokenIdentification {
@@ -184,6 +184,10 @@ impl OAuthTokenIdentification {
     /// Convert this token identification into a parsed token.
     pub fn into_token(self) -> Result<Token, TokenIdentificationError> {
         Token::new(self.token, self.token_type_hint)
+    }
+
+    pub fn token(&self) -> String {
+        self.token.clone()
     }
 }
 

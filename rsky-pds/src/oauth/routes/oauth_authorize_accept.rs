@@ -16,7 +16,6 @@ use rsky_oauth::oauth_provider::oidc::sub::Sub;
 use rsky_oauth::oauth_provider::output::send_authorize_redirect::AuthorizationResultRedirect;
 use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
 use rsky_oauth::oauth_types::{OAuthAuthorizationServerMetadata, OAuthClientId};
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -110,13 +109,13 @@ pub async fn oauth_authorize_accept(
     authorize_accept: AuthorizeAccept,
 ) -> Result<OAuthResponse<AuthorizationResultRedirect>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager_lock = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
+        account_manager_lock.clone(),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
     let data = match oauth_provider

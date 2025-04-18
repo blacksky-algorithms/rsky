@@ -34,10 +34,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
         match AccessStandard::from_request(req).await {
             Outcome::Success(output) => {
                 let AccessOutput { credentials, .. } = output.access;
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
-                };
+                let requester: Option<String> = credentials.did;
                 if let Some(limit) = req.query_value::<Option<u8>>("limit") {
                     match limit {
                         Ok(limit) => match limit {

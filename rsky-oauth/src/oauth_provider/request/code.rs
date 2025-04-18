@@ -1,8 +1,8 @@
 use crate::oauth_provider::constants::{CODE_BYTES_LENGTH, CODE_PREFIX};
-use rand::distr::SampleString;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-const CODE_LENGTH: usize = CODE_PREFIX.len() + CODE_BYTES_LENGTH * 2; //hex encoding
+const CODE_LENGTH: usize = CODE_PREFIX.len() + CODE_BYTES_LENGTH; //hex encoding
 
 #[derive(Debug, Deserialize, Serialize, Eq, Clone, PartialEq)]
 pub struct Code(String);
@@ -27,15 +27,38 @@ impl Code {
         Ok(Self(val))
     }
 
-    pub fn val(&self) -> String {
-        self.0.clone()
+    pub fn into_inner(self) -> String {
+        self.0
     }
 
-    pub async fn generate_code() -> Code {
+    pub fn generate() -> Code {
         use rand::distr::Alphanumeric;
+        let token: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(CODE_BYTES_LENGTH)
+            .map(char::from)
+            .collect();
+        let val = CODE_PREFIX.to_string() + token.as_str();
+        Code::new(val).unwrap()
+    }
+}
 
-        let string = Alphanumeric.sample_string(&mut rand::rng(), CODE_LENGTH);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        Code::new(string).unwrap()
+    #[test]
+    fn test_code() {
+        // let token_id = TokenId::new("tok-dwadwdaddwadwdad").unwrap();
+        // assert_eq!(token_id.into_inner(), "tok-dwadwdaddwadwdad");
+        // let token_id = TokenId::generate();
+        // let val = token_id.into_inner();
+        // TokenId::new(val).unwrap();
+        //
+        // let invalid_format_token_id = TokenId::new("aaaadwadwdaddwadwdad").unwrap_err();
+        // assert_eq!(invalid_format_token_id, TokenIdError::InvalidFormat);
+        //
+        // let invalid_length = TokenId::new("tok-dwadwda").unwrap_err();
+        // assert_eq!(invalid_length, TokenIdError::InvalidLength);
     }
 }

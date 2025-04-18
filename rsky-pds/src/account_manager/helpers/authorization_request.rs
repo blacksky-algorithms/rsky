@@ -47,7 +47,7 @@ fn request_data_to_row(id: RequestId, data: RequestData) -> AuthorizationRequest
     let client_id = data.client_id.into_inner();
     let code = match data.code {
         None => None,
-        Some(code) => Some(code.val()),
+        Some(code) => Some(code.into_inner()),
     };
     AuthorizationRequest {
         id,
@@ -93,7 +93,7 @@ pub async fn update_qb(id: RequestId, data: UpdateRequestData, db: &DbConn) -> R
         if let Some(code) = data.code {
             update(RequestSchema::authorization_request)
                 .filter(RequestSchema::id.eq(&id))
-                .set((RequestSchema::code.eq(code.val()),))
+                .set((RequestSchema::code.eq(code.into_inner()),))
                 .execute(conn)?;
         }
         if let Some(sub) = data.sub {
@@ -153,7 +153,7 @@ pub async fn remove_by_id_qb(id: RequestId, db: &DbConn) -> Result<()> {
 }
 
 pub async fn find_by_code_qb(db: &DbConn, code: Code) -> Result<Option<AuthorizationRequest>> {
-    let code = code.val();
+    let code = code.into_inner();
     let result = db
         .run(move |conn| {
             RequestSchema::authorization_request

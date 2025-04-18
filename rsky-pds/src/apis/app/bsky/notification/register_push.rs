@@ -30,10 +30,7 @@ pub async fn inner_register_push(
         platform,
         app_id,
     } = body.into_inner();
-    let did: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let did: String = auth.access.credentials.did.unwrap_or("".to_string());
     let nsid = Ids::AppBskyFeedGetFeedGenerator.as_str().to_string();
     let auth_headers = context::service_auth_headers(&did, &service_did, &nsid).await?;
 

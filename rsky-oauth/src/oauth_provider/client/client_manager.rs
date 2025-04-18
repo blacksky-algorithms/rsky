@@ -1,5 +1,6 @@
-use crate::cached_getter::{CachedGetter, GetCachedOptions};
+use crate::cached_getter::{CachedGetter, GetCachedOptions, Getter};
 use crate::jwk::Keyset;
+use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::client::client_store::ClientStore;
@@ -12,8 +13,8 @@ use crate::oauth_types::{
 };
 use crate::simple_store::SimpleStore;
 use crate::simple_store_memory::SimpleStoreMemory;
-use jsonwebtoken::jwk::JwkSet;
-use reqwest::RequestBuilder;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use url::Url;
@@ -31,6 +32,32 @@ pub struct ClientManager {
     hooks: Arc<OAuthHooks>,
 }
 
+pub struct JwkGetter {}
+
+impl Getter<String, JwkSet> for JwkGetter {
+    fn get<'a>(
+        &'a self,
+        key: String,
+        options: Option<GetCachedOptions>,
+        stored_value: Option<JwkSet>,
+    ) -> Pin<Box<dyn Future<Output = JwkSet> + Send + Sync + 'a>> {
+        Box::pin(async move { fetch_jwks_handler(key, options).await })
+    }
+}
+
+pub struct OAuthClientMetadataGetter {}
+
+impl Getter<String, OAuthClientMetadata> for OAuthClientMetadataGetter {
+    fn get<'a>(
+        &'a self,
+        key: String,
+        options: Option<GetCachedOptions>,
+        stored_value: Option<OAuthClientMetadata>,
+    ) -> Pin<Box<dyn Future<Output = OAuthClientMetadata> + Send + Sync + 'a>> {
+        Box::pin(async move { fetch_metadata_handler(key, options).await })
+    }
+}
+
 impl ClientManager {
     pub fn new(
         server_metadata: OAuthAuthorizationServerMetadata,
@@ -41,32 +68,10 @@ impl ClientManager {
         client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
         client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
     ) -> Self {
-        let jwks: CachedGetter<String, JwkSet> = CachedGetter::new(
-            // Box::new(
-            //     |id: String,
-            //            options: Option<GetCachedOptions>,
-            //            stored_value: Option<JwkSet>|
-            //            -> JwkSet {
-            //         let res = build_json_get_request(id, options).await.send();
-            //         fetch_jwks_handler(res)
-            //     },
-            // ),
-            client_jwks_cache,
-            None,
-        );
+        let jwks: CachedGetter<String, JwkSet> =
+            CachedGetter::new(Arc::new(RwLock::new(JwkGetter {})), client_jwks_cache, None);
         let metadata_getter: CachedGetter<String, OAuthClientMetadata> = CachedGetter::new(
-            // Box::new(
-            //     async move |id: String,
-            //                 options: Option<GetCachedOptions>,
-            //                 stored_value: Option<OAuthClientMetadata>|
-            //                 -> OAuthClientMetadata {
-            //         let res = build_json_get_request(id.to_string(), options)
-            //             .send()
-            //             .await
-            //             .unwrap();
-            //         fetch_metadata_handler(res)
-            //     },
-            // ),
+            Arc::new(RwLock::new(OAuthClientMetadataGetter {})),
             client_metadata_cache,
             None,
         );
@@ -135,36 +140,33 @@ impl ClientManager {
         &self,
         client_id: OAuthClientIdLoopback,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
-        // match &self.loopback_metadata {
-        //     None => Err(OAuthError::InvalidClientMetadataError(
-        //         "Loopback clients are not allowed".to_string(),
-        //     )),
-        //     Some(loopback_metadata) => {
-        //         let metadata = loopback_metadata(client_id.clone());
-        //         self.validate_client_metadata(client_id.as_str(), metadata)
-        //             .await
-        //     }
-        // }
+        if let Some(loopback_metadata) = &self.loopback_metadata {
+            let metadata = loopback_metadata(client_id.clone());
+            self.validate_client_metadata(client_id.as_str(), metadata)
+                .await
+        } else {
+            Err(OAuthError::InvalidClientMetadataError(
+                "Loopback clients are not allowed".to_string(),
+            ))
+        }
     }
 
     async fn get_discoverable_client_metadata(
         &self,
         client_id: &OAuthClientIdDiscoverable,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        unimplemented!()
-        // let metadata_url = client_id.as_url();
+        let metadata_url = client_id.as_url();
+
+        let metadata = self
+            .metadata_getter
+            .get(&metadata_url.to_string(), None)
+            .await;
+
+        // Note: we do *not* re-validate the metadata here, as the metadata is
+        // validated within the getter. This is to avoid double validation.
         //
-        // let metadata = self
-        //     .metadata_getter
-        //     .get(&metadata_url.to_string(), None)
-        //     .await;
-        //
-        // // Note: we do *not* re-validate the metadata here, as the metadata is
-        // // validated within the getter. This is to avoid double validation.
-        // //
-        // // return this.validateClientMetadata(metadataUrl.href, metadata)
-        // Ok(metadata)
+        // return this.validateClientMetadata(metadataUrl.href, metadata)
+        Ok(metadata)
     }
 
     async fn get_stored_client_metadata(
@@ -176,7 +178,8 @@ impl ClientManager {
                 "Invalid client ID".to_string(),
             )),
             Some(store) => {
-                let metadata = store.blocking_read().find_client(client_id.clone())?;
+                let store = store.read().await;
+                let metadata = store.find_client(client_id.clone())?;
                 self.validate_client_metadata(client_id.as_str(), metadata)
                     .await
             }
@@ -574,7 +577,7 @@ impl ClientManager {
                 let path = if client_uri_url.path().ends_with("/") {
                     client_uri_url.path().to_string()
                 } else {
-                    (client_uri_url.path().to_string() + "/")
+                    client_uri_url.path().to_string() + "/"
                 };
                 if !client_id_url.path().starts_with(path.as_str()) {
                     return Err(OAuthError::InvalidClientMetadataError(
@@ -659,15 +662,29 @@ impl ClientManager {
     }
 }
 
-pub fn build_json_get_request(uri: String, options: Option<GetCachedOptions>) -> RequestBuilder {
+pub async fn fetch_jwks_handler(uri: String, options: Option<GetCachedOptions>) -> JwkSet {
     let client = reqwest::Client::new();
-    client.get(uri).header("accept", "application/json")
+    let response = client
+        .get(uri)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    let jwks = response.json::<JwkSet>().await.unwrap();
+    jwks
 }
 
-pub fn fetch_jwks_handler(res: reqwest::Response) -> JwkSet {
-    unimplemented!()
-}
-
-pub fn fetch_metadata_handler(res: reqwest::Response) -> OAuthClientMetadata {
-    unimplemented!()
+pub async fn fetch_metadata_handler(
+    uri: String,
+    options: Option<GetCachedOptions>,
+) -> OAuthClientMetadata {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(uri)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    let metadata = response.json::<OAuthClientMetadata>().await.unwrap();
+    metadata
 }

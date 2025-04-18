@@ -1,6 +1,9 @@
 use crate::oauth_types::util::{is_hostname_ip, is_loopback_host};
+use base64::Engine;
 use http::Uri;
-use serde::{Deserialize, Serialize};
+use rocket::uri;
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     fmt::{self, Display, Formatter},
     str::FromStr,
@@ -63,8 +66,48 @@ impl ValidUri for DangerousUri {
 }
 
 /// Loopback URI (http://localhost, http://127.0.0.1, http://::1)
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Ord, PartialOrd)]
 pub struct LoopbackUri(String);
+
+impl Serialize for LoopbackUri {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
+// Custom visitor for deserialization
+struct LoopbackUriVisitor;
+
+impl Visitor<'_> for LoopbackUriVisitor {
+    type Value = LoopbackUri;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a string representing a LoopbackUri")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match LoopbackUri::validate(value) {
+            Ok(uri) => Ok(uri),
+            Err(error) => Err(E::custom(format!("{error}"))),
+        }
+    }
+}
+
+// Implement Deserialize using the visitor
+impl<'de> Deserialize<'de> for LoopbackUri {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(LoopbackUriVisitor)
+    }
+}
 
 impl LoopbackUri {
     /// Returns a string slice of the underlying URI
@@ -98,17 +141,53 @@ impl ValidUri for LoopbackUri {
 }
 
 /// HTTPS URI
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Ord, PartialOrd)]
 pub struct HttpsUri(String);
+
+impl Serialize for HttpsUri {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
+// Custom visitor for deserialization
+struct HttpsUriVisitor;
+
+impl Visitor<'_> for HttpsUriVisitor {
+    type Value = HttpsUri;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a string representing a HttpsUri")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match HttpsUri::validate(value) {
+            Ok(uri) => Ok(uri),
+            Err(error) => Err(E::custom(format!("{error}"))),
+        }
+    }
+}
+
+// Implement Deserialize using the visitor
+impl<'de> Deserialize<'de> for HttpsUri {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(HttpsUriVisitor)
+    }
+}
 
 impl HttpsUri {
     /// Returns a string slice of the underlying URI
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    pub fn new(val: String) -> Self {
-        Self(val)
     }
 }
 
@@ -152,17 +231,18 @@ impl ValidUri for HttpsUri {
 
 /// Web URI (either LoopbackUri or HttpsUri)
 #[derive(Debug, Clone, PartialEq, Ord, Eq, Serialize, Deserialize, PartialOrd)]
+#[serde(untagged)]
 pub enum WebUri {
     Loopback(LoopbackUri),
     Https(HttpsUri),
 }
 
 impl ValidUri for WebUri {
-    fn validate(uri_str: &str) -> Result<Self, UriError> {
-        if uri_str.starts_with("http://") {
-            LoopbackUri::validate(uri_str).map(WebUri::Loopback)
-        } else if uri_str.starts_with("https://") {
-            HttpsUri::validate(uri_str).map(WebUri::Https)
+    fn validate(uri: &str) -> Result<Self, UriError> {
+        if uri.starts_with("http://") {
+            LoopbackUri::validate(uri.as_str()).map(WebUri::Loopback)
+        } else if uri.starts_with("https://") {
+            HttpsUri::validate(uri.as_str()).map(WebUri::Https)
         } else {
             Err(UriError::InvalidProtocol("http: or https:".to_string()))
         }

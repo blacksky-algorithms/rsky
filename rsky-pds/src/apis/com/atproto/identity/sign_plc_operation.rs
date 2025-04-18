@@ -22,7 +22,7 @@ pub async fn sign_plc_operation(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<Json<Operation>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     let request = body.into_inner();
     let token = request.token.clone();
 

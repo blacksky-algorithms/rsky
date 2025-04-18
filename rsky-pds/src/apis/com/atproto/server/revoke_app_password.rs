@@ -16,7 +16,7 @@ pub async fn revoke_app_password(
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let RevokeAppPasswordInput { name } = body.into_inner();
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
 
     match account_manager.revoke_app_password(requester, name).await {
         Ok(_) => Ok(()),

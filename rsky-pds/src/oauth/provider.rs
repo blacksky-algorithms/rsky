@@ -3,7 +3,6 @@ use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
-use rocket::yansi::Paint;
 use rsky_oauth::jwk::{Key, Keyset};
 use rsky_oauth::jwk_jose::jose_key::JoseKey;
 use rsky_oauth::oauth_provider::access_token::access_token_type::AccessTokenType;
@@ -16,7 +15,7 @@ use rsky_oauth::oauth_provider::oauth_provider::{OAuthProvider, OAuthProviderCre
 use rsky_oauth::oauth_provider::output::customization::Customization;
 use rsky_oauth::oauth_types::{
     HttpsUri, OAuthClientId, OAuthClientIdLoopback, OAuthClientMetadata, OAuthIssuerIdentifier,
-    WebUri,
+    ValidUri, WebUri,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -90,7 +89,6 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
                 customization: options.customization,
                 safe_fetch: false,
                 redis: options.redis,
-                store: None,
                 client_jwks_cache: None,
                 client_metadata_cache: None,
                 loopback_metadata: Some(loopback_metadata),
@@ -145,8 +143,6 @@ fn build_custom_metadata(issuer: OAuthIssuerIdentifier) -> CustomMetadata {
             "transition:chat.bsky".to_string(),
         ]),
         authorization_details_type_supported: None,
-        protected_resources: Some(vec![WebUri::Https(HttpsUri::new(
-            issuer.as_ref().to_string(),
-        ))]),
+        protected_resources: Some(vec![WebUri::validate(issuer.as_ref()).unwrap()]),
     }
 }

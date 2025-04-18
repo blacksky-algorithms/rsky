@@ -7,7 +7,7 @@ use crate::oauth_types::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct TokenData {
     pub created_at: u64,
     pub updated_at: u64,

@@ -12,7 +12,9 @@ pub enum OAuthEndpointAuthMethod {
     ClientSecretJwt,
     /// Client credentials in the POST body
     ClientSecretPost,
+
     /// No authentication
+    #[serde(rename = "none")]
     None,
     /// Private key JWT authentication
     PrivateKeyJwt,

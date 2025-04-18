@@ -24,10 +24,7 @@ pub async fn inner_get_profiles(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetProfilesOutput>, ApiError> {
-    let requester: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let requester: String = auth.access.credentials.did.unwrap_or("".to_string());
     let read_afer_write_response = handle_read_after_write(
         METHOD_NSID.to_string(),
         requester,

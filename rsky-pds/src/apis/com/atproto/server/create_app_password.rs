@@ -17,7 +17,7 @@ pub async fn create_app_password(
 ) -> Result<Json<CreateAppPasswordOutput>, ApiError> {
     let CreateAppPasswordInput { name } = body.into_inner();
     match account_manager
-        .create_app_password(auth.access.credentials.unwrap().did.unwrap(), name)
+        .create_app_password(auth.access.credentials.did.unwrap(), name)
         .await
     {
         Ok(app_password) => Ok(Json(app_password)),

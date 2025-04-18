@@ -54,7 +54,7 @@ impl<'r> FromData<'r> for SignIn {
             Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
         }
 
-        let input = data.open(100.bytes());
+        let input = data.open(10000.bytes());
         let x = input.into_string().await.unwrap().value;
         let sign_in_payload: SignInPayload;
 
@@ -94,22 +94,25 @@ pub async fn oauth_authorize_sign_in(
     sign_in: SignIn,
 ) -> Result<OAuthResponse<SignInResponse>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager_lock = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
+        account_manager_lock.clone(),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
-    let _res = oauth_provider
+    let res = oauth_provider
         .sign_in(
             sign_in.device_id,
             sign_in.request_uri,
             sign_in.client_id,
             sign_in.credentials,
         )
-        .await;
-    unimplemented!()
+        .await?;
+    Ok(OAuthResponse {
+        body: res,
+        status: Status::Ok,
+    })
 }

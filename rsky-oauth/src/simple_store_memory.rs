@@ -31,18 +31,22 @@ where
     type Error = MemoryStoreError;
 
     async fn get(&self, key: &K) -> Result<Option<V>, Self::Error> {
-        Ok(self.store.blocking_read().get(key).cloned())
+        let store = self.store.read().await;
+        Ok(store.get(key).cloned())
     }
     async fn set(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.store.blocking_write().insert(key, value);
+        let mut store = self.store.write().await;
+        store.insert(key, value);
         Ok(())
     }
     async fn del(&self, key: &K) -> Result<(), Self::Error> {
-        self.store.blocking_write().remove(key);
+        let mut store = self.store.write().await;
+        store.remove(key);
         Ok(())
     }
     async fn clear(&self) -> Result<(), Self::Error> {
-        self.store.blocking_write().clear();
+        let mut store = self.store.write().await;
+        store.clear();
         Ok(())
     }
 }

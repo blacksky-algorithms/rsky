@@ -22,7 +22,7 @@ async fn inner_activate_account(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
     assert_valid_did_documents_for_service(requester.clone()).await?;
 
     let account = account_manager

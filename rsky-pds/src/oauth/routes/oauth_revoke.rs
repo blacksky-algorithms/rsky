@@ -22,17 +22,14 @@ impl<'r> FromRequest<'r> for OAuthRevokeGetRequestBody {
     #[tracing::instrument(skip_all)]
     async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
         let token = req.query_value::<String>("token").unwrap().unwrap();
-        // let token_type_hint = req.query_value::<Option<TokenTypeHint>>("token_type_hint").unwrap().unwrap();
         let hint = req
             .query_value::<String>("token_type_hint")
             .unwrap()
             .unwrap();
         let token_type_hint: Option<TokenTypeHint> = Some(hint.parse().unwrap());
         let body = OAuthRevokeGetRequestBody {
-            oauth_token_identification: OAuthTokenIdentification {
-                token,
-                token_type_hint,
-            },
+            oauth_token_identification: OAuthTokenIdentification::new(token, token_type_hint)
+                .unwrap(),
         };
         rocket::request::Outcome::Success(body)
     }
@@ -46,17 +43,17 @@ pub async fn get_oauth_revoke(
     body: OAuthRevokeGetRequestBody,
 ) -> Result<OAuthResponse<()>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager_lock = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
+        account_manager_lock.clone(),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
     oauth_provider
-        .revoke(&body.oauth_token_identification)
+        .revoke(body.oauth_token_identification)
         .await?;
     Ok(OAuthResponse {
         body: (),
@@ -192,17 +189,17 @@ pub async fn post_oauth_revoke(
     body: OAuthRevokeRequestBody,
 ) -> Result<OAuthResponse<()>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager_lock = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
+        account_manager_lock.clone(),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
     oauth_provider
-        .revoke(&body.oauth_token_identification)
+        .revoke(body.oauth_token_identification)
         .await?;
     Ok(OAuthResponse {
         body: (),

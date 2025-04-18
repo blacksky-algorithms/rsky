@@ -23,7 +23,7 @@ async fn inner_update_handle(
     account_manager: AccountManager,
 ) -> Result<()> {
     let UpdateHandleInput { handle } = body.into_inner();
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
 
     let opts = HandleValidationOpts {
         handle,

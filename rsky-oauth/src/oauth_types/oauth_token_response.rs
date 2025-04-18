@@ -4,7 +4,7 @@ use std::fmt;
 use crate::oauth_types::{OAuthAccessToken, OAuthAuthorizationDetails, OAuthScope, OAuthTokenType};
 
 use crate::oauth_provider::token::refresh_token::RefreshToken;
-use jsonwebtoken::TokenData;
+use crate::oauth_provider::token::token_data::TokenData;
 
 /// Success response from a token endpoint.
 ///
@@ -109,24 +109,24 @@ impl OAuthTokenResponse {
         self.refresh_token.is_some()
     }
 
-    /// Parse the ID token if present and validate its signature.
-    pub fn parse_id_token<T>(&self, key: &[u8]) -> Result<Option<TokenData<T>>, TokenResponseError>
-    where
-        T: for<'a> Deserialize<'a>,
-    {
-        match &self.id_token {
-            Some(token) => {
-                let decoded = jsonwebtoken::decode(
-                    token,
-                    &jsonwebtoken::DecodingKey::from_secret(key),
-                    &jsonwebtoken::Validation::default(),
-                )
-                .map_err(TokenResponseError::InvalidIdToken)?;
-                Ok(Some(decoded))
-            }
-            None => Ok(None),
-        }
-    }
+    // /// Parse the ID token if present and validate its signature.
+    // pub fn parse_id_token<T>(&self, key: &[u8]) -> Result<Option<TokenData<T>>, TokenResponseError>
+    // where
+    //     T: for<'a> Deserialize<'a>,
+    // {
+    //     match &self.id_token {
+    //         Some(token) => {
+    //             let decoded = jsonwebtoken::decode(
+    //                 token,
+    //                 &jsonwebtoken::DecodingKey::from_secret(key),
+    //                 &jsonwebtoken::Validation::default(),
+    //             )
+    //             .map_err(TokenResponseError::InvalidIdToken)?;
+    //             Ok(Some(decoded))
+    //         }
+    //         None => Ok(None),
+    //     }
+    // }
 
     /// Convert to JSON string.
     pub fn to_json(&self) -> Result<String, TokenResponseError> {
@@ -148,8 +148,8 @@ pub enum TokenResponseError {
     #[error("Failed to deserialize token response: {0}")]
     Deserialization(#[source] serde_json::Error),
 
-    #[error("Invalid ID token: {0}")]
-    InvalidIdToken(#[source] jsonwebtoken::errors::Error),
+    #[error("Invalid ID tokens")]
+    InvalidIdToken,
 }
 
 impl fmt::Display for OAuthTokenResponse {

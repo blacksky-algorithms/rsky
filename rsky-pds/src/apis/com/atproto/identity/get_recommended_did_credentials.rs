@@ -18,7 +18,7 @@ pub async fn get_recommended_did_credentials(
     cfg: &State<ServerConfig>,
     account_manager: AccountManager,
 ) -> Result<Json<GetRecommendedDidCredentialsResponse>, ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
     let availability_flags = AvailabilityFlags {
         include_taken_down: Some(true),
         include_deactivated: Some(true),

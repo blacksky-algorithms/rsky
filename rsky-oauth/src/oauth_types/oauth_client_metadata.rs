@@ -1,8 +1,8 @@
+use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_types::{
     OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthResponseType, OAuthScope,
     WebUri,
 };
-use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -219,41 +219,6 @@ impl OAuthClientMetadata {
             authorization_details_types: None,
         })
     }
-
-    /// Validate the metadata according to spec requirements.
-    pub fn validate(&self) -> Result<(), ClientMetadataError> {
-        unimplemented!()
-        // // Redirect URIs must not be empty
-        // if self.redirect_uris.is_empty() {
-        //     return Err(ClientMetadataError::NoRedirectUris);
-        // }
-        //
-        // // If auth method requires signing key, verify alg is specified
-        // if matches!(
-        //     self.token_endpoint_auth_method,
-        //     OAuthEndpointAuthMethod::PrivateKeyJwt
-        // ) && self.token_endpoint_auth_signing_alg.is_none()
-        // {
-        //     return Err(ClientMetadataError::MissingSigningAlgorithm);
-        // }
-        //
-        // // Other validation rules can be added here...
-        //
-        // Ok(())
-    }
-
-    /// Convert to JSON string.
-    pub fn to_json(&self) -> Result<String, ClientMetadataError> {
-        serde_json::to_string(self).map_err(ClientMetadataError::Serialization)
-    }
-
-    /// Parse from JSON string.
-    pub fn from_json(json: &str) -> Result<Self, ClientMetadataError> {
-        let metadata: Self =
-            serde_json::from_str(json).map_err(ClientMetadataError::Deserialization)?;
-        metadata.validate()?;
-        Ok(metadata)
-    }
 }
 
 /// Errors that can occur with client metadata.
@@ -300,32 +265,6 @@ mod tests {
             vec![OAuthGrantType::AuthorizationCode]
         );
         assert_eq!(metadata.application_type, ApplicationType::Web);
-    }
-
-    #[test]
-    fn test_metadata_validation() {
-        unimplemented!()
-        // No redirect URIs
-        // assert!(matches!(
-        //     OAuthClientMetadata::new(vec![]),
-        //     Err(ClientMetadataError::NoRedirectUris)
-        // ));
-        //
-        // // Missing signing algorithm
-        // let mut metadata = OAuthClientMetadata::new(vec![test_redirect_uri()]).unwrap();
-        // metadata.token_endpoint_auth_method = OAuthEndpointAuthMethod::PrivateKeyJwt;
-        // assert!(matches!(
-        //     metadata.validate(),
-        //     Err(ClientMetadataError::MissingSigningAlgorithm)
-        // ));
-    }
-
-    #[test]
-    fn test_serialization() {
-        let metadata = OAuthClientMetadata::new(vec![test_redirect_uri()]).unwrap();
-        let json = metadata.to_json().unwrap();
-        let parsed = OAuthClientMetadata::from_json(&json).unwrap();
-        assert_eq!(metadata, parsed);
     }
 
     #[test]

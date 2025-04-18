@@ -186,13 +186,13 @@ pub async fn oauth_token(
     account_manager: AccountManager,
 ) -> Result<OAuthResponse<OAuthTokenResponse>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager_lock = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
+        account_manager_lock.clone(),
+        account_manager_lock.clone(),
+        Some(account_manager_lock.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
     let dpop_jkt = oauth_provider

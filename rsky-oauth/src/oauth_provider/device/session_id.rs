@@ -1,9 +1,11 @@
 use crate::oauth_provider::constants::{SESSION_ID_BYTES_LENGTH, SESSION_ID_PREFIX};
+use rand::distr::Alphanumeric;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-const SESSION_ID_LENGTH: usize = SESSION_ID_PREFIX.len() + SESSION_ID_BYTES_LENGTH * 2;
+const SESSION_ID_LENGTH: usize = SESSION_ID_PREFIX.len() + SESSION_ID_BYTES_LENGTH;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionId(String);
@@ -26,6 +28,16 @@ impl SessionId {
     /// Get the underlying issuer URL string.
     pub fn into_inner(self) -> String {
         self.0
+    }
+
+    pub fn generate() -> SessionId {
+        let token: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(SESSION_ID_BYTES_LENGTH)
+            .map(char::from)
+            .collect();
+        let val = SESSION_ID_PREFIX.to_string() + token.as_str();
+        SessionId::new(val).unwrap()
     }
 }
 
@@ -54,9 +66,4 @@ impl FromStr for SessionId {
 pub enum SessionIdError {
     #[error("Invalid format")]
     Invalid,
-}
-
-//TODO generate hex id
-pub async fn generate_session_id() -> SessionId {
-    SessionId("test".to_string())
 }

@@ -5,4 +5,5 @@ pub enum AccessTokenType {
     AUTO,
     JWT,
     ID,
+    w,
 }
