@@ -4,7 +4,6 @@ use crate::oauth::{SharedOAuthProvider, SharedReplayStore};
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
-use rocket::serde::json::Json;
 use rocket::{post, Data, Request, State};
 use rsky_oauth::oauth_provider::errors::OAuthError;
 use rsky_oauth::oauth_types::{

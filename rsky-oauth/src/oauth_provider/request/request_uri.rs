@@ -33,7 +33,7 @@ impl RequestUri {
     }
 
     pub fn decode(request_uri: &RequestUri) -> RequestId {
-        let val = request_uri.clone().into_inner();
+        let val = &request_uri.clone().into_inner()[REQUEST_URI_PREFIX.len()..];
         RequestId::new(val).unwrap()
     }
 

@@ -276,13 +276,16 @@ impl DeviceManager {
         if device.is_none() || session.is_none() {
             // If the device cookie is valid, let's cleanup the DB
             if let Some(device) = device {
-                self.store.blocking_write().delete_device(device.0).await?
+                let mut store = self.store.write().await;
+                store.delete_device(device.0).await?;
+                drop(store);
             }
+            return Ok(None);
         }
+        let device = device.unwrap();
+        let session = session.unwrap();
 
-        unimplemented!()
-        //TODO
-        // Ok(())
+        Ok(Some((device.0, session.0, session.1 || device.1)))
     }
 
     fn set_cookie(&self, req: &Request, device_id: DeviceId, session_id: SessionId) {

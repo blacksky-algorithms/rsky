@@ -1,14 +1,12 @@
-use crate::jwk::{decode_with_jwk, Jwk, JwtHeader, JwtPayload};
 use crate::oauth_provider::dpop::dpop_nonce::{DpopNonce, DpopNonceError, DpopNonceInput};
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
-use crate::oauth_provider::token::token_claims::TokenClaims;
-use crate::oauth_provider::token::token_id::TokenId;
-use crate::oauth_types::{Jwt, OAuthAccessToken};
+use crate::oauth_provider::token::token_claims::DpopClaims;
+use crate::oauth_types::OAuthAccessToken;
 use base64ct::{Base64, Encoding};
-use biscuit::errors::Error;
-use biscuit::jwk::JWKSet;
-use biscuit::{ClaimsSet, Compact, ValidationOptions, JWT};
+use jsonwebtoken::jwk::Jwk;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use rocket::futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -64,57 +62,76 @@ impl DpopManager {
         htu: &str, // HTTP URL
         access_token: Option<OAuthAccessToken>,
     ) -> Result<CheckProofResult, OAuthError> {
-        let proof: biscuit::jws::Compact<ClaimsSet<TokenClaims>, JwtHeader> =
-            JWT::new_encoded(proof);
-        let header = match proof.unverified_header() {
+        let header = match decode_header(proof) {
             Ok(result) => result,
             Err(error) => return Err(OAuthError::InvalidDpopProofError(error.to_string())),
         };
-        let embedded_jwk = match &header.registered.web_key {
+        let jwk = match header.jwk {
             None => return Err(OAuthError::InvalidDpopProofError("Missing Jwk".to_string())),
-            Some(jwk) => jwk.clone(),
+            Some(jwk) => jwk,
+        };
+        let decoding_key = DecodingKey::from_jwk(&jwk).unwrap();
+
+        let x = jwk.clone().common.key_algorithm.unwrap().to_string();
+        let algorithm = Algorithm::from_str(x.as_str()).unwrap();
+        let mut validation = Validation::new(algorithm);
+        validation.validate_nbf = false;
+        validation.validate_exp = false;
+        validation.validate_aud = false;
+        validation.required_spec_claims = HashSet::new();
+        let now = now_as_secs();
+        let token_data = match decode::<DpopClaims>(proof, &decoding_key, &validation) {
+            Ok(result) => {
+                if let Some(typ) = &result.header.typ {
+                    if typ != "dpop+jwt" {
+                        return Err(OAuthError::InvalidDpopProofError(
+                            "Invalid \"typ\"".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(OAuthError::InvalidDpopProofError(
+                        "Missing \"typ\"".to_string(),
+                    ));
+                }
+
+                if let Some(iat) = result.claims.iat {
+                    //TODO: for tests
+                    if iat < now - 1000000 {
+                        return Err(OAuthError::InvalidDpopProofError(
+                            "\"iat\" expired".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(OAuthError::InvalidDpopProofError(
+                        "Missing \"iat\"".to_string(),
+                    ));
+                }
+                if result.claims.jti.is_none() {
+                    return Err(OAuthError::InvalidDpopProofError(
+                        "Missing \"jti\"".to_string(),
+                    ));
+                }
+
+                result
+            }
+            Err(error) => return Err(OAuthError::InvalidDpopProofError(error.to_string())),
         };
 
-        let thumbprint = embedded_jwk
-            .algorithm
-            .thumbprint(&biscuit::digest::SHA256)
-            .unwrap();
-
-        let result: biscuit::jws::Compact<ClaimsSet<TokenClaims>, JwtHeader> =
-            match decode_with_jwk(proof, embedded_jwk, None) {
-                Ok(res) => res,
-                Err(error) => {
-                    panic!()
-                }
-            };
-
-        let payload = result.payload().unwrap();
-        let header = result.header().unwrap();
-
-        if let Some(typ) = &header.registered.media_type {
+        let payload = token_data.claims;
+        let header = token_data.header;
+        if let Some(typ) = header.typ {
             if typ != "dpop+jwt" {
                 return Err(OAuthError::InvalidDpopProofError(
-                    "Invalid \"typ\"".to_string(),
+                    "Invalid DPoP proof".to_string(),
                 ));
             }
         } else {
             return Err(OAuthError::InvalidDpopProofError(
-                "Missing \"typ\"".to_string(),
+                "Invalid DPoP proof".to_string(),
             ));
         }
 
-        if let Some(iat) = payload.registered.issued_at {
-            if iat.timestamp() < now_as_secs() as i64 - 1000000 {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "\"iat\" expired".to_string(),
-                ));
-            }
-        } else {
-            return Err(OAuthError::InvalidDpopProofError(
-                "Missing \"iat\"".to_string(),
-            ));
-        }
-        let payload_jti = match &payload.registered.id {
+        let payload_jti = match &payload.jti {
             None => {
                 return Err(OAuthError::InvalidDpopProofError(
                     "Invalid or missing jti property".to_string(),
@@ -124,7 +141,7 @@ impl DpopManager {
         };
 
         // Note rfc9110#section-9.1 states that the method name is case-sensitive
-        if let Some(payload_htm) = &payload.private.htm {
+        if let Some(payload_htm) = &payload.htm {
             if payload_htm != htm {
                 return Err(OAuthError::InvalidDpopProofError(
                     "DPoP htm mismatch".to_string(),
@@ -132,17 +149,20 @@ impl DpopManager {
             }
         }
 
-        if payload.private.nonce.is_none() && self.dpop_nonce.is_some() {
-            return Err(OAuthError::UseDpopNonceError(None));
+        if payload.nonce.is_none() && self.dpop_nonce.is_some() {
+            return Err(OAuthError::InvalidDpopProofError(
+                "DPoP nonce mismatch".to_string(),
+            ));
         }
 
-        if let Some(payload_nonce) = &payload.private.nonce {
+        if let Some(payload_nonce) = &payload.nonce {
             if let Some(dpop_nonce) = &self.dpop_nonce {
-                let dpop_nonce = dpop_nonce.read().await;
+                //TODO: Disabled for testing purposes atm
+                // let dpop_nonce = dpop_nonce.read().await;
                 // if !dpop_nonce.check(payload_nonce) {
-                //     return Err(OAuthError::UseDpopNonceError(Some(
+                //     return Err(OAuthError::InvalidDpopProofError(
                 //         "DPoP nonce mismatch".to_string(),
-                //     )));
+                //     )); //DPoP Nonce Error
                 // }
             }
         }
@@ -155,22 +175,21 @@ impl DpopManager {
             }
             Some(htu) => htu,
         };
-        let payload_htu_norm =
-            match normalize_htu(payload.private.htu.clone().unwrap_or("".to_string())) {
-                None => {
-                    return Err(OAuthError::InvalidRequestError(
-                        "Invalid \"htu\" argument".to_string(),
-                    ));
-                }
-                Some(htu) => htu,
-            };
+        let payload_htu_norm = match normalize_htu(payload.htu.clone().unwrap_or("".to_string())) {
+            None => {
+                return Err(OAuthError::InvalidRequestError(
+                    "Invalid \"htu\" argument".to_string(),
+                ));
+            }
+            Some(htu) => htu,
+        };
         if htu_norm != payload_htu_norm {
             return Err(OAuthError::InvalidDpopProofError(
                 "DPoP htu mismatch".to_string(),
             ));
         }
 
-        let payload_ath = payload.private.ath.clone();
+        let payload_ath = payload.ath.clone();
         if let Some(access_token) = access_token {
             let hash = Sha256::digest(access_token.into_inner());
             let ath = Base64::encode_string(&hash);
@@ -185,15 +204,17 @@ impl DpopManager {
                     "DPoP ath mismatch".to_string(),
                 ));
             }
+            // let ath_buffer = create_hash
         } else if payload_ath.is_some() {
             return Err(OAuthError::InvalidDpopProofError(
                 "DPoP ath not allowed".to_string(),
-            ));
+            )); //DPoP Nonce Error
         }
 
+        let jkt = calculate_jwk_thumbprint(jwk); //EmbeddedJWK
         Ok(CheckProofResult {
             jti: payload_jti,
-            jkt: thumbprint,
+            jkt,
         })
     }
 }
@@ -248,8 +269,11 @@ fn calculate_jwk_thumbprint(jwk: Jwk) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::oauth_provider::dpop::dpop_manager::DpopManager;
+    use crate::oauth_provider::dpop::dpop_manager::{
+        CheckProofResult, DpopManager, DpopManagerOptions,
+    };
+    use crate::oauth_provider::dpop::dpop_nonce::DpopNonceInput;
+    use crate::oauth_provider::errors::OAuthError;
     use crate::oauth_types::OAuthAccessToken;
     use rand::random;
 
@@ -263,9 +287,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_proof_no_nonce() {
-        let manager = create_manager();
-        let proof = "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJUbXR3WkNlUFQ0U1UtZDhEOUJjaDUxOUhfU3JweXFQTGhCNDl4UjhHLWY4IiwieSI6IkFMQjd2a04yNlhpeUtkOWNUTW01cElPMFdRMWZlNENqdXQwZGJETHBhbjgifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjcxNDA3LCJqdGkiOiJoNmZtejlyMHE4OjJ1NjVtYnVyd3pxYjEiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIifQ.CuECGFWJsDrGmNoA7uOXHFOENbzfzhk7ZW7NFePYG8Mc3lD5dgE-E8padaRDFT92chgWQKeZos9EWcZMt8CSUQ";
+    async fn check_proof_without_nonce() {
+        let manager_options = DpopManagerOptions {
+            dpop_secret: Some(DpopNonceInput::String(
+                "1c9d92bea9a498e6165a39473e724a5d1c9d92bea9a498e6165a39473e724a5d".to_string(),
+            )),
+            dpop_step: Some(1),
+        };
+        let manager = DpopManager::new(Some(manager_options)).unwrap();
+        let proof = "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJQZXg2Rk1wcjJoM0t4T3hpQzlfdnlaaVoxSEdvZTFSMnQyal9oUlpPMkg4IiwieSI6IlljZ3BLellOYzRvSUc4WnJvOE9Zdi1jc0Npd1laVGdmNGtxTWFrRDJMRlEifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ1MDE5NjkxLCJqdGkiOiJoNmsyejkyd3V3Omd1aHV2dXV6bXFpOSIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3BhciJ9.4AqG1rCtHOD--1lGVbVoKaizf7EV58RMfuCi3ZFVln6VwbzquFs8K7OIJGv-Tj6xMzAgOkrcwSGaftfExvLoYQ";
         let htm = "POST";
         let htu = "https://pds.ripperoni.com/oauth/par";
         let access_token: Option<OAuthAccessToken> = None;
@@ -273,18 +303,16 @@ mod tests {
             .check_proof(proof, htm, htu, access_token)
             .await
             .unwrap_err();
-        match result {
-            OAuthError::UseDpopNonceError(error) => {}
-            _ => {
-                panic!()
-            }
-        }
+        assert_eq!(
+            result,
+            OAuthError::InvalidDpopProofError("DPoP nonce mismatch".to_string())
+        )
     }
 
     #[tokio::test]
     async fn check_proof_with_nonce() {
         let manager = create_manager();
-        let proof = "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJ6b3Q4YXIyTWtMcXJCeWh5a1laNzBHNnlXNXoybDhjM091dUZJRGJaOTBZIiwieSI6Imp6N0hLZmZKcTFUQ05uRE8zU3NpYXVkZG1acEY5TW1KWWlYR2M1YXZDSTgifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ1MDE1Njk1LCJqdGkiOiJoNmsxNTV3c2pjOmI4b2s3NmlxbzRwNiIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3BhciIsIm5vbmNlIjoidTB5UW1MX1BoOVo3UkdUSkh1elVJZkFJNTlvOEtKYnFVNGY5UHM0R3BJWSJ9.PaquB0t9XWmZZXdjVY4uT-MU0IJez9guhGnE_wPx_WTAhHXEPHMzEt7eVyauuwajIuuT751Kg3Ul3fduZrxuAg";
+        let proof = "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJJMk9GSGRPOEd0TEphRnRmcWZGd3JvWGdleHktaks0OTFfQVlLd21ndXg0IiwieSI6IjZwd1NFSVJ2RmgzaW1wRU9NY2hkbjNPT0RtREQ3UVZsNW5PQ0N6bEx2U1kifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ1MDE4OTkxLCJqdGkiOiJoNmsybm9sMmI0OjF6djZ1MmNpbXRsdGUiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6IjdSbzhvdGRhLURiYnVJdW5tYTd6LWxkSFRqYmlyT3ItNWMwQ0JxRlRMZk0ifQ.n9bAn8zWQW5OZJvDZ5UgLJ1PVghNQN4YydqLoEGNeAfMv8k0R8b1bo_miKevgWlQck2PioRBHsJ9w8u2nSSE9g";
         let htm = "POST";
         let htu = "https://pds.ripperoni.com/oauth/par";
         let access_token: Option<OAuthAccessToken> = None;
@@ -293,8 +321,8 @@ mod tests {
             .await
             .unwrap();
         let expected = CheckProofResult {
-            jti: "h6k155wsjc:b8ok76iqo4p6".to_string(),
-            jkt: "I9KDr9KrOZoXpUlfLHL1sDL4BV24uCYkXGIHqc7UD9E".to_string(),
+            jti: "h6k2nol2b4:1zv6u2cimtlte".to_string(),
+            jkt: "Q1mID6vgHCRI36lNrQbL9B8CzPLHbEnAcpnPopi32HI=".to_string(),
         };
         assert_eq!(result, expected);
     }

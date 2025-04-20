@@ -1,22 +1,22 @@
 // The purpose of the prefix is to provide type safety
 
 pub const DEVICE_ID_PREFIX: &str = "dev-";
-pub const DEVICE_ID_BYTES_LENGTH: usize = 16; // 128 bits
+pub const DEVICE_ID_BYTES_LENGTH: usize = 64; // 128 bits
 
 pub const SESSION_ID_PREFIX: &str = "ses-";
-pub const SESSION_ID_BYTES_LENGTH: usize = 16; // 128 bits - only valid if device id is valid
+pub const SESSION_ID_BYTES_LENGTH: usize = 64; // 128 bits - only valid if device id is valid
 
 pub const REFRESH_TOKEN_PREFIX: &str = "ref-";
-pub const REFRESH_TOKEN_BYTES_LENGTH: usize = 32; // 256 bits
+pub const REFRESH_TOKEN_BYTES_LENGTH: usize = 64; // 256 bits
 
 pub const TOKEN_ID_PREFIX: &str = "tok-";
-pub const TOKEN_ID_BYTES_LENGTH: usize = 16; // 128 bits - used as `jti` in JWTs (cannot be forged)
+pub const TOKEN_ID_BYTES_LENGTH: usize = 32; // 128 bits - used as `jti` in JWTs (cannot be forged)
 
 pub const REQUEST_ID_PREFIX: &str = "req-";
-pub const REQUEST_ID_BYTES_LENGTH: usize = 16; // 128 bits
+pub const REQUEST_ID_BYTES_LENGTH: usize = 32; // 128 bits
 
 pub const CODE_PREFIX: &str = "cod-";
-pub const CODE_BYTES_LENGTH: usize = 32;
+pub const CODE_BYTES_LENGTH: usize = 64;
 
 pub const SECOND: u64 = 1000;
 pub const MINUTE: u64 = 60 * SECOND;

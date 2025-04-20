@@ -27,7 +27,7 @@ pub fn compare_redirect_uri(allowed_uri: OAuthRedirectUri, request_uri: OAuthRed
             //
             // Note: We only apply this rule if the allowed URI does not have a port
             // specified.
-            todo!()
+            unimplemented!()
         }
         _ => false,
     }

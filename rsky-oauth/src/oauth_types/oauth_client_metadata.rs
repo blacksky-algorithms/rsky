@@ -1,8 +1,8 @@
-use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_types::{
     OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthResponseType, OAuthScope,
     WebUri,
 };
+use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// This metadata describes an OAuth client's properties and capabilities
 /// See OpenID Connect Registration 1.0 and RFC 7591.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct OAuthClientMetadata {
     /// List of redirect URIs for use in authorization requests
     pub redirect_uris: Vec<OAuthRedirectUri>,

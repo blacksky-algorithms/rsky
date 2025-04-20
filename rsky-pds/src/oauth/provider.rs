@@ -3,6 +3,7 @@ use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
+use rocket::yansi::Paint;
 use rsky_oauth::jwk::{Key, Keyset};
 use rsky_oauth::jwk_jose::jose_key::JoseKey;
 use rsky_oauth::oauth_provider::access_token::access_token_type::AccessTokenType;
@@ -17,6 +18,7 @@ use rsky_oauth::oauth_types::{
     HttpsUri, OAuthClientId, OAuthClientIdLoopback, OAuthClientMetadata, OAuthIssuerIdentifier,
     ValidUri, WebUri,
 };
+use rsky_oauth::simple_store_memory::SimpleStoreMemory;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -80,6 +82,10 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
         )),
         on_authorization_details: None,
     };
+    let client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>> =
+        Arc::new(RwLock::new(SimpleStoreMemory::default()));
+    let client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>> =
+        Arc::new(RwLock::new(SimpleStoreMemory::default()));
     SharedOAuthProvider {
         oauth_provider: Arc::new(RwLock::new(OAuthProvider::creator(
             OAuthProviderCreatorParams {
@@ -89,11 +95,11 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
                 customization: options.customization,
                 safe_fetch: false,
                 redis: options.redis,
-                client_jwks_cache: None,
-                client_metadata_cache: None,
+                client_jwks_cache: Some(client_jwks_cache),
+                client_metadata_cache: Some(client_metadata_cache),
                 loopback_metadata: Some(loopback_metadata),
                 dpop_secret: options.dpop_secret,
-                dpop_step: None,
+                dpop_step: Some(1),
                 issuer: options.issuer,
                 keyset: Some(keyset.clone()),
                 // If the PDS is bosh an authorization server & resource server (no

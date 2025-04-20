@@ -1,6 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::oauth::{SharedOAuthProvider, SharedReplayStore};
-use jsonwebtoken::jwk::{Jwk, JwkSet};
+use jsonwebtoken::jwk::JwkSet;
 use rocket::serde::json::Json;
 use rocket::{get, State};
 use std::sync::Arc;

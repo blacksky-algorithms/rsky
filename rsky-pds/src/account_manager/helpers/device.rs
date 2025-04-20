@@ -7,35 +7,34 @@ use diesel::{
 use rsky_common;
 use rsky_oauth::oauth_provider::device::device_data::DeviceData;
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
+use rsky_oauth::oauth_provider::device::device_store::PartialDeviceData;
 use rsky_oauth::oauth_provider::device::session_id::SessionId;
 
 fn row_to_device_data(device: models::Device) -> DeviceData {
-    unimplemented!()
-    // DeviceData {
-    //     user_agent: device.user_agent,
-    //     ip_address: device.ip_address,
-    //     session_id: SessionId::new(device.session_id.unwrap()).unwrap(),
-    //     last_seen_at: device.last_seen_at.parse().unwrap(),
-    // }
+    DeviceData {
+        user_agent: device.user_agent,
+        ip_address: device.ip_address.parse().unwrap(),
+        session_id: SessionId::new(device.session_id.unwrap()).unwrap(),
+        last_seen_at: device.last_seen_at.parse().unwrap(),
+    }
 }
 
 pub async fn create_device(device_id: DeviceId, data: DeviceData, db: &DbConn) -> Result<()> {
-    unimplemented!()
-    // use crate::schema::pds::device::dsl as DeviceSchema;
-    // db.run(move |conn| {
-    //     let rows: Vec<models::Device> = vec![models::Device {
-    //         id: device_id.into_inner(),
-    //         session_id: Some(data.session_id.into_inner()),
-    //         user_agent: data.user_agent,
-    //         ip_address: data.ip_address,
-    //         last_seen_at: data.last_seen_at.to_string(),
-    //     }];
-    //     insert_into(DeviceSchema::device)
-    //         .values(&rows)
-    //         .execute(conn)
-    // })
-    // .await?;
-    // Ok(())
+    use crate::schema::pds::device::dsl as DeviceSchema;
+    db.run(move |conn| {
+        let rows: Vec<models::Device> = vec![models::Device {
+            id: device_id.into_inner(),
+            session_id: Some(data.session_id.into_inner()),
+            user_agent: data.user_agent,
+            ip_address: data.ip_address.to_string(),
+            last_seen_at: data.last_seen_at.to_string(),
+        }];
+        insert_into(DeviceSchema::device)
+            .values(&rows)
+            .execute(conn)
+    })
+    .await?;
+    Ok(())
 }
 
 pub async fn read_device(device_id: DeviceId, db: &DbConn) -> Result<Option<DeviceData>> {
@@ -53,9 +52,14 @@ pub async fn read_device(device_id: DeviceId, db: &DbConn) -> Result<Option<Devi
     Ok(Some(row_to_device_data(result)))
 }
 
-pub async fn update_device(device_id: DeviceId, opts: DeviceData, db: &DbConn) -> Result<()> {
+pub async fn update_device(
+    device_id: DeviceId,
+    opts: PartialDeviceData,
+    db: &DbConn,
+) -> Result<()> {
     use crate::schema::pds::device::dsl as DeviceSchema;
     db.run(move |conn| {
+        //TODO
         // let mut update_list= vec![];
         // if let Some(user_agent) = opts.user_agent {
         //     update_list.push(DeviceSchema::user_agent.eq(user_agent));

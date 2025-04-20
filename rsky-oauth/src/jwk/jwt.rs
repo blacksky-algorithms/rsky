@@ -1,19 +1,12 @@
 use crate::jwk::Jwk;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::token::token_id::TokenId;
-use crate::oauth_types::{OAuthAuthorizationDetails, OAuthClientId, OAuthScope};
-use biscuit::errors::ValidationError;
-use biscuit::jwa::{Algorithm, SignatureAlgorithm};
-use biscuit::jwk::{AlgorithmParameters, JWKSet, JWK};
-use biscuit::jws::{Header, Secret};
-use biscuit::{CompactPart, Validation};
+use crate::oauth_types::{OAuthClientId, OAuthScope};
 use chrono::NaiveDate;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rocket::form::validate::Len;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::digest::typenum::private::Invert;
 use std::fmt;
 use thiserror::Error;
 // We'll need this for the jwk field
@@ -30,21 +23,20 @@ pub const PS256_STR: &str = "PS256";
 pub const PS384_STR: &str = "PS384";
 pub const PS512_STR: &str = "PS512";
 pub const EDDSA_STR: &str = "EdDSA";
-pub const ES512: &str = "ES512";
 
 /// Error type for JWT operations.
 #[derive(Debug, Error)]
 pub enum JwtError {
     #[error("Invalid JWT format")]
     InvalidFormat,
-    #[error("JWT validation error")]
-    Validation,
+    #[error("JWT validation error: {0}")]
+    Validation(#[from] jsonwebtoken::errors::Error),
     #[error("Invalid JWT claims: {0}")]
     InvalidClaims(String),
 }
 
 /// Standard JWT header fields, plus some custom fields
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JwtHeader {
     /// Algorithm used to sign the token
     pub alg: Option<String>,
@@ -154,21 +146,20 @@ pub enum Audience {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JwtToken(String);
 
-pub fn algorithm_as_string(alg: SignatureAlgorithm) -> String {
+pub fn algorithm_as_string(alg: Algorithm) -> String {
     match alg {
-        SignatureAlgorithm::HS256 => String::from(HS256_STR),
-        SignatureAlgorithm::HS384 => String::from(HS384_STR),
-        SignatureAlgorithm::HS512 => String::from(HS512_STR),
-        SignatureAlgorithm::ES256 => String::from(ES256_STR),
-        SignatureAlgorithm::ES384 => String::from(ES384_STR),
-        SignatureAlgorithm::RS256 => String::from(RS256_STR),
-        SignatureAlgorithm::RS384 => String::from(RS384_STR),
-        SignatureAlgorithm::RS512 => String::from(RS512_STR),
-        SignatureAlgorithm::PS256 => String::from(PS256_STR),
-        SignatureAlgorithm::PS384 => String::from(PS384_STR),
-        SignatureAlgorithm::PS512 => String::from(PS512_STR),
-        SignatureAlgorithm::None => String::from(""),
-        SignatureAlgorithm::ES512 => String::from(ES512),
+        Algorithm::HS256 => String::from(HS256_STR),
+        Algorithm::HS384 => String::from(HS384_STR),
+        Algorithm::HS512 => String::from(HS512_STR),
+        Algorithm::ES256 => String::from(ES256_STR),
+        Algorithm::ES384 => String::from(ES384_STR),
+        Algorithm::RS256 => String::from(RS256_STR),
+        Algorithm::RS384 => String::from(RS384_STR),
+        Algorithm::RS512 => String::from(RS512_STR),
+        Algorithm::PS256 => String::from(PS256_STR),
+        Algorithm::PS384 => String::from(PS384_STR),
+        Algorithm::PS512 => String::from(PS512_STR),
+        Algorithm::EdDSA => String::from(EDDSA_STR),
     }
 }
 
@@ -182,58 +173,58 @@ impl JwtToken {
         Ok(Self(token))
     }
 
-    // /// Sign claims with the given key and create a new token
-    // pub fn sign(header: &JwtHeader, claims: &JwtClaims, key: &[u8]) -> Result<Self, JwtError> {
-    //     let token = jsonwebtoken::encode(header, claims, &EncodingKey::from_secret(key))?;
-    //     Ok(Self(token))
-    // }
-    //
-    // /// Verify token signature and decode claims with default validation
-    // pub fn verify(&self, key: &[u8]) -> Result<(JwtHeader, JwtClaims), JwtError> {
-    //     self.verify_with_options(key, &Validation::default())
-    // }
+    /// Sign claims with the given key and create a new token
+    pub fn sign(header: &Header, claims: &JwtClaims, key: &[u8]) -> Result<Self, JwtError> {
+        let token = jsonwebtoken::encode(header, claims, &EncodingKey::from_secret(key))?;
+        Ok(Self(token))
+    }
 
-    // /// Verify token signature and decode claims with custom validation options.
-    // ///
-    // /// This method allows customizing the validation criteria for JWT verification,
-    // /// which is particularly useful for validating client assertion JWTs as described
-    // /// in the OAuth 2.0 specification.
-    // ///
-    // /// # Arguments
-    // /// * `key` - The key bytes used to verify the signature
-    // /// * `validation` - Custom validation parameters
-    // ///
-    // /// # Returns
-    // /// A tuple containing the decoded header and claims on success
-    // ///
-    // /// # Errors
-    // /// Returns a `JwtError` if verification fails
-    // pub fn verify_with_options(
-    //     &self,
-    //     key: &[u8],
-    //     validation: &Validation,
-    // ) -> Result<(JwtHeader, JwtClaims), JwtError> {
-    //     let token_data =
-    //         jsonwebtoken::decode::<JwtClaims>(&self.0, &DecodingKey::from_secret(key), validation)?;
-    //
-    //     let alg = algorithm_as_string(token_data.header.alg);
-    //     Ok((
-    //         JwtHeader {
-    //             alg: Some(alg),
-    //             jku: token_data.header.jku,
-    //             jwk: None, // TODO: convert from raw JWK
-    //             kid: token_data.header.kid,
-    //             x5u: None,
-    //             x5c: None,
-    //             x5t: None,
-    //             x5t_s256: None,
-    //             typ: token_data.header.typ,
-    //             cty: token_data.header.cty,
-    //             crit: None,
-    //         },
-    //         token_data.claims,
-    //     ))
-    // }
+    /// Verify token signature and decode claims with default validation
+    pub fn verify(&self, key: &[u8]) -> Result<(JwtHeader, JwtClaims), JwtError> {
+        self.verify_with_options(key, &Validation::default())
+    }
+
+    /// Verify token signature and decode claims with custom validation options.
+    ///
+    /// This method allows customizing the validation criteria for JWT verification,
+    /// which is particularly useful for validating client assertion JWTs as described
+    /// in the OAuth 2.0 specification.
+    ///
+    /// # Arguments
+    /// * `key` - The key bytes used to verify the signature
+    /// * `validation` - Custom validation parameters
+    ///
+    /// # Returns
+    /// A tuple containing the decoded header and claims on success
+    ///
+    /// # Errors
+    /// Returns a `JwtError` if verification fails
+    pub fn verify_with_options(
+        &self,
+        key: &[u8],
+        validation: &Validation,
+    ) -> Result<(JwtHeader, JwtClaims), JwtError> {
+        let token_data =
+            jsonwebtoken::decode::<JwtClaims>(&self.0, &DecodingKey::from_secret(key), validation)?;
+
+        let alg = algorithm_as_string(token_data.header.alg);
+        Ok((
+            JwtHeader {
+                alg: Some(alg),
+                jku: token_data.header.jku,
+                jwk: None, // TODO: convert from raw JWK
+                kid: token_data.header.kid,
+                x5u: None,
+                x5c: None,
+                x5t: None,
+                x5t_s256: None,
+                typ: token_data.header.typ,
+                cty: token_data.header.cty,
+                crit: None,
+            },
+            token_data.claims,
+        ))
+    }
 
     /// Get the underlying token string
     pub fn as_str(&self) -> &str {
@@ -358,7 +349,7 @@ pub struct JwtPayload {
 
     // Authorization details (RFC 9396)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorization_details: Option<OAuthAuthorizationDetails>,
+    pub authorization_details: Option<Vec<AuthorizationDetail>>,
 
     // Additional custom claims
     #[serde(flatten)]
@@ -535,87 +526,129 @@ mod tests {
         assert!(valid.is_ok());
     }
 
-    // #[test]
-    // fn test_jwt_sign_verify() {
-    //     let key = b"secret";
-    //     let now = SystemTime::now()
-    //         .duration_since(UNIX_EPOCH)
-    //         .unwrap()
-    //         .as_secs() as i64;
-    //
-    //     let mut claims = JwtClaims {
-    //         iss: Some("test-issuer".to_string()),
-    //         sub: Some("test-subject".to_string()),
-    //         aud: Some(Audience::Single("test-audience".to_string())),
-    //         exp: Some(now + 3600),
-    //         nbf: None,
-    //         iat: Some(now),
-    //         jti: None,
-    //         additional_claims: std::collections::HashMap::new(),
-    //     };
-    //
-    //     claims.additional_claims.insert(
-    //         "custom".to_string(),
-    //         serde_json::Value::String("value".to_string()),
-    //     );
-    //
-    //     let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
-    //
-    //     // Create a custom validation that matches our test JWT
-    //     let mut validation = Validation::default();
-    //     validation.set_audience(&["test-audience"]);
-    //
-    //     // Verify with our specific validation
-    //     let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
-    //     assert_eq!(decoded_claims.iss, claims.iss);
-    //     assert_eq!(decoded_claims.sub, claims.sub);
-    //     assert_eq!(
-    //         decoded_claims.additional_claims["custom"],
-    //         serde_json::json!("value")
-    //     );
-    // }
-    //
-    // #[test]
-    // fn test_jwt_verify_no_validation() {
-    //     let key = b"secret";
-    //     let now = SystemTime::now()
-    //         .duration_since(UNIX_EPOCH)
-    //         .unwrap()
-    //         .as_secs() as i64;
-    //
-    //     let mut claims = JwtClaims {
-    //         iss: Some("test-issuer".to_string()),
-    //         sub: Some("test-subject".to_string()),
-    //         aud: Some(Audience::Single("test-audience".to_string())),
-    //         exp: Some(now + 3600),
-    //         nbf: None,
-    //         iat: Some(now),
-    //         jti: None,
-    //         additional_claims: std::collections::HashMap::new(),
-    //     };
-    //
-    //     claims.additional_claims.insert(
-    //         "custom".to_string(),
-    //         serde_json::Value::String("value".to_string()),
-    //     );
-    //
-    //     let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
-    //
-    //     // Create a validation with all checks disabled for testing
-    //     let mut validation = Validation::default();
-    //     validation.validate_exp = false;
-    //     validation.validate_nbf = false;
-    //     validation.validate_aud = false;
-    //
-    //     // Verify with relaxed validation
-    //     let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
-    //     assert_eq!(decoded_claims.iss, claims.iss);
-    //     assert_eq!(decoded_claims.sub, claims.sub);
-    //     assert_eq!(
-    //         decoded_claims.additional_claims["custom"],
-    //         serde_json::json!("value")
-    //     );
-    // }
+    #[test]
+    fn test_jwt_sign_verify() {
+        let key = b"secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut claims = JwtClaims {
+            iss: Some("test-issuer".to_string()),
+            sub: Some("test-subject".to_string()),
+            aud: Some(Audience::Single("test-audience".to_string())),
+            exp: Some(now + 3600),
+            nbf: None,
+            iat: Some(now),
+            jti: None,
+            additional_claims: std::collections::HashMap::new(),
+        };
+
+        claims.additional_claims.insert(
+            "custom".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
+
+        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
+
+        // Create a custom validation that matches our test JWT
+        let mut validation = Validation::default();
+        validation.set_audience(&["test-audience"]);
+
+        // Verify with our specific validation
+        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
+        assert_eq!(decoded_claims.iss, claims.iss);
+        assert_eq!(decoded_claims.sub, claims.sub);
+        assert_eq!(
+            decoded_claims.additional_claims["custom"],
+            serde_json::json!("value")
+        );
+    }
+
+    #[test]
+    fn test_jwt_verify_no_validation() {
+        let key = b"secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut claims = JwtClaims {
+            iss: Some("test-issuer".to_string()),
+            sub: Some("test-subject".to_string()),
+            aud: Some(Audience::Single("test-audience".to_string())),
+            exp: Some(now + 3600),
+            nbf: None,
+            iat: Some(now),
+            jti: None,
+            additional_claims: std::collections::HashMap::new(),
+        };
+
+        claims.additional_claims.insert(
+            "custom".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
+
+        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
+
+        // Create a validation with all checks disabled for testing
+        let mut validation = Validation::default();
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.validate_aud = false;
+
+        // Verify with relaxed validation
+        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
+        assert_eq!(decoded_claims.iss, claims.iss);
+        assert_eq!(decoded_claims.sub, claims.sub);
+        assert_eq!(
+            decoded_claims.additional_claims["custom"],
+            serde_json::json!("value")
+        );
+    }
+
+    #[test]
+    fn test_jwt_verify_no_validation2() {
+        let key = b"secret";
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut claims = JwtClaims {
+            iss: Some("test-issuer".to_string()),
+            sub: Some("test-subject".to_string()),
+            aud: Some(Audience::Single("test-audience".to_string())),
+            exp: Some(now + 3600),
+            nbf: None,
+            iat: Some(now),
+            jti: None,
+            additional_claims: std::collections::HashMap::new(),
+        };
+
+        claims.additional_claims.insert(
+            "custom".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
+
+        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
+
+        // Create a validation with all checks disabled for testing
+        let mut validation = Validation::default();
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.validate_aud = false;
+
+        // Verify with relaxed validation
+        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
+        assert_eq!(decoded_claims.iss, claims.iss);
+        assert_eq!(decoded_claims.sub, claims.sub);
+        assert_eq!(
+            decoded_claims.additional_claims["custom"],
+            serde_json::json!("value")
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -631,82 +664,14 @@ pub enum SignedJwtError {
 impl SignedJwt {
     pub fn new(data: impl Into<String>) -> Result<Self, SignedJwtError> {
         let data = data.into();
+        let result = data.split(".").collect::<Vec<&str>>();
+        if result.len() != 3 {
+            return Err(SignedJwtError::InvalidFormat);
+        }
         Ok(Self(data))
     }
 
     pub fn val(&self) -> String {
         self.0.clone()
-    }
-}
-
-pub fn decode_with_jwk<T, H, J>(
-    jwt: biscuit::jws::Compact<T, JwtHeader>,
-    jwk: JWK<J>,
-    expected_algorithm: Option<SignatureAlgorithm>,
-) -> Result<biscuit::jws::Compact<T, H>, biscuit::errors::Error>
-where
-    T: CompactPart,
-    H: Serialize + DeserializeOwned,
-{
-    match jwt {
-        biscuit::jws::Compact::Decoded { .. } => Err(biscuit::errors::Error::UnsupportedOperation),
-        biscuit::jws::Compact::Encoded(encoded) => {
-            if encoded.len() != 3 {
-                unimplemented!()
-                // Err(DecodeError::PartsLengthError {
-                //     actual: encoded.len(),
-                //     expected: 3,
-                // })?
-            }
-
-            let signature: Vec<u8> = encoded.part(2)?;
-            let payload = &encoded.parts[0..2].join(".");
-
-            let header: Header<H> = encoded.part(0)?;
-            let algorithm = match jwk.common.algorithm {
-                Some(jwk_alg) => {
-                    let algorithm = match jwk_alg {
-                        Algorithm::Signature(algorithm) => algorithm,
-                        _ => Err(ValidationError::UnsupportedKeyAlgorithm)?,
-                    };
-
-                    if header.registered.algorithm != algorithm {
-                        Err(ValidationError::WrongAlgorithmHeader)?;
-                    }
-
-                    if let Some(expected_algorithm) = expected_algorithm {
-                        if expected_algorithm != algorithm {
-                            Err(ValidationError::WrongAlgorithmHeader)?;
-                        }
-                    }
-
-                    algorithm
-                }
-                None => match expected_algorithm {
-                    Some(expected_algorithm) => {
-                        if expected_algorithm != header.registered.algorithm {
-                            Err(ValidationError::WrongAlgorithmHeader)?;
-                        }
-                        expected_algorithm
-                    }
-                    None => Err(ValidationError::MissingAlgorithm)?,
-                },
-            };
-
-            let secret = match &jwk.algorithm {
-                AlgorithmParameters::EllipticCurve(ec) => ec.jws_public_key_secret(),
-                AlgorithmParameters::RSA(rsa) => rsa.jws_public_key_secret(),
-                AlgorithmParameters::OctetKey(oct) => Secret::Bytes(oct.value.clone()),
-                _ => Err(ValidationError::UnsupportedKeyAlgorithm)?,
-            };
-
-            algorithm
-                .verify(signature.as_ref(), payload.as_ref(), &secret)
-                .map_err(|_| ValidationError::InvalidSignature)?;
-
-            let decoded_claims: T = encoded.part(1)?;
-
-            Ok(biscuit::jws::Compact::new_decoded(header, decoded_claims))
-        }
     }
 }

@@ -1,6 +1,4 @@
-use crate::jwk::{
-    Audience, JwkError, JwtConfirmation, Key, SignedJwt, VerifyOptions, VerifyResult,
-};
+use crate::jwk::{Audience, JwtConfirmation, Key, SignedJwt, VerifyOptions};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_store::DeviceAccountInfo;
@@ -423,9 +421,8 @@ impl TokenManager {
             }
         };
 
-        let token_info = match self
-            .store
-            .blocking_read()
+        let store = self.store.read().await;
+        let token_info = match store
             .find_token_by_refresh_token(refresh_token.clone())
             .await?
         {
@@ -436,6 +433,7 @@ impl TokenManager {
             }
             Some(token_info) => token_info,
         };
+        drop(store);
 
         let account = token_info.account.clone();
         let data = token_info.data.clone();
@@ -443,19 +441,15 @@ impl TokenManager {
 
         if let Some(token_refresh_token) = token_info.current_refresh_token.clone() {
             if token_refresh_token != refresh_token {
-                self.store
-                    .blocking_write()
-                    .delete_token(token_info.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_token(token_info.id).await?;
                 return Err(OAuthError::InvalidGrantError(
                     "refresh token replayed".to_string(),
                 ));
             }
         } else {
-            self.store
-                .blocking_write()
-                .delete_token(token_info.id)
-                .await?;
+            let mut store = self.store.write().await;
+            store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "refresh token replayed".to_string(),
             ));
@@ -469,11 +463,9 @@ impl TokenManager {
             .grant_types
             .contains(&OAuthGrantType::RefreshToken)
         {
+            let mut store = self.store.write().await;
             // In case the client metadata was updated after the token was issued
-            self.store
-                .blocking_write()
-                .delete_token(token_info.id)
-                .await?;
+            store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "This client is not allowed to use the".to_string(),
             ));
@@ -485,10 +477,8 @@ impl TokenManager {
                     return Err(OAuthError::InvalidDpopKeyBindingError);
                 }
             } else {
-                self.store
-                    .blocking_write()
-                    .delete_token(token_info.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_token(token_info.id).await?;
                 return Err(OAuthError::InvalidDpopProofError(
                     "DPoP proof required".to_string(),
                 ));
@@ -502,10 +492,8 @@ impl TokenManager {
             AUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT
         };
         if last_activity + inactivity_timeout < now_as_secs() {
-            self.store
-                .blocking_write()
-                .delete_token(token_info.id)
-                .await?;
+            let mut store = self.store.write().await;
+            store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "Refresh token exceeded inactivity timeout".to_string(),
             ));
@@ -517,10 +505,8 @@ impl TokenManager {
             AUTHENTICATED_REFRESH_LIFETIME
         };
         if data.created_at + lifetime < now_as_secs() {
-            self.store
-                .blocking_write()
-                .delete_token(token_info.id)
-                .await?;
+            let mut store = self.store.write().await;
+            store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
                 "Refresh token expired".to_string(),
             ));
@@ -553,8 +539,8 @@ impl TokenManager {
             expires_at,
             updated_at: now,
         };
-        self.store
-            .blocking_write()
+        let mut store = self.store.write().await;
+        store
             .rotate_token(
                 token_info.id,
                 next_token_id.clone(),
@@ -562,6 +548,7 @@ impl TokenManager {
                 new_token_data,
             )
             .await?;
+        drop(store);
 
         let access_token = match !self.use_jwt_access_token(account.clone()) {
             true => next_token_id.val(),
@@ -609,6 +596,7 @@ impl TokenManager {
         if let Ok(token_id) = TokenId::new(token.as_str()) {
             let mut store = self.store.write().await;
             store.delete_token(token_id).await?;
+            drop(store);
         } else if let Ok(signed_jwt) = SignedJwt::new(token.as_str()) {
             let mut options = VerifyOptions {
                 audience: None,
@@ -630,27 +618,24 @@ impl TokenManager {
                 Some(token_id) => token_id,
                 None => return Err(OAuthError::RuntimeError("".to_string())),
             };
-            self.store.blocking_write().delete_token(token_id).await?;
+            let mut store = self.store.write().await;
+            store.delete_token(token_id).await?;
             return Ok(());
         } else if let Ok(refresh_token) = RefreshToken::new(token.as_str()) {
-            let token_info = self
-                .store
-                .blocking_read()
-                .find_token_by_refresh_token(refresh_token)
-                .await?;
+            let store = self.store.read().await;
+            let token_info = store.find_token_by_refresh_token(refresh_token).await?;
+            drop(store);
             if let Some(token_info) = token_info {
-                self.store
-                    .blocking_write()
-                    .delete_token(token_info.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_token(token_info.id).await?;
             }
         } else if let Ok(code) = Code::new(token.as_str()) {
-            let token_info = self.store.blocking_read().find_token_by_code(code).await?;
+            let store = self.store.read().await;
+            let token_info = store.find_token_by_code(code).await?;
+            drop(store);
             if let Some(token_info) = token_info {
-                self.store
-                    .blocking_write()
-                    .delete_token(token_info.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_token(token_info.id).await?;
             }
         }
         Ok(())
@@ -676,15 +661,13 @@ impl TokenManager {
         match self.validate_access(client, client_auth, &token_info).await {
             Ok(_) => {}
             Err(e) => {
-                self.store
-                    .blocking_write()
-                    .delete_token(token_info.id)
-                    .await?;
+                let mut store = self.store.write().await;
+                store.delete_token(token_info.id).await?;
                 return Err(e);
             }
         }
 
-        let now = 1;
+        let now = now_as_secs();
         if token_info.data.expires_at < now {
             return Err(OAuthError::InvalidGrantError("Token expired".to_string()));
         }
@@ -699,21 +682,19 @@ impl TokenManager {
         let token_val = token.token();
 
         if let Ok(token_id) = TokenId::new(token_val.as_str()) {
-            return self.store.blocking_read().read_token(token_id).await;
+            let store = self.store.read().await;
+            return store.read_token(token_id).await;
         }
 
         if let Ok(signed_jwt) = SignedJwt::new(token_val.as_str()) {
-            let payload = match self
-                .signer
-                .blocking_read()
-                .verify_access_token(signed_jwt, None)
-                .await
-            {
+            let signer = self.signer.read().await;
+            let payload = match signer.verify_access_token(signed_jwt, None).await {
                 Ok(response) => response.payload,
                 Err(_) => return Ok(None),
             };
 
-            let token_info = match self.store.blocking_read().read_token(payload.jti).await? {
+            let store = self.store.read().await;
+            let token_info = match store.read_token(payload.jti).await? {
                 None => return Ok(None),
                 Some(token_info) => token_info,
             };
@@ -734,11 +715,8 @@ impl TokenManager {
         }
 
         if let Ok(refresh_token) = RefreshToken::new(token_val.as_str()) {
-            let token_info = self
-                .store
-                .blocking_read()
-                .find_token_by_refresh_token(refresh_token)
-                .await?;
+            let store = self.store.read().await;
+            let token_info = store.find_token_by_refresh_token(refresh_token).await?;
             return if let Some(token_info) = token_info {
                 if token_info.current_refresh_token.is_none() {
                     Ok(None)
@@ -768,7 +746,7 @@ impl TokenManager {
                 "Invalid token".to_string(),
             )),
             Some(token_info) => {
-                if token_info.data.expires_at > 1u64 {
+                if token_info.data.expires_at > now_as_secs() {
                     return Err(OAuthError::InvalidTokenError(
                         token_type,
                         "Token expired".to_string(),
@@ -828,611 +806,639 @@ impl TokenManager {
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
-    // use crate::jwk::Keyset;
-    // use crate::jwk_jose::jose_key::{JoseKey, Jwk, JwkSet};
-    // use crate::oauth_provider::client::client_info::ClientInfo;
-    // use crate::oauth_provider::oidc::sub::Sub;
-    // use crate::oauth_provider::token;
-    // use crate::oauth_provider::token::token_data::TokenData;
-    // use crate::oauth_types::{
-    //     OAuthClientId, OAuthClientMetadata, OAuthIssuerIdentifier, OAuthRedirectUri,
-    //     OAuthRefreshToken, OAuthResponseType,
-    // };
-    // use jsonwebtoken::jwk::{
-    //     AlgorithmParameters, CommonParameters, Jwk, JwkSet, KeyAlgorithm, PublicKeyUse,
-    //     RSAKeyParameters,
-    // };
-    // use std::future::Future;
-    // use std::pin::Pin;
-    // use biscuit::jwk::{AlgorithmParameters, CommonParameters, PublicKeyUse, RSAKeyParameters};
-    //
-    // struct TestStore {}
-    //
-    // impl TokenStore for TestStore {
-    //     fn create_token(
-    //         &mut self,
-    //         token_id: TokenId,
-    //         data: TokenData,
-    //         refresh_token: Option<RefreshToken>,
-    //     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-    //         todo!()
-    //     }
-    //
-    //     fn read_token(
-    //         &self,
-    //         token_id: TokenId,
-    //     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
-    //     {
-    //         Box::pin(async move {
-    //             Ok(Some(TokenInfo {
-    //                 id: TokenId::new("tok-0123456789abcdef").unwrap(),
-    //                 data: TokenData {
-    //                     created_at: 0,
-    //                     updated_at: 0,
-    //                     expires_at: 0,
-    //                     client_id: OAuthClientId::new("client123").unwrap(),
-    //                     client_auth: ClientAuth {
-    //                         method: "POST".to_string(),
-    //                         alg: "".to_string(),
-    //                         kid: "".to_string(),
-    //                         jkt: "".to_string(),
-    //                     },
-    //                     device_id: None,
-    //                     sub: Sub::new("1").unwrap(),
-    //                     parameters: OAuthAuthorizationRequestParameters {
-    //                         client_id: OAuthClientId::new("client123").unwrap(),
-    //                         state: None,
-    //                         redirect_uri: None,
-    //                         scope: None,
-    //                         response_type: OAuthResponseType::Code,
-    //                         code_challenge: None,
-    //                         code_challenge_method: None,
-    //                         dpop_jkt: None,
-    //                         response_mode: None,
-    //                         nonce: None,
-    //                         max_age: None,
-    //                         claims: None,
-    //                         login_hint: None,
-    //                         ui_locales: None,
-    //                         id_token_hint: None,
-    //                         display: None,
-    //                         prompt: None,
-    //                         authorization_details: None,
-    //                     },
-    //                     details: None,
-    //                     code: None,
-    //                 },
-    //                 account: Account {
-    //                     sub: Sub::new("1").unwrap(),
-    //                     aud: Audience::Single("".to_string()),
-    //                     preferred_username: None,
-    //                     email: None,
-    //                     email_verified: None,
-    //                     picture: None,
-    //                     name: None,
-    //                 },
-    //                 info: None,
-    //                 current_refresh_token: None,
-    //             }))
-    //         })
-    //     }
-    //
-    //     fn delete_token(
-    //         &mut self,
-    //         token_id: TokenId,
-    //     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-    //         todo!()
-    //     }
-    //
-    //     fn rotate_token(
-    //         &mut self,
-    //         token_id: TokenId,
-    //         new_token_id: TokenId,
-    //         new_refresh_token: RefreshToken,
-    //         new_data: NewTokenData,
-    //     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-    //         todo!()
-    //     }
-    //
-    //     fn find_token_by_refresh_token(
-    //         &self,
-    //         refresh_token: RefreshToken,
-    //     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
-    //     {
-    //         todo!()
-    //     }
-    //
-    //     fn find_token_by_code(
-    //         &self,
-    //         code: Code,
-    //     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
-    //     {
-    //         todo!()
-    //     }
-    // }
-    //
-    // async fn create_signer() -> Signer {
-    //     let jwk = Jwk {
-    //         common: CommonParameters {
-    //             public_key_use: Some(PublicKeyUse::Signature),
-    //             key_operations: None,
-    //             key_algorithm: Some(KeyAlgorithm::RS256),
-    //             key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-    //             x509_url: None,
-    //             x509_chain: Some(vec!["MIIDBzCCAe+gAwIBAgIJakoPho0MJr56MA0GCSqGSIb3DQEBCwUAMCExHzAdBgNVBAMTFmRldi1lanRsOTg4dy5hdXRoMC5jb20wHhcNMTkxMDI5MjIwNzIyWhcNMzMwNzA3MjIwNzIyWjAhMR8wHQYDVQQDExZkZXYtZWp0bDk4OHcuYXV0aDAuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2+0Cxcs1t0wzhO+zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r/Zewm0s58oRGyic1Oyp8xiy78czlBG03jk/+/vdttJkie8pUc9AHBuMxAaV4iPN3zSi/J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP+qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB/9VgEw+QdaQHvxoAvD0f7aYsaJ1R6rrqxo+1Pun7j1/h7kOCGB0UcHDLDw7gaP/wIDAQABo0IwQDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBQwIoo6QzzUL/TcNVpLGrLdd3DAIzAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBALb8QycRmauyC/HRWRxTbl0w231HTAVYizQqhFQFl3beSQIhexGik+H+B4ve2rv94QRD3LlraUp+J26wLG89EnSCuCo/OxPAq+lxO6hNf6oKJ+Y2f48awIOxolO0f89qX3KMIkABXwKbYUcd+SBHX5ZP1V9cvJEyH0s3Fq9ObysPCH2j2Hjgz3WMIffSFMaO0DIfh3eNnv9hKQwavUO7fL/jqhBl4QxI2gMySi0Ni7PgAlBgxBx6YUp59q/lzMgAf19GOEOvI7l4dA0bc9pdsm7OhimskvOUSZYi5Pz3n/i/cTVKKhlj6NyINkMXlXGgyM9vEBpdcIpOWn/1H5QVy8Q=".to_string()]),
-    //             x509_sha1_fingerprint: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-    //             x509_sha256_fingerprint: None,
-    //         },
-    //         algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
-    //             key_type: Default::default(),
-    //             n: "zkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2-0Cxcs1t0wzhO-zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r_Zewm0s58oRGyic1Oyp8xiy78czlBG03jk_-_vdttJkie8pUc9AHBuMxAaV4iPN3zSi_J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP-qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB_9VgEw-QdaQHvxoAvD0f7aYsaJ1R6rrqxo-1Pun7j1_h7kOCGB0UcHDLDw7gaP_w".to_string(),
-    //             e: "AQAB".to_string(),
-    //         }),
-    //     };
-    //     let jose_key = JoseKey::from_jwk(jwk, None).await;
-    //     let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
-    //     let keyset = Keyset::new(vec![Box::new(jose_key)]);
-    //     let keyset = Arc::new(RwLock::new(keyset));
-    //
-    //     let token = SignedJwt::new("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6Ik5FTXlNRUZDTXpVd01URTFRVE5CT1VGRE1FUTFPRGN6UmprNU56QkdRelk0UVRrMVEwWkVPUSJ9.eyJpc3MiOiJodHRwczovL2Rldi1lanRsOTg4dy5hdXRoMC5jb20vIiwic3ViIjoiZ1pTeXNwQ1k1ZEk0aDFaM3Fwd3BkYjlUNFVQZEdENWtAY2xpZW50cyIsImF1ZCI6Imh0dHA6Ly9oZWxsb3dvcmxkIiwiaWF0IjoxNTcyNDA2NDQ3LCJleHAiOjE1NzI0OTI4NDcsImF6cCI6ImdaU3lzcENZNWRJNGgxWjNxcHdwZGI5VDRVUGRHRDVrIiwiZ3R5IjoiY2xpZW50LWNyZWRlbnRpYWxzIn0.nupgm7iFqSnERq9GxszwBrsYrYfMuSfUGj8tGQlkY3Ksh3o_IDfq1GO5ngHQLZuYPD-8qPIovPBEVomGZCo_jYvsbjmYkalAStmF01TvSoXQgJd09ygZstH0liKsmINStiRE8fTA-yfEIuBYttROizx-cDoxiindbKNIGOsqf6yOxf7ww8DrTBJKYRnHVkAfIK8wm9LRpsaOVzWdC7S3cbhCKvANjT0RTRpAx8b_AOr_UCpOr8paj-xMT9Zc9HVCMZLBfj6OZ6yVvnC9g6q_SlTa--fY9SL5eqy6-q1JGoyK_-BQ_YrCwrRdrjoJsJ8j-XFRFWJX09W3oDuZ990nGA").unwrap();
-    //
-    //     Signer::new(issuer, keyset)
-    // }
-    //
-    // async fn create_token_manager() -> TokenManager {
-    //     let store: Arc<RwLock<dyn TokenStore>> = Arc::new(RwLock::new(TestStore {}));
-    //     let signer: Arc<RwLock<Signer>> = Arc::new(RwLock::new(create_signer().await));
-    //     let access_token_type = AccessTokenType::JWT;
-    //     let max_age = Some(TOKEN_MAX_AGE);
-    //     let oauth_hooks = OAuthHooks {
-    //         on_client_info: Some(Box::new(
-    //             |client_id: OAuthClientId,
-    //              oauth_client_metadata: OAuthClientMetadata,
-    //              jwks: Option<JwkSet>|
-    //              -> ClientInfo {
-    //                 ClientInfo {
-    //                     is_first_party: client_id
-    //                         == OAuthClientId::new("https://bsky.app/").unwrap(),
-    //                     // @TODO make client client list configurable:
-    //                     is_trusted: false,
-    //                 }
-    //             },
-    //         )),
-    //         on_authorization_details: None,
-    //     };
-    //     TokenManager::new(
-    //         store,
-    //         signer,
-    //         access_token_type,
-    //         max_age,
-    //         Arc::new(oauth_hooks),
-    //     )
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_create() {
-    //     let token_manager = create_token_manager().await;
-    //     let client = Client {
-    //         id: OAuthClientId::new("client123").unwrap(),
-    //         metadata: OAuthClientMetadata {
-    //             redirect_uris: vec![],
-    //             response_types: vec![],
-    //             grant_types: vec![],
-    //             scope: None,
-    //             token_endpoint_auth_method: None,
-    //             token_endpoint_auth_signing_alg: None,
-    //             userinfo_signed_response_alg: None,
-    //             userinfo_encrypted_response_alg: None,
-    //             jwks_uri: None,
-    //             jwks: None,
-    //             application_type: Default::default(),
-    //             subject_type: None,
-    //             request_object_signing_alg: None,
-    //             id_token_signed_response_alg: None,
-    //             authorization_signed_response_alg: "".to_string(),
-    //             authorization_encrypted_response_enc: None,
-    //             authorization_encrypted_response_alg: None,
-    //             client_id: None,
-    //             client_name: None,
-    //             client_uri: None,
-    //             policy_uri: None,
-    //             tos_uri: None,
-    //             logo_uri: None,
-    //             default_max_age: None,
-    //             require_auth_time: None,
-    //             contacts: None,
-    //             tls_client_certificate_bound_access_tokens: None,
-    //             dpop_bound_access_tokens: None,
-    //             authorization_details_types: None,
-    //         },
-    //         jwks: None,
-    //         info: Default::default(),
-    //     };
-    //     let client_auth = ClientAuth {
-    //         method: "POST".to_string(),
-    //         alg: "".to_string(),
-    //         kid: "".to_string(),
-    //         jkt: "".to_string(),
-    //     };
-    //     let account = Account {
-    //         sub: Sub::new("sub1").unwrap(),
-    //         aud: Audience::Single("".to_string()),
-    //         preferred_username: None,
-    //         email: None,
-    //         email_verified: None,
-    //         picture: None,
-    //         name: None,
-    //     };
-    //     let device: Option<(DeviceId, DeviceAccountInfo)> = Some((
-    //         DeviceId::new("dev-0123456789abcdef").unwrap(),
-    //         DeviceAccountInfo {
-    //             remembered: false,
-    //             authenticated_at: 0,
-    //             authorized_clients: vec![],
-    //         },
-    //     ));
-    //     let parameters = OAuthAuthorizationRequestParameters {
-    //         client_id: OAuthClientId::new("client123").unwrap(),
-    //         state: None,
-    //         redirect_uri: None,
-    //         scope: None,
-    //         response_type: OAuthResponseType::Code,
-    //         code_challenge: None,
-    //         code_challenge_method: None,
-    //         dpop_jkt: None,
-    //         response_mode: None,
-    //         nonce: None,
-    //         max_age: None,
-    //         claims: None,
-    //         login_hint: None,
-    //         ui_locales: None,
-    //         id_token_hint: None,
-    //         display: None,
-    //         prompt: None,
-    //         authorization_details: None,
-    //     };
-    //     let dpop_jkt: Option<String> = None;
-    //     let input = OAuthAuthorizationCodeGrantTokenRequest::new(
-    //         Code::generate(),
-    //         OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
-    //         None::<String>,
-    //     )
-    //     .unwrap();
-    //     let result = token_manager
-    //         .create(
-    //             client,
-    //             client_auth,
-    //             account,
-    //             device,
-    //             parameters,
-    //             dpop_jkt,
-    //             CreateTokenInput::Authorization(input),
-    //         )
-    //         .await
-    //         .unwrap();
-    //     let expected = OAuthTokenResponse {
-    //         access_token: OAuthAccessToken::new("").unwrap(),
-    //         token_type: OAuthTokenType::DPoP,
-    //         scope: None,
-    //         refresh_token: None,
-    //         expires_in: None,
-    //         id_token: None,
-    //         authorization_details: None,
-    //         additional_fields: Default::default(),
-    //     };
-    //     assert_eq!(result, expected)
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_refresh() {
-    //     let token_manager = create_token_manager().await;
-    //     let client = Client {
-    //         id: OAuthClientId::new("").unwrap(),
-    //         metadata: OAuthClientMetadata {
-    //             redirect_uris: vec![],
-    //             response_types: vec![],
-    //             grant_types: vec![],
-    //             scope: None,
-    //             token_endpoint_auth_method: None,
-    //             token_endpoint_auth_signing_alg: None,
-    //             userinfo_signed_response_alg: None,
-    //             userinfo_encrypted_response_alg: None,
-    //             jwks_uri: None,
-    //             jwks: None,
-    //             application_type: Default::default(),
-    //             subject_type: None,
-    //             request_object_signing_alg: None,
-    //             id_token_signed_response_alg: None,
-    //             authorization_signed_response_alg: "".to_string(),
-    //             authorization_encrypted_response_enc: None,
-    //             authorization_encrypted_response_alg: None,
-    //             client_id: None,
-    //             client_name: None,
-    //             client_uri: None,
-    //             policy_uri: None,
-    //             tos_uri: None,
-    //             logo_uri: None,
-    //             default_max_age: None,
-    //             require_auth_time: None,
-    //             contacts: None,
-    //             tls_client_certificate_bound_access_tokens: None,
-    //             dpop_bound_access_tokens: None,
-    //             authorization_details_types: None,
-    //         },
-    //         jwks: None,
-    //         info: Default::default(),
-    //     };
-    //     let client_auth = ClientAuth {
-    //         method: "".to_string(),
-    //         alg: "".to_string(),
-    //         kid: "".to_string(),
-    //         jkt: "".to_string(),
-    //     };
-    //     let input = OAuthRefreshTokenGrantTokenRequest::new(
-    //         OAuthRefreshToken::new("".to_string()).unwrap(),
-    //     );
-    //     let dpop_jkt: Option<String> = Some("".to_string());
-    //     let result = token_manager
-    //         .refresh(client, client_auth, input, dpop_jkt)
-    //         .await
-    //         .unwrap();
-    //     let expected = OAuthTokenResponse {
-    //         access_token: OAuthAccessToken::new("").unwrap(),
-    //         token_type: OAuthTokenType::DPoP,
-    //         scope: None,
-    //         refresh_token: None,
-    //         expires_in: None,
-    //         id_token: None,
-    //         authorization_details: None,
-    //         additional_fields: Default::default(),
-    //     };
-    //     assert_eq!(result, expected)
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_revoke() {
-    //     let mut token_manager = create_token_manager().await;
-    //     let oauth_token = OAuthTokenIdentification::new("", None).unwrap();
-    //     token_manager.revoke(oauth_token).await.unwrap();
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_client_token_info() {
-    //     let mut token_manager = create_token_manager().await;
-    //     let client = Client {
-    //         id: OAuthClientId::new("client123").unwrap(),
-    //         metadata: OAuthClientMetadata {
-    //             redirect_uris: vec![],
-    //             response_types: vec![],
-    //             grant_types: vec![],
-    //             scope: None,
-    //             token_endpoint_auth_method: None,
-    //             token_endpoint_auth_signing_alg: None,
-    //             userinfo_signed_response_alg: None,
-    //             userinfo_encrypted_response_alg: None,
-    //             jwks_uri: None,
-    //             jwks: None,
-    //             application_type: Default::default(),
-    //             subject_type: None,
-    //             request_object_signing_alg: None,
-    //             id_token_signed_response_alg: None,
-    //             authorization_signed_response_alg: "".to_string(),
-    //             authorization_encrypted_response_enc: None,
-    //             authorization_encrypted_response_alg: None,
-    //             client_id: None,
-    //             client_name: None,
-    //             client_uri: None,
-    //             policy_uri: None,
-    //             tos_uri: None,
-    //             logo_uri: None,
-    //             default_max_age: None,
-    //             require_auth_time: None,
-    //             contacts: None,
-    //             tls_client_certificate_bound_access_tokens: None,
-    //             dpop_bound_access_tokens: None,
-    //             authorization_details_types: None,
-    //         },
-    //         jwks: None,
-    //         info: Default::default(),
-    //     };
-    //     let client_auth = ClientAuth {
-    //         method: "".to_string(),
-    //         alg: "".to_string(),
-    //         kid: "".to_string(),
-    //         jkt: "".to_string(),
-    //     };
-    //     let token = OAuthTokenIdentification::new("", None).unwrap();
-    //     let result = token_manager
-    //         .client_token_info(&client, &client_auth, &token)
-    //         .await
-    //         .unwrap();
-    //     let expected = TokenInfo {
-    //         id: TokenId::new("").unwrap(),
-    //         data: TokenData {
-    //             created_at: 0,
-    //             updated_at: 0,
-    //             expires_at: 0,
-    //             client_id: OAuthClientId::new("").unwrap(),
-    //             client_auth: ClientAuth {
-    //                 method: "".to_string(),
-    //                 alg: "".to_string(),
-    //                 kid: "".to_string(),
-    //                 jkt: "".to_string(),
-    //             },
-    //             device_id: None,
-    //             sub: Sub::new("").unwrap(),
-    //             parameters: OAuthAuthorizationRequestParameters {
-    //                 client_id: OAuthClientId::new("").unwrap(),
-    //                 state: None,
-    //                 redirect_uri: None,
-    //                 scope: None,
-    //                 response_type: OAuthResponseType::Code,
-    //                 code_challenge: None,
-    //                 code_challenge_method: None,
-    //                 dpop_jkt: None,
-    //                 response_mode: None,
-    //                 nonce: None,
-    //                 max_age: None,
-    //                 claims: None,
-    //                 login_hint: None,
-    //                 ui_locales: None,
-    //                 id_token_hint: None,
-    //                 display: None,
-    //                 prompt: None,
-    //                 authorization_details: None,
-    //             },
-    //             details: None,
-    //             code: None,
-    //         },
-    //         account: Account {
-    //             sub: Sub::new("").unwrap(),
-    //             aud: Audience::Single("".to_string()),
-    //             preferred_username: None,
-    //             email: None,
-    //             email_verified: None,
-    //             picture: None,
-    //             name: None,
-    //         },
-    //         info: None,
-    //         current_refresh_token: None,
-    //     };
-    //     assert_eq!(result, expected)
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_get_token_info() {
-    //     let token_manager = create_token_manager().await;
-    //     let token_type: OAuthTokenType = OAuthTokenType::DPoP;
-    //     let token_id: TokenId = TokenId::new("").unwrap();
-    //     let result = token_manager
-    //         .get_token_info(token_type, token_id)
-    //         .await
-    //         .unwrap();
-    //     let expected = TokenInfo {
-    //         id: TokenId::new("").unwrap(),
-    //         data: TokenData {
-    //             created_at: 0,
-    //             updated_at: 0,
-    //             expires_at: 0,
-    //             client_id: OAuthClientId::new("").unwrap(),
-    //             client_auth: ClientAuth {
-    //                 method: "".to_string(),
-    //                 alg: "".to_string(),
-    //                 kid: "".to_string(),
-    //                 jkt: "".to_string(),
-    //             },
-    //             device_id: None,
-    //             sub: Sub::new("").unwrap(),
-    //             parameters: OAuthAuthorizationRequestParameters {
-    //                 client_id: OAuthClientId::new("").unwrap(),
-    //                 state: None,
-    //                 redirect_uri: None,
-    //                 scope: None,
-    //                 response_type: OAuthResponseType::Code,
-    //                 code_challenge: None,
-    //                 code_challenge_method: None,
-    //                 dpop_jkt: None,
-    //                 response_mode: None,
-    //                 nonce: None,
-    //                 max_age: None,
-    //                 claims: None,
-    //                 login_hint: None,
-    //                 ui_locales: None,
-    //                 id_token_hint: None,
-    //                 display: None,
-    //                 prompt: None,
-    //                 authorization_details: None,
-    //             },
-    //             details: None,
-    //             code: None,
-    //         },
-    //         account: Account {
-    //             sub: Sub::new("").unwrap(),
-    //             aud: Audience::Single("".to_string()),
-    //             preferred_username: None,
-    //             email: None,
-    //             email_verified: None,
-    //             picture: None,
-    //             name: None,
-    //         },
-    //         info: None,
-    //         current_refresh_token: None,
-    //     };
-    //     assert_eq!(result, expected)
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_authenticate_token_id() {
-    //     let token_manager = create_token_manager().await;
-    //     let token_type = OAuthTokenType::DPoP;
-    //     let token = TokenId::new("tok-0123456789abcdef").unwrap();
-    //     let dpop_jkt: Option<String> = Some("DPoP eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJfVlFPaVBrQ0NHbHFkODljdWJ1UkNTWE01bnJtbUJZTW5fQ0Q5RWNtQUhvIiwieSI6ImNrZTF3TUJYOXNabWktVzBrOTVFa1VSZkNobFk2bWpuUm1TQzhsMElxRG8ifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NTk1OTM4LCJqdGkiOiJoNmVvYjVyeXJrOjI0OXc3MjZ5ZjFkc3oiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6IndYTkFfM283ckZ3X3p2eXpOMHAxVm5RZE8yZUhDenJLMXBiUGt3Yk1qT2MifQ.0k23eIpVoT9Xmb3owTMMSzPkFLe7ULVyd0v_qdHzCNzPM7Z3sA-sOpVWg-Mkx6qutu-7S8Oa4-KL8awB1DKEKA".to_string());
-    //     let result = token_manager
-    //         .authenticate_token_id(token_type, token, dpop_jkt, None)
-    //         .await
-    //         .unwrap();
-    //     let expected = AuthenticateTokenIdResult {
-    //         verify_token_claims_result: VerifyTokenClaimsResult {
-    //             token: OAuthAccessToken::new("").unwrap(),
-    //             token_id: TokenId::new("").unwrap(),
-    //             token_type: OAuthTokenType::DPoP,
-    //             claims: Default::default(),
-    //         },
-    //         token_info: TokenInfo {
-    //             id: TokenId::new("").unwrap(),
-    //             data: TokenData {
-    //                 created_at: 0,
-    //                 updated_at: 0,
-    //                 expires_at: 0,
-    //                 client_id: OAuthClientId::new("").unwrap(),
-    //                 client_auth: ClientAuth {
-    //                     method: "".to_string(),
-    //                     alg: "".to_string(),
-    //                     kid: "".to_string(),
-    //                     jkt: "".to_string(),
-    //                 },
-    //                 device_id: None,
-    //                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
-    //                 parameters: OAuthAuthorizationRequestParameters {
-    //                     client_id: OAuthClientId::new(
-    //                         "https://cleanfollow-bsky.pages.dev/client-metadata.json",
-    //                     )
-    //                     .unwrap(),
-    //                     state: None,
-    //                     redirect_uri: None,
-    //                     scope: None,
-    //                     response_type: OAuthResponseType::Code,
-    //                     code_challenge: None,
-    //                     code_challenge_method: None,
-    //                     dpop_jkt: None,
-    //                     response_mode: None,
-    //                     nonce: None,
-    //                     max_age: None,
-    //                     claims: None,
-    //                     login_hint: None,
-    //                     ui_locales: None,
-    //                     id_token_hint: None,
-    //                     display: None,
-    //                     prompt: None,
-    //                     authorization_details: None,
-    //                 },
-    //                 details: None,
-    //                 code: None,
-    //             },
-    //             account: Account {
-    //                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
-    //                 aud: Audience::Single("audience".to_string()),
-    //                 preferred_username: None,
-    //                 email: None,
-    //                 email_verified: None,
-    //                 picture: None,
-    //                 name: None,
-    //             },
-    //             info: None,
-    //             current_refresh_token: None,
-    //         },
-    //     };
-    //     assert_eq!(result, expected)
-    // }
+    use super::*;
+    use crate::jwk::Keyset;
+    use crate::jwk_jose::jose_key::JoseKey;
+    use crate::oauth_provider::client::client_info::ClientInfo;
+    use crate::oauth_provider::oidc::sub::Sub;
+    use crate::oauth_provider::token::token_data::TokenData;
+    use crate::oauth_types::{
+        OAuthClientId, OAuthClientMetadata, OAuthIssuerIdentifier, OAuthRedirectUri,
+        OAuthRefreshToken, OAuthResponseType,
+    };
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, Jwk, JwkSet,
+        KeyAlgorithm, PublicKeyUse, RSAKeyParameters,
+    };
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct TestStore {}
+
+    impl TokenStore for TestStore {
+        fn create_token(
+            &mut self,
+            token_id: TokenId,
+            data: TokenData,
+            refresh_token: Option<RefreshToken>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+            unimplemented!()
+        }
+
+        fn read_token(
+            &self,
+            token_id: TokenId,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            Box::pin(async move {
+                Ok(Some(TokenInfo {
+                    id: TokenId::new("tok-0123456789abcdef").unwrap(),
+                    data: TokenData {
+                        created_at: 0,
+                        updated_at: 0,
+                        expires_at: 0,
+                        client_id: OAuthClientId::new("client123").unwrap(),
+                        client_auth: ClientAuth {
+                            method: "POST".to_string(),
+                            alg: "".to_string(),
+                            kid: "".to_string(),
+                            jkt: "".to_string(),
+                        },
+                        device_id: None,
+                        sub: Sub::new("1").unwrap(),
+                        parameters: OAuthAuthorizationRequestParameters {
+                            client_id: OAuthClientId::new("client123").unwrap(),
+                            state: None,
+                            redirect_uri: None,
+                            scope: None,
+                            response_type: OAuthResponseType::Code,
+                            code_challenge: None,
+                            code_challenge_method: None,
+                            dpop_jkt: None,
+                            response_mode: None,
+                            nonce: None,
+                            max_age: None,
+                            claims: None,
+                            login_hint: None,
+                            ui_locales: None,
+                            id_token_hint: None,
+                            display: None,
+                            prompt: None,
+                            authorization_details: None,
+                        },
+                        details: None,
+                        code: None,
+                    },
+                    account: Account {
+                        sub: Sub::new("1").unwrap(),
+                        aud: Audience::Single("".to_string()),
+                        preferred_username: None,
+                        email: None,
+                        email_verified: None,
+                        picture: None,
+                        name: None,
+                    },
+                    info: None,
+                    current_refresh_token: None,
+                }))
+            })
+        }
+
+        fn delete_token(
+            &mut self,
+            token_id: TokenId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+            let token_id = token_id;
+            Box::pin(async move {
+                if token_id == TokenId::new("tok-7e415d9b2aec8f78d11d2b8c7144b87d").unwrap() {
+                    return Ok(());
+                } else {
+                    return Err(OAuthError::RuntimeError("Error".to_string()));
+                }
+            })
+        }
+
+        fn rotate_token(
+            &mut self,
+            token_id: TokenId,
+            new_token_id: TokenId,
+            new_refresh_token: RefreshToken,
+            new_data: NewTokenData,
+        ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+            unimplemented!()
+        }
+
+        fn find_token_by_refresh_token(
+            &self,
+            refresh_token: RefreshToken,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            let refresh_token = refresh_token;
+            Box::pin(async move {
+                Ok(Some(TokenInfo {
+                    id: TokenId::new("tok-7e415d9b2aec8f78d11d2b8c7144b87d").unwrap(),
+                    data: TokenData {
+                        created_at: 0,
+                        updated_at: 0,
+                        expires_at: 0,
+                        client_id: OAuthClientId::new("client1".to_string()).unwrap(),
+                        client_auth: ClientAuth {
+                            method: "".to_string(),
+                            alg: "".to_string(),
+                            kid: "".to_string(),
+                            jkt: "".to_string(),
+                        },
+                        device_id: None,
+                        sub: Sub::new("sub1").unwrap(),
+                        parameters: OAuthAuthorizationRequestParameters {
+                            client_id: OAuthClientId::new("client1".to_string()).unwrap(),
+                            state: None,
+                            redirect_uri: None,
+                            scope: None,
+                            response_type: OAuthResponseType::Code,
+                            code_challenge: None,
+                            code_challenge_method: None,
+                            dpop_jkt: None,
+                            response_mode: None,
+                            nonce: None,
+                            max_age: None,
+                            claims: None,
+                            login_hint: None,
+                            ui_locales: None,
+                            id_token_hint: None,
+                            display: None,
+                            prompt: None,
+                            authorization_details: None,
+                        },
+                        details: None,
+                        code: None,
+                    },
+                    account: Account {
+                        sub: Sub::new("sub1").unwrap(),
+                        aud: Audience::Single("client".to_string()),
+                        preferred_username: None,
+                        email: None,
+                        email_verified: None,
+                        picture: None,
+                        name: None,
+                    },
+                    info: None,
+                    current_refresh_token: None,
+                }))
+            })
+        }
+
+        fn find_token_by_code(
+            &self,
+            code: Code,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            unimplemented!()
+        }
+    }
+
+    async fn create_signer() -> Signer {
+        let jwk = Jwk {
+            common: CommonParameters {
+                public_key_use: Some(PublicKeyUse::Signature),
+                key_algorithm: Some(KeyAlgorithm::ES256),
+                ..Default::default()
+            },
+            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: Default::default(),
+                curve: Default::default(),
+                x: "vf9j5yujiO25FukCWswD9GFGU30xwm6D6JlVIp40FUU".to_string(),
+                y: "5EqgG67c-QjyCgHmhiq65kjqEo0Wig8a97h322vTtq4".to_string(),
+            }),
+        };
+        let jose_key = JoseKey::from_jwk(jwk, None).await;
+        let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
+        let keyset = Keyset::new(vec![Box::new(jose_key)]);
+        let keyset = Arc::new(RwLock::new(keyset));
+
+        let token = SignedJwt::new("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6Ik5FTXlNRUZDTXpVd01URTFRVE5CT1VGRE1FUTFPRGN6UmprNU56QkdRelk0UVRrMVEwWkVPUSJ9.eyJpc3MiOiJodHRwczovL2Rldi1lanRsOTg4dy5hdXRoMC5jb20vIiwic3ViIjoiZ1pTeXNwQ1k1ZEk0aDFaM3Fwd3BkYjlUNFVQZEdENWtAY2xpZW50cyIsImF1ZCI6Imh0dHA6Ly9oZWxsb3dvcmxkIiwiaWF0IjoxNTcyNDA2NDQ3LCJleHAiOjE1NzI0OTI4NDcsImF6cCI6ImdaU3lzcENZNWRJNGgxWjNxcHdwZGI5VDRVUGRHRDVrIiwiZ3R5IjoiY2xpZW50LWNyZWRlbnRpYWxzIn0.nupgm7iFqSnERq9GxszwBrsYrYfMuSfUGj8tGQlkY3Ksh3o_IDfq1GO5ngHQLZuYPD-8qPIovPBEVomGZCo_jYvsbjmYkalAStmF01TvSoXQgJd09ygZstH0liKsmINStiRE8fTA-yfEIuBYttROizx-cDoxiindbKNIGOsqf6yOxf7ww8DrTBJKYRnHVkAfIK8wm9LRpsaOVzWdC7S3cbhCKvANjT0RTRpAx8b_AOr_UCpOr8paj-xMT9Zc9HVCMZLBfj6OZ6yVvnC9g6q_SlTa--fY9SL5eqy6-q1JGoyK_-BQ_YrCwrRdrjoJsJ8j-XFRFWJX09W3oDuZ990nGA").unwrap();
+
+        Signer::new(issuer, keyset)
+    }
+
+    async fn create_token_manager() -> TokenManager {
+        let store: Arc<RwLock<dyn TokenStore>> = Arc::new(RwLock::new(TestStore {}));
+        let signer: Arc<RwLock<Signer>> = Arc::new(RwLock::new(create_signer().await));
+        let access_token_type = AccessTokenType::JWT;
+        let max_age = Some(TOKEN_MAX_AGE);
+        let oauth_hooks = OAuthHooks {
+            on_client_info: Some(Box::new(
+                |client_id: OAuthClientId,
+                 oauth_client_metadata: OAuthClientMetadata,
+                 jwks: Option<JwkSet>|
+                 -> ClientInfo {
+                    ClientInfo {
+                        is_first_party: client_id
+                            == OAuthClientId::new(
+                                "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                            )
+                            .unwrap(),
+                        // @TODO make client client list configurable:
+                        is_trusted: false,
+                    }
+                },
+            )),
+            on_authorization_details: None,
+        };
+        TokenManager::new(
+            store,
+            signer,
+            access_token_type,
+            max_age,
+            Arc::new(oauth_hooks),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_create() {
+        let token_manager = create_token_manager().await;
+        let client = Client {
+            id: OAuthClientId::new("client123").unwrap(),
+            metadata: OAuthClientMetadata {
+                ..Default::default()
+            },
+            jwks: None,
+            info: Default::default(),
+        };
+        let client_auth = ClientAuth {
+            method: "POST".to_string(),
+            alg: "".to_string(),
+            kid: "".to_string(),
+            jkt: "".to_string(),
+        };
+        let account = Account {
+            sub: Sub::new("sub1").unwrap(),
+            aud: Audience::Single("".to_string()),
+            preferred_username: None,
+            email: None,
+            email_verified: None,
+            picture: None,
+            name: None,
+        };
+        let device: Option<(DeviceId, DeviceAccountInfo)> = None;
+        let parameters = OAuthAuthorizationRequestParameters {
+            client_id: OAuthClientId::new("client123").unwrap(),
+            state: None,
+            redirect_uri: None,
+            scope: None,
+            response_type: OAuthResponseType::Code,
+            code_challenge: None,
+            code_challenge_method: None,
+            dpop_jkt: None,
+            response_mode: None,
+            nonce: None,
+            max_age: None,
+            claims: None,
+            login_hint: None,
+            ui_locales: None,
+            id_token_hint: None,
+            display: None,
+            prompt: None,
+            authorization_details: None,
+        };
+        let dpop_jkt: Option<String> = None;
+        let input = OAuthAuthorizationCodeGrantTokenRequest::new(
+            Code::generate(),
+            OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
+            None::<String>,
+        )
+        .unwrap();
+        let result = token_manager
+            .create(
+                client,
+                client_auth,
+                account,
+                device,
+                parameters,
+                dpop_jkt,
+                CreateTokenInput::Authorization(input),
+            )
+            .await
+            .unwrap();
+        let expected = OAuthTokenResponse {
+            access_token: OAuthAccessToken::new("").unwrap(),
+            token_type: OAuthTokenType::DPoP,
+            scope: None,
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            authorization_details: None,
+            additional_fields: Default::default(),
+        };
+        assert_eq!(result, expected)
+    }
+
+    #[tokio::test]
+    async fn test_refresh() {
+        let token_manager = create_token_manager().await;
+        let client = Client {
+            id: OAuthClientId::new("client1").unwrap(),
+            metadata: OAuthClientMetadata {
+                redirect_uris: vec![],
+                response_types: vec![],
+                grant_types: vec![],
+                scope: None,
+                token_endpoint_auth_method: None,
+                token_endpoint_auth_signing_alg: None,
+                userinfo_signed_response_alg: None,
+                userinfo_encrypted_response_alg: None,
+                jwks_uri: None,
+                jwks: None,
+                application_type: Default::default(),
+                subject_type: None,
+                request_object_signing_alg: None,
+                id_token_signed_response_alg: None,
+                authorization_signed_response_alg: "".to_string(),
+                authorization_encrypted_response_enc: None,
+                authorization_encrypted_response_alg: None,
+                client_id: None,
+                client_name: None,
+                client_uri: None,
+                policy_uri: None,
+                tos_uri: None,
+                logo_uri: None,
+                default_max_age: None,
+                require_auth_time: None,
+                contacts: None,
+                tls_client_certificate_bound_access_tokens: None,
+                dpop_bound_access_tokens: None,
+                authorization_details_types: None,
+            },
+            jwks: None,
+            info: Default::default(),
+        };
+        let client_auth = ClientAuth {
+            method: "".to_string(),
+            alg: "".to_string(),
+            kid: "".to_string(),
+            jkt: "".to_string(),
+        };
+        let input = OAuthRefreshTokenGrantTokenRequest::new(
+            OAuthRefreshToken::new(
+                "ref-a41a16a716951a211b9ba177b121ce469128fb4eeb4cea6f10fd949014ab48c4".to_string(),
+            )
+            .unwrap(),
+        );
+        let dpop_jkt: Option<String> = Some("".to_string());
+        let result = token_manager
+            .refresh(client, client_auth, input, dpop_jkt)
+            .await
+            .unwrap();
+        let expected = OAuthTokenResponse {
+            access_token: OAuthAccessToken::new("").unwrap(),
+            token_type: OAuthTokenType::DPoP,
+            scope: None,
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            authorization_details: None,
+            additional_fields: Default::default(),
+        };
+        assert_eq!(result, expected)
+    }
+
+    #[tokio::test]
+    async fn test_revoke() {
+        let mut token_manager = create_token_manager().await;
+        let oauth_token = OAuthTokenIdentification::new(
+            "ref-0733f6779a644420c60f2d630adc34d8bc5f2fe048a2747a96e22d519cf6d3ea",
+            None,
+        )
+        .unwrap();
+        token_manager.revoke(oauth_token).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_client_token_info() {
+        let mut token_manager = create_token_manager().await;
+        let client = Client {
+            id: OAuthClientId::new("client123").unwrap(),
+            metadata: OAuthClientMetadata {
+                redirect_uris: vec![],
+                response_types: vec![],
+                grant_types: vec![],
+                scope: None,
+                token_endpoint_auth_method: None,
+                token_endpoint_auth_signing_alg: None,
+                userinfo_signed_response_alg: None,
+                userinfo_encrypted_response_alg: None,
+                jwks_uri: None,
+                jwks: None,
+                application_type: Default::default(),
+                subject_type: None,
+                request_object_signing_alg: None,
+                id_token_signed_response_alg: None,
+                authorization_signed_response_alg: "".to_string(),
+                authorization_encrypted_response_enc: None,
+                authorization_encrypted_response_alg: None,
+                client_id: None,
+                client_name: None,
+                client_uri: None,
+                policy_uri: None,
+                tos_uri: None,
+                logo_uri: None,
+                default_max_age: None,
+                require_auth_time: None,
+                contacts: None,
+                tls_client_certificate_bound_access_tokens: None,
+                dpop_bound_access_tokens: None,
+                authorization_details_types: None,
+            },
+            jwks: None,
+            info: Default::default(),
+        };
+        let client_auth = ClientAuth {
+            method: "".to_string(),
+            alg: "".to_string(),
+            kid: "".to_string(),
+            jkt: "".to_string(),
+        };
+        let token = OAuthTokenIdentification::new("", None).unwrap();
+        let result = token_manager
+            .client_token_info(&client, &client_auth, &token)
+            .await
+            .unwrap();
+        let expected = TokenInfo {
+            id: TokenId::new("").unwrap(),
+            data: TokenData {
+                created_at: 0,
+                updated_at: 0,
+                expires_at: 0,
+                client_id: OAuthClientId::new("").unwrap(),
+                client_auth: ClientAuth {
+                    method: "".to_string(),
+                    alg: "".to_string(),
+                    kid: "".to_string(),
+                    jkt: "".to_string(),
+                },
+                device_id: None,
+                sub: Sub::new("").unwrap(),
+                parameters: OAuthAuthorizationRequestParameters {
+                    client_id: OAuthClientId::new("").unwrap(),
+                    state: None,
+                    redirect_uri: None,
+                    scope: None,
+                    response_type: OAuthResponseType::Code,
+                    code_challenge: None,
+                    code_challenge_method: None,
+                    dpop_jkt: None,
+                    response_mode: None,
+                    nonce: None,
+                    max_age: None,
+                    claims: None,
+                    login_hint: None,
+                    ui_locales: None,
+                    id_token_hint: None,
+                    display: None,
+                    prompt: None,
+                    authorization_details: None,
+                },
+                details: None,
+                code: None,
+            },
+            account: Account {
+                sub: Sub::new("").unwrap(),
+                aud: Audience::Single("".to_string()),
+                preferred_username: None,
+                email: None,
+                email_verified: None,
+                picture: None,
+                name: None,
+            },
+            info: None,
+            current_refresh_token: None,
+        };
+        assert_eq!(result, expected)
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info() {
+        let token_manager = create_token_manager().await;
+        let token_type: OAuthTokenType = OAuthTokenType::DPoP;
+        let token_id: TokenId = TokenId::new("").unwrap();
+        let result = token_manager
+            .get_token_info(token_type, token_id)
+            .await
+            .unwrap();
+        let expected = TokenInfo {
+            id: TokenId::new("").unwrap(),
+            data: TokenData {
+                created_at: 0,
+                updated_at: 0,
+                expires_at: 0,
+                client_id: OAuthClientId::new("").unwrap(),
+                client_auth: ClientAuth {
+                    method: "".to_string(),
+                    alg: "".to_string(),
+                    kid: "".to_string(),
+                    jkt: "".to_string(),
+                },
+                device_id: None,
+                sub: Sub::new("").unwrap(),
+                parameters: OAuthAuthorizationRequestParameters {
+                    client_id: OAuthClientId::new("").unwrap(),
+                    state: None,
+                    redirect_uri: None,
+                    scope: None,
+                    response_type: OAuthResponseType::Code,
+                    code_challenge: None,
+                    code_challenge_method: None,
+                    dpop_jkt: None,
+                    response_mode: None,
+                    nonce: None,
+                    max_age: None,
+                    claims: None,
+                    login_hint: None,
+                    ui_locales: None,
+                    id_token_hint: None,
+                    display: None,
+                    prompt: None,
+                    authorization_details: None,
+                },
+                details: None,
+                code: None,
+            },
+            account: Account {
+                sub: Sub::new("").unwrap(),
+                aud: Audience::Single("".to_string()),
+                preferred_username: None,
+                email: None,
+                email_verified: None,
+                picture: None,
+                name: None,
+            },
+            info: None,
+            current_refresh_token: None,
+        };
+        assert_eq!(result, expected)
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_token_id() {
+        let token_manager = create_token_manager().await;
+        let token_type = OAuthTokenType::DPoP;
+        let token = TokenId::new("tok-0123456789abcdef").unwrap();
+        let dpop_jkt: Option<String> = Some("DPoP eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJfVlFPaVBrQ0NHbHFkODljdWJ1UkNTWE01bnJtbUJZTW5fQ0Q5RWNtQUhvIiwieSI6ImNrZTF3TUJYOXNabWktVzBrOTVFa1VSZkNobFk2bWpuUm1TQzhsMElxRG8ifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NTk1OTM4LCJqdGkiOiJoNmVvYjVyeXJrOjI0OXc3MjZ5ZjFkc3oiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6IndYTkFfM283ckZ3X3p2eXpOMHAxVm5RZE8yZUhDenJLMXBiUGt3Yk1qT2MifQ.0k23eIpVoT9Xmb3owTMMSzPkFLe7ULVyd0v_qdHzCNzPM7Z3sA-sOpVWg-Mkx6qutu-7S8Oa4-KL8awB1DKEKA".to_string());
+        let result = token_manager
+            .authenticate_token_id(token_type, token, dpop_jkt, None)
+            .await
+            .unwrap();
+        let expected = AuthenticateTokenIdResult {
+            verify_token_claims_result: VerifyTokenClaimsResult {
+                token: OAuthAccessToken::new("").unwrap(),
+                token_id: TokenId::new("").unwrap(),
+                token_type: OAuthTokenType::DPoP,
+                claims: Default::default(),
+            },
+            token_info: TokenInfo {
+                id: TokenId::new("").unwrap(),
+                data: TokenData {
+                    created_at: 0,
+                    updated_at: 0,
+                    expires_at: 0,
+                    client_id: OAuthClientId::new("").unwrap(),
+                    client_auth: ClientAuth {
+                        method: "".to_string(),
+                        alg: "".to_string(),
+                        kid: "".to_string(),
+                        jkt: "".to_string(),
+                    },
+                    device_id: None,
+                    sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                    parameters: OAuthAuthorizationRequestParameters {
+                        client_id: OAuthClientId::new(
+                            "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                        )
+                        .unwrap(),
+                        state: None,
+                        redirect_uri: None,
+                        scope: None,
+                        response_type: OAuthResponseType::Code,
+                        code_challenge: None,
+                        code_challenge_method: None,
+                        dpop_jkt: None,
+                        response_mode: None,
+                        nonce: None,
+                        max_age: None,
+                        claims: None,
+                        login_hint: None,
+                        ui_locales: None,
+                        id_token_hint: None,
+                        display: None,
+                        prompt: None,
+                        authorization_details: None,
+                    },
+                    details: None,
+                    code: None,
+                },
+                account: Account {
+                    sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                    aud: Audience::Single("audience".to_string()),
+                    preferred_username: None,
+                    email: None,
+                    email_verified: None,
+                    picture: None,
+                    name: None,
+                },
+                info: None,
+                current_refresh_token: None,
+            },
+        };
+        assert_eq!(result, expected)
+    }
 }

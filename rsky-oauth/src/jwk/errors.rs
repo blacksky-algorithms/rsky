@@ -1,4 +1,3 @@
-use crate::oauth_provider::request::request_id::RequestId;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 

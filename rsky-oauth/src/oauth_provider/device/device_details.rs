@@ -7,7 +7,7 @@ pub struct DeviceDetails {
 }
 
 pub fn extract_device_details(req: &Request) -> DeviceDetails {
-    let user_agent = req.headers().get("user-agent").next().unwrap().to_string();
+    let user_agent = req.headers().get("User-Agent").next().unwrap().to_string();
     let ip_address = req.client_ip().unwrap();
 
     DeviceDetails {

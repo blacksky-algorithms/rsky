@@ -4,7 +4,7 @@ use rocket::serde::json::Json;
 use rocket::{get, State};
 use rsky_oauth::oauth_provider::errors::OAuthError;
 use rsky_oauth::oauth_types::{
-    BearerMethod, HttpsUri, OAuthAuthorizationServerMetadata, OAuthIssuerIdentifier,
+    BearerMethod, OAuthAuthorizationServerMetadata, OAuthIssuerIdentifier,
     OAuthProtectedResourceMetadata, ValidUri, WebUri,
 };
 use std::str::FromStr;

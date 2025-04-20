@@ -87,3 +87,159 @@ impl AccountManager {
         x
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jwk::Audience;
+    use crate::oauth_provider::account::account_store::DeviceAccountInfo;
+    use crate::oauth_types::OAuthClientId;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct TestAccountStore {}
+
+    impl AccountStore for TestAccountStore {
+        fn authenticate_account(
+            &self,
+            credentials: SignInCredentials,
+            device_id: DeviceId,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            unimplemented!()
+        }
+
+        fn add_authorized_client(
+            &self,
+            device_id: DeviceId,
+            sub: Sub,
+            client_id: OAuthClientId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+            unimplemented!()
+        }
+
+        fn get_device_account(
+            &self,
+            device_id: DeviceId,
+            sub: Sub,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            unimplemented!()
+        }
+
+        fn remove_device_account(
+            &self,
+            device_id: DeviceId,
+            sub: Sub,
+        ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
+            unimplemented!()
+        }
+
+        fn list_device_accounts(
+            &self,
+            device_id: DeviceId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
+        {
+            unimplemented!()
+        }
+    }
+
+    fn create_account_manager() -> AccountManager {
+        AccountManager::new(Arc::new(RwLock::new(TestAccountStore {})))
+    }
+
+    #[tokio::test]
+    async fn test_sign_in() {
+        let account_manager = create_account_manager();
+        let credentials = SignInCredentials {
+            username: "".to_string(),
+            password: "".to_string(),
+            remember: None,
+            email_otp: None,
+        };
+        let device_id = DeviceId::new("").unwrap();
+        let result = account_manager
+            .sign_in(credentials, device_id)
+            .await
+            .unwrap();
+        let expected = AccountInfo {
+            account: Account {
+                sub: Sub::new("").unwrap(),
+                aud: Audience::Single("".to_string()),
+                preferred_username: None,
+                email: None,
+                email_verified: None,
+                picture: None,
+                name: None,
+            },
+            info: DeviceAccountInfo {
+                remembered: false,
+                authenticated_at: 0,
+                authorized_clients: vec![],
+            },
+        };
+    }
+
+    #[tokio::test]
+    async fn test_get() {
+        let account_manager = create_account_manager();
+        let device_id = DeviceId::new("").unwrap();
+        let sub = Sub::new("").unwrap();
+        let result = account_manager.get(&device_id, sub).await.unwrap();
+        let expected = AccountInfo {
+            account: Account {
+                sub: Sub::new("").unwrap(),
+                aud: Audience::Single("".to_string()),
+                preferred_username: None,
+                email: None,
+                email_verified: None,
+                picture: None,
+                name: None,
+            },
+            info: DeviceAccountInfo {
+                remembered: false,
+                authenticated_at: 0,
+                authorized_clients: vec![],
+            },
+        };
+    }
+
+    #[tokio::test]
+    async fn test_add_authorized_client() {
+        let account_manager = create_account_manager();
+        let device_id = DeviceId::new("").unwrap();
+        let account = Account {
+            sub: Sub::new("").unwrap(),
+            aud: Audience::Single("".to_string()),
+            preferred_username: None,
+            email: None,
+            email_verified: None,
+            picture: None,
+            name: None,
+        };
+        let client = Client {
+            id: OAuthClientId::new("").unwrap(),
+            metadata: Default::default(),
+            jwks: None,
+            info: Default::default(),
+        };
+        let _client_auth = ClientAuth {
+            method: "".to_string(),
+            alg: "".to_string(),
+            kid: "".to_string(),
+            jkt: "".to_string(),
+        };
+        account_manager
+            .add_authorized_client(device_id, account, client, _client_auth)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_list() {
+        let account_manager = create_account_manager();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a8").unwrap();
+        let result = account_manager.list(&device_id).await;
+        let expected = vec![];
+        assert_eq!(result, expected);
+    }
+}

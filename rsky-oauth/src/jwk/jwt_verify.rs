@@ -1,12 +1,14 @@
-use crate::jwk::{JwtHeader, JwtPayload};
+use crate::jwk::JwtPayload;
+use crate::oauth_types::OAuthIssuerIdentifier;
+use jsonwebtoken::Header;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct VerifyOptions {
     pub audience: Option<String>,
     /** in seconds */
     pub clock_tolerance: Option<u64>,
-    pub issuer: Option<String>,
+    pub issuer: Option<OAuthIssuerIdentifier>,
     /** in seconds */
     pub max_token_age: Option<u64>,
     pub subject: Option<String>,
@@ -18,5 +20,5 @@ pub struct VerifyOptions {
 #[derive(Serialize, Eq, PartialEq, Deserialize, Debug)]
 pub struct VerifyResult {
     pub payload: JwtPayload,
-    pub protected_header: JwtHeader,
+    pub protected_header: Header,
 }

@@ -3,10 +3,11 @@ use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_types::OAuthClientId;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SignInCredentials {
     pub username: String,
     pub password: String,
@@ -16,8 +17,9 @@ pub struct SignInCredentials {
      * {@link AccountStore.listDeviceAccounts}. Note that this only makes sense when
      * used with a device ID.
      */
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remember: Option<bool>,
-
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email_otp: Option<String>,
 }
 
@@ -28,7 +30,7 @@ pub struct DeviceAccountInfo {
     pub authorized_clients: Vec<OAuthClientId>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountInfo {
     pub account: Account,
     pub info: DeviceAccountInfo,

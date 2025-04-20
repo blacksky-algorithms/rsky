@@ -1,6 +1,5 @@
 use crate::cached_getter::{CachedGetter, GetCachedOptions, Getter};
 use crate::jwk::Keyset;
-use crate::jwk_jose::jose_key::JwkSet;
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::client::client_info::ClientInfo;
 use crate::oauth_provider::client::client_store::ClientStore;
@@ -13,6 +12,7 @@ use crate::oauth_types::{
 };
 use crate::simple_store::SimpleStore;
 use crate::simple_store_memory::SimpleStoreMemory;
+use jsonwebtoken::jwk::JwkSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ pub struct ClientManager {
     jwks: CachedGetter<String, JwkSet>,
     server_metadata: OAuthAuthorizationServerMetadata,
     keyset: Arc<RwLock<Keyset>>,
-    store: Option<Arc<RwLock<dyn ClientStore>>>,
+    store: Arc<RwLock<dyn ClientStore>>,
     metadata_getter: CachedGetter<String, OAuthClientMetadata>,
     loopback_metadata: Option<LoopbackMetadataGetter>,
     hooks: Arc<OAuthHooks>,
@@ -63,7 +63,7 @@ impl ClientManager {
         server_metadata: OAuthAuthorizationServerMetadata,
         keyset: Arc<RwLock<Keyset>>,
         hooks: Arc<OAuthHooks>,
-        store: Option<Arc<RwLock<dyn ClientStore>>>,
+        store: Arc<RwLock<dyn ClientStore>>,
         loopback_metadata: Option<LoopbackMetadataGetter>,
         client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
         client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
@@ -173,17 +173,10 @@ impl ClientManager {
         &self,
         client_id: &OAuthClientId,
     ) -> Result<OAuthClientMetadata, OAuthError> {
-        match &self.store {
-            None => Err(OAuthError::InvalidClientMetadataError(
-                "Invalid client ID".to_string(),
-            )),
-            Some(store) => {
-                let store = store.read().await;
-                let metadata = store.find_client(client_id.clone())?;
-                self.validate_client_metadata(client_id.as_str(), metadata)
-                    .await
-            }
-        }
+        let store = self.store.read().await;
+        let metadata = store.find_client(client_id.clone())?;
+        self.validate_client_metadata(client_id.as_str(), metadata)
+            .await
     }
 
     /**
@@ -687,4 +680,129 @@ pub async fn fetch_metadata_handler(
         .unwrap();
     let metadata = response.json::<OAuthClientMetadata>().await.unwrap();
     metadata
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::jwk::Keyset;
+    use crate::jwk_jose::jose_key::JoseKey;
+    use crate::oauth_provider::client::client::Client;
+    use crate::oauth_provider::client::client_info::ClientInfo;
+    use crate::oauth_provider::client::client_manager::{ClientManager, LoopbackMetadataGetter};
+    use crate::oauth_provider::client::client_store::ClientStore;
+    use crate::oauth_provider::errors::OAuthError;
+    use crate::oauth_provider::oauth_hooks::OAuthHooks;
+    use crate::oauth_types::{
+        OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientMetadata,
+        OAuthIssuerIdentifier, ValidUri, WebUri,
+    };
+    use crate::simple_store_memory::SimpleStoreMemory;
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, Jwk, JwkSet,
+        KeyAlgorithm, PublicKeyUse,
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    struct TestClientStore {}
+
+    impl ClientStore for TestClientStore {
+        fn find_client(&self, client_id: OAuthClientId) -> Result<OAuthClientMetadata, OAuthError> {
+            unimplemented!()
+        }
+    }
+
+    fn create_server_metadata() -> OAuthAuthorizationServerMetadata {
+        OAuthAuthorizationServerMetadata::new(
+            OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap(),
+            WebUri::validate("https://pds.ripperoni.com/oauth/authorize").unwrap(),
+            WebUri::validate("https://pds.ripperoni.com/oauth/token").unwrap(),
+        )
+    }
+
+    async fn create_keyset() -> Keyset {
+        let jwk = Jwk {
+            common: CommonParameters {
+                public_key_use: Some(PublicKeyUse::Signature),
+                key_algorithm: Some(KeyAlgorithm::ES256),
+                ..Default::default()
+            },
+            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: Default::default(),
+                curve: Default::default(),
+                x: "vf9j5yujiO25FukCWswD9GFGU30xwm6D6JlVIp40FUU".to_string(),
+                y: "5EqgG67c-QjyCgHmhiq65kjqEo0Wig8a97h322vTtq4".to_string(),
+            }),
+        };
+        let jose_key = JoseKey::from_jwk(jwk, None).await;
+        let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
+        Keyset::new(vec![Box::new(jose_key)])
+    }
+
+    fn create_hooks() -> OAuthHooks {
+        OAuthHooks {
+            on_client_info: Some(Box::new(
+                |client_id: OAuthClientId,
+                 oauth_client_metadata: OAuthClientMetadata,
+                 jwks: Option<JwkSet>|
+                 -> ClientInfo {
+                    ClientInfo {
+                        is_first_party: client_id
+                            == OAuthClientId::new(
+                                "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                            )
+                            .unwrap(),
+                        // @TODO make client client list configurable:
+                        is_trusted: false,
+                    }
+                },
+            )),
+            on_authorization_details: None,
+        }
+    }
+
+    fn create_loopback_metadata() -> LoopbackMetadataGetter {
+        unimplemented!()
+    }
+
+    fn create_client_jwks_cache() -> SimpleStoreMemory<String, JwkSet> {
+        SimpleStoreMemory::default()
+    }
+
+    fn create_client_metadata_cache() -> SimpleStoreMemory<String, OAuthClientMetadata> {
+        SimpleStoreMemory::default()
+    }
+
+    async fn create_client_manager() -> ClientManager {
+        let server_metadata = create_server_metadata();
+        let keyset = Arc::new(RwLock::new(create_keyset().await));
+        let hooks = Arc::new(create_hooks());
+        let store = Arc::new(RwLock::new(TestClientStore {}));
+        let loopback_metadata = None;
+        let client_jwks_cache = Arc::new(RwLock::new(create_client_jwks_cache()));
+        let client_metadata_cache = Arc::new(RwLock::new(create_client_metadata_cache()));
+        ClientManager::new(
+            server_metadata,
+            keyset,
+            hooks,
+            store,
+            loopback_metadata,
+            client_jwks_cache,
+            client_metadata_cache,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_client() {
+        let client_manager = create_client_manager().await;
+        let client_id = OAuthClientId::new("client123").unwrap();
+        let result = client_manager.get_client(&client_id).await.unwrap();
+        let expected = Client {
+            id: OAuthClientId::new("client123").unwrap(),
+            metadata: Default::default(),
+            jwks: None,
+            info: Default::default(),
+        };
+        assert_eq!(result, expected);
+    }
 }

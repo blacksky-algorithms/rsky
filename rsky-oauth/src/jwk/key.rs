@@ -1,7 +1,6 @@
-use crate::jwk::{JwkError, JwtHeader, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
-use crate::jwk_jose::jose_key::Jwk;
-use biscuit::jwa::{Algorithm, SignatureAlgorithm};
-use biscuit::jwk::{EllipticCurve, PublicKeyUse};
+use crate::jwk::{JwkError, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
+use jsonwebtoken::jwk::{EllipticCurve, Jwk, KeyAlgorithm, PublicKeyUse};
+use jsonwebtoken::{Algorithm, Header, Validation};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -24,20 +23,20 @@ pub trait Key: Send + Sync {
      *
      * @see {@link https://datatracker.ietf.org/doc/html/rfc7518#section-3.1 | "alg" (Algorithm) Header Parameter Values for JWS}
      */
-    fn alg(&self) -> Option<SignatureAlgorithm>;
+    fn alg(&self) -> Option<KeyAlgorithm>;
 
     fn kid(&self) -> Option<String>;
 
     fn crv(&self) -> Option<EllipticCurve>;
 
-    fn algorithms(&self) -> Vec<SignatureAlgorithm>;
+    fn algorithms(&self) -> Vec<Algorithm>;
 
     /**
      * Create a signed JWT
      */
     fn create_jwt(
         &self,
-        header: JwtHeader,
+        header: Header,
         payload: JwtPayload,
     ) -> Pin<Box<dyn Future<Output = Result<SignedJwt, JwkError>> + Send + Sync>>;
 

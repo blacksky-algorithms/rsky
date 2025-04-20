@@ -34,5 +34,5 @@ pub fn compare_client_auth(a: &ClientAuth, b: &ClientAuth) -> Result<bool, OAuth
 }
 
 pub async fn auth_jwk_thumbprint(key: Vec<u8>) -> String {
-    todo!()
+    unimplemented!()
 }

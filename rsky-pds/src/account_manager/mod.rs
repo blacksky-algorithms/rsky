@@ -27,6 +27,7 @@ use rsky_common::time::{from_micros_to_str, from_str_to_micros, HOUR};
 use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
+use rsky_oauth::jwk::Audience;
 use rsky_oauth::oauth_provider::account::account_store::{
     AccountInfo, AccountStore, SignInCredentials,
 };
@@ -666,7 +667,14 @@ impl AccountStore for AccountManager {
     ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
     {
         Box::pin(async move {
-            match device_account::get_account_info(device_id, sub, self.db.as_ref()).await {
+            match device_account::get_account_info(
+                device_id,
+                sub,
+                Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                self.db.as_ref(),
+            )
+            .await
+            {
                 Ok(account_info) => Ok(account_info),
                 Err(_) => Err(OAuthError::RuntimeError("".to_string())),
             }
@@ -693,7 +701,13 @@ impl AccountStore for AccountManager {
     {
         let device_id = device_id.clone();
         Box::pin(async move {
-            match device_account::list_remembered_devices(self.db.as_ref(), device_id).await {
+            match device_account::list_remembered_devices(
+                self.db.as_ref(),
+                device_id,
+                Audience::Single("did:web:pds.ripperoni.com".to_string()),
+            )
+            .await
+            {
                 Ok(account_infos) => Ok(account_infos),
                 Err(_) => Err(OAuthError::RuntimeError("".to_string())),
             }
@@ -813,13 +827,12 @@ impl DeviceStore for AccountManager {
         device_id: DeviceId,
         data: PartialDeviceData,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), OAuthError>> + Send + Sync + '_>> {
-        unimplemented!()
-        // Box::pin(async move {
-        //     match device::update_device(device_id, data, self.db.as_ref()).await {
-        //         Ok(_) => Ok(()),
-        //         Err(_) => Err(OAuthError::RuntimeError("".to_string())),
-        //     }
-        // })
+        Box::pin(async move {
+            match device::update_device(device_id, data, self.db.as_ref()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+            }
+        })
     }
 
     fn delete_device(

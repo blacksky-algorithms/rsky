@@ -14,7 +14,7 @@ pub struct UpdateRequestData {
     pub client_id: Option<OAuthClientId>,
     pub client_auth: Option<ClientAuth>,
     pub parameters: Option<OAuthAuthorizationRequestParameters>,
-    pub expires_at: Option<u64>,
+    pub expires_at: Option<i64>,
     pub device_id: Option<DeviceId>,
     pub sub: Option<Sub>,
     pub code: Option<Code>,

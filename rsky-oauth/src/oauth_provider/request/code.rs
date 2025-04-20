@@ -1,6 +1,7 @@
 use crate::oauth_provider::constants::{CODE_BYTES_LENGTH, CODE_PREFIX};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 const CODE_LENGTH: usize = CODE_PREFIX.len() + CODE_BYTES_LENGTH; //hex encoding
 
@@ -40,6 +41,12 @@ impl Code {
             .collect();
         let val = CODE_PREFIX.to_string() + token.as_str();
         Code::new(val).unwrap()
+    }
+}
+
+impl Display for Code {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

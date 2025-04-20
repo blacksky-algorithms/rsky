@@ -6,4 +6,4 @@ pub mod jwk_jose;
 pub mod oauth_provider;
 pub mod oauth_types;
 mod simple_store;
-mod simple_store_memory;
+pub mod simple_store_memory;

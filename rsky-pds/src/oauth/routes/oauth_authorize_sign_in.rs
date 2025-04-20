@@ -1,13 +1,17 @@
 use crate::account_manager::AccountManager;
+use crate::apis::ApiError;
+use crate::oauth::routes::csrf_cookie;
 use crate::oauth::{OAuthResponse, SharedOAuthProvider, SharedReplayStore};
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
 use rocket::{post, Data, Request, State};
 use rsky_oauth::oauth_provider::account::account_store::SignInCredentials;
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
+use rsky_oauth::oauth_provider::device::device_manager::DeviceManager;
 use rsky_oauth::oauth_provider::errors::OAuthError;
 use rsky_oauth::oauth_provider::lib::http::request::{
-    validate_fetch_mode, validate_fetch_site, validate_referer, validate_same_origin,
+    validate_csrf_token, validate_fetch_mode, validate_fetch_site, validate_referer,
+    validate_same_origin,
 };
 use rsky_oauth::oauth_provider::lib::util::url::UrlReference;
 use rsky_oauth::oauth_provider::oauth_provider::SignInResponse;
@@ -21,10 +25,10 @@ pub struct SignIn {
     pub device_id: DeviceId,
     pub request_uri: RequestUri,
     pub client_id: OAuthClientId,
-    pub account_sub: Sub,
     pub credentials: SignInCredentials,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct SignInPayload {
     csrf_token: String,
     request_uri: RequestUri,
@@ -43,46 +47,94 @@ impl<'r> FromData<'r> for SignIn {
     ) -> rocket::data::Outcome<'r, Self, Self::Error> {
         match validate_fetch_mode(req, vec!["same-origin"]) {
             Ok(_) => {}
-            Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
+            Err(e) => {
+                let error = ApiError::InvalidRequest("Invalid fetch mode header".to_string());
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(400), ()));
+            }
         }
         match validate_fetch_site(req, vec!["same-origin"]) {
             Ok(_) => {}
-            Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
+            Err(e) => {
+                let error = ApiError::InvalidRequest("Invalid fetch site header".to_string());
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(400), ()));
+            }
         }
-        match validate_same_origin(req, "same-origin") {
+        match validate_same_origin(req, "https://pds.ripperoni.com") {
             Ok(_) => {}
-            Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
+            Err(e) => {
+                let error = ApiError::InvalidRequest("Invalid same-origin header".to_string());
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(400), ()));
+            }
         }
 
-        let input = data.open(10000.bytes());
-        let x = input.into_string().await.unwrap().value;
-        let sign_in_payload: SignInPayload;
+        let input = data.open(100000.bytes());
+        let datastream = input.into_string().await.unwrap().value;
+        println!("{}", datastream);
+        let sign_in_payload: SignInPayload = serde_json::from_str(datastream.as_str()).unwrap();
 
         let url_reference = UrlReference {
-            origin: Some(String::from("")),
+            origin: Some(String::from("https://pds.ripperoni.com")),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {
             Ok(_) => {}
-            Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
+            Err(e) => {
+                let error = ApiError::InvalidRequest("Invalid referer".to_string());
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(400), ()));
+            }
         }
-        unimplemented!()
-        // match validate_csrf_token(
-        //     req,
-        //     sign_in_payload.csrf_token.as_str(),
-        //     csrf_cookie(&sign_in_payload.request_uri).as_str(),
-        //     true,
-        // ) {
-        //     Ok(_) => {}
-        //     Err(e) => return rocket::data::Outcome::Error((Status::new(400), ())),
-        // }
+        match validate_csrf_token(
+            req,
+            sign_in_payload.csrf_token.as_str(),
+            csrf_cookie(&sign_in_payload.request_uri).as_str(),
+            true,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                let error = ApiError::InvalidRequest("Invalid csrf token".to_string());
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(400), ()));
+            }
+        }
 
-        // rocket::data::Outcome::Success(Self {
-        //     device_id: sign_in_payload.device_id,
-        //     request_uri: sign_in_payload.request_uri,
-        //     client_id: sign_in_payload.client_id,
-        //     account_sub: sign_in_payload.account_sub,
-        // })
+        let account_manager = match req
+            .guard::<AccountManager>()
+            .await
+            .map(|account_manager| account_manager)
+        {
+            rocket::request::Outcome::Success(account_manager) => account_manager,
+            rocket::request::Outcome::Error(_) => {
+                let error = ApiError::RuntimeError;
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(500), ()));
+            }
+            rocket::request::Outcome::Forward(_) => {
+                let error = ApiError::RuntimeError;
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(500), ()));
+            }
+        };
+
+        let mut device_manager = DeviceManager::new(Arc::new(RwLock::new(account_manager)), None);
+        let device_id = match device_manager.load(req, true).await {
+            Ok(device_id) => device_id,
+            Err(errror) => {
+                let error = ApiError::RuntimeError;
+                req.local_cache(|| Some(error.clone()));
+                return rocket::data::Outcome::Error((Status::new(500), ()));
+            }
+        };
+
+        rocket::data::Outcome::Success(Self {
+            device_id,
+            request_uri: sign_in_payload.request_uri,
+            client_id: sign_in_payload.client_id,
+            credentials: sign_in_payload.credentials,
+        })
     }
 }
 

@@ -67,3 +67,24 @@ pub struct TokenClaims {
     // https://datatracker.ietf.org/doc/html/rfc9396#section-14.2
     pub authorization_details: Option<Value>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug, Eq, PartialEq)]
+pub struct DpopClaims {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iat: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub htm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub htu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ath: Option<String>,
+    /// Additional custom claims
+    #[serde(flatten)]
+    pub additional_claims: std::collections::HashMap<String, serde_json::Value>,
+}
