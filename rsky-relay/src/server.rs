@@ -52,7 +52,7 @@ pub struct Server {
     listener: TcpListener,
     base_url: Url,
     buf: Vec<u8>,
-    crawlers: Tree,
+    hosts: Tree,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -64,19 +64,19 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:9000")?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
-        let crawlers = DB.open_tree("crawlers")?;
+        let hosts = DB.open_tree("hosts")?;
         Ok(Self {
             listener,
             base_url,
             buf: vec![0; 1024],
-            crawlers,
+            hosts,
             request_crawl_tx,
             subscribe_repos_tx,
         })
     }
 
     pub fn run(mut self) -> Result<(), ServerError> {
-        for res in &self.crawlers {
+        for res in &self.hosts {
             let (hostname, cursor) = res?;
             let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
             let cursor = cursor.into();
@@ -143,7 +143,7 @@ impl Server {
                     if let Ok(request_crawl) =
                         serde_json::from_reader::<_, RequestCrawl>(&self.buf[offset..len])
                     {
-                        if !self.crawlers.contains_key(&request_crawl.hostname)? {
+                        if !self.hosts.contains_key(&request_crawl.hostname)? {
                             self.request_crawl_tx.push(request_crawl)?;
                         }
                         #[expect(clippy::unwrap_used)]

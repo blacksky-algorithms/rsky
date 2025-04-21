@@ -10,13 +10,14 @@ use futures::stream::FuturesUnordered;
 use hashbrown::HashSet;
 use lru::LruCache;
 use reqwest::Client;
-use rsky_common::get_verification_material;
-use rsky_identity::types::DidDocument;
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio::time::timeout;
+
+use rsky_common::get_verification_material;
+use rsky_identity::types::DidDocument;
 
 const POLL_TIMEOUT: Duration = Duration::from_micros(1);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -165,7 +166,7 @@ impl Resolver {
         let (req, hostname) = if let Some(hostname) = hostname {
             (self.client.get(format!("https://{hostname}/{DOC_PATH}")), Some(hostname.to_owned()))
         } else if let Some(after) = self.after.take() {
-            tracing::debug!("fetching after: {after}");
+            tracing::trace!("fetching after: {after}");
             self.last = Instant::now();
             (self.client.get(format!("{PLC_URL}={after}")), None)
         } else {

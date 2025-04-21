@@ -9,13 +9,14 @@ bstr = "1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
-cid = { version = "0.11", features = ["serde-codec"] }
+cid = { version = "0.10", features = ["serde-codec"] }
 color-eyre = "0.6"
 derive_more = { version = "2", features = ["full"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hashbrown = "0.15"
 http = "1"
 httparse = "1.10"
+ipld-core = "0.4"
 k256 = "0.13"
 lru = "0.14"
 magnetic = "2"

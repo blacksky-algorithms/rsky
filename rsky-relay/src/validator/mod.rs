@@ -1,3 +1,4 @@
+mod event;
 mod manager;
 mod resolver;
 mod types;

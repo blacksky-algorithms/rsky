@@ -1,9 +1,13 @@
 use std::collections::TryReserveError;
 
+use cid::Cid;
 use p256::ecdsa::signature::Verifier;
 use thiserror::Error;
 
-use crate::validator::types::Commit;
+use rsky_common::tid::TID;
+
+use crate::validator::event::{Commit, SubscribeReposEvent};
+use crate::validator::types::RepoState;
 
 const P256_DID_PREFIX: &[u8] = &[0x80, 0x24];
 const K256_DID_PREFIX: &[u8] = &[0xe7, 0x01];
@@ -33,4 +37,65 @@ pub fn verify_commit_sig(commit: &Commit, key: &[u8; 35]) -> Result<bool, Verifi
             unreachable!()
         }
     }
+}
+
+pub fn verify_commit_msg(
+    event: &SubscribeReposEvent, rev: &TID, root: Cid, prev: &RepoState,
+) -> bool {
+    let did = event.did();
+    if !prev.rev.older_than(rev) {
+        tracing::debug!(
+            "[{did}] old msg: {rev} -> {} ({})",
+            prev.rev,
+            rev.timestamp() - prev.rev.timestamp()
+        );
+        return false;
+    }
+
+    if let SubscribeReposEvent::Commit(commit) = &event {
+        if let Some(rev) = &commit.since {
+            if rev != &prev.rev.0 {
+                tracing::debug!("[{did}] prev_rev mismatch: {rev} (expected: {})", prev.rev);
+                return false;
+            }
+        } else {
+            // NOTE: some PDSs don't send this field, so we continue verifying
+            tracing::trace!("[{did}] missing since");
+        }
+
+        if let Some(data) = &commit.prev_data {
+            if data != &prev.data {
+                tracing::debug!("[{did}] prev_data mismatch");
+                return false;
+            }
+        } else {
+            tracing::trace!("[{did}] missing prev_data");
+            return false;
+        }
+
+        let Ok(mut tree) = commit.tree(root) else {
+            tracing::debug!("[{}] unable to read MST", commit.repo);
+            return false;
+        };
+        for op in &commit.ops {
+            if !op.is_valid() {
+                tracing::trace!("[{}] unable to invert legacy op", commit.repo);
+                // TODO: once firehose format is fully shipped, remove this
+                return true;
+            }
+            if !tree.invert(op) {
+                return false;
+            }
+        }
+
+        // let found = tree.cid;
+        // if let Some(expected) = commit.prev_data {
+        //     if expected != found {
+        //         tracing::debug!("inverted tree root mismatch: {found} ({expected})");
+        //         return false;
+        //     }
+        // }
+    }
+
+    true
 }
