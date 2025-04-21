@@ -6,11 +6,11 @@ use diesel::*;
 use diesel::{insert_into, QueryDsl, RunQueryDsl, SelectableHelper};
 use rsky_oauth::oauth_provider::token::refresh_token::RefreshToken;
 
-pub async fn insert_qb(refresh_token: RefreshToken, token_id: u64, db: &DbConn) -> Result<()> {
+pub async fn insert_qb(refresh_token: String, token_id: String, db: &DbConn) -> Result<()> {
     db.run(move |conn| {
         let rows: Vec<models::UsedRefreshToken> = vec![models::UsedRefreshToken {
-            token_id: token_id.to_string(),
-            refresh_token: refresh_token.val(),
+            token_id,
+            refresh_token,
         }];
         insert_into(RefreshSchema::used_refresh_token)
             .values(&rows)

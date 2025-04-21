@@ -10,7 +10,7 @@ pub struct PartialDeviceData {
     pub user_agent: Option<String>,
     pub ip_address: Option<IpAddr>,
     pub session_id: Option<SessionId>,
-    pub last_seen_at: Option<u64>,
+    pub last_seen_at: Option<i64>,
 }
 
 pub trait DeviceStore: Send + Sync {

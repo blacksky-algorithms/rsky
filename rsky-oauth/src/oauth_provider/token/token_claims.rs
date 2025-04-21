@@ -10,10 +10,10 @@ pub struct TokenClaims {
     pub iss: Option<String>,
     pub aud: Option<Audience>,
     pub sub: Option<Sub>,
-    pub exp: Option<u64>,
-    pub nbf: Option<u64>,
-    pub iat: Option<u64>,
-    pub jti: Option<TokenId>,
+    pub exp: Option<i64>,
+    pub nbf: Option<i64>,
+    pub iat: Option<i64>,
+    pub jti: Option<String>,
     pub htm: Option<String>,
     pub htu: Option<String>,
     pub ath: Option<String>,
@@ -33,7 +33,7 @@ pub struct TokenClaims {
     pub at_hash: Option<String>,
     pub c_hash: Option<String>,
     pub s_hash: Option<String>,
-    pub auth_time: Option<u64>,
+    pub auth_time: Option<i64>,
 
     // https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims
 
@@ -51,7 +51,7 @@ pub struct TokenClaims {
     pub birthdate: Option<String>,
     pub zoneinfo: Option<String>,
     pub locale: Option<String>,
-    pub updated_at: Option<u64>,
+    pub updated_at: Option<i64>,
 
     // OpenID: "email" scope
     pub email: Option<String>,
@@ -73,7 +73,7 @@ pub struct DpopClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub iat: Option<u64>,
+    pub iat: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

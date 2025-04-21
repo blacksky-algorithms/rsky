@@ -19,9 +19,9 @@ pub mod request;
 pub mod signer;
 pub mod token;
 
-pub fn now_as_secs() -> u64 {
+pub fn now_as_secs() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("timestamp in micros since UNIX epoch")
-        .as_secs()
+        .as_secs() as i64
 }

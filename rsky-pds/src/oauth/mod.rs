@@ -4,7 +4,6 @@ use rocket::{response, Request, Response};
 use rsky_oauth::jwk::Keyset;
 use rsky_oauth::oauth_provider::oauth_provider::OAuthProviderCreator;
 use rsky_oauth::oauth_provider::replay::replay_store::ReplayStore;
-use rsky_oauth::oauth_types::OAuthParResponse;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -39,6 +38,7 @@ pub struct SharedReplayStore {
 pub struct OAuthResponse<T: serde::Serialize> {
     pub body: T,
     pub status: Status,
+    pub dpop_nonce: Option<String>,
 }
 
 impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
@@ -53,9 +53,10 @@ impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
         response.raw_header("Pragma", "no-cache");
 
         // https://datatracker.ietf.org/doc/html/rfc9449#section-8.2
-        //TODO DPOP
-        response.raw_header("DPoP-Nonce", "TODO");
-        response.raw_header_adjoin("Access-Control-Expose-Headers", "DPoP-Nonce");
+        if let Some(dpop_nonce) = self.dpop_nonce {
+            response.raw_header("DPoP-Nonce", dpop_nonce);
+            response.raw_header_adjoin("Access-Control-Expose-Headers", "DPoP-Nonce");
+        }
 
         match request.headers().get_one("Accept") {
             None => {

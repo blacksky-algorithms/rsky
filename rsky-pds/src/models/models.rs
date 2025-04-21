@@ -468,13 +468,13 @@ pub struct Token {
     pub token_id: String,
     #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
-    pub created_at: bool,
+    pub created_at: DateTime<Utc>,
     #[diesel(column_name = updatedAt)]
     #[serde(rename = "updatedAt")]
-    pub updated_at: String,
+    pub updated_at: DateTime<Utc>,
     #[diesel(column_name = expiresAt)]
     #[serde(rename = "expiresAt")]
-    pub expires_at: i64,
+    pub expires_at: DateTime<Utc>,
     #[diesel(column_name = clientId)]
     #[serde(rename = "clientId")]
     pub client_id: String,
@@ -520,7 +520,7 @@ pub struct Device {
     pub ip_address: String,
     #[diesel(column_name = lastSeenAt)]
     #[serde(rename = "lastSeenAt")]
-    pub last_seen_at: String,
+    pub last_seen_at: DateTime<Utc>,
 }
 
 #[derive(
@@ -545,7 +545,7 @@ pub struct DeviceAccount {
     pub device_id: String,
     #[diesel(column_name = authenticatedAt)]
     #[serde(rename = "authenticatedAt")]
-    pub authenticated_at: String,
+    pub authenticated_at: DateTime<Utc>,
     pub remember: bool,
     #[diesel(column_name = authorizedClients)]
     #[serde(rename = "authorizedClients")]
@@ -582,7 +582,7 @@ pub struct AuthorizationRequest {
     pub parameters: String,
     #[diesel(column_name = expiresAt)]
     #[serde(rename = "expiresAt")]
-    pub expires_at: i64,
+    pub expires_at: DateTime<Utc>,
     pub code: Option<String>,
 }
 

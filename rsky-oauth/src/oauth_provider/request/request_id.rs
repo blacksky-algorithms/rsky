@@ -71,7 +71,6 @@ pub enum RequestIdError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_provider::token::token_id::{TokenId, TokenIdError};
 
     #[test]
     fn test_request_id() {

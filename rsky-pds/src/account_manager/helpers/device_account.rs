@@ -4,7 +4,7 @@ use crate::schema::pds::actor::dsl as ActorSchema;
 use crate::schema::pds::device::dsl as DeviceSchema;
 use crate::schema::pds::device_account::dsl as DeviceAccountSchema;
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use diesel::*;
 use diesel::{delete, QueryDsl, RunQueryDsl};
 use rsky_common;
@@ -90,7 +90,7 @@ pub async fn get_account_info(
                     Option<String>,
                     Option<String>,
                     Option<i16>,
-                    String,
+                    DateTime<Utc>,
                     bool,
                     String,
                 )>(conn)
@@ -110,7 +110,7 @@ pub async fn get_account_info(
     };
     let authorized_clients: Vec<OAuthClientId> =
         serde_json::from_str(entry.11.as_str()).unwrap_or(vec![]);
-    let authenticated_at = DateTime::parse_from_rfc3339(entry.9.as_str())?.timestamp();
+    let authenticated_at = entry.9;
     let account_info = AccountInfo {
         account: Account {
             sub,
@@ -123,17 +123,21 @@ pub async fn get_account_info(
         },
         info: DeviceAccountInfo {
             remembered: entry.10,
-            authenticated_at: authenticated_at as u64,
+            authenticated_at,
             authorized_clients,
         },
     };
     Ok(Some(account_info))
 }
 
-pub async fn read_qb(device_id: DeviceId, sub: Sub, db: &DbConn) -> Result<(bool, String, String)> {
+pub async fn read_qb(
+    device_id: DeviceId,
+    sub: Sub,
+    db: &DbConn,
+) -> Result<(bool, String, DateTime<Utc>)> {
     let did = sub.get();
     let device_id = device_id.into_inner();
-    let result: (bool, String, String) = db
+    let result: (bool, String, DateTime<Utc>) = db
         .run(move |conn| {
             DeviceAccountSchema::device_account
                 .filter(DeviceAccountSchema::did.eq(did))
@@ -194,7 +198,7 @@ pub async fn list_remembered_devices(
                     Option<String>,
                     Option<String>,
                     Option<i16>,
-                    String,
+                    DateTime<Utc>,
                     bool,
                     String,
                 )>(conn)
@@ -223,7 +227,7 @@ pub async fn list_remembered_devices(
             },
             info: DeviceAccountInfo {
                 remembered: entry.10,
-                authenticated_at: 0,
+                authenticated_at: entry.9,
                 authorized_clients,
             },
         };
@@ -240,7 +244,7 @@ pub async fn create_or_update(
 ) -> Result<()> {
     let device_id = device_id.into_inner();
     let did = sub.get();
-    let authenticated_at = now();
+    let authenticated_at = Utc::now();
 
     let authorized_clients: Vec<OAuthClientId> = vec![];
     let authorized_clients = serde_json::to_string(&authorized_clients)?;

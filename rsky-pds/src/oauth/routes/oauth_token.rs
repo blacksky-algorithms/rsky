@@ -178,6 +178,7 @@ impl<'r> FromData<'r> for OAuthTokenRequestBody {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[post("/oauth/token", data = "<body>")]
 pub async fn oauth_token(
     shared_oauth_provider: &State<SharedOAuthProvider>,
@@ -211,8 +212,10 @@ pub async fn oauth_token(
             Some(dpop_jkt),
         )
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: data,
         status: Status::Ok,
+        dpop_nonce,
     })
 }

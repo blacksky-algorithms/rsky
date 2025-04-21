@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[tracing::instrument(skip_all)]
 #[get("/.well-known/oauth-authorization-server")]
 pub async fn oauth_well_known(
     shared_oauth_provider: &State<SharedOAuthProvider>,
@@ -18,18 +19,19 @@ pub async fn oauth_well_known(
     account_manager: AccountManager,
 ) -> Result<Json<OAuthAuthorizationServerMetadata>, OAuthError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
-    let x = Arc::new(RwLock::new(account_manager));
+    let account_manager = Arc::new(RwLock::new(account_manager));
     let oauth_provider = creator(
-        x.clone(),
-        Some(x.clone()),
-        x.clone(),
-        x.clone(),
-        Some(x.clone()),
+        account_manager.clone(),
+        Some(account_manager.clone()),
+        account_manager.clone(),
+        account_manager.clone(),
+        Some(account_manager.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
     Ok(Json(oauth_provider.metadata.clone()))
 }
 
+#[tracing::instrument(skip_all)]
 #[get("/.well-known/oauth-protected-resource")]
 pub async fn oauth_well_known_resources() -> Json<OAuthProtectedResourceMetadata> {
     let result = OAuthProtectedResourceMetadata {

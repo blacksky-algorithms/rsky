@@ -65,7 +65,7 @@ impl OAuthVerifier {
         let replay_store = match opts.replay_store {
             None => match opts.redis {
                 None => Arc::new(RwLock::new(ReplayStoreMemory::new())),
-                Some(redis) => {
+                Some(_redis) => {
                     unimplemented!()
                 }
             },
@@ -146,7 +146,7 @@ impl OAuthVerifier {
 
         self.assert_token_type_allowed(token_type.clone(), AccessTokenType::JWT)?;
 
-        let signer = self.signer.write().await;
+        let signer = self.signer.read().await;
         let payload = signer
             .verify_access_token(signed_jwt.clone(), None)
             .await?
@@ -193,9 +193,10 @@ impl OAuthVerifier {
             .await
     }
 }
-
+//
 // #[cfg(test)]
 // mod tests {
+//     use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse};
 //     use super::*;
 //     use crate::jwk::Key;
 //     use crate::jwk_jose::jose_key::JoseKey;

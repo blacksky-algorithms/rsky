@@ -10,7 +10,6 @@ use crate::oauth_types::{
     OAuthClientIdLoopback, OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType,
     OAuthRedirectUri, OAuthResponseType, SubjectType,
 };
-use crate::simple_store::SimpleStore;
 use crate::simple_store_memory::SimpleStoreMemory;
 use jsonwebtoken::jwk::JwkSet;
 use std::future::Future;

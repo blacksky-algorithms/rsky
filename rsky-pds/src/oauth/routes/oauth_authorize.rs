@@ -124,6 +124,7 @@ impl<'r> FromRequest<'r> for OAuthAuthorizeRequestBody {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[get("/oauth/authorize")]
 pub async fn oauth_authorize(
     shared_oauth_provider: &State<SharedOAuthProvider>,

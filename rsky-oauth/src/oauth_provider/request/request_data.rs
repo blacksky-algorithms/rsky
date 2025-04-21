@@ -3,24 +3,25 @@ use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::request::code::Code;
 use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthClientId};
+use chrono::{DateTime, Utc};
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestData {
     pub client_id: OAuthClientId,
     pub client_auth: ClientAuth,
     pub parameters: OAuthAuthorizationRequestParameters,
-    pub expires_at: i64,
+    pub expires_at: DateTime<Utc>,
     pub device_id: Option<DeviceId>,
     pub sub: Option<Sub>,
     pub code: Option<Code>,
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestDataAuthorized {
     pub client_id: OAuthClientId,
     pub client_auth: ClientAuth,
     pub parameters: OAuthAuthorizationRequestParameters,
-    pub expires_at: i64,
+    pub expires_at: DateTime<Utc>,
     pub device_id: DeviceId,
     pub sub: Sub,
     pub code: Option<Code>,

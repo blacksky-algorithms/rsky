@@ -5,13 +5,13 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthClientId,
 };
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
-#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenData {
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub expires_at: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     pub client_id: OAuthClientId,
     pub client_auth: ClientAuth,
     pub device_id: Option<DeviceId>,

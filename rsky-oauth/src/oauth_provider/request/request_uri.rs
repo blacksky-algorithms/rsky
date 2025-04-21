@@ -1,4 +1,3 @@
-use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_provider::request::request_id::RequestId;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};

@@ -6,6 +6,7 @@ use rocket::{get, State};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[tracing::instrument(skip_all)]
 #[get("/oauth/jwks")]
 pub async fn oauth_jwks(
     shared_oauth_provider: &State<SharedOAuthProvider>,

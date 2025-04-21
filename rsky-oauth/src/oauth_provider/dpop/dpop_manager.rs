@@ -6,7 +6,6 @@ use crate::oauth_types::OAuthAccessToken;
 use base64ct::{Base64, Encoding};
 use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use rocket::futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -47,7 +46,7 @@ impl DpopManager {
             None => None,
             Some(dpop_nonce) => {
                 let mut dpop_nonce = dpop_nonce.write().await;
-                Some(dpop_nonce.next())
+                Some(dpop_nonce.next_nonce())
             }
         }
     }
@@ -96,7 +95,7 @@ impl DpopManager {
 
                 if let Some(iat) = result.claims.iat {
                     //TODO: for tests
-                    if iat < now - 1000000 {
+                    if iat < now - 10 {
                         return Err(OAuthError::InvalidDpopProofError(
                             "\"iat\" expired".to_string(),
                         ));
@@ -157,13 +156,12 @@ impl DpopManager {
 
         if let Some(payload_nonce) = &payload.nonce {
             if let Some(dpop_nonce) = &self.dpop_nonce {
-                //TODO: Disabled for testing purposes atm
-                // let dpop_nonce = dpop_nonce.read().await;
-                // if !dpop_nonce.check(payload_nonce) {
-                //     return Err(OAuthError::InvalidDpopProofError(
-                //         "DPoP nonce mismatch".to_string(),
-                //     )); //DPoP Nonce Error
-                // }
+                let dpop_nonce = dpop_nonce.read().await;
+                if !dpop_nonce.check(payload_nonce) {
+                    return Err(OAuthError::InvalidDpopProofError(
+                        "DPoP nonce mismatch".to_string(),
+                    )); //DPoP Nonce Error
+                }
             }
         }
 

@@ -131,6 +131,7 @@ mod tests {
     use crate::oauth_types::{
         OAuthAuthorizationRequestParameters, OAuthClientId, OAuthResponseType,
     };
+    use chrono::Utc;
 
     fn create_request_store() -> RequestStoreMemory {
         RequestStoreMemory::new()
@@ -168,7 +169,7 @@ mod tests {
                 prompt: None,
                 authorization_details: None,
             },
-            expires_at: 0,
+            expires_at: Utc::now(),
             device_id: None,
             sub: None,
             code: None,
@@ -183,7 +184,7 @@ mod tests {
         let data: RequestData = RequestData {
             client_id: OAuthClientId::new("client").unwrap(),
             client_auth: ClientAuth {
-                method: "".to_string(),
+                method: "POST".to_string(),
                 alg: "".to_string(),
                 kid: "".to_string(),
                 jkt: "".to_string(),
@@ -208,7 +209,7 @@ mod tests {
                 prompt: None,
                 authorization_details: None,
             },
-            expires_at: 0,
+            expires_at: Utc::now(),
             device_id: None,
             sub: None,
             code: None,
@@ -253,7 +254,7 @@ mod tests {
                 prompt: None,
                 authorization_details: None,
             },
-            expires_at: 0,
+            expires_at: Utc::now(),
             device_id: None,
             sub: None,
             code: None,
@@ -314,7 +315,7 @@ mod tests {
                 prompt: None,
                 authorization_details: None,
             },
-            expires_at: 0,
+            expires_at: Utc::now(),
             device_id: None,
             sub: None,
             code: Some(code.clone()),

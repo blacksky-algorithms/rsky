@@ -1,7 +1,5 @@
 use crate::oauth_types::util::{is_hostname_ip, is_loopback_host};
-use base64::Engine;
 use http::Uri;
-use rocket::uri;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{

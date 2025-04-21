@@ -147,8 +147,10 @@ pub async fn oauth_introspect(
     let body = oauth_provider
         .introspect(body.client_credentials, body.token_identification)
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body,
         status: Status::Ok,
+        dpop_nonce,
     })
 }

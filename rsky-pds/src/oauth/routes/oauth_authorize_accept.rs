@@ -193,6 +193,7 @@ impl<'r> FromRequest<'r> for AuthorizeAccept {
 // 4) validate the sec-fetch-mode header,
 // 5) validate the sec-fetch-dest header (see navigationHandler).
 // And will error if any of these checks fail.
+#[tracing::instrument(skip_all)]
 #[get("/oauth/authorize/accept")]
 pub async fn oauth_authorize_accept(
     shared_oauth_provider: &State<SharedOAuthProvider>,

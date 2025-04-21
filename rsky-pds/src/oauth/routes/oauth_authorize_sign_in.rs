@@ -163,8 +163,10 @@ pub async fn oauth_authorize_sign_in(
             sign_in.credentials,
         )
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: res,
         status: Status::Ok,
+        dpop_nonce,
     })
 }

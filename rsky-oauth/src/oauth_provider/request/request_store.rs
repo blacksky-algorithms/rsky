@@ -6,6 +6,7 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::request::request_data::RequestData;
 use crate::oauth_provider::request::request_id::RequestId;
 use crate::oauth_types::{OAuthAuthorizationRequestParameters, OAuthClientId};
+use chrono::{DateTime, Utc};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -14,7 +15,7 @@ pub struct UpdateRequestData {
     pub client_id: Option<OAuthClientId>,
     pub client_auth: Option<ClientAuth>,
     pub parameters: Option<OAuthAuthorizationRequestParameters>,
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<DateTime<Utc>>,
     pub device_id: Option<DeviceId>,
     pub sub: Option<Sub>,
     pub code: Option<Code>,

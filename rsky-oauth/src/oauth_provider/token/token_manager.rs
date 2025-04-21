@@ -1,4 +1,4 @@
-use crate::jwk::{Audience, JwtConfirmation, Key, SignedJwt, VerifyOptions};
+use crate::jwk::{Audience, JwtConfirmation, SignedJwt, VerifyOptions};
 use crate::oauth_provider::access_token::access_token_type::AccessTokenType;
 use crate::oauth_provider::account::account::Account;
 use crate::oauth_provider::account::account_store::DeviceAccountInfo;
@@ -29,6 +29,7 @@ use crate::oauth_types::{
     OAuthRefreshTokenGrantTokenRequest, OAuthTokenIdentification, OAuthTokenResponse,
     OAuthTokenType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -59,7 +60,7 @@ pub struct TokenManager {
     pub store: Arc<RwLock<dyn TokenStore>>,
     pub signer: Arc<RwLock<Signer>>,
     pub access_token_type: AccessTokenType,
-    pub token_max_age: u64,
+    pub token_max_age: i64,
     pub oauth_hooks: Arc<OAuthHooks>,
 }
 
@@ -68,7 +69,7 @@ pub type TokenManagerCreator = Box<
             Arc<RwLock<dyn TokenStore>>,
             Arc<RwLock<Signer>>,
             AccessTokenType,
-            Option<u64>,
+            Option<i64>,
             Arc<OAuthHooks>,
         ) -> TokenManager
         + Send
@@ -81,7 +82,7 @@ impl TokenManager {
             move |store: Arc<RwLock<dyn TokenStore>>,
                   signer: Arc<RwLock<Signer>>,
                   access_token_type: AccessTokenType,
-                  max_age: Option<u64>,
+                  max_age: Option<i64>,
                   hooks: Arc<OAuthHooks>|
                   -> TokenManager {
                 TokenManager::new(store, signer, access_token_type, max_age, hooks)
@@ -93,7 +94,7 @@ impl TokenManager {
         store: Arc<RwLock<dyn TokenStore>>,
         signer: Arc<RwLock<Signer>>,
         access_token_type: AccessTokenType,
-        max_age: Option<u64>,
+        max_age: Option<i64>,
         oauth_hooks: Arc<OAuthHooks>,
     ) -> Self {
         let token_max_age = max_age.unwrap_or_else(|| TOKEN_MAX_AGE);
@@ -106,10 +107,9 @@ impl TokenManager {
         }
     }
 
-    fn create_token_expiry(&self, now: Option<u64>) -> u64 {
-        let time = now_as_secs();
-        let now = now.unwrap_or_else(|| time);
-        now + self.token_max_age
+    fn create_token_expiry(&self, now: Option<DateTime<Utc>>) -> DateTime<Utc> {
+        let now = now.unwrap_or(Utc::now());
+        DateTime::from_timestamp(now.timestamp() + self.token_max_age, 0).unwrap()
     }
 
     fn use_jwt_access_token(&self, account: Account) -> bool {
@@ -164,7 +164,6 @@ impl TokenManager {
             }
         }
 
-        let mut code: Option<Code> = None;
         let input_grant_type = input.grant_type();
         if !client.metadata.grant_types.contains(&input_grant_type) {
             return Err(OAuthError::InvalidGrantError(format!(
@@ -222,7 +221,7 @@ impl TokenManager {
                             }
                         }
                     }
-                } else if let Some(code_verifier) = input.code_verifier() {
+                } else if input.code_verifier().is_some() {
                     return Err(OAuthError::InvalidRequestError(
                         "code_challenge parameter wasn't provided".to_string(),
                     ));
@@ -248,7 +247,7 @@ impl TokenManager {
             None
         };
 
-        let now = now_as_secs();
+        let now = Utc::now();
         let expires_at = self.create_token_expiry(Some(now));
 
         let details = match &self.oauth_hooks.on_authorization_details {
@@ -258,11 +257,11 @@ impl TokenManager {
 
         let device_id = match device {
             None => None,
-            Some((device_id, device_account_info)) => Some(device_id),
+            Some((device_id, _device_account_info)) => Some(device_id),
         };
         let token_data = TokenData {
-            created_at: now,
-            updated_at: now,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
             expires_at,
             client_id: client.id.clone(),
             client_auth,
@@ -270,7 +269,7 @@ impl TokenManager {
             sub: account.sub.clone(),
             parameters: parameters.clone(),
             details: details.clone(),
-            code,
+            code: None,
         };
 
         let mut store = self.store.write().await;
@@ -338,7 +337,7 @@ impl TokenManager {
         &self,
         access_token: OAuthAccessToken,
         refresh_token: Option<RefreshToken>,
-        expires_at: u64,
+        expires_at: DateTime<Utc>,
         parameters: OAuthAuthorizationRequestParameters,
         account: Account,
         authorization_details: Option<OAuthAuthorizationDetails>,
@@ -357,7 +356,7 @@ impl TokenManager {
             token_type,
             scope: parameters.scope,
             refresh_token,
-            expires_in: Some(expires_at),
+            expires_in: Some(expires_at.timestamp() - now_as_secs()),
             id_token: None,
             authorization_details,
             // ATPROTO extension: add the sub claim to the token response to allow
@@ -491,7 +490,7 @@ impl TokenManager {
         } else {
             AUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT
         };
-        if last_activity + inactivity_timeout < now_as_secs() {
+        if last_activity.timestamp() + inactivity_timeout < now_as_secs() {
             let mut store = self.store.write().await;
             store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
@@ -504,7 +503,7 @@ impl TokenManager {
         } else {
             AUTHENTICATED_REFRESH_LIFETIME
         };
-        if data.created_at + lifetime < now_as_secs() {
+        if data.created_at.timestamp() + lifetime < now_as_secs() {
             let mut store = self.store.write().await;
             store.delete_token(token_info.id).await?;
             return Err(OAuthError::InvalidGrantError(
@@ -519,7 +518,7 @@ impl TokenManager {
         let next_token_id = TokenId::generate();
         let next_refresh_token = RefreshToken::generate();
 
-        let now = now_as_secs();
+        let now = Utc::now();
         let expires_at = self.create_token_expiry(Some(now));
 
         let new_token_data = NewTokenData {
@@ -537,7 +536,7 @@ impl TokenManager {
             // a valid DPoP proof.
             client_auth,
             expires_at,
-            updated_at: now,
+            updated_at: Utc::now(),
         };
         let mut store = self.store.write().await;
         store
@@ -619,7 +618,7 @@ impl TokenManager {
                 None => return Err(OAuthError::RuntimeError("".to_string())),
             };
             let mut store = self.store.write().await;
-            store.delete_token(token_id).await?;
+            store.delete_token(TokenId::new(token_id).unwrap()).await?;
             return Ok(());
         } else if let Ok(refresh_token) = RefreshToken::new(token.as_str()) {
             let store = self.store.read().await;
@@ -668,7 +667,7 @@ impl TokenManager {
         }
 
         let now = now_as_secs();
-        if token_info.data.expires_at < now {
+        if token_info.data.expires_at.timestamp() < now {
             return Err(OAuthError::InvalidGrantError("Token expired".to_string()));
         }
 
@@ -746,7 +745,7 @@ impl TokenManager {
                 "Invalid token".to_string(),
             )),
             Some(token_info) => {
-                if token_info.data.expires_at > now_as_secs() {
+                if token_info.data.expires_at.timestamp() > now_as_secs() {
                     return Err(OAuthError::InvalidTokenError(
                         token_type,
                         "Token expired".to_string(),
@@ -779,8 +778,8 @@ impl TokenManager {
         let claims = TokenClaims {
             aud: Some(token_info.account.aud.clone()),
             sub: Some(token_info.account.sub.clone()),
-            exp: Some(token_info.data.expires_at.clone()),
-            iat: Some(token_info.data.updated_at.clone()),
+            exp: Some(token_info.data.expires_at.timestamp()),
+            iat: Some(token_info.data.updated_at.timestamp()),
             scope: token_info.data.parameters.scope.clone(),
             client_id: Some(token_info.data.client_id.clone()),
             cnf,
@@ -844,9 +843,9 @@ mod tests {
                 Ok(Some(TokenInfo {
                     id: TokenId::new("tok-0123456789abcdef").unwrap(),
                     data: TokenData {
-                        created_at: 0,
-                        updated_at: 0,
-                        expires_at: 0,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        expires_at: Utc::now(),
                         client_id: OAuthClientId::new("client123").unwrap(),
                         client_auth: ClientAuth {
                             method: "POST".to_string(),
@@ -881,7 +880,7 @@ mod tests {
                     },
                     account: Account {
                         sub: Sub::new("1").unwrap(),
-                        aud: Audience::Single("".to_string()),
+                        aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                         preferred_username: None,
                         email: None,
                         email_verified: None,
@@ -928,9 +927,9 @@ mod tests {
                 Ok(Some(TokenInfo {
                     id: TokenId::new("tok-7e415d9b2aec8f78d11d2b8c7144b87d").unwrap(),
                     data: TokenData {
-                        created_at: 0,
-                        updated_at: 0,
-                        expires_at: 0,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        expires_at: Utc::now(),
                         client_id: OAuthClientId::new("client1".to_string()).unwrap(),
                         client_auth: ClientAuth {
                             method: "".to_string(),
@@ -1063,7 +1062,7 @@ mod tests {
         };
         let account = Account {
             sub: Sub::new("sub1").unwrap(),
-            aud: Audience::Single("".to_string()),
+            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
             preferred_username: None,
             email: None,
             email_verified: None,
@@ -1256,10 +1255,13 @@ mod tests {
         let expected = TokenInfo {
             id: TokenId::new("").unwrap(),
             data: TokenData {
-                created_at: 0,
-                updated_at: 0,
-                expires_at: 0,
-                client_id: OAuthClientId::new("").unwrap(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                expires_at: Utc::now(),
+                client_id: OAuthClientId::new(
+                    "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                )
+                .unwrap(),
                 client_auth: ClientAuth {
                     method: "".to_string(),
                     alg: "".to_string(),
@@ -1267,9 +1269,12 @@ mod tests {
                     jkt: "".to_string(),
                 },
                 device_id: None,
-                sub: Sub::new("").unwrap(),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                 parameters: OAuthAuthorizationRequestParameters {
-                    client_id: OAuthClientId::new("").unwrap(),
+                    client_id: OAuthClientId::new(
+                        "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                    )
+                    .unwrap(),
                     state: None,
                     redirect_uri: None,
                     scope: None,
@@ -1292,8 +1297,8 @@ mod tests {
                 code: None,
             },
             account: Account {
-                sub: Sub::new("").unwrap(),
-                aud: Audience::Single("".to_string()),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 preferred_username: None,
                 email: None,
                 email_verified: None,
@@ -1318,20 +1323,20 @@ mod tests {
         let expected = TokenInfo {
             id: TokenId::new("").unwrap(),
             data: TokenData {
-                created_at: 0,
-                updated_at: 0,
-                expires_at: 0,
-                client_id: OAuthClientId::new("").unwrap(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                expires_at: Utc::now(),
+                client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
                 client_auth: ClientAuth {
-                    method: "".to_string(),
+                    method: "POST".to_string(),
                     alg: "".to_string(),
                     kid: "".to_string(),
                     jkt: "".to_string(),
                 },
                 device_id: None,
-                sub: Sub::new("").unwrap(),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                 parameters: OAuthAuthorizationRequestParameters {
-                    client_id: OAuthClientId::new("").unwrap(),
+                    client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
                     state: None,
                     redirect_uri: None,
                     scope: None,
@@ -1354,8 +1359,8 @@ mod tests {
                 code: None,
             },
             account: Account {
-                sub: Sub::new("").unwrap(),
-                aud: Audience::Single("".to_string()),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 preferred_username: None,
                 email: None,
                 email_verified: None,
@@ -1388,10 +1393,13 @@ mod tests {
             token_info: TokenInfo {
                 id: TokenId::new("").unwrap(),
                 data: TokenData {
-                    created_at: 0,
-                    updated_at: 0,
-                    expires_at: 0,
-                    client_id: OAuthClientId::new("").unwrap(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    expires_at: Utc::now(),
+                    client_id: OAuthClientId::new(
+                        "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                    )
+                    .unwrap(),
                     client_auth: ClientAuth {
                         method: "".to_string(),
                         alg: "".to_string(),

@@ -418,7 +418,7 @@ impl OAuthProvider {
         let customization = options.customization;
         let authentication_max_age = options
             .authentication_max_age
-            .unwrap_or_else(|| AUTHENTICATION_MAX_AGE);
+            .unwrap_or_else(|| AUTHENTICATION_MAX_AGE as u64);
 
         let account_manager = AccountManager::new(account_store);
         let client_manager = ClientManager::new(
@@ -466,8 +466,8 @@ impl OAuthProvider {
     fn login_required(&self, info: &DeviceAccountInfo) -> bool {
         /* in seconds */
         let now = now_as_secs();
-        let auth_age = now - info.authenticated_at;
-        auth_age >= self.authentication_max_age
+        let auth_age = now - info.authenticated_at.timestamp();
+        auth_age as u64 >= self.authentication_max_age
     }
 
     async fn authenticate_client(
@@ -545,7 +545,7 @@ impl OAuthProvider {
                     "Request object must contain a jti claim".to_string(),
                 ));
             }
-            Some(jti) => jti.val(),
+            Some(jti) => jti,
         };
 
         if !self
@@ -609,7 +609,8 @@ impl OAuthProvider {
             .create_authorization_request(client, client_auth, parameters, None, dpop_jkt)
             .await?;
 
-        let response = OAuthParResponse::new(res.uri.into_inner(), res.expires_at as u64).unwrap();
+        let expires_in = res.expires_at.timestamp() - now_as_secs();
+        let response = OAuthParResponse::new(res.uri.into_inner(), expires_in).unwrap();
         Ok(response)
     }
 
@@ -1226,8 +1227,8 @@ impl OAuthProvider {
             token_type: Some(token_type),
             authorization_details: token_info.data.details,
             aud: None, //token_info.account.aud,
-            exp: Some(token_info.data.expires_at as i64),
-            iat: Some(token_info.data.updated_at as i64),
+            exp: Some(token_info.data.expires_at.timestamp()),
+            iat: Some(token_info.data.updated_at.timestamp()),
             iss: Some(signer.issuer.to_string()),
             jti: Some(token_info.id.val()),
             nbf: None,
@@ -1281,6 +1282,7 @@ mod tests {
         OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthRefreshToken,
         OAuthResponseType, OAuthScope, ResponseMode, TokenTypeHint, ValidUri, WebUri,
     };
+    use chrono::Utc;
     use jsonwebtoken::jwk::{
         AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
         EllipticCurveKeyType, KeyAlgorithm, KeyOperations, PublicKeyUse,
@@ -1303,7 +1305,7 @@ mod tests {
                 Ok(Some(AccountInfo {
                     account: Account {
                         sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
-                        aud: Audience::Single("".to_string()),
+                        aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                         preferred_username: None,
                         email: None,
                         email_verified: None,
@@ -1312,7 +1314,7 @@ mod tests {
                     },
                     info: DeviceAccountInfo {
                         remembered: false,
-                        authenticated_at: 0,
+                        authenticated_at: Utc::now(),
                         authorized_clients: vec![],
                     },
                 }))
@@ -1452,15 +1454,15 @@ mod tests {
                         )
                         .unwrap(),
                         data: TokenData {
-                            created_at: 0,
-                            updated_at: 0,
-                            expires_at: 0,
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                            expires_at: Utc::now(),
                             client_id: OAuthClientId::new(
                                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                             )
                             .unwrap(),
                             client_auth: ClientAuth {
-                                method: "".to_string(),
+                                method: "POST".to_string(),
                                 alg: "".to_string(),
                                 kid: "".to_string(),
                                 jkt: "".to_string(),
@@ -1495,7 +1497,7 @@ mod tests {
                         },
                         account: Account {
                             sub: Sub::new("sub1").unwrap(),
-                            aud: Audience::Single("".to_string()),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                             preferred_username: None,
                             email: None,
                             email_verified: None,
@@ -1571,7 +1573,7 @@ mod tests {
                             prompt: None,
                             authorization_details: None,
                         },
-                        expires_at: now_as_secs() + PAR_EXPIRES_IN,
+                        expires_at: Utc::now(),
                         device_id: None,
                         sub: None,
                         code: None,
@@ -2035,7 +2037,7 @@ mod tests {
         let expected = SignInResponse {
             account: Account {
                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
-                aud: Audience::Single("".to_string()),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 preferred_username: None,
                 email: None,
                 email_verified: None,

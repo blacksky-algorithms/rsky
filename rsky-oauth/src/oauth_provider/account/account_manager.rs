@@ -9,6 +9,7 @@ use crate::oauth_types::is_oauth_client_id_loopback;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+//TODO protect against timing attacks
 const TIMING_ATTACK_MITIGATION_DELAY: u32 = 400;
 
 pub struct AccountManager {
@@ -43,18 +44,14 @@ impl AccountManager {
         let store = self.store.read().await;
         match store.get_device_account(device_id.clone(), sub).await {
             Ok(result) => match result {
-                None => {
-                    return Err(OAuthError::InvalidRequestError(
-                        "Account not found".to_string(),
-                    ))
-                }
+                None => Err(OAuthError::InvalidRequestError(
+                    "Account not found".to_string(),
+                )),
                 Some(account_info) => Ok(account_info),
             },
-            Err(_) => {
-                return Err(OAuthError::InvalidRequestError(
-                    "Account not found".to_string(),
-                ))
-            }
+            Err(_) => Err(OAuthError::InvalidRequestError(
+                "Account not found".to_string(),
+            )),
         }
     }
 
@@ -67,7 +64,7 @@ impl AccountManager {
     ) {
         // "Loopback" clients are not distinguishable from one another.
         if !is_oauth_client_id_loopback(&client.id) {
-            let mut store = self.store.write().await;
+            let store = self.store.read().await;
             store
                 .add_authorized_client(device_id, account.sub, client.id)
                 .await
@@ -94,6 +91,7 @@ mod tests {
     use crate::jwk::Audience;
     use crate::oauth_provider::account::account_store::DeviceAccountInfo;
     use crate::oauth_types::OAuthClientId;
+    use chrono::Utc;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -106,7 +104,35 @@ mod tests {
             device_id: DeviceId,
         ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
         {
-            unimplemented!()
+            let expected_credentials = SignInCredentials {
+                username: "username".to_string(),
+                password: "password".to_string(),
+                remember: None,
+                email_otp: None,
+            };
+            let expected_device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a1").unwrap();
+            Box::pin(async move {
+                if credentials == expected_credentials && device_id == expected_device_id {
+                    Ok(Some(AccountInfo {
+                        account: Account {
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
+                        },
+                        info: DeviceAccountInfo {
+                            remembered: false,
+                            authenticated_at: Utc::now(),
+                            authorized_clients: vec![],
+                        },
+                    }))
+                } else {
+                    panic!()
+                }
+            })
         }
 
         fn add_authorized_client(
@@ -115,7 +141,13 @@ mod tests {
             sub: Sub,
             client_id: OAuthClientId,
         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-            unimplemented!()
+            Box::pin(async move {
+                if device_id == DeviceId::new("dev-64976a0a962c4b7521abd679789c44a3").unwrap() {
+                    Ok(())
+                } else {
+                    panic!()
+                }
+            })
         }
 
         fn get_device_account(
@@ -124,7 +156,30 @@ mod tests {
             sub: Sub,
         ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
         {
-            unimplemented!()
+            Box::pin(async move {
+                if device_id == DeviceId::new("dev-64976a0a962c4b7521abd679789c44a2").unwrap()
+                    && sub == Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap()
+                {
+                    Ok(Some(AccountInfo {
+                        account: Account {
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
+                        },
+                        info: DeviceAccountInfo {
+                            remembered: false,
+                            authenticated_at: Utc::now(),
+                            authorized_clients: vec![],
+                        },
+                    }))
+                } else {
+                    panic!()
+                }
+            })
         }
 
         fn remove_device_account(
@@ -140,7 +195,29 @@ mod tests {
             device_id: DeviceId,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
         {
-            unimplemented!()
+            Box::pin(async move {
+                if device_id == DeviceId::new("dev-64976a0a962c4b7521abd679789c44a4").unwrap() {
+                    let infos = vec![AccountInfo {
+                        account: Account {
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
+                        },
+                        info: DeviceAccountInfo {
+                            remembered: false,
+                            authenticated_at: Utc::now(),
+                            authorized_clients: vec![],
+                        },
+                    }];
+                    Ok(infos)
+                } else {
+                    panic!()
+                }
+            })
         }
     }
 
@@ -152,20 +229,20 @@ mod tests {
     async fn test_sign_in() {
         let account_manager = create_account_manager();
         let credentials = SignInCredentials {
-            username: "".to_string(),
-            password: "".to_string(),
+            username: "username".to_string(),
+            password: "password".to_string(),
             remember: None,
             email_otp: None,
         };
-        let device_id = DeviceId::new("").unwrap();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a1").unwrap();
         let result = account_manager
             .sign_in(credentials, device_id)
             .await
             .unwrap();
         let expected = AccountInfo {
             account: Account {
-                sub: Sub::new("").unwrap(),
-                aud: Audience::Single("".to_string()),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 preferred_username: None,
                 email: None,
                 email_verified: None,
@@ -174,7 +251,7 @@ mod tests {
             },
             info: DeviceAccountInfo {
                 remembered: false,
-                authenticated_at: 0,
+                authenticated_at: Utc::now(),
                 authorized_clients: vec![],
             },
         };
@@ -183,13 +260,13 @@ mod tests {
     #[tokio::test]
     async fn test_get() {
         let account_manager = create_account_manager();
-        let device_id = DeviceId::new("").unwrap();
-        let sub = Sub::new("").unwrap();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a2").unwrap();
+        let sub = Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap();
         let result = account_manager.get(&device_id, sub).await.unwrap();
         let expected = AccountInfo {
             account: Account {
-                sub: Sub::new("").unwrap(),
-                aud: Audience::Single("".to_string()),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 preferred_username: None,
                 email: None,
                 email_verified: None,
@@ -198,7 +275,7 @@ mod tests {
             },
             info: DeviceAccountInfo {
                 remembered: false,
-                authenticated_at: 0,
+                authenticated_at: Utc::now(),
                 authorized_clients: vec![],
             },
         };
@@ -207,10 +284,10 @@ mod tests {
     #[tokio::test]
     async fn test_add_authorized_client() {
         let account_manager = create_account_manager();
-        let device_id = DeviceId::new("").unwrap();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a3").unwrap();
         let account = Account {
-            sub: Sub::new("").unwrap(),
-            aud: Audience::Single("".to_string()),
+            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
             preferred_username: None,
             email: None,
             email_verified: None,
@@ -218,13 +295,14 @@ mod tests {
             name: None,
         };
         let client = Client {
-            id: OAuthClientId::new("").unwrap(),
+            id: OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json")
+                .unwrap(),
             metadata: Default::default(),
             jwks: None,
             info: Default::default(),
         };
         let _client_auth = ClientAuth {
-            method: "".to_string(),
+            method: "POST".to_string(),
             alg: "".to_string(),
             kid: "".to_string(),
             jkt: "".to_string(),
@@ -237,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_list() {
         let account_manager = create_account_manager();
-        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a8").unwrap();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679789c44a4").unwrap();
         let result = account_manager.list(&device_id).await;
         let expected = vec![];
         assert_eq!(result, expected);

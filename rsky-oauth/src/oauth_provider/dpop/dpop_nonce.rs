@@ -31,7 +31,7 @@ impl DpopNonce {
                 "Expected 32 bytes".to_string(),
             ));
         }
-        if step > DPOP_NONCE_MAX_AGE / 3 {
+        if step > DPOP_NONCE_MAX_AGE as u64 / 3 {
             return Err(DpopNonceError::InvalidRequestParams(
                 "Invalid step".to_string(),
             ));
@@ -52,7 +52,7 @@ impl DpopNonce {
         })
     }
 
-    pub fn next(&mut self) -> String {
+    pub fn next_nonce(&mut self) -> String {
         self.rotate();
         self.next.clone()
     }
@@ -92,7 +92,7 @@ impl DpopNonce {
         input: Option<DpopNonceInput>,
         _step: Option<u64>,
     ) -> Result<DpopNonce, DpopNonceError> {
-        let step = _step.unwrap_or(DPOP_NONCE_MAX_AGE / 3);
+        let step = _step.unwrap_or(DPOP_NONCE_MAX_AGE as u64 / 3);
         match input {
             None => {
                 let random_bytes = rand::rng().random::<[u8; 32]>();

@@ -32,7 +32,3 @@ pub fn compare_client_auth(a: &ClientAuth, b: &ClientAuth) -> Result<bool, OAuth
         "Invalid ClientAuth method".to_string(),
     ))
 }
-
-pub async fn auth_jwk_thumbprint(key: Vec<u8>) -> String {
-    unimplemented!()
-}

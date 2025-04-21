@@ -2,7 +2,6 @@ use crate::oauth_provider::constants::{
     CLIENT_ASSERTION_MAX_AGE, CODE_CHALLENGE_REPLAY_TIMEFRAME, DPOP_NONCE_MAX_AGE, JAR_MAX_AGE,
 };
 use crate::oauth_provider::replay::replay_store::ReplayStore;
-use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::OAuthClientId;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -80,6 +79,7 @@ fn as_time_frame(time_frame: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::oauth_provider::replay::replay_store_memory::ReplayStoreMemory;
+    use crate::oauth_provider::token::token_id::TokenId;
     use crate::oauth_types::OAuthClientId;
 
     fn create_replay_manager() -> ReplayManager {

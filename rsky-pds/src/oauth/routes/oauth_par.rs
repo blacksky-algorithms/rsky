@@ -190,6 +190,7 @@ impl<'r> FromData<'r> for OAuthParRequestBody {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[post("/oauth/par", data = "<body>")]
 pub async fn oauth_par(
     shared_oauth_provider: &State<SharedOAuthProvider>,
@@ -223,8 +224,10 @@ pub async fn oauth_par(
             Some(dpop_jkt),
         )
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: res,
         status: Status::Created,
+        dpop_nonce,
     })
 }

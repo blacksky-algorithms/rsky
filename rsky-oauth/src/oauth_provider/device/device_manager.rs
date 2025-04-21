@@ -6,6 +6,7 @@ use crate::oauth_provider::device::device_store::{DeviceStore, PartialDeviceData
 use crate::oauth_provider::device::session_id::SessionId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
+use chrono::Utc;
 use rocket::Request;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -181,7 +182,7 @@ impl DeviceManager {
             user_agent: details.user_agent,
             ip_address: details.ip_address,
             session_id: session_id.clone(),
-            last_seen_at: now_as_secs(),
+            last_seen_at: Utc::now(),
         };
 
         let mut store = self.store.write().await;
@@ -208,7 +209,7 @@ impl DeviceManager {
         drop(store);
 
         let last_seen_at = data.last_seen_at;
-        let age = now_as_secs() - last_seen_at;
+        let age = now_as_secs() - last_seen_at.timestamp();
 
         if session_id != data.session_id {
             if age <= SESSION_FIXATION_MAX_AGE {

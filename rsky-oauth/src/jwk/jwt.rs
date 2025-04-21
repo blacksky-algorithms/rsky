@@ -254,13 +254,13 @@ pub struct JwtPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<Sub>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp: Option<u64>,
+    pub exp: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub nbf: Option<u64>,
+    pub nbf: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub iat: Option<u64>,
+    pub iat: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jti: Option<TokenId>,
+    pub jti: Option<String>,
 
     // Additional standard claims
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -55,9 +55,11 @@ pub async fn get_oauth_revoke(
     oauth_provider
         .revoke(body.oauth_token_identification)
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: (),
         status: Status::Ok,
+        dpop_nonce,
     })
 }
 
@@ -181,6 +183,7 @@ impl<'r> FromData<'r> for OAuthRevokeRequestBody {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[post("/oauth/revoke", data = "<body>")]
 pub async fn post_oauth_revoke(
     shared_oauth_provider: &State<SharedOAuthProvider>,
@@ -201,8 +204,10 @@ pub async fn post_oauth_revoke(
     oauth_provider
         .revoke(body.oauth_token_identification)
         .await?;
+    let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: (),
         status: Status::Ok,
+        dpop_nonce,
     })
 }

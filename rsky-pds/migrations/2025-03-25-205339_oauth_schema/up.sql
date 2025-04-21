@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS pds.authorization_request
     "clientId"   character varying NOT NULL,
     "clientAuth" character varying NOT NULL,
     parameters   character varying NOT NULL,
-    "expiresAt"  bigint            NOT NULL,
+    "expiresAt" Timestamptz NOT NULL,
     code         character varying
 );
 
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS pds.device
     "sessionId"  character varying unique,
     "userAgent"  character varying,
     "ipAddress"  character varying NOT NULL,
-    "lastSeenAt" character varying NOT NULL
+    "lastSeenAt" Timestamptz NOT NULL
 );
 
 ALTER TABLE ONLY pds.device
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS pds.device_account
 (
     did                 character varying NOT NULL,
     "deviceId"          character varying NOT NULL,
-    "authenticatedAt"   character varying NOT NULL,
+    "authenticatedAt" Timestamptz NOT NULL,
     remember            boolean           NOT NULL,
     "authorizedClients" character varying NOT NULL
 );
@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS pds.token
     id                    character varying NOT NULL, --TODO
     did                   character varying NOT NULL,
     "tokenId"             character varying NOT NULL unique,
-    "createdAt"           boolean           NOT NULL,
-    "updatedAt"           character varying NOT NULL,
-    "expiresAt"           bigint            NOT NULL,
+    "createdAt" Timestamptz NOT NULL,
+    "updatedAt" Timestamptz NOT NULL,
+    "expiresAt" Timestamptz NOT NULL,
     "clientId"            character varying NOT NULL,
     "clientAuth"          character varying NOT NULL,
     "deviceId"            character varying,

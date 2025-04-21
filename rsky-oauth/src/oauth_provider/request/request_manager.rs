@@ -18,6 +18,7 @@ use crate::oauth_types::{
     OAuthCodeChallengeMethod, OAuthGrantType, OAuthResponseType, Prompt,
     CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
+use chrono::{DateTime, Utc};
 use rocket::form::validate::Contains;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -27,7 +28,7 @@ pub struct RequestManager {
     store: Arc<RwLock<dyn RequestStore>>,
     signer: Arc<RwLock<Signer>>,
     metadata: OAuthAuthorizationServerMetadata,
-    token_max_age: u64,
+    token_max_age: i64,
     hooks: Arc<OAuthHooks>,
 }
 
@@ -36,7 +37,7 @@ impl RequestManager {
         store: Arc<RwLock<dyn RequestStore>>,
         signer: Arc<RwLock<Signer>>,
         metadata: OAuthAuthorizationServerMetadata,
-        token_max_age: u64,
+        token_max_age: i64,
         hooks: Arc<OAuthHooks>,
     ) -> Self {
         RequestManager {
@@ -53,7 +54,7 @@ impl RequestManager {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("timestamp in micros since UNIX epoch")
             .as_millis() as u64;
-        now - self.token_max_age
+        now - self.token_max_age as u64
     }
 
     pub async fn create_authorization_request(
@@ -78,18 +79,14 @@ impl RequestManager {
         parameters: OAuthAuthorizationRequestParameters,
         device_id: Option<DeviceId>,
     ) -> Result<RequestInfo, OAuthError> {
-        let expires_at = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("timestamp in micros since UNIX epoch")
-            .as_micros() as u64
-            + PAR_EXPIRES_IN;
+        let expires_at = DateTime::from_timestamp(now_as_secs() + PAR_EXPIRES_IN, 0).unwrap();
         let id = RequestId::generate();
 
         let data = RequestData {
             client_id: client.id.clone(),
             client_auth: client_auth.clone(),
             parameters: parameters.clone(),
-            expires_at: expires_at as i64,
+            expires_at,
             device_id,
             sub: None,
             code: None,
@@ -103,7 +100,7 @@ impl RequestManager {
             id,
             uri,
             parameters: parameters.clone(),
-            expires_at: expires_at as i64,
+            expires_at,
             client_id: client.id.clone(),
             client_auth: client_auth.clone(),
         })
@@ -397,8 +394,8 @@ impl RequestManager {
             ));
         }
 
-        let now = now_as_secs();
-        if request_data.expires_at < now as i64 {
+        let now = Utc::now().timestamp();
+        if request_data.expires_at.timestamp() < now {
             store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
                 request_data.parameters,
@@ -406,7 +403,8 @@ impl RequestManager {
                 None,
             ));
         } else {
-            updates.expires_at = Some((now + AUTHORIZATION_INACTIVITY_TIMEOUT) as i64);
+            updates.expires_at =
+                Some(DateTime::from_timestamp(now + AUTHORIZATION_INACTIVITY_TIMEOUT, 0).unwrap());
         }
 
         if request_data.client_id != client_id.clone() {
@@ -471,7 +469,7 @@ impl RequestManager {
         };
         drop(store);
 
-        if data.expires_at < now_as_secs() as i64 {
+        if data.expires_at.timestamp() < Utc::now().timestamp() {
             let mut store = self.store.write().await;
             store.delete_request(id).await?;
             return Err(OAuthError::AccessDeniedError(
@@ -522,7 +520,10 @@ impl RequestManager {
             sub: Some(account.sub.clone()),
             code: Some(code.clone()),
             // Allow the client to exchange the code for a token within the next 60 seconds.
-            expires_at: Some(now_as_secs() as i64 + AUTHORIZATION_INACTIVITY_TIMEOUT as i64),
+            expires_at: Some(
+                DateTime::from_timestamp(now_as_secs() + AUTHORIZATION_INACTIVITY_TIMEOUT, 0)
+                    .unwrap(),
+            ),
             ..Default::default()
         };
         let mut store = self.store.write().await;
@@ -569,7 +570,7 @@ impl RequestManager {
             ));
         }
 
-        if authorized_request.expires_at < now_as_secs() as i64 {
+        if authorized_request.expires_at.timestamp() < now_as_secs() {
             let mut store = self.store.write().await;
             store.delete_request(request.id).await?;
             return Err(OAuthError::InvalidGrantError(
@@ -864,7 +865,7 @@ mod tests {
                 prompt: None,
                 authorization_details: None,
             },
-            expires_at: 0,
+            expires_at: Utc::now(),
             client_id: OAuthClientId::new(
                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
             )

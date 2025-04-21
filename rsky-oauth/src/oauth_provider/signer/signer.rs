@@ -10,9 +10,9 @@ use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthIssuerIdentifier,
 };
-use jsonwebtoken::{Algorithm, Header, Validation};
+use chrono::{DateTime, Utc};
+use jsonwebtoken::{Algorithm, Header};
 use rocket::form::FromForm;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -60,7 +60,7 @@ impl Signer {
         sign_header: Header,
         payload: JwtPayload,
     ) -> Result<SignedJwt, JwkError> {
-        let keyset = self.keyset.write().await;
+        let keyset = self.keyset.read().await;
         keyset
             .create_jwt(algorithms, search_kids, sign_header, payload)
             .await
@@ -77,10 +77,12 @@ impl Signer {
 
         let mut payload = JwtPayload::default();
         payload.aud = Some(options.aud);
-        payload.iat = options.iat;
-        payload.exp = Some(options.exp);
+        if let Some(iat) = options.iat {
+            payload.iat = Some(iat.timestamp());
+        }
+        payload.exp = Some(options.exp.timestamp());
         payload.sub = Some(options.sub);
-        payload.jti = Some(options.jti);
+        payload.jti = Some(options.jti.val());
         payload.cnf = options.cnf;
         // // https://datatracker.ietf.org/doc/html/rfc8693#section-4.3
         payload.client_id = Some(client.id);
@@ -137,8 +139,8 @@ pub struct AccessTokenOptions {
     pub aud: Audience,
     pub sub: Sub,
     pub jti: TokenId,
-    pub exp: u64,
-    pub iat: Option<u64>,
+    pub exp: DateTime<Utc>,
+    pub iat: Option<DateTime<Utc>>,
     pub alg: Option<Algorithm>,
     pub cnf: Option<JwtConfirmation>,
     pub authorization_details: Option<OAuthAuthorizationDetails>,
@@ -160,7 +162,6 @@ mod tests {
         RSAKeyParameters,
     };
     use rocket::yansi::Paint;
-    use std::collections::HashSet;
 
     #[tokio::test]
     async fn test_verify() {
@@ -365,10 +366,10 @@ mod tests {
             authorization_details: None,
         };
         let options = AccessTokenOptions {
-            aud: Audience::Single("".to_string()),
-            sub: Sub::new("".to_string()).unwrap(),
+            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+            sub: Sub::new("did:plc:wdadad".to_string()).unwrap(),
             jti: TokenId::new("".to_string()).unwrap(),
-            exp: 0,
+            exp: Utc::now(),
             iat: None,
             alg: None,
             cnf: None,
@@ -428,10 +429,10 @@ mod tests {
             payload: SignedTokenPayload {
                 iat: 0,
                 iss: "".to_string(),
-                aud: Audience::Single("".to_string()),
+                aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
                 exp: 0,
                 jti: TokenId::new("").unwrap(),
-                sub: Sub::new("").unwrap(),
+                sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                 client_id: OAuthClientId::new("".to_string()).unwrap(),
                 nbf: None,
                 htm: None,

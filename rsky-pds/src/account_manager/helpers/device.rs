@@ -15,7 +15,7 @@ fn row_to_device_data(device: models::Device) -> DeviceData {
         user_agent: device.user_agent,
         ip_address: device.ip_address.parse().unwrap(),
         session_id: SessionId::new(device.session_id.unwrap()).unwrap(),
-        last_seen_at: device.last_seen_at.parse().unwrap(),
+        last_seen_at: device.last_seen_at,
     }
 }
 
@@ -27,7 +27,7 @@ pub async fn create_device(device_id: DeviceId, data: DeviceData, db: &DbConn) -
             session_id: Some(data.session_id.into_inner()),
             user_agent: data.user_agent,
             ip_address: data.ip_address.to_string(),
-            last_seen_at: data.last_seen_at.to_string(),
+            last_seen_at: data.last_seen_at,
         }];
         insert_into(DeviceSchema::device)
             .values(&rows)

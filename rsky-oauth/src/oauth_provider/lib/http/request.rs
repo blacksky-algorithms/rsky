@@ -1,5 +1,4 @@
 use crate::oauth_provider::lib::util::url::UrlReference;
-use crate::oauth_provider::request::request_uri::RequestUri;
 use rand::distr::Alphanumeric;
 use rand::Rng;
 use rocket::http::{Cookie, SameSite};

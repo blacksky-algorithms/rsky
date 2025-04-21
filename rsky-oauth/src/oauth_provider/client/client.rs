@@ -7,15 +7,13 @@ use crate::oauth_provider::lib::util::redirect_uri::compare_redirect_uri;
 use crate::oauth_types::{
     OAuthAuthorizationRequestParameters, OAuthClientCredentials, OAuthClientId,
     OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType, OAuthIssuerIdentifier,
-    OAuthRedirectUri, OAuthResponseType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    OAuthRedirectUri, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, DecodingKey, TokenData, Validation};
-use rocket::form::validate::Len;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::str::FromStr;
 
 /**
  * @see {@link https://www.iana.org/assignments/oauth-parameters/oauth-parameters.xhtml#token-endpoint-auth-method}
@@ -95,7 +93,7 @@ impl Client {
         validation.validate_exp = false;
         validation.required_spec_claims = HashSet::new();
         validation.insecure_disable_signature_validation();
-        let jwk = jwks.keys.get(0).unwrap();
+        let jwk = jwks.keys.first().unwrap();
         let decoding_key = DecodingKey::from_jwk(jwk).unwrap();
         let result = decode::<T>(token.as_str(), &decoding_key, &validation).unwrap();
         Ok(result)
@@ -105,7 +103,7 @@ impl Client {
         &self,
         token: String,
         options: VerifyOptions,
-    ) -> Result<jsonwebtoken::TokenData<T>, OAuthError>
+    ) -> Result<TokenData<T>, OAuthError>
     where
         T: DeserializeOwned,
     {
@@ -115,7 +113,7 @@ impl Client {
         validation.validate_nbf = false;
         validation.validate_exp = false;
         validation.required_spec_claims = HashSet::new();
-        let jwk = jwks.keys.get(0).unwrap();
+        let jwk = jwks.keys.first().unwrap();
         let decoding_key = DecodingKey::from_jwk(jwk).unwrap();
         let result = decode::<T>(token.as_str(), &decoding_key, &validation).unwrap();
         Ok(result)
@@ -178,7 +176,7 @@ impl Client {
                         jkt: "todo".to_string(),
                     };
                     let jti = result.claims.jti.unwrap();
-                    Ok((client_auth, Some(jti.val())))
+                    Ok((client_auth, Some(jti)))
                 }
                 _ => Err(OAuthError::InvalidRequestError(
                     "client_assertion_type required for ".to_string(),
@@ -369,31 +367,39 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_types::OAuthClientCredentialsNone;
+    use crate::oauth_types::{
+        ApplicationType, OAuthClientCredentialsNone, OAuthResponseType, OAuthScope, ValidUri,
+        WebUri,
+    };
 
     fn create_client() -> Client {
         let id = OAuthClientId::new("client123").unwrap();
         let metadata = OAuthClientMetadata {
-            redirect_uris: vec![],
-            response_types: vec![],
-            grant_types: vec![],
-            scope: None,
-            token_endpoint_auth_method: None,
+            redirect_uris: vec![
+                OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap()
+            ],
+            response_types: vec![OAuthResponseType::Code],
+            grant_types: vec![
+                OAuthGrantType::AuthorizationCode,
+                OAuthGrantType::RefreshToken,
+            ],
+            scope: Some(OAuthScope::new("atproto transition:generic").unwrap()),
+            token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::None),
             token_endpoint_auth_signing_alg: None,
             userinfo_signed_response_alg: None,
             userinfo_encrypted_response_alg: None,
             jwks_uri: None,
             jwks: None,
-            application_type: Default::default(),
+            application_type: ApplicationType::Web,
             subject_type: None,
             request_object_signing_alg: None,
             id_token_signed_response_alg: None,
             authorization_signed_response_alg: "".to_string(),
             authorization_encrypted_response_enc: None,
             authorization_encrypted_response_alg: None,
-            client_id: None,
-            client_name: None,
-            client_uri: None,
+            client_id: Some("https://cleanfollow-bsky.pages.dev/client-metadata.json".to_string()),
+            client_name: Some("cleanfollow-bsky".to_string()),
+            client_uri: Some(WebUri::validate("https://cleanfollow-bsky.pages.dev").unwrap()),
             policy_uri: None,
             tos_uri: None,
             logo_uri: None,
@@ -401,7 +407,7 @@ mod tests {
             require_auth_time: None,
             contacts: None,
             tls_client_certificate_bound_access_tokens: None,
-            dpop_bound_access_tokens: None,
+            dpop_bound_access_tokens: Some(true),
             authorization_details_types: None,
         };
         let jwks = JwkSet { keys: vec![] };

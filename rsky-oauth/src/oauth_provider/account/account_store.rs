@@ -3,11 +3,12 @@ use crate::oauth_provider::device::device_id::DeviceId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::oidc::sub::Sub;
 use crate::oauth_types::OAuthClientId;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct SignInCredentials {
     pub username: String,
     pub password: String,
@@ -26,7 +27,7 @@ pub struct SignInCredentials {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct DeviceAccountInfo {
     pub remembered: bool,
-    pub authenticated_at: u64,
+    pub authenticated_at: DateTime<Utc>,
     pub authorized_clients: Vec<OAuthClientId>,
 }
 

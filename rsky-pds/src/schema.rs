@@ -50,7 +50,7 @@ pub mod pds {
             clientId -> Varchar,
             clientAuth -> Varchar,
             parameters -> Varchar,
-            expiresAt -> Int8,
+            expiresAt -> Timestamptz,
             code -> Nullable<Varchar>,
         }
     }
@@ -83,7 +83,7 @@ pub mod pds {
             sessionId -> Nullable<Varchar>,
             userAgent -> Nullable<Varchar>,
             ipAddress -> Varchar,
-            lastSeenAt -> Varchar,
+            lastSeenAt -> Timestamptz,
         }
     }
 
@@ -91,7 +91,7 @@ pub mod pds {
         pds.device_account (deviceId, did) {
             did -> Varchar,
             deviceId -> Varchar,
-            authenticatedAt -> Varchar,
+            authenticatedAt -> Timestamptz,
             remember -> Bool,
             authorizedClients -> Varchar,
         }
@@ -199,9 +199,9 @@ pub mod pds {
             id -> Varchar,
             did -> Varchar,
             tokenId -> Varchar,
-            createdAt -> Bool,
-            updatedAt -> Varchar,
-            expiresAt -> Int8,
+            createdAt -> Timestamptz,
+            updatedAt -> Timestamptz,
+            expiresAt -> Timestamptz,
             clientId -> Varchar,
             clientAuth -> Varchar,
             deviceId -> Nullable<Varchar>,

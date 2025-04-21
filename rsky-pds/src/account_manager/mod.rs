@@ -6,13 +6,12 @@ use crate::account_manager::helpers::auth::{
 };
 use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
-use crate::account_manager::helpers::token::{find_by_qb, FindByQbOpts};
+use crate::account_manager::helpers::token::FindByQbOpts;
 use crate::account_manager::helpers::{authorization_request, device_account, repo};
 use crate::account_manager::helpers::{token, used_refresh_token};
-use crate::apis::ApiError::AuthRequiredError;
 use crate::auth_verifier::AuthScope;
 use crate::db::DbConn;
-use crate::models::models::{AuthorizationRequest, EmailTokenPurpose};
+use crate::models::models::EmailTokenPurpose;
 use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
@@ -36,7 +35,6 @@ use rsky_oauth::oauth_provider::device::device_data::DeviceData;
 use rsky_oauth::oauth_provider::device::device_id::DeviceId;
 use rsky_oauth::oauth_provider::device::device_store::{DeviceStore, PartialDeviceData};
 use rsky_oauth::oauth_provider::errors::OAuthError;
-use rsky_oauth::oauth_provider::now_as_secs;
 use rsky_oauth::oauth_provider::oidc::sub::Sub;
 use rsky_oauth::oauth_provider::request::code::Code;
 use rsky_oauth::oauth_provider::request::request_data::RequestData;
@@ -51,7 +49,6 @@ use rsky_oauth::oauth_provider::token::token_store::{NewTokenData, TokenInfo, To
 use rsky_oauth::oauth_types::{OAuthClientId, OAuthClientMetadata};
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
-use std::convert::identity;
 use std::env;
 use std::future::Future;
 use std::pin::Pin;
@@ -666,14 +663,9 @@ impl AccountStore for AccountManager {
         sub: Sub,
     ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
     {
+        let audience = Audience::Single(env::var("PDS_SERVICE_DID").unwrap());
         Box::pin(async move {
-            match device_account::get_account_info(
-                device_id,
-                sub,
-                Audience::Single("did:web:pds.ripperoni.com".to_string()),
-                self.db.as_ref(),
-            )
-            .await
+            match device_account::get_account_info(device_id, sub, audience, self.db.as_ref()).await
             {
                 Ok(account_info) => Ok(account_info),
                 Err(_) => Err(OAuthError::RuntimeError("".to_string())),
@@ -699,14 +691,11 @@ impl AccountStore for AccountManager {
         device_id: DeviceId,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
     {
+        let audience = Audience::Single(env::var("PDS_SERVICE_DID").unwrap());
         let device_id = device_id.clone();
         Box::pin(async move {
-            match device_account::list_remembered_devices(
-                self.db.as_ref(),
-                device_id,
-                Audience::Single("did:web:pds.ripperoni.com".to_string()),
-            )
-            .await
+            match device_account::list_remembered_devices(self.db.as_ref(), device_id, audience)
+                .await
             {
                 Ok(account_infos) => Ok(account_infos),
                 Err(_) => Err(OAuthError::RuntimeError("".to_string())),
@@ -781,7 +770,9 @@ impl RequestStore for AccountManager {
                 .unwrap_or_else(|error| None);
             match result {
                 None => None,
-                Some(result) => Some(authorization_request::row_to_found_request_result(result)),
+                Some(result) => {
+                    Some(authorization_request::row_to_found_request_result(result).unwrap())
+                }
             }
         })
     }
@@ -888,6 +879,7 @@ impl TokenStore for AccountManager {
         token_id: TokenId,
     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
     {
+        let audience = Audience::Single(env::var("PDS_SERVICE_DID").unwrap());
         Box::pin(async move {
             let opts = FindByQbOpts {
                 id: None,
@@ -895,7 +887,9 @@ impl TokenStore for AccountManager {
                 token_id: Some(token_id.val()),
                 current_refresh_token: None,
             };
-            let row = token::find_by_qb(self.db.as_ref(), opts).await.unwrap();
+            let row = token::read_token(self.db.as_ref(), opts, audience)
+                .await
+                .unwrap();
             match row {
                 None => Ok(None),
                 Some(row) => Ok(Some(row)),
@@ -911,7 +905,9 @@ impl TokenStore for AccountManager {
             // Will cascade to used_refresh_token (used_refresh_token_fk)
             match token::remove_qb(self.db.as_ref(), token_id).await {
                 Ok(_) => Ok(()),
-                Err(_) => Err(OAuthError::RuntimeError("".to_string())),
+                Err(_) => Err(OAuthError::RuntimeError(
+                    "Failed to delete token".to_string(),
+                )),
             }
         })
     }
@@ -923,21 +919,35 @@ impl TokenStore for AccountManager {
         new_refresh_token: RefreshToken,
         new_data: NewTokenData,
     ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-        unimplemented!()
-        // Box::pin(async move {
-        //     let (id, current_refresh_token) = token::for_rotate(self.db.as_ref(), token_id).await?;
-        //
-        //     used_refresh_token::insert_qb(self.db.as_ref(), token_id, current_refresh_token).await?;
-        //
-        //     let count = used_refresh_token::count_qb(new_refresh_token, self.db.as_ref()).await?;
-        //
-        //     if count > 0 {
-        //         // Do NOT throw (we don't want the transaction to be rolled back)
-        //     } else {
-        //         token::rotate_qb(self.db.as_ref(), new_token_id, new_refresh_token, new_data).await?;
-        //     }
-        //     Ok(())
-        // })
+        let token_id = token_id.val();
+        Box::pin(async move {
+            let (id, current_refresh_token) = token::for_rotate(self.db.as_ref(), token_id.clone())
+                .await
+                .unwrap();
+
+            used_refresh_token::insert_qb(current_refresh_token, id, self.db.as_ref())
+                .await
+                .unwrap();
+
+            let count = used_refresh_token::count_qb(new_refresh_token.clone(), self.db.as_ref())
+                .await
+                .unwrap();
+
+            if count > 0 {
+                // Do NOT throw (we don't want the transaction to be rolled back)
+            } else {
+                token::rotate_qb(
+                    self.db.as_ref(),
+                    token_id,
+                    new_token_id,
+                    new_refresh_token,
+                    new_data,
+                )
+                .await
+                .unwrap();
+            }
+            Ok(())
+        })
     }
 
     fn find_token_by_refresh_token(
@@ -945,6 +955,7 @@ impl TokenStore for AccountManager {
         refresh_token: RefreshToken,
     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
     {
+        let audience = Audience::Single(env::var("PDS_SERVICE_DID").unwrap());
         Box::pin(async move {
             let used =
                 used_refresh_token::find_by_token_qb(refresh_token.clone(), self.db.as_ref())
@@ -966,7 +977,9 @@ impl TokenStore for AccountManager {
                 },
             };
 
-            let row = token::find_by_qb(self.db.as_ref(), search).await.unwrap();
+            let row = token::read_token(self.db.as_ref(), search, audience)
+                .await
+                .unwrap();
             match row {
                 None => Ok(None),
                 Some(row) => Ok(Some(row)),
@@ -979,6 +992,7 @@ impl TokenStore for AccountManager {
         code: Code,
     ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
     {
+        let audience = Audience::Single(env::var("PDS_SERVICE_DID").unwrap());
         Box::pin(async move {
             let opts = FindByQbOpts {
                 id: None,
@@ -986,7 +1000,7 @@ impl TokenStore for AccountManager {
                 token_id: None,
                 current_refresh_token: None,
             };
-            match find_by_qb(self.db.as_ref(), opts).await {
+            match token::read_token(self.db.as_ref(), opts, audience).await {
                 Ok(token_info) => Ok(token_info),
                 Err(error) => Err(OAuthError::RuntimeError("DB Exception".to_string())),
             }

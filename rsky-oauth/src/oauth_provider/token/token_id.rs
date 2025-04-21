@@ -1,5 +1,4 @@
 use crate::oauth_provider::constants::{TOKEN_ID_BYTES_LENGTH, TOKEN_ID_PREFIX};
-use crate::oauth_provider::oidc::sub::Sub;
 use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde::de::Visitor;

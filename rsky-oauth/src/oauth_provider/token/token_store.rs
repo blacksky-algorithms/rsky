@@ -6,6 +6,7 @@ use crate::oauth_provider::request::code::Code;
 use crate::oauth_provider::token::refresh_token::RefreshToken;
 use crate::oauth_provider::token::token_data::TokenData;
 use crate::oauth_provider::token::token_id::TokenId;
+use chrono::{DateTime, Utc};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -20,8 +21,8 @@ pub struct TokenInfo {
 
 pub struct NewTokenData {
     pub client_auth: ClientAuth,
-    pub expires_at: u64,
-    pub updated_at: u64,
+    pub expires_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 pub trait TokenStore: Send + Sync {

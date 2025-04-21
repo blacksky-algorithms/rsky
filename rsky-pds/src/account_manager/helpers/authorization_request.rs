@@ -2,6 +2,7 @@ use crate::db::DbConn;
 use crate::models::models::AuthorizationRequest;
 use crate::schema::pds::authorization_request::dsl as RequestSchema;
 use anyhow::Result;
+use chrono::DateTime;
 use diesel::row::NamedRow;
 use diesel::*;
 use diesel::{delete, insert_into, QueryDsl, RunQueryDsl, SelectableHelper};
@@ -43,12 +44,36 @@ pub fn row_to_request_data(request: AuthorizationRequest) -> RequestData {
     }
 }
 
-pub fn row_to_found_request_result(row: AuthorizationRequest) -> FoundRequestResult {
-    unimplemented!()
-    // FoundRequestResult {
-    //     id: row.id,
-    //     data: RequestData {},
-    // }
+pub fn row_to_found_request_result(row: AuthorizationRequest) -> Result<FoundRequestResult> {
+    let expires_at = row.expires_at;
+    let device_id = match row.device_id {
+        None => None,
+        Some(device_id) => Some(DeviceId::new(device_id)?),
+    };
+    let client_id = OAuthClientId::new(row.client_id)?;
+    let client_auth: ClientAuth = serde_json::from_str(row.client_auth.as_str())?;
+    let parameters: OAuthAuthorizationRequestParameters =
+        serde_json::from_str(row.parameters.as_str())?;
+    let sub = match row.did {
+        None => None,
+        Some(did) => Some(Sub::new(did).unwrap()),
+    };
+    let code = match row.code {
+        None => None,
+        Some(code) => Some(Code::new(code)?),
+    };
+    Ok(FoundRequestResult {
+        id: RequestId::new(row.id).unwrap(),
+        data: RequestData {
+            client_id,
+            client_auth,
+            parameters,
+            expires_at,
+            device_id,
+            sub,
+            code,
+        },
+    })
 }
 
 fn request_data_to_row(id: RequestId, data: RequestData) -> AuthorizationRequest {
@@ -129,7 +154,6 @@ pub async fn update_qb(id: RequestId, data: UpdateRequestData, db: &DbConn) -> R
                 .execute(conn)?;
         }
         if let Some(expires_at) = data.expires_at {
-            let expires_at = expires_at as i64;
             update(RequestSchema::authorization_request)
                 .filter(RequestSchema::id.eq(&id))
                 .set((RequestSchema::expiresAt.eq(expires_at),))
@@ -148,8 +172,9 @@ pub async fn update_qb(id: RequestId, data: UpdateRequestData, db: &DbConn) -> R
 pub async fn remove_old_expired_qb(delay: Option<i64>, db: &DbConn) {
     // We allow some delay for the expiration time so that expired requests
     // can still be returned to the OAuthProvider library for error handling.
-    let delay = delay.unwrap_or(600000);
-    let expire_time = now_as_secs() as i64 - delay;
+    let delay = delay.unwrap_or(60);
+    let expire_time = now_as_secs() - delay;
+    let expire_time = DateTime::from_timestamp(expire_time, 0).unwrap();
 
     db.run(move |conn| {
         delete(RequestSchema::authorization_request)

@@ -148,12 +148,12 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
     }
 
     pub async fn get_stored(&self, key: &K, options: Option<GetCachedOptions>) -> Option<V> {
-        let mut store = self.store.read().await;
+        let store = self.store.read().await;
         store.get(key).await.unwrap_or_else(|_| None)
     }
 
     pub async fn set_stored(&self, key: K, value: V) {
-        let mut store = self.store.write().await;
+        let store = self.store.read().await;
         match store.set(key.clone(), value.clone()).await {
             Ok(_) => {}
             Err(_) => {
@@ -167,7 +167,7 @@ impl<K: Eq + Hash + Debug + Send + Sync + Clone, V: Clone + Sync + Debug + Send>
     }
 
     pub async fn del_stored(&self, key: &K) {
-        let mut store = self.store.write().await;
+        let store = self.store.read().await;
         store.del(key).await.unwrap()
     }
 }

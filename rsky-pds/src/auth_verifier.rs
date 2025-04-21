@@ -18,13 +18,11 @@ use rsky_common::env::env_str;
 use rsky_common::get_verification_material;
 use rsky_identity::did::atproto_data::get_did_key_from_multibase;
 use rsky_identity::types::DidDocument;
-use rsky_oauth::oauth_provider::oauth_verifier::OAuthVerifier;
 use rsky_oauth::oauth_provider::token::verify_token_claims::VerifyTokenClaimsOptions;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str;
 use std::sync::Arc;
-use std::thread::scope;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -799,16 +797,17 @@ pub async fn validate_bearer_token<'r>(
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn validate_dpop_access_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
-    verify_options: Option<VerificationOptions>,
 ) -> Result<AccessOutput> {
     let shared_oauth_provider = match request.rocket().state::<SharedOAuthProvider>() {
         None => {
+            tracing::error!("Error getting oauth provider");
             return Err(anyhow::Error::new(AuthError::InternalServerError(
                 "Unexpected Error Occurred".to_string(),
-            )))
+            )));
         }
         Some(shared_oauth_provider) => shared_oauth_provider,
     };
@@ -820,24 +819,21 @@ pub async fn validate_dpop_access_token<'r>(
         .map(|account_manager| account_manager)
     {
         Outcome::Success(account_manager) => account_manager,
-        Outcome::Error(_) => {
+        _ => {
+            tracing::error!("Error getting account_manager");
             return Err(anyhow::Error::new(AuthError::InternalServerError(
                 "Unexpected Error Occurred".to_string(),
-            )))
-        }
-        Outcome::Forward(_) => {
-            return Err(anyhow::Error::new(AuthError::InternalServerError(
-                "Unexpected Error Occurred".to_string(),
-            )))
+            )));
         }
     };
     let account_manager = Arc::new(RwLock::new(account_manager));
 
     let shared_replay_store = match request.rocket().state::<SharedReplayStore>() {
         None => {
+            tracing::error!("Error getting replay_store");
             return Err(anyhow::Error::new(AuthError::InternalServerError(
                 "Unexpected Error Occurred".to_string(),
-            )))
+            )));
         }
         Some(shared_oauth_provider) => shared_oauth_provider,
     };
@@ -852,12 +848,8 @@ pub async fn validate_dpop_access_token<'r>(
     );
 
     let mut oauth_verifier = oauth_provider.oauth_verifier;
-    // https://datatracker.ietf.org/doc/html/rfc9449#section-8.2
-    if let Some(dpop_nonce) = oauth_verifier.next_dpop_nonce().await {
-        // request.add_header()
-    }
 
-    let url = "".to_string();
+    let url = request.uri().to_string();
     let header_map = request.headers();
     let options = VerifyTokenClaimsOptions {
         audience: Some(vec![env::var("PDS_SERVICE_DID")?]),
@@ -982,7 +974,7 @@ async fn validate_access_token<'r>(
                     artifacts: Some(token),
                 }
             } else if header.starts_with("DPoP ") {
-                validate_dpop_access_token(request, scopes, Some(options)).await?
+                validate_dpop_access_token(request, scopes).await?
             } else {
                 return Err(anyhow::Error::new(AuthError::AuthRequired(
                     "Unexpected authorization type".to_string(),

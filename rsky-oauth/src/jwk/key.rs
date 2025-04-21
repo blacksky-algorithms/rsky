@@ -1,6 +1,6 @@
 use crate::jwk::{JwkError, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
 use jsonwebtoken::jwk::{EllipticCurve, Jwk, KeyAlgorithm, PublicKeyUse};
-use jsonwebtoken::{Algorithm, Header, Validation};
+use jsonwebtoken::{Algorithm, Header};
 use std::future::Future;
 use std::pin::Pin;
 
