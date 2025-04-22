@@ -7,17 +7,12 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use sled::Tree;
 use thiserror::Error;
-use tungstenite::Utf8Bytes;
-use tungstenite::protocol::CloseFrame;
-use tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::publisher::connection::{Connection, ConnectionError};
 use crate::publisher::types::{Command, CommandReceiver};
 use crate::types::{Cursor, DB};
 
 const INTEREST: Interest = Interest::WRITABLE;
-const SHUTDOWN_FRAME: CloseFrame =
-    CloseFrame { code: CloseCode::Restart, reason: Utf8Bytes::from_static("RelayRestart") };
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -57,15 +52,13 @@ impl Worker {
         Ok(())
     }
 
-    pub fn shutdown(mut self) {
-        for conn in self.connections.iter_mut().filter_map(|x| x.as_mut()) {
-            if let Err(err) = conn.close(SHUTDOWN_FRAME) {
-                tracing::warn!("publisher conn close error: {err}");
-            }
+    pub fn shutdown(self) {
+        for conn in self.connections {
+            drop(conn);
         }
     }
 
-    fn handle_command(&mut self, command: Command, seq: Cursor) -> bool {
+    fn handle_command(&mut self, command: Command, mut seq: Cursor) -> bool {
         match command {
             Command::Connect(config) => {
                 tracing::info!(
@@ -74,8 +67,11 @@ impl Worker {
                     config.addr,
                     config.cursor
                 );
-                match Connection::connect(config.addr, config.stream, config.cursor.unwrap_or(seq))
-                {
+                match Connection::connect(
+                    config.addr,
+                    config.stream,
+                    config.cursor.unwrap_or_else(|| seq.next()),
+                ) {
                     Ok(conn) => {
                         let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(
                             || {

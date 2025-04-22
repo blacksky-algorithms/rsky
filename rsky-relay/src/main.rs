@@ -39,11 +39,11 @@ pub async fn main() -> Result<()> {
     let (request_crawl_tx, request_crawl_rx) = rtrb::RingBuffer::new(CAPACITY2);
     let (subscribe_repos_tx, subscribe_repos_rx) = rtrb::RingBuffer::new(CAPACITY2);
     let validator = ValidatorManager::new(message_rx)?;
-    tokio::spawn(validator.run());
+    let handle = tokio::spawn(validator.run());
     let crawler = CrawlerManager::new(WORKERS, &message_tx, request_crawl_rx)?;
     let publisher = PublisherManager::new(WORKERS, subscribe_repos_rx)?;
     let server = Server::new(request_crawl_tx, subscribe_repos_tx)?;
-    thread::scope(move |s| {
+    let ret = thread::scope(move |s| {
         thread::Builder::new().name("rsky-crawl".into()).spawn_scoped(s, move || crawler.run())?;
         thread::Builder::new().name("rsky-pub".into()).spawn_scoped(s, move || publisher.run())?;
         thread::Builder::new().name("rsky-server".into()).spawn_scoped(s, move || server.run())?;
@@ -57,5 +57,7 @@ pub async fn main() -> Result<()> {
         tracing::info!("shutting down");
         SHUTDOWN.store(true, Ordering::Relaxed);
         Ok(())
-    })
+    });
+    handle.await??;
+    ret
 }

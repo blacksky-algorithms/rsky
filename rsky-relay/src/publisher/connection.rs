@@ -16,6 +16,8 @@ const OUTDATED_MSG: &[u8] = b"\xa2ate#infobop\x01\xa2dnamenOutdatedCursorgmessag
 const FUTURE_MSG: &[u8] = b"\xa1bop \xa2eerrorlFutureCursorgmessageuCursor in the future.";
 const FUTURE_CLOSE: CloseFrame =
     CloseFrame { code: CloseCode::Policy, reason: Utf8Bytes::from_static("FutureCursor") };
+const SHUTDOWN_FRAME: CloseFrame =
+    CloseFrame { code: CloseCode::Restart, reason: Utf8Bytes::from_static("RelayRestart") };
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -111,5 +113,11 @@ impl Connection {
             }
         }
         Ok(true)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        drop(self.close(SHUTDOWN_FRAME));
     }
 }

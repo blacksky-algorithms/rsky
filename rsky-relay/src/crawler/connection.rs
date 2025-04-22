@@ -69,7 +69,7 @@ impl Connection {
     // false: not polled
     // true: polled
     pub fn poll(&mut self) -> Result<bool, ConnectionError> {
-        for _ in 0..1024 {
+        for _ in 0..128 {
             if self.message_tx.remaining() < 16 {
                 return Ok(false);
             }
@@ -102,5 +102,11 @@ impl Connection {
             slot.hostname.clone_from(&self.hostname);
         }
         Ok(true)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        drop(self.close());
     }
 }

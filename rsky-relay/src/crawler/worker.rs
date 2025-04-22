@@ -49,11 +49,9 @@ impl Worker {
         Ok(())
     }
 
-    pub fn shutdown(mut self) {
-        for conn in self.connections.iter_mut().filter_map(|x| x.as_mut()) {
-            if let Err(err) = conn.close() {
-                tracing::warn!("crawler conn close error: {err}");
-            }
+    pub fn shutdown(self) {
+        for conn in self.connections {
+            drop(conn);
         }
     }
 
