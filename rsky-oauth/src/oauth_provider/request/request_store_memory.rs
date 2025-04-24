@@ -143,12 +143,7 @@ mod tests {
         let id = RequestId::generate();
         let data: RequestData = RequestData {
             client_id: OAuthClientId::new("client").unwrap(),
-            client_auth: ClientAuth {
-                method: "".to_string(),
-                alg: "".to_string(),
-                kid: "".to_string(),
-                jkt: "".to_string(),
-            },
+            client_auth: ClientAuth::new(None),
             parameters: OAuthAuthorizationRequestParameters {
                 client_id: OAuthClientId::new("client").unwrap(),
                 state: None,
@@ -183,12 +178,7 @@ mod tests {
         let id = RequestId::generate();
         let data: RequestData = RequestData {
             client_id: OAuthClientId::new("client").unwrap(),
-            client_auth: ClientAuth {
-                method: "POST".to_string(),
-                alg: "".to_string(),
-                kid: "".to_string(),
-                jkt: "".to_string(),
-            },
+            client_auth: ClientAuth::new(None),
             parameters: OAuthAuthorizationRequestParameters {
                 client_id: OAuthClientId::new("client").unwrap(),
                 state: None,
@@ -228,12 +218,7 @@ mod tests {
         let id = RequestId::generate();
         let data: RequestData = RequestData {
             client_id: OAuthClientId::new("client").unwrap(),
-            client_auth: ClientAuth {
-                method: "".to_string(),
-                alg: "".to_string(),
-                kid: "".to_string(),
-                jkt: "".to_string(),
-            },
+            client_auth: ClientAuth::new(None),
             parameters: OAuthAuthorizationRequestParameters {
                 client_id: OAuthClientId::new("client").unwrap(),
                 state: None,
@@ -289,12 +274,7 @@ mod tests {
         let code = Code::generate();
         let data: RequestData = RequestData {
             client_id: OAuthClientId::new("client").unwrap(),
-            client_auth: ClientAuth {
-                method: "".to_string(),
-                alg: "".to_string(),
-                kid: "".to_string(),
-                jkt: "".to_string(),
-            },
+            client_auth: ClientAuth::new(None),
             parameters: OAuthAuthorizationRequestParameters {
                 client_id: OAuthClientId::new("client").unwrap(),
                 state: None,

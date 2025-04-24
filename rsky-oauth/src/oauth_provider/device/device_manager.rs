@@ -7,6 +7,7 @@ use crate::oauth_provider::device::session_id::SessionId;
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
 use chrono::Utc;
+use rocket::http::{Cookie, SameSite};
 use rocket::Request;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -290,10 +291,21 @@ impl DeviceManager {
     }
 
     fn set_cookie(&self, req: &Request, device_id: DeviceId, session_id: SessionId) {
-        req.cookies()
-            .add((self.options.cookie.device.clone(), device_id.into_inner()));
-        req.cookies()
-            .add((self.options.cookie.session.clone(), session_id.into_inner()));
+        let path = self.options.cookie.path.clone();
+        let device_cookie =
+            Cookie::build((self.options.cookie.device.clone(), device_id.into_inner()))
+                .secure(true)
+                .http_only(true)
+                .same_site(SameSite::Lax)
+                .path(path.clone());
+        let session_cookie =
+            Cookie::build((self.options.cookie.session.clone(), session_id.into_inner()))
+                .secure(true)
+                .http_only(true)
+                .same_site(SameSite::Lax)
+                .path(path.clone());
+        req.cookies().add(device_cookie);
+        req.cookies().add(session_cookie);
     }
 
     fn get_device_details(&self, req: &Request) -> DeviceDetails {

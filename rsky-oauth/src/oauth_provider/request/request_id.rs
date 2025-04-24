@@ -21,12 +21,13 @@ impl RequestId {
         if uri.is_empty() {
             return Err(RequestIdError::Empty);
         }
-        if uri.len() != REQUEST_ID_LENGTH {
-            return Err(RequestIdError::InvalidLength);
-        }
         if !uri.starts_with(REQUEST_ID_PREFIX) {
             return Err(RequestIdError::InvalidFormat);
         }
+        if uri.len() != REQUEST_ID_LENGTH {
+            return Err(RequestIdError::InvalidLength);
+        }
+
         Ok(Self(uri))
     }
 
@@ -74,16 +75,19 @@ mod tests {
 
     #[test]
     fn test_request_id() {
-        let request_id = RequestId::new("tok-dwadwdaddwadwdad").unwrap();
-        assert_eq!(request_id.into_inner(), "tok-dwadwdaddwadwdad");
+        let request_id = RequestId::new("req-dwadwdaddwadwdaddwadwdaddwadwdad").unwrap();
+        assert_eq!(
+            request_id.into_inner(),
+            "req-dwadwdaddwadwdaddwadwdaddwadwdad"
+        );
         let request_id = RequestId::generate();
         let val = request_id.into_inner();
         RequestId::new(val).unwrap();
 
-        let invalid_format = RequestId::new("aaaadwadwdaddwadwdad").unwrap_err();
+        let invalid_format = RequestId::new("cod-dwadwdaddwadwdaddwadwdaddwadwdad").unwrap_err();
         assert_eq!(invalid_format, RequestIdError::InvalidFormat);
 
-        let invalid_length = RequestId::new("tok-dwadwda").unwrap_err();
+        let invalid_length = RequestId::new("req-dwadwda").unwrap_err();
         assert_eq!(invalid_length, RequestIdError::InvalidLength);
     }
 }

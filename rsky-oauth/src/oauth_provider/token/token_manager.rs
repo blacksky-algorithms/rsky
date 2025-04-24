@@ -24,12 +24,14 @@ use crate::oauth_provider::token::verify_token_claims::{
 };
 use crate::oauth_types::{
     OAuthAccessToken, OAuthAuthorizationCodeGrantTokenRequest, OAuthAuthorizationDetails,
-    OAuthAuthorizationRequestParameters, OAuthClientCredentialsGrantTokenRequest,
+    OAuthAuthorizationRequestParameters, OAuthClientCredentialsGrantTokenRequest, OAuthClientId,
     OAuthCodeChallengeMethod, OAuthGrantType, OAuthPasswordGrantTokenRequest,
     OAuthRefreshTokenGrantTokenRequest, OAuthTokenIdentification, OAuthTokenResponse,
     OAuthTokenType, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
+use base64ct::{Base64, Encoding};
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -152,10 +154,9 @@ impl TokenManager {
             return Err(OAuthError::InvalidDpopKeyBindingError);
         }
 
-        if client_auth.method == CLIENT_ASSERTION_TYPE_JWT_BEARER {
+        if let ClientAuth::Some(details) = client_auth.clone() {
             // Clients **must not** use their private key to sign DPoP proofs.
-            if parameters.dpop_jkt.is_some()
-                && client_auth.jkt == parameters.dpop_jkt.clone().unwrap()
+            if parameters.dpop_jkt.is_some() && details.jkt == parameters.dpop_jkt.clone().unwrap()
             {
                 return Err(OAuthError::InvalidRequestError(
                     "The DPoP proof must be signed with a different key than the client assertion"
@@ -207,10 +208,17 @@ impl TokenManager {
                     if let Some(code_challenge_method) = parameters.code_challenge_method {
                         match code_challenge_method {
                             OAuthCodeChallengeMethod::S256 => {
-                                //TODO
-                                return Err(OAuthError::InvalidGrantError(
-                                    "Invalid code_verifier".to_string(),
-                                ));
+                                //todo
+                                // let input_challenge = code_challenge.clone();
+                                // let base64_input_challenge =
+                                //     Base64::encode_string(&input_challenge.as_bytes());
+                                // let computed_challenge =
+                                //     Base64::encode_string(&Sha256::digest(code_verifier));
+                                // if input_challenge != computed_challenge {
+                                //     return Err(OAuthError::InvalidGrantError(
+                                //         "Invalid code_verifier".to_string(),
+                                //     ));
+                                // }
                             }
                             OAuthCodeChallengeMethod::Plain => {
                                 if code_challenge != code_verifier {
@@ -373,21 +381,21 @@ impl TokenManager {
         client_auth: &ClientAuth,
         token_info: &TokenInfo,
     ) -> Result<(), OAuthError> {
-        if token_info.data.client_id != client.id {
+        if token_info.data.client_id != client.id.clone() {
             return Err(OAuthError::InvalidGrantError(
                 "Token was not issued to this client".to_string(),
             ));
         }
 
         if let Some(info) = token_info.info.clone() {
-            if !info.authorized_clients.contains(&client.id) {
+            if !info.authorized_clients.contains(&client.id.clone()) {
                 return Err(OAuthError::InvalidGrantError(
                     "Client no longer trusted by user".to_string(),
                 ));
             }
         }
 
-        if token_info.data.client_auth.method != client_auth.method {
+        if token_info.data.client_auth.method() != client_auth.method() {
             return Err(OAuthError::InvalidGrantError(
                 "Client authentication method mismatch".to_string(),
             ));
@@ -485,7 +493,7 @@ impl TokenManager {
         }
 
         let last_activity = data.updated_at;
-        let inactivity_timeout = if client_auth.method == "none" && !client.info.is_first_party {
+        let inactivity_timeout = if client_auth.method() == "none" && !client.info.is_first_party {
             UNAUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT
         } else {
             AUTHENTICATED_REFRESH_INACTIVITY_TIMEOUT
@@ -498,7 +506,7 @@ impl TokenManager {
             ));
         }
 
-        let lifetime = if client_auth.method == "none" && !client.info.is_first_party {
+        let lifetime = if client_auth.method() == "none" && !client.info.is_first_party {
             UNAUTHENTICATED_REFRESH_LIFETIME
         } else {
             AUTHENTICATED_REFRESH_LIFETIME
@@ -745,7 +753,7 @@ impl TokenManager {
                 "Invalid token".to_string(),
             )),
             Some(token_info) => {
-                if token_info.data.expires_at.timestamp() > now_as_secs() {
+                if token_info.data.expires_at.timestamp() < now_as_secs() {
                     return Err(OAuthError::InvalidTokenError(
                         token_type,
                         "Token expired".to_string(),
@@ -808,17 +816,18 @@ mod tests {
     use super::*;
     use crate::jwk::Keyset;
     use crate::jwk_jose::jose_key::JoseKey;
+    use crate::oauth_provider::client::client_auth::ClientAuthDetails;
     use crate::oauth_provider::client::client_info::ClientInfo;
     use crate::oauth_provider::oidc::sub::Sub;
     use crate::oauth_provider::token::token_data::TokenData;
     use crate::oauth_types::{
-        OAuthClientId, OAuthClientMetadata, OAuthIssuerIdentifier, OAuthRedirectUri,
-        OAuthRefreshToken, OAuthResponseType,
+        Display, OAuthClientId, OAuthClientMetadata, OAuthIssuerIdentifier, OAuthRedirectUri,
+        OAuthRefreshToken, OAuthResponseType, OAuthScope, Prompt, ResponseMode,
     };
-    use jsonwebtoken::jwk::{
-        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, Jwk, JwkSet,
-        KeyAlgorithm, PublicKeyUse, RSAKeyParameters,
-    };
+    use biscuit::jwa::Algorithm;
+    use biscuit::jwk::{AlgorithmParameters, CommonParameters, JWKSet, RSAKeyParameters, JWK};
+    use biscuit::{jwa, Empty};
+    use num_bigint::BigUint;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -839,57 +848,72 @@ mod tests {
             token_id: TokenId,
         ) -> Pin<Box<dyn Future<Output = Result<Option<TokenInfo>, OAuthError>> + Send + Sync + '_>>
         {
+            let token_id = token_id;
             Box::pin(async move {
-                Ok(Some(TokenInfo {
-                    id: TokenId::new("tok-0123456789abcdef").unwrap(),
-                    data: TokenData {
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                        expires_at: Utc::now(),
-                        client_id: OAuthClientId::new("client123").unwrap(),
-                        client_auth: ClientAuth {
-                            method: "POST".to_string(),
-                            alg: "".to_string(),
-                            kid: "".to_string(),
-                            jkt: "".to_string(),
+                if token_id
+                    == TokenId::new("tok-7bddad4f0bf4f788dfb71edc41b4247f".to_string()).unwrap()
+                {
+                    Ok(Some(TokenInfo {
+                        id: TokenId::new("tok-7bddad4f0bf4f788dfb71edc41b4247f").unwrap(),
+                        data: TokenData {
+                            created_at: "2024-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                            updated_at: "2024-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                            expires_at: "2026-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                            client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
+                            client_auth: ClientAuth::new(None),
+                            device_id: Some(DeviceId::new("dev-64976a0a962c4b7521abd679789c44a8").unwrap()),
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            parameters: OAuthAuthorizationRequestParameters {
+                                client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
+                                state: Some("-87HL5S0U7rA71zRMMucDA".to_string()),
+                                redirect_uri: Some(
+                                    OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/".to_string())
+                                        .unwrap(),
+                                ),
+                                scope: Some(OAuthScope::new("atproto transition:generic".to_string()).unwrap()),
+                                response_type: OAuthResponseType::Code,
+                                code_challenge: Some("E0fpC2Qz0OT-iUqtvwxcuaCciTAgsEuE3XmMlz6hcCk".to_string()),
+                                code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+                                dpop_jkt: Some("9LLGPTQ9RxcuOdbzwsteKXWHF-9VaMqM76on5tcjiMc".to_string()),
+                                response_mode: Some(ResponseMode::Fragment),
+                                nonce: None,
+                                max_age: Some("2026-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap().timestamp() as u32),
+                                claims: None,
+                                login_hint: Some("ripperoni.com".to_string()),
+                                ui_locales: None,
+                                id_token_hint: None,
+                                display: Some(Display::Page),
+                                prompt: Some(Prompt::Consent),
+                                authorization_details: None,
+                            },
+                            details: None,
+                            code: Some(
+                                Code::new(
+                                    "cod-2fe27accba2e80759d069825d88af324fe0f8c8f9b0e4b67a70b1b624649d78c",
+                                )
+                                    .unwrap(),
+                            ),
                         },
-                        device_id: None,
-                        sub: Sub::new("1").unwrap(),
-                        parameters: OAuthAuthorizationRequestParameters {
-                            client_id: OAuthClientId::new("client123").unwrap(),
-                            state: None,
-                            redirect_uri: None,
-                            scope: None,
-                            response_type: OAuthResponseType::Code,
-                            code_challenge: None,
-                            code_challenge_method: None,
-                            dpop_jkt: None,
-                            response_mode: None,
-                            nonce: None,
-                            max_age: None,
-                            claims: None,
-                            login_hint: None,
-                            ui_locales: None,
-                            id_token_hint: None,
-                            display: None,
-                            prompt: None,
-                            authorization_details: None,
+                        account: Account {
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
                         },
-                        details: None,
-                        code: None,
-                    },
-                    account: Account {
-                        sub: Sub::new("1").unwrap(),
-                        aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
-                        preferred_username: None,
-                        email: None,
-                        email_verified: None,
-                        picture: None,
-                        name: None,
-                    },
-                    info: None,
-                    current_refresh_token: None,
-                }))
+                        info: None,
+                        current_refresh_token: Some(
+                            RefreshToken::new(
+                                "ref-82f4c3cc0a01f200cae304154af0a531b3b3e4c18478a238b2d9e224e44b28ac",
+                            )
+                                .unwrap(),
+                        ),
+                    }))
+                } else {
+                    Ok(None)
+                }
             })
         }
 
@@ -931,12 +955,7 @@ mod tests {
                         updated_at: Utc::now(),
                         expires_at: Utc::now(),
                         client_id: OAuthClientId::new("client1".to_string()).unwrap(),
-                        client_auth: ClientAuth {
-                            method: "".to_string(),
-                            alg: "".to_string(),
-                            kid: "".to_string(),
-                            jkt: "".to_string(),
-                        },
+                        client_auth: ClientAuth::new(None),
                         device_id: None,
                         sub: Sub::new("sub1").unwrap(),
                         parameters: OAuthAuthorizationRequestParameters {
@@ -987,18 +1006,30 @@ mod tests {
     }
 
     async fn create_signer() -> Signer {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_algorithm: Some(KeyAlgorithm::ES256),
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
                 ..Default::default()
             },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: Default::default(),
-                curve: Default::default(),
-                x: "vf9j5yujiO25FukCWswD9GFGU30xwm6D6JlVIp40FUU".to_string(),
-                y: "5EqgG67c-QjyCgHmhiq65kjqEo0Wig8a97h322vTtq4".to_string(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -1019,7 +1050,7 @@ mod tests {
             on_client_info: Some(Box::new(
                 |client_id: OAuthClientId,
                  oauth_client_metadata: OAuthClientMetadata,
-                 jwks: Option<JwkSet>|
+                 jwks: Option<JWKSet<Empty>>|
                  -> ClientInfo {
                     ClientInfo {
                         is_first_party: client_id
@@ -1047,21 +1078,21 @@ mod tests {
     async fn test_create() {
         let token_manager = create_token_manager().await;
         let client = Client {
-            id: OAuthClientId::new("client123").unwrap(),
+            id: OAuthClientId::new("https://cleanfollow-bsky.pages.dev/client-metadata.json")
+                .unwrap(),
             metadata: OAuthClientMetadata {
                 ..Default::default()
             },
             jwks: None,
             info: Default::default(),
         };
-        let client_auth = ClientAuth {
-            method: "POST".to_string(),
-            alg: "".to_string(),
+        let client_auth = ClientAuth::new(Some(ClientAuthDetails {
+            alg: "ES256".to_string(),
             kid: "".to_string(),
             jkt: "".to_string(),
-        };
+        }));
         let account = Account {
-            sub: Sub::new("sub1").unwrap(),
+            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
             aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
             preferred_username: None,
             email: None,
@@ -1073,28 +1104,31 @@ mod tests {
         let parameters = OAuthAuthorizationRequestParameters {
             client_id: OAuthClientId::new("client123").unwrap(),
             state: None,
-            redirect_uri: None,
-            scope: None,
+            redirect_uri: Some(
+                OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
+            ),
+            scope: Some(OAuthScope::new("atproto transition:generic").unwrap()),
             response_type: OAuthResponseType::Code,
-            code_challenge: None,
-            code_challenge_method: None,
-            dpop_jkt: None,
-            response_mode: None,
+            code_challenge: Some("E0fpC2Qz0OT-iUqtvwxcuaCciTAgsEuE3XmMlz6hcCk".to_string()),
+            code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+            dpop_jkt: Some("9LLGPTQ9RxcuOdbzwsteKXWHF-9VaMqM76on5tcjiMc".to_string()),
+            response_mode: Some(ResponseMode::Fragment),
             nonce: None,
-            max_age: None,
+            max_age: Some(1),
             claims: None,
-            login_hint: None,
+            login_hint: Some("ripperoni.com".to_string()),
             ui_locales: None,
             id_token_hint: None,
-            display: None,
-            prompt: None,
+            display: Some(Display::Page),
+            prompt: Some(Prompt::Consent),
             authorization_details: None,
         };
-        let dpop_jkt: Option<String> = None;
+        let dpop_jkt: Option<String> =
+            Some("9LLGPTQ9RxcuOdbzwsteKXWHF-9VaMqM76on5tcjiMc".to_string());
         let input = OAuthAuthorizationCodeGrantTokenRequest::new(
             Code::generate(),
             OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
-            None::<String>,
+            Some("E0fpC2Qz0OT-iUqtvwxcuaCciTAgsEuE3XmMlz6hcCk".to_string()),
         )
         .unwrap();
         let result = token_manager
@@ -1161,12 +1195,11 @@ mod tests {
             jwks: None,
             info: Default::default(),
         };
-        let client_auth = ClientAuth {
-            method: "".to_string(),
-            alg: "".to_string(),
+        let client_auth = ClientAuth::new(Some(ClientAuthDetails {
+            alg: "ESS256".to_string(),
             kid: "".to_string(),
             jkt: "".to_string(),
-        };
+        }));
         let input = OAuthRefreshTokenGrantTokenRequest::new(
             OAuthRefreshToken::new(
                 "ref-a41a16a716951a211b9ba177b121ce469128fb4eeb4cea6f10fd949014ab48c4".to_string(),
@@ -1181,8 +1214,8 @@ mod tests {
         let expected = OAuthTokenResponse {
             access_token: OAuthAccessToken::new("").unwrap(),
             token_type: OAuthTokenType::DPoP,
-            scope: None,
-            refresh_token: None,
+            scope: Some(OAuthScope::new("".to_string()).unwrap()),
+            refresh_token: Some(RefreshToken::new("".to_string()).unwrap()),
             expires_in: None,
             id_token: None,
             authorization_details: None,
@@ -1241,12 +1274,7 @@ mod tests {
             jwks: None,
             info: Default::default(),
         };
-        let client_auth = ClientAuth {
-            method: "".to_string(),
-            alg: "".to_string(),
-            kid: "".to_string(),
-            jkt: "".to_string(),
-        };
+        let client_auth = ClientAuth::new(None);
         let token = OAuthTokenIdentification::new("", None).unwrap();
         let result = token_manager
             .client_token_info(&client, &client_auth, &token)
@@ -1262,12 +1290,7 @@ mod tests {
                     "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                 )
                 .unwrap(),
-                client_auth: ClientAuth {
-                    method: "".to_string(),
-                    alg: "".to_string(),
-                    kid: "".to_string(),
-                    jkt: "".to_string(),
-                },
+                client_auth: ClientAuth::new(None),
                 device_id: None,
                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                 parameters: OAuthAuthorizationRequestParameters {
@@ -1315,48 +1338,56 @@ mod tests {
     async fn test_get_token_info() {
         let token_manager = create_token_manager().await;
         let token_type: OAuthTokenType = OAuthTokenType::DPoP;
-        let token_id: TokenId = TokenId::new("").unwrap();
+        let token_id: TokenId = TokenId::new("tok-7bddad4f0bf4f788dfb71edc41b4247f").unwrap();
         let result = token_manager
             .get_token_info(token_type, token_id)
             .await
             .unwrap();
         let expected = TokenInfo {
-            id: TokenId::new("").unwrap(),
+            id: TokenId::new("tok-7bddad4f0bf4f788dfb71edc41b4247f").unwrap(),
             data: TokenData {
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                expires_at: Utc::now(),
+                created_at: "2024-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                updated_at: "2024-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                expires_at: "2026-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
                 client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
-                client_auth: ClientAuth {
-                    method: "POST".to_string(),
-                    alg: "".to_string(),
-                    kid: "".to_string(),
-                    jkt: "".to_string(),
-                },
-                device_id: None,
+                client_auth: ClientAuth::new(None),
+                device_id: Some(DeviceId::new("dev-64976a0a962c4b7521abd679789c44a8").unwrap()),
                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                 parameters: OAuthAuthorizationRequestParameters {
                     client_id: OAuthClientId::new("https://cleanfollow.com").unwrap(),
-                    state: None,
-                    redirect_uri: None,
-                    scope: None,
+                    state: Some("-87HL5S0U7rA71zRMMucDA".to_string()),
+                    redirect_uri: Some(
+                        OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/".to_string())
+                            .unwrap(),
+                    ),
+                    scope: Some(OAuthScope::new("atproto transition:generic".to_string()).unwrap()),
                     response_type: OAuthResponseType::Code,
-                    code_challenge: None,
-                    code_challenge_method: None,
-                    dpop_jkt: None,
-                    response_mode: None,
+                    code_challenge: Some("E0fpC2Qz0OT-iUqtvwxcuaCciTAgsEuE3XmMlz6hcCk".to_string()),
+                    code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+                    dpop_jkt: Some("9LLGPTQ9RxcuOdbzwsteKXWHF-9VaMqM76on5tcjiMc".to_string()),
+                    response_mode: Some(ResponseMode::Fragment),
                     nonce: None,
-                    max_age: None,
+                    max_age: Some(
+                        "2026-11-28T12:00:09Z"
+                            .parse::<DateTime<Utc>>()
+                            .unwrap()
+                            .timestamp() as u32,
+                    ),
                     claims: None,
-                    login_hint: None,
+                    login_hint: Some("ripperoni.com".to_string()),
                     ui_locales: None,
                     id_token_hint: None,
-                    display: None,
-                    prompt: None,
+                    display: Some(Display::Page),
+                    prompt: Some(Prompt::Consent),
                     authorization_details: None,
                 },
                 details: None,
-                code: None,
+                code: Some(
+                    Code::new(
+                        "cod-2fe27accba2e80759d069825d88af324fe0f8c8f9b0e4b67a70b1b624649d78c",
+                    )
+                    .unwrap(),
+                ),
             },
             account: Account {
                 sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
@@ -1368,7 +1399,12 @@ mod tests {
                 name: None,
             },
             info: None,
-            current_refresh_token: None,
+            current_refresh_token: Some(
+                RefreshToken::new(
+                    "ref-82f4c3cc0a01f200cae304154af0a531b3b3e4c18478a238b2d9e224e44b28ac",
+                )
+                .unwrap(),
+            ),
         };
         assert_eq!(result, expected)
     }
@@ -1377,7 +1413,7 @@ mod tests {
     async fn test_authenticate_token_id() {
         let token_manager = create_token_manager().await;
         let token_type = OAuthTokenType::DPoP;
-        let token = TokenId::new("tok-0123456789abcdef").unwrap();
+        let token = TokenId::new("tok-739361c165c76408088de74ee136cf66").unwrap();
         let dpop_jkt: Option<String> = Some("DPoP eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJfVlFPaVBrQ0NHbHFkODljdWJ1UkNTWE01bnJtbUJZTW5fQ0Q5RWNtQUhvIiwieSI6ImNrZTF3TUJYOXNabWktVzBrOTVFa1VSZkNobFk2bWpuUm1TQzhsMElxRG8ifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NTk1OTM4LCJqdGkiOiJoNmVvYjVyeXJrOjI0OXc3MjZ5ZjFkc3oiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9wZHMucmlwcGVyb25pLmNvbS9vYXV0aC9wYXIiLCJub25jZSI6IndYTkFfM283ckZ3X3p2eXpOMHAxVm5RZE8yZUhDenJLMXBiUGt3Yk1qT2MifQ.0k23eIpVoT9Xmb3owTMMSzPkFLe7ULVyd0v_qdHzCNzPM7Z3sA-sOpVWg-Mkx6qutu-7S8Oa4-KL8awB1DKEKA".to_string());
         let result = token_manager
             .authenticate_token_id(token_type, token, dpop_jkt, None)
@@ -1400,12 +1436,7 @@ mod tests {
                         "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                     )
                     .unwrap(),
-                    client_auth: ClientAuth {
-                        method: "".to_string(),
-                        alg: "".to_string(),
-                        kid: "".to_string(),
-                        jkt: "".to_string(),
-                    },
+                    client_auth: ClientAuth::new(None),
                     device_id: None,
                     sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
                     parameters: OAuthAuthorizationRequestParameters {

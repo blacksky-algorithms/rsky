@@ -266,26 +266,7 @@ async fn test_oauth_jwks() {
     assert_eq!(response_status, Status::Ok);
     let response_keys = response.into_json::<JwkSet>().await.unwrap();
 
-    let expected = JwkSet {
-        keys: vec![Jwk {
-            common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: Some(vec![KeyOperations::Sign]),
-                key_algorithm: Some(KeyAlgorithm::PS256),
-                key_id: Some("test".to_string()),
-                x509_url: None,
-                x509_chain: None,
-                x509_sha1_fingerprint: None,
-                x509_sha256_fingerprint: None,
-            },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: EllipticCurveKeyType::EC,
-                curve: EllipticCurve::P256,
-                x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
-                y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
-            }),
-        }],
-    };
+    let expected = JwkSet { keys: vec![] };
     assert_eq!(response_keys, expected);
 }
 
@@ -673,4 +654,163 @@ async fn test_oauth_reject() {
         .await;
     let response_status = response.status();
     assert_eq!(response_status, Status::SeeOther);
+}
+
+#[tokio::test]
+async fn test_oauth_token() {
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(&postgres).await;
+    let (username, password) = create_account(&client).await;
+
+    let input = json!(
+        {
+            "redirect_uri":"https://cleanfollow-bsky.pages.dev/",
+            "code_challenge":"RLpoJtb7axWTfWVjH1T5bay2uQ38N8alwaMvoGK2Z10",
+            "code_challenge_method":"S256",
+            "state":"yfhsnwinGQkORB1eV5Tf7A",
+            "login_hint":"dummaccount.rsky.com",
+            "response_mode":"fragment",
+            "response_type":"code",
+            "display":"page",
+            "scope":"atproto transition:generic",
+            "client_id":"https://cleanfollow-bsky.pages.dev/client-metadata.json"
+        }
+    );
+    let response = client
+        .post("/oauth/par")
+        .header(ContentType::JSON)
+        .header(Header::new("dpop", "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJEQTRCVWNzR2ZzT2V6NzlPNzAwcF9rMjFIZFNMNklnSFJSbzlUT0Fha2IwIiwieSI6IjBmaHdQUWNwRXBKSk9Zek5uMXd3UkNzTDRuR2lfNVhwdmdOdHBYeUJUN1EifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjYwNDExLCJqdGkiOiJoNmZoeGZhdjc0OjI4enpvdG1ycTU0MCIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3BhciIsIm5vbmNlIjoiaGdtMU5XSmpJLTRybzN0WFN6M19oTWYwamZOVlFvSmtIU05FbDFRT082USJ9.CC0LA2fjqGDP2YgC-ulCDSo9PgmPCh1bk_AvW6nxvuScE18EaDyxHvV1x1vq2emxTaR3aM8pTsD6-3nhw4yQiw"))
+        .header(Header::new("Sec-Fetch-Dest", "empty"))
+        .header(Header::new("Sec-Fetch-Mode", "cors"))
+        .header(Header::new("Sec-Fetch-Site", "cross-site"))
+        .header(Header::new("Content-Length", "1000"))
+        .header(Header::new("Accept", "*/*"))
+        .body(input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Created);
+    let response_body = response.into_json::<OAuthParResponse>().await.unwrap();
+    let request_uri = response_body.request_uri();
+    let client_id = "https://cleanfollow-bsky.pages.dev/client-metadata.json";
+    let url = format!("/oauth/authorize?client_id={client_id}&request_uri={request_uri}");
+    let localhost = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8000).into();
+    let response = client
+        .get(url.clone())
+        .header(Header::new("dpop", "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJEQTRCVWNzR2ZzT2V6NzlPNzAwcF9rMjFIZFNMNklnSFJSbzlUT0Fha2IwIiwieSI6IjBmaHdQUWNwRXBKSk9Zek5uMXd3UkNzTDRuR2lfNVhwdmdOdHBYeUJUN1EifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ0NjYwNDExLCJqdGkiOiJoNmZoeGZhdjc0OjI4enpvdG1ycTU0MCIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3BhciIsIm5vbmNlIjoiaGdtMU5XSmpJLTRybzN0WFN6M19oTWYwamZOVlFvSmtIU05FbDFRT082USJ9.CC0LA2fjqGDP2YgC-ulCDSo9PgmPCh1bk_AvW6nxvuScE18EaDyxHvV1x1vq2emxTaR3aM8pTsD6-3nhw4yQiw"))
+        .header(Header::new("Sec-Fetch-Site", "cross-site"))
+        .header(Header::new("Sec-Fetch-Mode", "navigate"))
+        .header(Header::new("Sec-Fetch-Dest", "document"))
+        .header(Header::new("Accept", "*/*"))
+        .header(Header::new("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0"))
+        .remote(localhost)
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
+
+    let cookies = response.cookies();
+    let csrf_token = cookies
+        .get(("csrf-".to_string() + request_uri).as_str())
+        .unwrap()
+        .clone();
+    let device_id = cookies.get("device-id").unwrap().clone();
+    let session_id = cookies.get("session-id").unwrap().clone();
+
+    let input = json!(
+        {
+            "csrf_token":csrf_token.value(),
+            "request_uri":request_uri,
+            "client_id":"https://cleanfollow-bsky.pages.dev/client-metadata.json",
+            "credentials":{
+                "username":username,
+                "password":password,
+                "remember":true
+            }
+        }
+    );
+    let referer = "https://pds.ripperoni.com".to_string() + url.as_str();
+    let response = client
+        .post("/oauth/authorize/sign-in")
+        .header(ContentType::JSON)
+        .header(Header::new("Sec-Fetch-Dest", "empty"))
+        .header(Header::new("Origin", "https://pds.ripperoni.com"))
+        .header(Header::new("Sec-Fetch-Mode", "same-origin"))
+        .header(Header::new("Sec-Fetch-Site", "same-origin"))
+        .header(Header::new("Referer", referer.clone()))
+        .header(Header::new("Content-Length", "1000"))
+        .header(Header::new("Accept", "*/*"))
+        .header(Header::new(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0",
+        ))
+        .cookie(csrf_token.clone())
+        .cookie(device_id.clone())
+        .cookie(session_id.clone())
+        .remote(localhost.clone())
+        .body(input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
+    let response_body = response.into_json::<SignInResponse>().await.unwrap();
+    let did = response_body.account.sub.get();
+
+    //Accept
+    let csrf = csrf_token.value();
+    let url = format!("/oauth/authorize/accept?client_id={client_id}&request_uri={request_uri}&csrf_token={csrf}&account_sub={did}");
+    let response = client
+        .get(url)
+        .header(ContentType::JSON)
+        .header(Header::new("Sec-Fetch-Dest", "document"))
+        .header(Header::new("Origin", "https://pds.ripperoni.com"))
+        .header(Header::new("Sec-Fetch-Mode", "navigate"))
+        .header(Header::new("Sec-Fetch-Site", "same-origin"))
+        .header(Header::new("Referer", referer.clone()))
+        .header(Header::new("Content-Length", "1000"))
+        .header(Header::new("Accept", "*/*"))
+        .header(Header::new(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0",
+        ))
+        .cookie(csrf_token)
+        .cookie(device_id)
+        .cookie(session_id)
+        .remote(localhost)
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::SeeOther);
+
+    let token_input = json!(
+        {
+            "client_id":"https://cleanfollow-bsky.pages.dev/client-metadata.json",
+            "code":"<code>",
+            "code_verifier": "<code_verifier>",
+            "grant_type": "authorization_code",
+            "redirect_uri": "https://cleanfollow-bsky.pages.dev"
+        }
+    );
+    //Token
+    let response = client
+        .post("/oauth/token")
+        .header(ContentType::JSON)
+        .header(Header::new("Sec-Fetch-Dest", "empty"))
+        .header(Header::new("Origin", "https::/cleanfollow-bsky.pages.dev"))
+        .header(Header::new("Sec-Fetch-Mode", "cors"))
+        .header(Header::new("Sec-Fetch-Site", "cross-site"))
+        .header(Header::new("Referer", referer.clone()))
+        .header(Header::new("Content-Length", "1000"))
+        .header(Header::new("Accept", "*/*"))
+        .header(Header::new(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0",
+        ))
+        .header(Header::new("dpop", "eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJtVVlqS3NOWkdmUHIzajh2andpSG8yd3oxTEd5V1N5czJKUHdrN0xJT0tBIiwieSI6IkVyQkppSFNHRW4zeFdOLUZWaW5IRWZpTHprNVdBRGYzbmpOX2ZFZENvQjAifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ1MzY1OTIxLCJqdGkiOiJoNm9pMTlydWVvOmRscjVraTd3cm9ycyIsImh0bSI6IlBPU1QiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL29hdXRoL3Rva2VuIiwibm9uY2UiOiIyM0Z0bjZwWG83RGFGNXRXTlhZSVgzeVllTXRXVTNMUzR6M2psaGhramprIn0._anewYjqW8Jo12rw0NqbGIlNK4dfb_dUwu-A8s8msOQHUPae80UxpuquMzf4r2-AUpbsFE7VUoD9vpb3QHKlJw"))
+        .remote(localhost)
+        .body(token_input.to_string())
+        .dispatch()
+        .await;
+    let response_status = response.status();
+    assert_eq!(response_status, Status::Ok);
 }

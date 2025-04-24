@@ -19,12 +19,13 @@ pub enum CodeError {
 impl Code {
     pub fn new(val: impl Into<String>) -> Result<Self, CodeError> {
         let val = val.into();
-        if val.len() != CODE_LENGTH {
-            return Err(CodeError::InvalidLength);
-        }
         if !val.starts_with(CODE_PREFIX) {
             return Err(CodeError::InvalidFormat);
         }
+        if val.len() != CODE_LENGTH {
+            return Err(CodeError::InvalidLength);
+        }
+
         Ok(Self(val))
     }
 
@@ -56,8 +57,8 @@ mod tests {
 
     #[test]
     fn test_code() {
-        let code = Code::new("tok-dwadwdaddwadwdad").unwrap();
-        assert_eq!(code.into_inner(), "tok-dwadwdaddwadwdad");
+        let code = Code::new("cod-dwadwdaddwadwdaddwadwdaddwadwdad").unwrap();
+        assert_eq!(code.into_inner(), "cod-dwadwdaddwadwdaddwadwdaddwadwdad");
         let code = Code::generate();
         let val = code.into_inner();
         Code::new(val).unwrap();
@@ -65,7 +66,7 @@ mod tests {
         let invalid_format_code = Code::new("aaaadwadwdaddwadwdad").unwrap_err();
         assert_eq!(invalid_format_code, CodeError::InvalidFormat);
 
-        let invalid_length = Code::new("tok-dwadwda").unwrap_err();
+        let invalid_length = Code::new("cod-dwadwda").unwrap_err();
         assert_eq!(invalid_length, CodeError::InvalidLength);
     }
 }

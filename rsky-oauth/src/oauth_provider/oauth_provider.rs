@@ -6,7 +6,7 @@ use crate::oauth_provider::account::account_store::{
     AccountStore, DeviceAccountInfo, SignInCredentials,
 };
 use crate::oauth_provider::client::client::Client;
-use crate::oauth_provider::client::client_auth::ClientAuth;
+use crate::oauth_provider::client::client_auth::{ClientAuth, ClientAuthDetails};
 use crate::oauth_provider::client::client_manager::{ClientManager, LoopbackMetadataGetter};
 use crate::oauth_provider::client::client_store::ClientStore;
 use crate::oauth_provider::constants::{AUTHENTICATION_MAX_AGE, TOKEN_MAX_AGE};
@@ -44,14 +44,15 @@ use crate::oauth_types::{
     ActiveTokenInfo, ApplicationType, OAuthAccessToken, OAuthAuthorizationCodeGrantTokenRequest,
     OAuthAuthorizationRequestJar, OAuthAuthorizationRequestPar,
     OAuthAuthorizationRequestParameters, OAuthAuthorizationRequestQuery,
-    OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientId, OAuthClientMetadata,
-    OAuthIntrospectionResponse, OAuthIssuerIdentifier, OAuthParResponse,
-    OAuthRefreshTokenGrantTokenRequest, OAuthResponseType, OAuthTokenIdentification,
-    OAuthTokenRequest, OAuthTokenResponse, OAuthTokenType, Prompt,
-    CLIENT_ASSERTION_TYPE_JWT_BEARER,
+    OAuthAuthorizationServerMetadata, OAuthClientCredentials, OAuthClientId, OAuthClientIdLoopback,
+    OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType, OAuthIntrospectionResponse,
+    OAuthIssuerIdentifier, OAuthParResponse, OAuthRedirectUri, OAuthRefreshTokenGrantTokenRequest,
+    OAuthResponseType, OAuthScope, OAuthTokenIdentification, OAuthTokenRequest, OAuthTokenResponse,
+    OAuthTokenType, Prompt, CLIENT_ASSERTION_TYPE_JWT_BEARER,
 };
 use crate::simple_store_memory::SimpleStoreMemory;
-use jsonwebtoken::jwk::{Jwk, JwkSet};
+use biscuit::jwk::{JWKSet, JWK};
+use biscuit::Empty;
 use rocket::form::validate::Contains;
 use rocket::http::Status;
 use rocket::response::Responder;
@@ -191,7 +192,7 @@ pub struct OAuthProviderOptions {
      *
      * @note the cached entries should automatically expire after a certain time (typically 10 minutes)
      */
-    pub client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
+    pub client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JWKSet<Empty>>>>,
 
     /**
      * In order to speed up the client fetching process, you can provide a cache
@@ -276,7 +277,7 @@ pub struct OAuthProviderCreatorParams {
      *
      * @note the cached entries should automatically expire after a certain time (typically 10 minutes)
      */
-    pub client_jwks_cache: Option<Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>>,
+    pub client_jwks_cache: Option<Arc<RwLock<SimpleStoreMemory<String, JWKSet<Empty>>>>>,
 
     /**
      * In order to speed up the client fetching process, you can provide a cache
@@ -329,7 +330,6 @@ impl OAuthProvider {
         let client_metadata_cache = options
             .client_metadata_cache
             .unwrap_or(Arc::new(RwLock::new(SimpleStoreMemory::default())));
-        // let loopback_metadata = Arc::new(options.loopback_metadata);
         Box::new(
             move |account_store: Arc<RwLock<dyn AccountStore>>,
                   request_store: Option<Arc<RwLock<dyn RequestStore>>>,
@@ -367,6 +367,46 @@ impl OAuthProvider {
     }
 
     pub fn new(options: OAuthProviderOptions) -> Result<Self, OAuthError> {
+        let loopback_metadata =
+            Box::new(
+                move |client_id: OAuthClientIdLoopback| OAuthClientMetadata {
+                    redirect_uris: vec![
+                        OAuthRedirectUri::new("http://127.0.0.1/").unwrap(),
+                        OAuthRedirectUri::new("http://[::1]/").unwrap(),
+                    ],
+                    response_types: vec![OAuthResponseType::Code],
+                    grant_types: vec![
+                        OAuthGrantType::AuthorizationCode,
+                        OAuthGrantType::RefreshToken,
+                    ],
+                    scope: Some(OAuthScope::new("atproto").unwrap()),
+                    token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::None),
+                    token_endpoint_auth_signing_alg: None,
+                    userinfo_signed_response_alg: None,
+                    userinfo_encrypted_response_alg: None,
+                    jwks_uri: None,
+                    jwks: None,
+                    application_type: ApplicationType::Web,
+                    subject_type: None,
+                    request_object_signing_alg: None,
+                    id_token_signed_response_alg: None,
+                    authorization_signed_response_alg: "".to_string(),
+                    authorization_encrypted_response_enc: None,
+                    authorization_encrypted_response_alg: None,
+                    client_id: Some(client_id.as_str().to_string()),
+                    client_name: None,
+                    client_uri: None,
+                    policy_uri: None,
+                    tos_uri: None,
+                    logo_uri: None,
+                    default_max_age: None,
+                    require_auth_time: None,
+                    contacts: None,
+                    tls_client_certificate_bound_access_tokens: None,
+                    dpop_bound_access_tokens: Some(true),
+                    authorization_details_types: None,
+                },
+            );
         let oauth_hooks = options.oauth_hooks;
         let token_max_age = TOKEN_MAX_AGE;
 
@@ -401,7 +441,7 @@ impl OAuthProvider {
             access_token_type: options.access_token_type,
             redis: None,
             replay_store,
-            dpop_options: None,
+            dpop_options: dpop_options,
         };
         let oauth_verifier = OAuthVerifier::new(verifier_opts);
 
@@ -421,12 +461,13 @@ impl OAuthProvider {
             .unwrap_or_else(|| AUTHENTICATION_MAX_AGE as u64);
 
         let account_manager = AccountManager::new(account_store);
+
         let client_manager = ClientManager::new(
             metadata.clone(),
             oauth_verifier.keyset.clone(),
             oauth_hooks.clone(),
             client_store.unwrap(),
-            options.loopback_metadata,
+            Some(loopback_metadata),
             client_jwks_cache,
             client_metadata_cache,
         );
@@ -458,7 +499,7 @@ impl OAuthProvider {
         })
     }
 
-    pub async fn get_jwks(&self) -> Vec<Jwk> {
+    pub async fn get_jwks(&self) -> Vec<JWK<Empty>> {
         let keyset = self.oauth_verifier.keyset.read().await;
         keyset.public_jwks()
     }
@@ -480,9 +521,7 @@ impl OAuthProvider {
             .verify_credentials(credentials, &self.oauth_verifier.issuer)
             .await?;
 
-        if client.metadata.application_type == ApplicationType::Native
-            && client_auth.method == "none"
-        {
+        if client.metadata.application_type == ApplicationType::Native && client_auth.is_none() {
             // https://datatracker.ietf.org/doc/html/rfc8252#section-8.4
             //
             // > Except when using a mechanism like Dynamic Client Registration
@@ -517,9 +556,9 @@ impl OAuthProvider {
         input: OAuthAuthorizationRequestJar,
     ) -> Result<DecodeJarResponse, OAuthError> {
         let result = client.decode_request_object(input.jwt()).await?;
-        let claims = result.claims.clone();
+        let claims = result.payload.clone();
         let payload = OAuthAuthorizationRequestParameters {
-            client_id: result.claims.client_id.clone().unwrap(),
+            client_id: result.payload.client_id.clone().unwrap(),
             state: None,
             redirect_uri: None,
             scope: None,
@@ -560,8 +599,8 @@ impl OAuthProvider {
             ));
         }
 
-        let kid = result.header.kid;
-        let alg = result.header.alg;
+        let kid = result.protected_header.kid;
+        let alg = result.protected_header.alg;
         unimplemented!()
         // let jkt = result.cl
         // if let Some(protected_header) = result.1 {
@@ -622,12 +661,7 @@ impl OAuthProvider {
     ) -> Result<RequestInfo, OAuthError> {
         match query.clone() {
             OAuthAuthorizationRequestQuery::Parameters(query) => {
-                let auth = ClientAuth {
-                    method: "none".to_string(),
-                    alg: "".to_string(),
-                    kid: "".to_string(),
-                    jkt: "".to_string(),
-                };
+                let auth = ClientAuth::new(None);
                 self.request_manager
                     .create_authorization_request(client, auth, query, Some(device_id), None)
                     .await
@@ -637,12 +671,11 @@ impl OAuthProvider {
                 if request_object.kid.is_some() {
                     // Allow using signed JAR during "/authorize" as client authentication.
                     // This allows clients to skip PAR to initiate trusted sessions.
-                    let client_auth = ClientAuth {
-                        method: CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
+                    let client_auth = ClientAuth::new(Some(ClientAuthDetails {
                         alg: request_object.alg.unwrap(),
                         kid: request_object.kid.unwrap(),
                         jkt: request_object.jkt.unwrap(),
-                    };
+                    }));
 
                     self.request_manager
                         .create_authorization_request(
@@ -654,12 +687,7 @@ impl OAuthProvider {
                         )
                         .await
                 } else {
-                    let client_auth = ClientAuth {
-                        method: "none".to_string(),
-                        alg: "".to_string(),
-                        kid: "".to_string(),
-                        jkt: "".to_string(),
-                    };
+                    let client_auth = ClientAuth::new(None);
                     self.request_manager
                         .create_authorization_request(
                             client,
@@ -1156,7 +1184,7 @@ impl OAuthProvider {
                 account_info.account,
                 Some((request_data_authorized.device_id, account_info.info)),
                 request_data_authorized.parameters,
-                None, // input,
+                dpop_jkt, // input,
                 CreateTokenInput::Authorization(input),
             )
             .await
@@ -1200,7 +1228,7 @@ impl OAuthProvider {
         // > 2.0 access token such as the bearer token described in OAuth 2.0 Bearer
         // > Token Usage [RFC6750]. The methods of managing and validating these
         // > authentication credentials are out of scope of this specification.
-        if client_auth.method == "none" {
+        if client_auth.is_none() {
             return Err(OAuthError::UnauthorizedClientError(
                 "Client authentication required".to_string(),
             ));
@@ -1266,8 +1294,8 @@ mod tests {
     use crate::jwk::{Audience, Key, SignedJwt};
     use crate::jwk_jose::jose_key::JoseKey;
     use crate::oauth_provider::account::account_store::AccountInfo;
+    use crate::oauth_provider::client::client_auth::ClientAuthDetails;
     use crate::oauth_provider::client::client_info::ClientInfo;
-    use crate::oauth_provider::constants::PAR_EXPIRES_IN;
     use crate::oauth_provider::device::device_data::DeviceData;
     use crate::oauth_provider::device::device_store::PartialDeviceData;
     use crate::oauth_provider::request::request_data::RequestData;
@@ -1282,11 +1310,14 @@ mod tests {
         OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthRefreshToken,
         OAuthResponseType, OAuthScope, ResponseMode, TokenTypeHint, ValidUri, WebUri,
     };
-    use chrono::Utc;
-    use jsonwebtoken::jwk::{
-        AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
-        EllipticCurveKeyType, KeyAlgorithm, KeyOperations, PublicKeyUse,
+    use biscuit::jwa;
+    use biscuit::jwa::Algorithm;
+    use biscuit::jwk::{
+        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, EllipticCurveKeyType,
+        KeyOperations, PublicKeyUse, RSAKeyParameters,
     };
+    use chrono::{DateTime, Utc};
+    use num_bigint::BigUint;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -1352,7 +1383,36 @@ mod tests {
             device_id: DeviceId,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<AccountInfo>, OAuthError>> + Send + Sync + '_>>
         {
-            unimplemented!()
+            Box::pin(async move {
+                if device_id == DeviceId::new("dev-64976a0a962c4b7521abd679789c44a3").unwrap() {
+                    let mut result = vec![];
+                    result.push(AccountInfo {
+                        account: Account {
+                            sub: Sub::new("did:plc:khvyd3oiw46vif5gm7hijslk").unwrap(),
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
+                        },
+                        info: DeviceAccountInfo {
+                            remembered: false,
+                            authenticated_at: "2024-11-28T12:00:09Z"
+                                .parse::<DateTime<Utc>>()
+                                .unwrap(),
+                            authorized_clients: vec![OAuthClientId::new(
+                                "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                            )
+                            .unwrap()],
+                        },
+                    });
+                    Ok(result)
+                } else {
+                    let result = vec![];
+                    Ok(result)
+                }
+            })
         }
     }
 
@@ -1461,12 +1521,7 @@ mod tests {
                                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                             )
                             .unwrap(),
-                            client_auth: ClientAuth {
-                                method: "POST".to_string(),
-                                alg: "".to_string(),
-                                kid: "".to_string(),
-                                jkt: "".to_string(),
-                            },
+                            client_auth: ClientAuth::new(None),
                             device_id: None,
                             sub: Sub::new("sub1").unwrap(),
                             parameters: OAuthAuthorizationRequestParameters {
@@ -1544,12 +1599,7 @@ mod tests {
                             "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                         )
                         .unwrap(),
-                        client_auth: ClientAuth {
-                            method: "".to_string(),
-                            alg: "".to_string(),
-                            kid: "".to_string(),
-                            jkt: "".to_string(),
-                        },
+                        client_auth: ClientAuth::new(None),
                         parameters: OAuthAuthorizationRequestParameters {
                             client_id: OAuthClientId::new(
                                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
@@ -1573,8 +1623,10 @@ mod tests {
                             prompt: None,
                             authorization_details: None,
                         },
-                        expires_at: Utc::now(),
-                        device_id: None,
+                        expires_at: "2026-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                        device_id: Some(
+                            DeviceId::new("dev-64976a0a962c4b7521abd679789c44a8").unwrap(),
+                        ),
                         sub: None,
                         code: None,
                     }))
@@ -1608,7 +1660,7 @@ mod tests {
                 if id == RequestId::new("req-f46e8a935aa5343574848e8a3c260fae").unwrap() {
                     Ok(())
                 } else {
-                    panic!()
+                    panic!("Delete Request Error")
                 }
             })
         }
@@ -1617,7 +1669,64 @@ mod tests {
             &self,
             code: Code,
         ) -> Pin<Box<dyn Future<Output = Option<FoundRequestResult>> + Send + Sync + '_>> {
-            unimplemented!()
+            Box::pin(async move {
+                if code
+                    == Code::new(
+                        "cod-2fe27accba2e80759d069825d88af324fe0f8c8f9b0e4b67a70b1b624649d78c",
+                    )
+                    .unwrap()
+                {
+                    Some(FoundRequestResult {
+                        id: RequestId::new("req-f46e8a935aa5343574848e8a3c260fae").unwrap(),
+                        data: RequestData {
+                            client_id: OAuthClientId::new(
+                                "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                            )
+                            .unwrap(),
+                            client_auth: ClientAuth::None,
+                            parameters: OAuthAuthorizationRequestParameters {
+                                client_id: OAuthClientId::new(
+                                    "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                                )
+                                .unwrap(),
+                                state: Some("7CWTxDeKpRZgPGwdTmWDEg".to_string()),
+                                redirect_uri: Some(
+                                    OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/")
+                                        .unwrap(),
+                                ),
+                                scope: Some(
+                                    OAuthScope::new("atproto transition:generic".to_string())
+                                        .unwrap(),
+                                ),
+                                response_type: OAuthResponseType::Code,
+                                code_challenge: Some(
+                                    "nscy9oF1_tjys23EIldP9Gta2T-yPt0C0ADqzlQRxp4".to_string(),
+                                ),
+                                code_challenge_method: Some(OAuthCodeChallengeMethod::S256),
+                                dpop_jkt: Some(
+                                    "Rc8X0vRhUwO7TurkyDatlsvXaBW1jKjp4pg779lZZvA".to_string(),
+                                ),
+                                response_mode: Some(ResponseMode::Fragment),
+                                nonce: None,
+                                max_age: None,
+                                claims: None,
+                                login_hint: Some("ripperoni.com".to_string()),
+                                ui_locales: None,
+                                id_token_hint: None,
+                                display: Some(Display::Page),
+                                prompt: Some(Prompt::Consent),
+                                authorization_details: None,
+                            },
+                            expires_at: Default::default(),
+                            device_id: None,
+                            sub: None,
+                            code: None,
+                        },
+                    })
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -1655,18 +1764,30 @@ mod tests {
     }
 
     async fn create_signer() -> Signer {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_algorithm: Some(KeyAlgorithm::ES256),
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
                 ..Default::default()
             },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: Default::default(),
-                curve: Default::default(),
-                x: "vf9j5yujiO25FukCWswD9GFGU30xwm6D6JlVIp40FUU".to_string(),
-                y: "5EqgG67c-QjyCgHmhiq65kjqEo0Wig8a97h322vTtq4".to_string(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -1687,7 +1808,7 @@ mod tests {
             on_client_info: Some(Box::new(
                 |client_id: OAuthClientId,
                  oauth_client_metadata: OAuthClientMetadata,
-                 jwks: Option<JwkSet>|
+                 jwks: Option<JWKSet<Empty>>|
                  -> ClientInfo {
                     ClientInfo {
                         is_first_party: client_id
@@ -1703,9 +1824,10 @@ mod tests {
             on_authorization_details: None,
         };
         let metadata = OAuthAuthorizationServerMetadata::new(
-            OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap(),
-            WebUri::validate("https://pds.ripperoni.com/oauth/authorize").unwrap(),
-            WebUri::validate("https://pds.ripperoni.com/oauth/token").unwrap(),
+            OAuthIssuerIdentifier::new("https://inspired-amusing-tick.ngrok-free.app").unwrap(),
+            WebUri::validate("https://inspired-amusing-tick.ngrok-free.app/oauth/authorize")
+                .unwrap(),
+            WebUri::validate("https://inspired-amusing-tick.ngrok-free.app/oauth/token").unwrap(),
         );
         RequestManager::new(
             store,
@@ -1722,7 +1844,7 @@ mod tests {
             on_client_info: Some(Box::new(
                 |client_id: OAuthClientId,
                  oauth_client_metadata: OAuthClientMetadata,
-                 jwks: Option<JwkSet>|
+                 jwks: Option<JWKSet<Empty>>|
                  -> ClientInfo {
                     ClientInfo {
                         is_first_party: client_id
@@ -1735,7 +1857,8 @@ mod tests {
             )),
             on_authorization_details: None,
         };
-        let issuer = OAuthIssuerIdentifier::new("https://pds.ripperoni.com").unwrap();
+        let issuer =
+            OAuthIssuerIdentifier::new("https://inspired-amusing-tick.ngrok-free.app").unwrap();
         let custom_metadata = build_custom_metadata(issuer.clone());
         let options = OAuthProviderOptions {
             authentication_max_age: None,
@@ -1779,23 +1902,30 @@ mod tests {
         let oauth_provider = create_oauth_provider().await;
         let result = oauth_provider.get_jwks().await;
 
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: Some(vec![KeyOperations::Sign]),
-                key_algorithm: Some(KeyAlgorithm::PS256),
-                key_id: Some("test".to_string()),
-                x509_url: None,
-                x509_chain: None,
-                x509_sha1_fingerprint: None,
-                x509_sha256_fingerprint: None,
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
+                ..Default::default()
             },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: EllipticCurveKeyType::EC,
-                curve: EllipticCurve::P256,
-                x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
-                y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
 
         assert_eq!(result, vec![jwk]);
@@ -2155,19 +2285,16 @@ mod tests {
     async fn test_code_grant() {
         let mut oauth_provider = create_oauth_provider().await;
         let client = create_client();
-        let client_auth = ClientAuth {
-            method: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
-            alg: "".to_string(),
-            kid: "".to_string(),
-            jkt: "".to_string(),
-        };
+        let client_auth = ClientAuth::new(None);
         let input = OAuthAuthorizationCodeGrantTokenRequest::new(
-            Code::generate(),
+            Code::new("cod-2fe27accba2e80759d069825d88af324fe0f8c8f9b0e4b67a70b1b624649d78c")
+                .unwrap(),
             OAuthRedirectUri::new("https://cleanfollow-bsky.pages.dev/").unwrap(),
-            None::<String>,
+            Some("E0fpC2Qz0OT-iUqtvwxcuaCciTAgsEuE3XmMlz6hcCk"),
         )
         .unwrap();
-        let dpop_jkt: Option<String> = Some("".to_string());
+        let dpop_jkt: Option<String> =
+            Some("Rc8X0vRhUwO7TurkyDatlsvXaBW1jKjp4pg779lZZvA".to_string());
         let result = oauth_provider
             .code_grant(client, client_auth, input, dpop_jkt)
             .await
@@ -2189,12 +2316,11 @@ mod tests {
     async fn test_refresh_token_grant() {
         let mut oauth_provider = create_oauth_provider().await;
         let client = create_client();
-        let client_auth = ClientAuth {
-            method: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
+        let client_auth = ClientAuth::new(Some(ClientAuthDetails {
             alg: "".to_string(),
             kid: "".to_string(),
             jkt: "".to_string(),
-        };
+        }));
         let input = OAuthRefreshTokenGrantTokenRequest::new(OAuthRefreshToken::new("").unwrap());
         let dpop_jkt: Option<String> = Some("".to_string());
         let result = oauth_provider
@@ -2276,7 +2402,7 @@ mod tests {
             dpop_bound_access_tokens: None,
             authorization_details_types: None,
         };
-        let jwks = JwkSet { keys: vec![] };
+        let jwks: JWKSet<Empty> = JWKSet { keys: vec![] };
         let info = ClientInfo {
             is_first_party: false,
             is_trusted: false,
@@ -2286,23 +2412,30 @@ mod tests {
 
     async fn build_keyset() -> Keyset {
         let mut keys = Vec::new();
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: Some(vec![KeyOperations::Sign]),
-                key_algorithm: Some(KeyAlgorithm::PS256),
-                key_id: None,
-                x509_url: None,
-                x509_chain: None,
-                x509_sha1_fingerprint: None,
-                x509_sha256_fingerprint: None,
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
+                ..Default::default()
             },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: EllipticCurveKeyType::EC,
-                curve: EllipticCurve::P256,
-                x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
-                y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let key = JoseKey::from_jwk(jwk, None).await;
         keys.push(Box::new(key) as Box<dyn Key>);

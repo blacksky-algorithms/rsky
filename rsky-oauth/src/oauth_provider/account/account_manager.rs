@@ -301,12 +301,7 @@ mod tests {
             jwks: None,
             info: Default::default(),
         };
-        let _client_auth = ClientAuth {
-            method: "POST".to_string(),
-            alg: "".to_string(),
-            kid: "".to_string(),
-            jkt: "".to_string(),
-        };
+        let _client_auth = ClientAuth::new(None);
         account_manager
             .add_authorized_client(device_id, account, client, _client_auth)
             .await;

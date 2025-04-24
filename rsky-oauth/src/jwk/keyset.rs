@@ -1,9 +1,11 @@
 use crate::jwk::key::Key;
-use crate::jwk::{JwkError, JwtPayload, SignedJwt, VerifyOptions, VerifyResult};
-use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
-use jsonwebtoken::{Algorithm, Header};
+use crate::jwk::{
+    algorithm_as_string, JwkError, JwtHeader, JwtPayload, SignedJwt, VerifyOptions, VerifyResult,
+};
+use biscuit::jwa::{Algorithm, SignatureAlgorithm};
+use biscuit::jwk::{PublicKeyUse, JWK};
+use biscuit::{Empty, JWT};
 use rocket::form::validate::Contains;
-use std::collections::HashSet;
 
 pub struct Keyset {
     keys: Vec<Box<dyn Key>>,
@@ -28,15 +30,15 @@ impl Keyset {
             keys,
             preferred_signing_algorithms: vec![
                 // Prefer elliptic curve algorithms
-                Algorithm::EdDSA,
-                Algorithm::ES256,
+                Algorithm::Signature(SignatureAlgorithm::ES256),
+                Algorithm::Signature(SignatureAlgorithm::ES384),
                 // https://datatracker.ietf.org/doc/html/rfc7518#section-3.5
-                Algorithm::PS256,
-                Algorithm::PS384,
-                Algorithm::PS512,
-                Algorithm::HS256,
-                Algorithm::HS384,
-                Algorithm::HS512,
+                Algorithm::Signature(SignatureAlgorithm::PS256),
+                Algorithm::Signature(SignatureAlgorithm::PS384),
+                Algorithm::Signature(SignatureAlgorithm::PS512),
+                Algorithm::Signature(SignatureAlgorithm::HS256),
+                Algorithm::Signature(SignatureAlgorithm::HS384),
+                Algorithm::Signature(SignatureAlgorithm::HS512),
             ],
         }
     }
@@ -45,21 +47,21 @@ impl Keyset {
         self.keys.len()
     }
 
-    pub fn sign_algorithms(&self) -> Vec<Algorithm> {
-        let mut algorithms = HashSet::new();
-        for key in &self.keys {
-            if let Some(r#use) = key.r#use() {
-                if r#use == PublicKeyUse::Signature {
-                    for alg in key.algorithms() {
-                        algorithms.insert(alg);
-                    }
-                }
-            }
-        }
-        Vec::from_iter(algorithms)
-    }
+    // pub fn sign_algorithms(&self) -> Vec<Algorithm> {
+    //     let mut algorithms = HashSet::new();
+    //     for key in &self.keys {
+    //         if let Some(r#use) = key.r#use() {
+    //             if r#use == PublicKeyUse::Signature {
+    //                 for alg in key.algorithms() {
+    //                     algorithms.insert(alg);
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     Vec::from_iter(algorithms)
+    // }
 
-    pub fn public_jwks(&self) -> Vec<Jwk> {
+    pub fn public_jwks(&self) -> Vec<JWK<Empty>> {
         let mut result = vec![];
         for key in &self.keys {
             if let Some(jwk) = key.public_jwk() {
@@ -69,7 +71,7 @@ impl Keyset {
         result
     }
 
-    pub fn private_jwks(&self) -> Vec<Jwk> {
+    pub fn private_jwks(&self) -> Vec<JWK<Empty>> {
         let mut result = vec![];
         for key in &self.keys {
             if let Some(jwk) = key.private_jwk() {
@@ -182,7 +184,7 @@ impl Keyset {
         &self,
         algorithms: Option<Vec<Algorithm>>,
         search_kids: Option<Vec<String>>,
-        header: Header,
+        header: JwtHeader,
         jwt_payload: JwtPayload,
     ) -> Result<SignedJwt, JwkError> {
         let mut header = header.clone();
@@ -193,9 +195,9 @@ impl Keyset {
         };
         let (key, alg) = match self.find_key(key_search).await {
             Ok(result) => result,
-            Err(error) => return Err(JwkError::JwtCreateError("".to_string())),
+            Err(error) => return Err(JwkError::JwtCreateError(error.to_string())),
         };
-        header.alg = alg;
+        header.alg = Some(algorithm_as_string(alg));
         header.kid = key.kid();
         key.create_jwt(header, jwt_payload).await
     }
@@ -205,18 +207,20 @@ impl Keyset {
         signed_jwt: SignedJwt,
         options: Option<VerifyOptions>,
     ) -> Result<VerifyResult, JwkError> {
-        let header = jsonwebtoken::decode_header(signed_jwt.val().as_str()).expect("No header");
-        let kid = match header.kid {
-            Some(kid) => kid,
-            None => return Err(JwkError::JwtVerifyError("No kid supplied".to_string())),
-        };
+        let encoded_jwt = JWT::<JwtPayload, JwtHeader>::new_encoded(signed_jwt.val().as_str());
+        let header = encoded_jwt.unverified_header().unwrap();
+        let kid = header.registered.key_id;
 
         let mut errors = vec![];
 
+        let kids = match kid {
+            None => None,
+            Some(kid) => Some(vec![kid]),
+        };
         let key_search = KeySearch {
             r#use: None,
-            kid: Some(vec![kid]),
-            alg: Some(vec![header.alg]),
+            kid: kids,
+            alg: Some(vec![Algorithm::Signature(header.registered.algorithm)]),
         };
 
         for key in self.list(key_search).await {
@@ -233,6 +237,7 @@ impl Keyset {
                 "ERR_JWKS_NO_MATCHING_KEY".to_string(),
             ))
         } else if errors.len() == 1 {
+            println!("{}", errors.get(0).unwrap());
             Err(JwkError::JwtVerifyError("ERR_JWT_INVALID".to_string()))
         } else {
             Err(JwkError::JwtVerifyError("ERR_JWT_INVALID".to_string()))
@@ -242,79 +247,55 @@ impl Keyset {
 
 #[cfg(test)]
 mod tests {
-    use crate::jwk::{Audience, JwtPayload, Key, Keyset, SignedJwt, VerifyOptions, VerifyResult};
+    use crate::jwk::{JwtHeader, JwtPayload, Key, Keyset, SignedJwt, VerifyResult};
     use crate::jwk_jose::jose_key::JoseKey;
-    use crate::oauth_provider::oidc::sub::Sub;
-    use jsonwebtoken::jwk::{
-        AlgorithmParameters, CommonParameters, Jwk, KeyAlgorithm, OctetKeyParameters, OctetKeyType,
-        PublicKeyUse, RSAKeyParameters,
+    use biscuit::jwa::{Algorithm, SignatureAlgorithm};
+    use biscuit::jwk::{
+        AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
+        EllipticCurveKeyType, JWK,
     };
-    use jsonwebtoken::{Algorithm, Header};
+    use biscuit::Empty;
 
     #[tokio::test]
     async fn test_verify_jwt() {
         let mut keys: Vec<Box<dyn Key>> = vec![];
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_algorithm: Some(KeyAlgorithm::HS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
+                algorithm: Some(Algorithm::Signature(SignatureAlgorithm::ES256)),
                 ..Default::default()
             },
-            algorithm: AlgorithmParameters::OctetKey(OctetKeyParameters {
-                key_type: OctetKeyType::Octet,
-                value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: EllipticCurveKeyType::EC,
+                curve: EllipticCurve::P256,
+                x: base64_url::decode("A04hGmnNyRzyQ7U8Mf0vImpmPWhUv-PpHXggrEjJ6U0").unwrap(),
+                y: base64_url::decode("GV_74zLzH5jBHu_vuOxeNXW5SBH6B3TEN9zPDT7GuSw").unwrap(),
+                d: None,
             }),
+            additional: Empty {},
         };
-        let jose_key = JoseKey::from_jwk(jwk, None).await;
+        let jose_key = JoseKey::from_jwk(jwk.clone(), None).await;
         keys.push(Box::new(jose_key));
         let keyset = Keyset::new(keys);
-        let token = SignedJwt::new("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6Ik5FTXlNRUZDTXpVd01URTFRVE5CT1VGRE1FUTFPRGN6UmprNU56QkdRelk0UVRrMVEwWkVPUSJ9.eyJpc3MiOiJodHRwczovL2Rldi1lanRsOTg4dy5hdXRoMC5jb20vIiwic3ViIjoiZ1pTeXNwQ1k1ZEk0aDFaM3Fwd3BkYjlUNFVQZEdENWtAY2xpZW50cyIsImF1ZCI6Imh0dHA6Ly9oZWxsb3dvcmxkIiwiaWF0IjoxNTcyNDA2NDQ3LCJleHAiOjE1NzI0OTI4NDcsImF6cCI6ImdaU3lzcENZNWRJNGgxWjNxcHdwZGI5VDRVUGRHRDVrIiwiZ3R5IjoiY2xpZW50LWNyZWRlbnRpYWxzIn0.nupgm7iFqSnERq9GxszwBrsYrYfMuSfUGj8tGQlkY3Ksh3o_IDfq1GO5ngHQLZuYPD-8qPIovPBEVomGZCo_jYvsbjmYkalAStmF01TvSoXQgJd09ygZstH0liKsmINStiRE8fTA-yfEIuBYttROizx-cDoxiindbKNIGOsqf6yOxf7ww8DrTBJKYRnHVkAfIK8wm9LRpsaOVzWdC7S3cbhCKvANjT0RTRpAx8b_AOr_UCpOr8paj-xMT9Zc9HVCMZLBfj6OZ6yVvnC9g6q_SlTa--fY9SL5eqy6-q1JGoyK_-BQ_YrCwrRdrjoJsJ8j-XFRFWJX09W3oDuZ990nGA").unwrap();
+        let token = SignedJwt::new("eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7ImFsZyI6IkVTMjU2IiwiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJBMDRoR21uTnlSenlRN1U4TWYwdkltcG1QV2hVdi1QcEhYZ2dyRWpKNlUwIiwieSI6IkdWXzc0ekx6SDVqQkh1X3Z1T3hlTlhXNVNCSDZCM1RFTjl6UERUN0d1U3cifX0.eyJpc3MiOiJodHRwczovL2NsZWFuZm9sbG93LWJza3kucGFnZXMuZGV2L2NsaWVudC1tZXRhZGF0YS5qc29uIiwiaWF0IjoxNzQ1MzA3MzE4LCJqdGkiOiJoNm5yNDJxbWJlOjM0bjgzb2hvMnJ3NWQiLCJodG0iOiJHRVQiLCJodHUiOiJodHRwczovL3Bkcy5yaXBwZXJvbmkuY29tL3hycGMvYXBwLmJza3kuYWN0b3IuZ2V0UHJvZmlsZT9hY3Rvcj1kaWQlM0FwbGMlM0FldG01aW56eGh5Mnd0bzI2Z2dwcnpnZ3MiLCJub25jZSI6Ik4wcm94eWtqQmJ6RzVJYjVGTkhvaVMtNFJXQjBaR3pldlJmbDhsOWYtUDgiLCJhdGgiOiJaVXFDLWtuR01zUzdTenI1SldoMUJwZ01MVTNiZ3lJcFRjZmhIdnZuQ0xzIn0.dyO0MS-7hBj_ru10IkyZcfbW0OhrfEvsCUmXBQFe74tamfAFqb86OFeSGERVwNNp1kodHzcp11Ffs_AUgYeU0w").unwrap();
         let result = keyset.verify_jwt(token, None).await.unwrap();
         let expected = VerifyResult {
-            payload: Default::default(),
-            protected_header: Default::default(),
-        };
-        assert_eq!(result, expected)
-    }
-
-    #[tokio::test]
-    async fn test_create_jwt() {
-        let mut keys: Vec<Box<dyn Key>> = vec![];
-        let jwk = Jwk {
-            common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_algorithm: Some(KeyAlgorithm::HS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
+            payload: JwtPayload {
+                iss: Some("https://cleanfollow-bsky.pages.dev/client-metadata.json".to_string()),
+                iat: Some(1745307318),
+                jti: Some("h6nr42qmbe:34n83oho2rw5d".to_string()),
+                htm: Some("GET".to_string()),
+                htu: Some("https://pds.ripperoni.com/xrpc/app.bsky.actor.getProfile?actor=did%3Aplc%3Aetm5inzxhy2wto26ggprzggs".to_string()),
+                ath: Some("ZUqC-knGMsS7Szr5JWh1BpgMLU3bgyIpTcfhHvvnCLs".to_string()),
+                nonce: Some("N0roxykjBbzG5Ib5FNHoiS-4RWB0ZGzevRfl8l9f-P8".to_string()),
                 ..Default::default()
             },
-            algorithm: AlgorithmParameters::OctetKey(OctetKeyParameters {
-                key_type: OctetKeyType::Octet,
-                value: "NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string(),
-            }),
+            protected_header: JwtHeader {
+                alg: Some("ES256".to_string()),
+                jwk: Some(jwk),
+                typ: Some("dpop+jwt".to_string()),
+                ..Default::default()
+            },
         };
-        let jose_key = JoseKey::from_jwk(jwk, None).await;
-        keys.push(Box::new(jose_key));
-        let keyset = Keyset::new(keys);
-        let header = Header {
-            typ: Some("JWT".to_string()),
-            alg: Algorithm::HS256,
-            kid: Some(String::from(
-                "NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ",
-            )),
-            ..Default::default()
-        };
-        let payload = JwtPayload {
-            iss: Some("https://rsky.com/".to_string()),
-            aud: Some(Audience::Single("did:web:pds.ripperoni.com".to_string())),
-            sub: Some(Sub::new("gZSyspCY5dI4h1Z3qpwpdb9T4UPdGD5k@clients").unwrap()),
-            exp: Some(1572492847),
-            iat: Some(1572406447),
-            azp: Some("gZSyspCY5dI4h1Z3qpwpdb9T4UPdGD5k".to_string()),
-            ..Default::default()
-        };
-        // let signed_jwt = keyset.create_jwt(header, payload).await.unwrap();
-        // let expected = SignedJwt::new("").unwrap();
-        // assert_eq!(signed_jwt, expected)
+        assert_eq!(result, expected)
     }
 }

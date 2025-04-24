@@ -1,34 +1,49 @@
-use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_types::CLIENT_ASSERTION_TYPE_JWT_BEARER;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
-pub struct ClientAuth {
-    pub method: String,
+pub enum ClientAuth {
+    None,
+    Some(ClientAuthDetails),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+pub struct ClientAuthDetails {
     pub alg: String,
     pub kid: String,
     pub jkt: String,
 }
 
-pub fn compare_client_auth(a: &ClientAuth, b: &ClientAuth) -> Result<bool, OAuthError> {
-    if a.method == "none" {
-        if b.method != a.method {
-            return Ok(false);
+impl ClientAuth {
+    pub fn new(options: Option<ClientAuthDetails>) -> Self {
+        match options {
+            None => ClientAuth::None,
+            Some(param_details) => ClientAuth::Some(ClientAuthDetails {
+                alg: param_details.alg,
+                kid: param_details.kid,
+                jkt: param_details.jkt,
+            }),
         }
-
-        return Ok(true);
     }
 
-    if a.method == CLIENT_ASSERTION_TYPE_JWT_BEARER {
-        if b.method != a.method {
-            return Ok(false);
+    pub fn is_none(&self) -> bool {
+        match self {
+            ClientAuth::None => true,
+            ClientAuth::Some(_) => false,
         }
-
-        return Ok(true);
     }
 
-    // Fool-proof
-    Err(OAuthError::InvalidClientAuthMethod(
-        "Invalid ClientAuth method".to_string(),
-    ))
+    pub fn is_jwt_bearer(&self) -> bool {
+        match self {
+            ClientAuth::None => false,
+            ClientAuth::Some(_) => true,
+        }
+    }
+
+    pub fn method(&self) -> String {
+        match self {
+            ClientAuth::None => "none".to_string(),
+            ClientAuth::Some(_) => CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string(),
+        }
+    }
 }

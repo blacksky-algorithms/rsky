@@ -1,4 +1,4 @@
-use rocket::http::Status;
+use rocket::http::{ContentType, Status};
 use rocket::response::Responder;
 use rocket::{response, Request, Response};
 use rsky_oauth::jwk::Keyset;
@@ -57,7 +57,8 @@ impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
             response.raw_header("DPoP-Nonce", dpop_nonce);
             response.raw_header_adjoin("Access-Control-Expose-Headers", "DPoP-Nonce");
         }
-
+        // urn:ietf:params:oauth:request_uri:req-1d7f20f63108f9a709c0792960748cd2
+        // urn:ietf:params:oauth:request_uri:req-vKnCRPuGeNd6dlHTZO7mPY4wvwO1GTJW
         match request.headers().get_one("Accept") {
             None => {
                 let mut response = Response::build();
@@ -81,8 +82,29 @@ impl<'r, T: serde::Serialize> Responder<'r, 'static> for OAuthResponse<T> {
                 return response.ok();
             }
         };
+        response.header(ContentType::JSON);
         response.sized_body(y.len(), Cursor::new(y));
         response.status(self.status);
+        Ok(response.finalize())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OAuthOptions {}
+
+impl<'r> Responder<'r, 'static> for OAuthOptions {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let mut response = Response::build();
+
+        response.raw_header("Access-Control-Allow-Origin", "*");
+        response.raw_header("Access-Control-Allow-Methods", "*");
+        response.raw_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type,Authorization,DPoP",
+        );
+        response.raw_header("Access-Control-Max-Age", "86400");
+
+        response.status(Status::new(204u16));
         Ok(response.finalize())
     }
 }

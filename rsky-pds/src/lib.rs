@@ -30,6 +30,7 @@ pub mod schema;
 pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
+
 use crate::account_manager::{AccountManager, SharedAccountManager};
 use crate::config::env_to_cfg;
 use crate::crawlers::Crawlers;
@@ -83,6 +84,7 @@ use rocket::figment::{
     util::map,
     value::{Map, Value},
 };
+use rocket::fs::FileServer;
 use rocket::http::Header;
 use rocket::http::Status;
 use rocket::response::status;
@@ -329,6 +331,10 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(oauth_provider)
         .manage(account_manager)
         .manage(replay_store)
+        .mount(
+            "/@atproto/oauth-provider/~assets",
+            FileServer::from("/Users/trentoncoleman/temporary/rsky/rsky-pds"),
+        )
 }
 
 fn pds_routes() -> Vec<Route> {

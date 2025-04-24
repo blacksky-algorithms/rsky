@@ -1,4 +1,5 @@
 use crate::oauth_types::OAuthRedirectUri;
+use url::Url;
 
 /**
  *
@@ -27,7 +28,27 @@ pub fn compare_redirect_uri(allowed_uri: OAuthRedirectUri, request_uri: OAuthRed
             //
             // Note: We only apply this rule if the allowed URI does not have a port
             // specified.
-            unimplemented!()
+            let allowed_url = Url::parse(allowed_uri.as_str()).unwrap();
+            let request_url = Url::parse(request_uri.as_str()).unwrap();
+
+            let port_match = if let Some(allowed_port) = allowed_url.port() {
+                if let Some(request_port) = request_url.port() {
+                    request_port == allowed_port
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+
+            port_match
+                && allowed_url.host() == request_url.host()
+                && allowed_url.path() == request_url.path()
+                && allowed_url.query() == request_url.query()
+                && allowed_url.username() == request_url.username()
+                && allowed_url.password() == request_url.password()
+                && allowed_url.scheme() == request_url.scheme()
+                && allowed_url.fragment() == request_url.fragment()
         }
         _ => false,
     }

@@ -9,7 +9,7 @@ mod oauth_revoke;
 mod oauth_token;
 mod oauth_well_known;
 
-use rocket::http::{Header, Status};
+use rocket::http::{ContentType, Header, Status};
 use rocket::request::FromRequest;
 use rocket::response::{content, Responder};
 use rocket::{response, routes, Request, Response, Route};
@@ -20,11 +20,12 @@ use rsky_oauth::oauth_provider::output::send_authorize_redirect::AuthorizationRe
 use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
 use rsky_oauth::oauth_types::{
     OAuthAuthorizationRequestQuery, OAuthClientCredentials, OAuthClientId,
-    OAuthTokenIdentification, ResponseMode,
+    OAuthTokenIdentification, Prompt, ResponseMode,
 };
 use serde_json::json;
+use std::hash::Hash;
 use std::io::Cursor;
-use url::Url;
+use url::{form_urlencoded, Url};
 
 pub struct AcceptQuery {
     pub csrf_token: String,
@@ -68,11 +69,15 @@ pub fn get_routes() -> Vec<Route> {
         oauth_well_known::oauth_well_known,
         oauth_jwks::oauth_jwks,
         oauth_par::oauth_par,
+        oauth_par::oauth_par_options,
         oauth_token::oauth_token,
+        oauth_token::oauth_token_options,
         oauth_revoke::post_oauth_revoke,
+        oauth_revoke::oauth_revoke_options,
         oauth_introspect::oauth_introspect,
         oauth_authorize::oauth_authorize,
         oauth_authorize_sign_in::oauth_authorize_sign_in,
+        oauth_authorize_sign_in::oauth_signin_options,
         oauth_authorize_accept::oauth_authorize_accept,
         oauth_authorize_reject::oauth_authorize_reject,
         oauth_revoke::get_oauth_revoke,
@@ -114,7 +119,7 @@ impl<'r> Responder<'r, 'static> for OAuthAuthorizeResponse {
                     .unwrap_or(ResponseMode::Query);
                 response.header(Header::new("Cache-Control", "no-store"));
 
-                let issuer = redirect.issuer;
+                let issuer = redirect.issuer.into_inner();
                 let state = redirect.parameters.state;
                 let redirect_response = redirect.redirect.response;
                 let session_state = redirect.redirect.session_state;
@@ -130,90 +135,92 @@ impl<'r> Responder<'r, 'static> for OAuthAuthorizeResponse {
                 match mode {
                     ResponseMode::Query => {
                         let mut url = Url::parse(uri.as_str()).unwrap();
-                        url.set_query(Some(format!("issuer={issuer}").as_str()));
+                        let mut query_str = "".to_string();
+                        query_str += format!("issuer={issuer}&").as_str();
                         if let Some(state) = state {
-                            url.set_query(Some(format!("state={state}").as_str()));
+                            query_str += format!("state={state}&").as_str();
                         }
                         if let Some(redirect_response) = redirect_response {
-                            url.set_query(Some(
-                                format!("redirect_response={redirect_response}").as_str(),
-                            ));
+                            query_str += format!("redirect_response={redirect_response}&").as_str();
                         }
                         if let Some(session_state) = session_state {
-                            url.set_query(Some(format!("session_state={session_state}").as_str()));
+                            query_str += format!("session_state={session_state}&").as_str();
                         }
                         if let Some(code) = code {
-                            url.set_query(Some(format!("code={code}").as_str()));
+                            query_str += format!("code={code}&").as_str();
                         }
                         if let Some(id_token) = id_token {
-                            url.set_query(Some(format!("id_token={id_token}").as_str()));
+                            query_str += format!("id_token={id_token}&").as_str();
                         }
 
                         if let Some(access_token) = access_token {
-                            url.set_query(Some(format!("access_token={access_token}").as_str()));
+                            query_str += format!("access_token={access_token}&").as_str();
                         }
                         if let Some(expires_in) = expires_in {
-                            url.set_query(Some(format!("expires_in={expires_in}").as_str()));
+                            query_str += format!("expires_in={expires_in}&").as_str();
                         }
                         if let Some(token_type) = token_type {
-                            url.set_query(Some(format!("token_type={token_type}").as_str()));
+                            query_str += format!("token_type={token_type}&").as_str();
                         }
                         if let Some(error) = error {
-                            url.set_query(Some(format!("error={error}").as_str()));
+                            query_str += format!("error={error}&").as_str();
                         }
                         if let Some(error_description) = error_description {
-                            url.set_query(Some(
-                                format!("error_description={error_description}").as_str(),
-                            ));
+                            query_str += format!("error_description={error_description}&").as_str();
                         }
                         if let Some(error_uri) = error_uri {
-                            url.set_query(Some(format!("error_uri={error_uri}").as_str()));
+                            query_str += format!("error_uri={error_uri}&").as_str();
                         }
+                        query_str.pop();
+                        url.set_fragment(Some(query_str.as_str()));
                         response.status(Status::SeeOther);
                         response.header(Header::new("Location", url.as_str().to_string()));
                         return Ok(response.finalize());
                     }
                     ResponseMode::Fragment => {
                         let mut url = Url::parse(uri.as_str()).unwrap();
-                        url.set_query(Some(format!("issuer={issuer}").as_str()));
+                        let mut fragment_str = "".to_string();
+                        let issuer: String =
+                            form_urlencoded::byte_serialize(issuer.as_bytes()).collect();
+                        fragment_str += format!("iss={issuer}&").as_str();
                         if let Some(state) = state {
-                            url.set_query(Some(format!("state={state}").as_str()));
+                            fragment_str += format!("state={state}&").as_str();
                         }
                         if let Some(redirect_response) = redirect_response {
-                            url.set_query(Some(
-                                format!("redirect_response={redirect_response}").as_str(),
-                            ));
+                            fragment_str +=
+                                format!("redirect_response={redirect_response}&").as_str();
                         }
                         if let Some(session_state) = session_state {
-                            url.set_query(Some(format!("session_state={session_state}").as_str()));
+                            fragment_str += format!("session_state={session_state}&").as_str();
                         }
                         if let Some(code) = code {
-                            url.set_query(Some(format!("code={code}").as_str()));
+                            fragment_str += format!("code={code}&").as_str();
                         }
                         if let Some(id_token) = id_token {
-                            url.set_query(Some(format!("id_token={id_token}").as_str()));
+                            fragment_str += format!("id_token={id_token}&").as_str();
                         }
 
                         if let Some(access_token) = access_token {
-                            url.set_query(Some(format!("access_token={access_token}").as_str()));
+                            fragment_str += format!("access_token={access_token}&").as_str();
                         }
                         if let Some(expires_in) = expires_in {
-                            url.set_query(Some(format!("expires_in={expires_in}").as_str()));
+                            fragment_str += format!("expires_in={expires_in}&").as_str();
                         }
                         if let Some(token_type) = token_type {
-                            url.set_query(Some(format!("token_type={token_type}").as_str()));
+                            fragment_str += format!("token_type={token_type}&").as_str();
                         }
                         if let Some(error) = error {
-                            url.set_query(Some(format!("error={error}").as_str()));
+                            fragment_str += format!("error={error}&").as_str();
                         }
                         if let Some(error_description) = error_description {
-                            url.set_query(Some(
-                                format!("error_description={error_description}").as_str(),
-                            ));
+                            fragment_str +=
+                                format!("error_description={error_description}&").as_str();
                         }
                         if let Some(error_uri) = error_uri {
-                            url.set_query(Some(format!("error_uri={error_uri}").as_str()));
+                            fragment_str += format!("error_uri={error_uri}&").as_str();
                         }
+                        fragment_str.pop();
+                        url.set_fragment(Some(fragment_str.as_str()));
                         response.status(Status::SeeOther);
                         response.header(Header::new("Location", url.as_str().to_string()));
                         return Ok(response.finalize());
@@ -238,33 +245,45 @@ impl<'r> Responder<'r, 'static> for OAuthAuthorizeResponse {
                 response.header(Header::new("X-Content-Type-Options", "nosniff"));
                 response.header(Header::new("X-XSS-Protection", "0"));
                 response.header(Header::new("Strict-Transport-Security", "max-age=63072000"));
-                //TODO
-                // response.header(("Content-Security-Policy", "same-origin"));
+                response.header(Header::new("Content-Security-Policy", "same-origin"));
 
                 // Build Document
+                let issuer = page.issuer.to_string();
+                let client_id = page.client.id.as_str();
+                let request_uri = page.authorize.uri.into_inner();
+                let csrf_cookie = "csrf-".to_string() + request_uri.as_str();
+                let login_hint = page.parameters.login_hint.unwrap_or("".to_string());
+                let new_session_requires_consent = match page.parameters.prompt {
+                    None => "false",
+                    Some(prompt) => {
+                        if prompt == Prompt::Consent {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                    }
+                };
 
                 //Write HTML
-                let html = content::RawHtml(
-                    r#"
-                <!doctype html>
-                    <html${attrsToHtml(htmlAttrs)}>
-                      <head>
-                        <meta charset="UTF-8" />
-                        ${title && html`<title>${title}</title>`}
-                        ${base && html`<base href="${base.href}" />`}
-                        ${meta?.some(isViewportMeta) ? null : defaultViewport}
-                        ${meta?.map(metaToHtml)}
-                        ${links?.map(linkToHtml)}
-                        ${head} ${styles?.map(styleToHtml)}
-                      </head>
-                      <body${attrsToHtml(bodyAttrs)}>
-                        ${body} ${scripts?.map(scriptToHtml)}
-                      </body>
-                    </html>
-                "#,
+                let html = format!(
+                    "<!doctype html>
+                        <html lang=\"en\">
+                            <head>
+                                <meta charset=\"UTF-8\" />
+                                <title>Authorize</title>
+                                <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>
+                                <link rel=\"stylesheet\" href=\"/@atproto/oauth-provider/~assets/main.css\" /><style></style>
+                            </head>
+                            <body>
+                                <div id=\"root\"></div>
+                                <script>window[\"__authorizeData\"]={{\"clientId\":\"{client_id}\",\"clientMetadata\":{{\"redirect_uris\":[\"{issuer}/\"],\"response_types\":[\"code\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scope\":\"atproto transition:generic\",\"token_endpoint_auth_method\":\"none\",\"application_type\":\"web\",\"client_id\":\"{client_id}\",\"client_name\":\"cleanfollow-bsky\",\"client_uri\":\"https://cleanfollow-bsky.pages.dev\",\"dpop_bound_access_tokens\":true}},\"clientTrusted\":false,\"requestUri\":\"{request_uri}\",\"csrfCookie\":\"{csrf_cookie}\",\"loginHint\":\"{login_hint}\",\"newSessionsRequireConsent\":true,\"scopeDetails\":[{{\"scope\":\"atproto\"}},{{\"scope\":\"transition:generic\"}}],\"sessions\":[]}};document.currentScript.remove();</script><script>window[\"__customizationData\"]={{\"name\":\"Personal PDS\",\"links\":[]}};document.currentScript.remove();</script><script type=\"module\" src=\"/@atproto/oauth-provider/~assets/main.js\"></script>
+                            </body>
+                        </html>",
                 );
 
-                return response.ok();
+                response.header(ContentType::HTML);
+                response.sized_body(html.len(), Cursor::new(html));
+                response.ok()
             }
         }
     }

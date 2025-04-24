@@ -35,9 +35,9 @@ pub async fn oauth_well_known(
 #[get("/.well-known/oauth-protected-resource")]
 pub async fn oauth_well_known_resources() -> Json<OAuthProtectedResourceMetadata> {
     let result = OAuthProtectedResourceMetadata {
-        resource: WebUri::validate("https://pds.ripperoni.com").unwrap(),
+        resource: WebUri::validate("https://inspired-amusing-tick.ngrok-free.app").unwrap(),
         authorization_servers: Some(vec![OAuthIssuerIdentifier::from_str(
-            "https://pds.ripperoni.com",
+            "https://inspired-amusing-tick.ngrok-free.app",
         )
         .unwrap()]),
         jwks_uri: None,

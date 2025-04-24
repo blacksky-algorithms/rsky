@@ -1,6 +1,6 @@
 use crate::jwk::{
-    Audience, JwkError, JwtConfirmation, JwtPayload, Key, Keyset, SignedJwt, VerifyOptions,
-    VerifyResult,
+    Audience, JwkError, JwtConfirmation, JwtHeader, JwtPayload, Key, Keyset, SignedJwt,
+    VerifyOptions, VerifyResult,
 };
 use crate::oauth_provider::client::client::Client;
 use crate::oauth_provider::errors::OAuthError;
@@ -10,9 +10,8 @@ use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthIssuerIdentifier,
 };
+use biscuit::jwa::Algorithm;
 use chrono::{DateTime, Utc};
-use jsonwebtoken::{Algorithm, Header};
-use rocket::form::FromForm;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -57,7 +56,7 @@ impl Signer {
         &self,
         algorithms: Option<Vec<Algorithm>>,
         search_kids: Option<Vec<String>>,
-        sign_header: Header,
+        sign_header: JwtHeader,
         payload: JwtPayload,
     ) -> Result<SignedJwt, JwkError> {
         let keyset = self.keyset.read().await;
@@ -72,7 +71,7 @@ impl Signer {
         parameters: OAuthAuthorizationRequestParameters,
         options: AccessTokenOptions,
     ) -> Result<SignedJwt, JwkError> {
-        let mut header = Header::default();
+        let mut header = JwtHeader::default();
         header.typ = Some("at+jwt".to_string());
 
         let mut payload = JwtPayload::default();
@@ -148,7 +147,7 @@ pub struct AccessTokenOptions {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct VerifyAccessTokenResponse {
-    pub protected_header: Header,
+    pub protected_header: JwtHeader,
     pub payload: SignedTokenPayload,
 }
 
@@ -157,30 +156,37 @@ mod tests {
     use super::*;
     use crate::jwk_jose::jose_key::JoseKey;
     use crate::oauth_types::{OAuthClientId, OAuthClientMetadata, OAuthResponseType};
-    use jsonwebtoken::jwk::{
-        AlgorithmParameters, CommonParameters, Jwk, JwkSet, KeyAlgorithm, PublicKeyUse,
-        RSAKeyParameters,
-    };
-    use rocket::yansi::Paint;
+    use biscuit::jwa;
+    use biscuit::jwk::{AlgorithmParameters, CommonParameters, JWKSet, RSAKeyParameters, JWK};
+    use biscuit::jws::Secret;
+    use num_bigint::BigUint;
 
     #[tokio::test]
     async fn test_verify() {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: None,
-                key_algorithm: Some(KeyAlgorithm::RS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_url: None,
-                x509_chain: Some(vec!["MIIDBzCCAe+gAwIBAgIJakoPho0MJr56MA0GCSqGSIb3DQEBCwUAMCExHzAdBgNVBAMTFmRldi1lanRsOTg4dy5hdXRoMC5jb20wHhcNMTkxMDI5MjIwNzIyWhcNMzMwNzA3MjIwNzIyWjAhMR8wHQYDVQQDExZkZXYtZWp0bDk4OHcuYXV0aDAuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2+0Cxcs1t0wzhO+zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r/Zewm0s58oRGyic1Oyp8xiy78czlBG03jk/+/vdttJkie8pUc9AHBuMxAaV4iPN3zSi/J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP+qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB/9VgEw+QdaQHvxoAvD0f7aYsaJ1R6rrqxo+1Pun7j1/h7kOCGB0UcHDLDw7gaP/wIDAQABo0IwQDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBQwIoo6QzzUL/TcNVpLGrLdd3DAIzAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBALb8QycRmauyC/HRWRxTbl0w231HTAVYizQqhFQFl3beSQIhexGik+H+B4ve2rv94QRD3LlraUp+J26wLG89EnSCuCo/OxPAq+lxO6hNf6oKJ+Y2f48awIOxolO0f89qX3KMIkABXwKbYUcd+SBHX5ZP1V9cvJEyH0s3Fq9ObysPCH2j2Hjgz3WMIffSFMaO0DIfh3eNnv9hKQwavUO7fL/jqhBl4QxI2gMySi0Ni7PgAlBgxBx6YUp59q/lzMgAf19GOEOvI7l4dA0bc9pdsm7OhimskvOUSZYi5Pz3n/i/cTVKKhlj6NyINkMXlXGgyM9vEBpdcIpOWn/1H5QVy8Q=".to_string()]),
-                x509_sha1_fingerprint: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_sha256_fingerprint: None,
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
+                ..Default::default()
             },
             algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
-                key_type: Default::default(),
-                n: "zkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2-0Cxcs1t0wzhO-zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r_Zewm0s58oRGyic1Oyp8xiy78czlBG03jk_-_vdttJkie8pUc9AHBuMxAaV4iPN3zSi_J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP-qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB_9VgEw-QdaQHvxoAvD0f7aYsaJ1R6rrqxo-1Pun7j1_h7kOCGB0UcHDLDw7gaP_w".to_string(),
-                e: "AQAB".to_string(),
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -205,22 +211,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_sign() {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: None,
-                key_algorithm: Some(KeyAlgorithm::RS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_url: None,
-                x509_chain: Some(vec!["MIIDBzCCAe+gAwIBAgIJakoPho0MJr56MA0GCSqGSIb3DQEBCwUAMCExHzAdBgNVBAMTFmRldi1lanRsOTg4dy5hdXRoMC5jb20wHhcNMTkxMDI5MjIwNzIyWhcNMzMwNzA3MjIwNzIyWjAhMR8wHQYDVQQDExZkZXYtZWp0bDk4OHcuYXV0aDAuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2+0Cxcs1t0wzhO+zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r/Zewm0s58oRGyic1Oyp8xiy78czlBG03jk/+/vdttJkie8pUc9AHBuMxAaV4iPN3zSi/J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP+qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB/9VgEw+QdaQHvxoAvD0f7aYsaJ1R6rrqxo+1Pun7j1/h7kOCGB0UcHDLDw7gaP/wIDAQABo0IwQDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBQwIoo6QzzUL/TcNVpLGrLdd3DAIzAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBALb8QycRmauyC/HRWRxTbl0w231HTAVYizQqhFQFl3beSQIhexGik+H+B4ve2rv94QRD3LlraUp+J26wLG89EnSCuCo/OxPAq+lxO6hNf6oKJ+Y2f48awIOxolO0f89qX3KMIkABXwKbYUcd+SBHX5ZP1V9cvJEyH0s3Fq9ObysPCH2j2Hjgz3WMIffSFMaO0DIfh3eNnv9hKQwavUO7fL/jqhBl4QxI2gMySi0Ni7PgAlBgxBx6YUp59q/lzMgAf19GOEOvI7l4dA0bc9pdsm7OhimskvOUSZYi5Pz3n/i/cTVKKhlj6NyINkMXlXGgyM9vEBpdcIpOWn/1H5QVy8Q=".to_string()]),
-                x509_sha1_fingerprint: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_sha256_fingerprint: None,
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
+                ..Default::default()
             },
             algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
-                key_type: Default::default(),
-                n: "zkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2-0Cxcs1t0wzhO-zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r_Zewm0s58oRGyic1Oyp8xiy78czlBG03jk_-_vdttJkie8pUc9AHBuMxAaV4iPN3zSi_J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP-qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB_9VgEw-QdaQHvxoAvD0f7aYsaJ1R6rrqxo-1Pun7j1_h7kOCGB0UcHDLDw7gaP_w".to_string(),
-                e: "AQAB".to_string(),
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -229,7 +243,7 @@ mod tests {
 
         let algorithms: Option<Vec<Algorithm>> = None;
         let search_kids: Option<Vec<String>> = None;
-        let sign_header = Header::default();
+        let sign_header = JwtHeader::default();
         let payload = JwtPayload {
             iss: None,
             aud: None,
@@ -275,7 +289,6 @@ mod tests {
             additional_claims: Default::default(),
         };
 
-        let header = Header::default();
         let signer = Signer::new(issuer, keyset);
         let result = signer
             .sign(algorithms, search_kids, sign_header, payload)
@@ -287,22 +300,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_access_token() {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: None,
-                key_algorithm: Some(KeyAlgorithm::RS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_url: None,
-                x509_chain: Some(vec!["MIIDBzCCAe+gAwIBAgIJakoPho0MJr56MA0GCSqGSIb3DQEBCwUAMCExHzAdBgNVBAMTFmRldi1lanRsOTg4dy5hdXRoMC5jb20wHhcNMTkxMDI5MjIwNzIyWhcNMzMwNzA3MjIwNzIyWjAhMR8wHQYDVQQDExZkZXYtZWp0bDk4OHcuYXV0aDAuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2+0Cxcs1t0wzhO+zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r/Zewm0s58oRGyic1Oyp8xiy78czlBG03jk/+/vdttJkie8pUc9AHBuMxAaV4iPN3zSi/J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP+qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB/9VgEw+QdaQHvxoAvD0f7aYsaJ1R6rrqxo+1Pun7j1/h7kOCGB0UcHDLDw7gaP/wIDAQABo0IwQDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBQwIoo6QzzUL/TcNVpLGrLdd3DAIzAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBALb8QycRmauyC/HRWRxTbl0w231HTAVYizQqhFQFl3beSQIhexGik+H+B4ve2rv94QRD3LlraUp+J26wLG89EnSCuCo/OxPAq+lxO6hNf6oKJ+Y2f48awIOxolO0f89qX3KMIkABXwKbYUcd+SBHX5ZP1V9cvJEyH0s3Fq9ObysPCH2j2Hjgz3WMIffSFMaO0DIfh3eNnv9hKQwavUO7fL/jqhBl4QxI2gMySi0Ni7PgAlBgxBx6YUp59q/lzMgAf19GOEOvI7l4dA0bc9pdsm7OhimskvOUSZYi5Pz3n/i/cTVKKhlj6NyINkMXlXGgyM9vEBpdcIpOWn/1H5QVy8Q=".to_string()]),
-                x509_sha1_fingerprint: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_sha256_fingerprint: None,
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
+                ..Default::default()
             },
             algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
-                key_type: Default::default(),
-                n: "zkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2-0Cxcs1t0wzhO-zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r_Zewm0s58oRGyic1Oyp8xiy78czlBG03jk_-_vdttJkie8pUc9AHBuMxAaV4iPN3zSi_J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP-qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB_9VgEw-QdaQHvxoAvD0f7aYsaJ1R6rrqxo-1Pun7j1_h7kOCGB0UcHDLDw7gaP_w".to_string(),
-                e: "AQAB".to_string(),
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -310,43 +331,16 @@ mod tests {
         let keyset = Arc::new(RwLock::new(keyset));
         let signer = Signer::new(issuer, keyset);
         let client = Client {
-            id: OAuthClientId::new("".to_string()).unwrap(),
+            id: OAuthClientId::new("client123".to_string()).unwrap(),
             metadata: OAuthClientMetadata {
                 redirect_uris: vec![],
-                response_types: vec![],
-                grant_types: vec![],
-                scope: None,
-                token_endpoint_auth_method: None,
-                token_endpoint_auth_signing_alg: None,
-                userinfo_signed_response_alg: None,
-                userinfo_encrypted_response_alg: None,
-                jwks_uri: None,
-                jwks: None,
-                application_type: Default::default(),
-                subject_type: None,
-                request_object_signing_alg: None,
-                id_token_signed_response_alg: None,
-                authorization_signed_response_alg: "".to_string(),
-                authorization_encrypted_response_enc: None,
-                authorization_encrypted_response_alg: None,
-                client_id: None,
-                client_name: None,
-                client_uri: None,
-                policy_uri: None,
-                tos_uri: None,
-                logo_uri: None,
-                default_max_age: None,
-                require_auth_time: None,
-                contacts: None,
-                tls_client_certificate_bound_access_tokens: None,
-                dpop_bound_access_tokens: None,
-                authorization_details_types: None,
+                ..Default::default()
             },
-            jwks: Some(JwkSet { keys: vec![] }),
+            jwks: Some(JWKSet { keys: vec![] }),
             info: Default::default(),
         };
         let parameters = OAuthAuthorizationRequestParameters {
-            client_id: OAuthClientId::new("".to_string()).unwrap(),
+            client_id: OAuthClientId::new("client123".to_string()).unwrap(),
             state: None,
             redirect_uri: None,
             scope: None,
@@ -368,10 +362,10 @@ mod tests {
         let options = AccessTokenOptions {
             aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
             sub: Sub::new("did:plc:wdadad".to_string()).unwrap(),
-            jti: TokenId::new("".to_string()).unwrap(),
+            jti: TokenId::new("tok-739361c165c76408088de74ee136cf66".to_string()).unwrap(),
             exp: Utc::now(),
             iat: None,
-            alg: None,
+            alg: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
             cnf: None,
             authorization_details: None,
         };
@@ -385,24 +379,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_access_token() {
-        let jwk = Jwk {
-            common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_operations: None,
-                key_algorithm: Some(KeyAlgorithm::RS256),
-                key_id: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_url: None,
-                x509_chain: Some(vec!["MIIDBzCCAe+gAwIBAgIJakoPho0MJr56MA0GCSqGSIb3DQEBCwUAMCExHzAdBgNVBAMTFmRldi1lanRsOTg4dy5hdXRoMC5jb20wHhcNMTkxMDI5MjIwNzIyWhcNMzMwNzA3MjIwNzIyWjAhMR8wHQYDVQQDExZkZXYtZWp0bDk4OHcuYXV0aDAuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2+0Cxcs1t0wzhO+zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r/Zewm0s58oRGyic1Oyp8xiy78czlBG03jk/+/vdttJkie8pUc9AHBuMxAaV4iPN3zSi/J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP+qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB/9VgEw+QdaQHvxoAvD0f7aYsaJ1R6rrqxo+1Pun7j1/h7kOCGB0UcHDLDw7gaP/wIDAQABo0IwQDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBQwIoo6QzzUL/TcNVpLGrLdd3DAIzAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBALb8QycRmauyC/HRWRxTbl0w231HTAVYizQqhFQFl3beSQIhexGik+H+B4ve2rv94QRD3LlraUp+J26wLG89EnSCuCo/OxPAq+lxO6hNf6oKJ+Y2f48awIOxolO0f89qX3KMIkABXwKbYUcd+SBHX5ZP1V9cvJEyH0s3Fq9ObysPCH2j2Hjgz3WMIffSFMaO0DIfh3eNnv9hKQwavUO7fL/jqhBl4QxI2gMySi0Ni7PgAlBgxBx6YUp59q/lzMgAf19GOEOvI7l4dA0bc9pdsm7OhimskvOUSZYi5Pz3n/i/cTVKKhlj6NyINkMXlXGgyM9vEBpdcIpOWn/1H5QVy8Q=".to_string()]),
-                x509_sha1_fingerprint: Some("NEMyMEFCMzUwMTE1QTNBOUFDMEQ1ODczRjk5NzBGQzY4QTk1Q0ZEOQ".to_string()),
-                x509_sha256_fingerprint: None,
-            },
-            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
-                key_type: Default::default(),
-                n: "zkM1QHcP0v8bmwQ2fd3Pj6unCTx5k8LsW9cuLtUhAjjzRGpSEwGCKEgi1ej2-0Cxcs1t0wzhO-zSv1TJbsDI0x862PIFEs3xkGqPZU6rfQMzvCmncAcMjuW7r_Zewm0s58oRGyic1Oyp8xiy78czlBG03jk_-_vdttJkie8pUc9AHBuMxAaV4iPN3zSi_J5OVSlovk607H3AUiL3Bfg4ssS1bsJvaFG0kuNscoiP-qLRTjFK6LzZS99VxegeNzttqGbtj5BwNgbtuzrIyfLmYB_9VgEw-QdaQHvxoAvD0f7aYsaJ1R6rrqxo-1Pun7j1_h7kOCGB0UcHDLDw7gaP_w".to_string(),
-                e: "AQAB".to_string(),
-            }),
-        };
-        let jose_key = JoseKey::from_jwk(jwk, None).await;
+        let secret = Secret::rsa_keypair_from_file("/rsa_keypair").unwrap();
+        let jose_key = JoseKey::from_secret(secret, None, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
         let keyset = Keyset::new(vec![Box::new(jose_key)]);
         let keyset = Arc::new(RwLock::new(keyset));

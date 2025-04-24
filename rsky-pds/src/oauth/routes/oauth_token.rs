@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::oauth::OAuthResponse;
+use crate::oauth::{OAuthOptions, OAuthResponse};
 use crate::oauth::{SharedOAuthProvider, SharedReplayStore};
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
@@ -90,7 +90,8 @@ impl<'r> FromData<'r> for OAuthTokenRequestBody {
                                     oauth_token_request,
                                     method: "POST".to_string(),
                                     dpop: dpop.to_string(),
-                                    url: req.uri().to_string(),
+                                    url: "https://inspired-amusing-tick.ngrok-free.app".to_string()
+                                        + req.uri().to_string().as_str(),
                                 })
                             }
                             Err(_error) => {
@@ -152,7 +153,8 @@ impl<'r> FromData<'r> for OAuthTokenRequestBody {
                                     oauth_token_request,
                                     method: "POST".to_string(),
                                     dpop: dpop.to_string(),
-                                    url: req.uri().to_string(),
+                                    url: "https://inspired-amusing-tick.ngrok-free.app".to_string()
+                                        + req.uri().to_string().as_str(),
                                 })
                             }
                             Err(_error) => {
@@ -218,4 +220,10 @@ pub async fn oauth_token(
         status: Status::Ok,
         dpop_nonce,
     })
+}
+
+#[tracing::instrument(skip_all)]
+#[rocket::options("/oauth/token")]
+pub async fn oauth_token_options() -> OAuthOptions {
+    OAuthOptions {}
 }

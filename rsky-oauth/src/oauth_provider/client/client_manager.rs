@@ -11,7 +11,8 @@ use crate::oauth_types::{
     OAuthRedirectUri, OAuthResponseType, SubjectType,
 };
 use crate::simple_store_memory::SimpleStoreMemory;
-use jsonwebtoken::jwk::JwkSet;
+use biscuit::jwk::JWKSet;
+use biscuit::Empty;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ pub type LoopbackMetadataGetter =
     Box<dyn Fn(OAuthClientIdLoopback) -> OAuthClientMetadata + Send + Sync>;
 
 pub struct ClientManager {
-    jwks: CachedGetter<String, JwkSet>,
+    jwks: CachedGetter<String, JWKSet<Empty>>,
     server_metadata: OAuthAuthorizationServerMetadata,
     keyset: Arc<RwLock<Keyset>>,
     store: Arc<RwLock<dyn ClientStore>>,
@@ -33,13 +34,13 @@ pub struct ClientManager {
 
 pub struct JwkGetter {}
 
-impl Getter<String, JwkSet> for JwkGetter {
+impl Getter<String, JWKSet<Empty>> for JwkGetter {
     fn get<'a>(
         &'a self,
         key: String,
         options: Option<GetCachedOptions>,
-        stored_value: Option<JwkSet>,
-    ) -> Pin<Box<dyn Future<Output = JwkSet> + Send + Sync + 'a>> {
+        stored_value: Option<JWKSet<Empty>>,
+    ) -> Pin<Box<dyn Future<Output = JWKSet<Empty>> + Send + Sync + 'a>> {
         Box::pin(async move { fetch_jwks_handler(key, options).await })
     }
 }
@@ -64,10 +65,10 @@ impl ClientManager {
         hooks: Arc<OAuthHooks>,
         store: Arc<RwLock<dyn ClientStore>>,
         loopback_metadata: Option<LoopbackMetadataGetter>,
-        client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>>,
+        client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JWKSet<Empty>>>>,
         client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>>,
     ) -> Self {
-        let jwks: CachedGetter<String, JwkSet> =
+        let jwks: CachedGetter<String, JWKSet<Empty>> =
             CachedGetter::new(Arc::new(RwLock::new(JwkGetter {})), client_jwks_cache, None);
         let metadata_getter: CachedGetter<String, OAuthClientMetadata> = CachedGetter::new(
             Arc::new(RwLock::new(OAuthClientMetadataGetter {})),
@@ -120,6 +121,7 @@ impl ClientManager {
         Ok(Client::new(client_id.clone(), metadata, jwks, partial_info))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_client_metadata(
         &self,
         client_id: &OAuthClientId,
@@ -131,10 +133,12 @@ impl ClientManager {
                 .get_discoverable_client_metadata(&discoverable_client_id)
                 .await;
         } else {
+            println!("stored client");
             return self.get_stored_client_metadata(client_id).await;
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_loopback_client_metadata(
         &self,
         client_id: OAuthClientIdLoopback,
@@ -479,7 +483,7 @@ impl ClientManager {
                     ));
                 }
 
-                if !redirect_uri.is_https() {
+                if redirect_uri.is_https() {
                     // https://datatracker.ietf.org/doc/html/rfc8252#section-7.3
                     //
                     // > Loopback redirect URIs use the "http" scheme and are constructed
@@ -654,7 +658,7 @@ impl ClientManager {
     }
 }
 
-pub async fn fetch_jwks_handler(uri: String, options: Option<GetCachedOptions>) -> JwkSet {
+pub async fn fetch_jwks_handler(uri: String, options: Option<GetCachedOptions>) -> JWKSet<Empty> {
     let client = reqwest::Client::new();
     let response = client
         .get(uri)
@@ -662,7 +666,7 @@ pub async fn fetch_jwks_handler(uri: String, options: Option<GetCachedOptions>) 
         .send()
         .await
         .unwrap();
-    let jwks = response.json::<JwkSet>().await.unwrap();
+    let jwks = response.json::<JWKSet<Empty>>().await.unwrap();
     jwks
 }
 
@@ -692,14 +696,18 @@ mod tests {
     use crate::oauth_provider::errors::OAuthError;
     use crate::oauth_provider::oauth_hooks::OAuthHooks;
     use crate::oauth_types::{
-        OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientMetadata,
-        OAuthIssuerIdentifier, ValidUri, WebUri,
+        ApplicationType, OAuthAuthorizationServerMetadata, OAuthClientId, OAuthClientIdLoopback,
+        OAuthClientMetadata, OAuthEndpointAuthMethod, OAuthGrantType, OAuthIssuerIdentifier,
+        OAuthRedirectUri, OAuthResponseType, OAuthScope, ValidUri, WebUri,
     };
     use crate::simple_store_memory::SimpleStoreMemory;
-    use jsonwebtoken::jwk::{
-        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, Jwk, JwkSet,
-        KeyAlgorithm, PublicKeyUse,
+    use biscuit::jwa::Algorithm;
+    use biscuit::jwk::{
+        AlgorithmParameters, CommonParameters, EllipticCurveKeyParameters, JWKSet, PublicKeyUse,
+        RSAKeyParameters, JWK,
     };
+    use biscuit::{jwa, Empty};
+    use num_bigint::BigUint;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -720,18 +728,30 @@ mod tests {
     }
 
     async fn create_keyset() -> Keyset {
-        let jwk = Jwk {
+        let jwk = JWK {
             common: CommonParameters {
-                public_key_use: Some(PublicKeyUse::Signature),
-                key_algorithm: Some(KeyAlgorithm::ES256),
+                algorithm: Some(Algorithm::Signature(jwa::SignatureAlgorithm::RS256)),
+                key_id: Some("2011-04-29".to_string()),
                 ..Default::default()
             },
-            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-                key_type: Default::default(),
-                curve: Default::default(),
-                x: "vf9j5yujiO25FukCWswD9GFGU30xwm6D6JlVIp40FUU".to_string(),
-                y: "5EqgG67c-QjyCgHmhiq65kjqEo0Wig8a97h322vTtq4".to_string(),
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                n: BigUint::new(vec![
+                    2661337731, 446995658, 1209332140, 183172752, 955894533, 3140848734, 581365968,
+                    3217299938, 3520742369, 1559833632, 1548159735, 2303031139, 1726816051,
+                    92775838, 37272772, 1817499268, 2876656510, 1328166076, 2779910671, 4258539214,
+                    2834014041, 3172137349, 4008354576, 121660540, 1941402830, 1620936445,
+                    993798294, 47616683, 272681116, 983097263, 225284287, 3494334405, 4005126248,
+                    1126447551, 2189379704, 4098746126, 3730484719, 3232696701, 2583545877,
+                    428738419, 2533069420, 2922211325, 2227907999, 4154608099, 679827337,
+                    1165541732, 2407118218, 3485541440, 799756961, 1854157941, 3062830172,
+                    3270332715, 1431293619, 3068067851, 2238478449, 2704523019, 2826966453,
+                    1548381401, 3719104923, 2605577849, 2293389158, 273345423, 169765991,
+                    3539762026,
+                ]),
+                e: BigUint::new(vec![65537]),
+                ..Default::default()
             }),
+            additional: Default::default(),
         };
         let jose_key = JoseKey::from_jwk(jwk, None).await;
         let issuer = OAuthIssuerIdentifier::new("http://pds.ripperoni.com").unwrap();
@@ -743,7 +763,7 @@ mod tests {
             on_client_info: Some(Box::new(
                 |client_id: OAuthClientId,
                  oauth_client_metadata: OAuthClientMetadata,
-                 jwks: Option<JwkSet>|
+                 jwks: Option<JWKSet<Empty>>|
                  -> ClientInfo {
                     ClientInfo {
                         is_first_party: client_id
@@ -751,7 +771,6 @@ mod tests {
                                 "https://cleanfollow-bsky.pages.dev/client-metadata.json",
                             )
                             .unwrap(),
-                        // @TODO make client client list configurable:
                         is_trusted: false,
                     }
                 },
@@ -764,7 +783,7 @@ mod tests {
         unimplemented!()
     }
 
-    fn create_client_jwks_cache() -> SimpleStoreMemory<String, JwkSet> {
+    fn create_client_jwks_cache() -> SimpleStoreMemory<String, JWKSet<Empty>> {
         SimpleStoreMemory::default()
     }
 
@@ -777,7 +796,46 @@ mod tests {
         let keyset = Arc::new(RwLock::new(create_keyset().await));
         let hooks = Arc::new(create_hooks());
         let store = Arc::new(RwLock::new(TestClientStore {}));
-        let loopback_metadata = None;
+        let loopback_metadata =
+            Box::new(
+                move |client_id: OAuthClientIdLoopback| OAuthClientMetadata {
+                    redirect_uris: vec![
+                        OAuthRedirectUri::new("http://127.0.0.1/").unwrap(),
+                        OAuthRedirectUri::new("http://[::1]/").unwrap(),
+                    ],
+                    response_types: vec![OAuthResponseType::Code],
+                    grant_types: vec![
+                        OAuthGrantType::AuthorizationCode,
+                        OAuthGrantType::RefreshToken,
+                    ],
+                    scope: Some(OAuthScope::new("atproto").unwrap()),
+                    token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::None),
+                    token_endpoint_auth_signing_alg: None,
+                    userinfo_signed_response_alg: None,
+                    userinfo_encrypted_response_alg: None,
+                    jwks_uri: None,
+                    jwks: None,
+                    application_type: ApplicationType::Native,
+                    subject_type: None,
+                    request_object_signing_alg: None,
+                    id_token_signed_response_alg: None,
+                    authorization_signed_response_alg: "".to_string(),
+                    authorization_encrypted_response_enc: None,
+                    authorization_encrypted_response_alg: None,
+                    client_id: Some(client_id.as_str().to_string()),
+                    client_name: None,
+                    client_uri: None,
+                    policy_uri: None,
+                    tos_uri: None,
+                    logo_uri: None,
+                    default_max_age: None,
+                    require_auth_time: None,
+                    contacts: None,
+                    tls_client_certificate_bound_access_tokens: None,
+                    dpop_bound_access_tokens: Some(true),
+                    authorization_details_types: None,
+                },
+            );
         let client_jwks_cache = Arc::new(RwLock::new(create_client_jwks_cache()));
         let client_metadata_cache = Arc::new(RwLock::new(create_client_metadata_cache()));
         ClientManager::new(
@@ -785,22 +843,61 @@ mod tests {
             keyset,
             hooks,
             store,
-            loopback_metadata,
+            Some(loopback_metadata),
             client_jwks_cache,
             client_metadata_cache,
         )
     }
 
     #[tokio::test]
-    async fn test_get_client() {
+    async fn test_get_loopback_client() {
         let client_manager = create_client_manager().await;
-        let client_id = OAuthClientId::new("client123").unwrap();
+        let client_id = OAuthClientId::new("http://localhost/").unwrap();
         let result = client_manager.get_client(&client_id).await.unwrap();
         let expected = Client {
-            id: OAuthClientId::new("client123").unwrap(),
-            metadata: Default::default(),
+            id: OAuthClientId::new("http://localhost/").unwrap(),
+            metadata: OAuthClientMetadata {
+                redirect_uris: vec![
+                    OAuthRedirectUri::new("http://127.0.0.1/").unwrap(),
+                    OAuthRedirectUri::new("http://[::1]/").unwrap(),
+                ],
+                response_types: vec![OAuthResponseType::Code],
+                grant_types: vec![
+                    OAuthGrantType::AuthorizationCode,
+                    OAuthGrantType::RefreshToken,
+                ],
+                scope: Some(OAuthScope::new("atproto").unwrap()),
+                token_endpoint_auth_method: Some(OAuthEndpointAuthMethod::None),
+                token_endpoint_auth_signing_alg: None,
+                userinfo_signed_response_alg: None,
+                userinfo_encrypted_response_alg: None,
+                jwks_uri: None,
+                jwks: None,
+                application_type: ApplicationType::Native,
+                subject_type: None,
+                request_object_signing_alg: None,
+                id_token_signed_response_alg: None,
+                authorization_signed_response_alg: "".to_string(),
+                authorization_encrypted_response_enc: None,
+                authorization_encrypted_response_alg: None,
+                client_id: Some(client_id.as_str().to_string()),
+                client_name: None,
+                client_uri: None,
+                policy_uri: None,
+                tos_uri: None,
+                logo_uri: None,
+                default_max_age: None,
+                require_auth_time: None,
+                contacts: None,
+                tls_client_certificate_bound_access_tokens: None,
+                dpop_bound_access_tokens: Some(true),
+                authorization_details_types: None,
+            },
             jwks: None,
-            info: Default::default(),
+            info: ClientInfo {
+                is_first_party: false,
+                is_trusted: false,
+            },
         };
         assert_eq!(result, expected);
     }

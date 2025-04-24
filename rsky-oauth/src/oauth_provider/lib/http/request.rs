@@ -101,9 +101,11 @@ pub fn setup_csrf_token(req: &Request, cookie_name: String) {
         .take(16)
         .map(char::from)
         .collect();
+    let path = req.clone().uri().path().as_str().to_string();
     let cookie = Cookie::build((cookie_name, csrf_token))
         .secure(true)
         .http_only(false)
-        .same_site(SameSite::Lax);
+        .same_site(SameSite::Lax)
+        .path(path);
     req.cookies().add(cookie);
 }

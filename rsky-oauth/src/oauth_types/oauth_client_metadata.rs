@@ -2,7 +2,8 @@ use crate::oauth_types::{
     OAuthEndpointAuthMethod, OAuthGrantType, OAuthRedirectUri, OAuthResponseType, OAuthScope,
     WebUri,
 };
-use jsonwebtoken::jwk::JwkSet;
+use biscuit::jwk::JWKSet;
+use biscuit::Empty;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -49,7 +50,7 @@ pub struct OAuthClientMetadata {
 
     /// Client's JSON Web Key Set
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jwks: Option<JwkSet>,
+    pub jwks: Option<JWKSet<Empty>>,
 
     /// Type of application (web or native)
     #[serde(default)]

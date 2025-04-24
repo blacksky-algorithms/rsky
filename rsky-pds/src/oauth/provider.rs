@@ -1,4 +1,7 @@
 use crate::oauth::SharedOAuthProvider;
+use biscuit::jwk::JWKSet;
+use biscuit::jws::Secret;
+use biscuit::Empty;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
@@ -19,6 +22,7 @@ use rsky_oauth::oauth_types::{
     ValidUri, WebUri,
 };
 use rsky_oauth::simple_store_memory::SimpleStoreMemory;
+use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -71,7 +75,7 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
         on_client_info: Some(Box::new(
             |client_id: OAuthClientId,
              oauth_client_metadata: OAuthClientMetadata,
-             jwks: Option<JwkSet>|
+             jwks: Option<JWKSet<Empty>>|
              -> ClientInfo {
                 ClientInfo {
                     is_first_party: client_id == OAuthClientId::new("https://bsky.app/").unwrap(),
@@ -82,7 +86,7 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
         )),
         on_authorization_details: None,
     };
-    let client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JwkSet>>> =
+    let client_jwks_cache: Arc<RwLock<SimpleStoreMemory<String, JWKSet<Empty>>>> =
         Arc::new(RwLock::new(SimpleStoreMemory::default()));
     let client_metadata_cache: Arc<RwLock<SimpleStoreMemory<String, OAuthClientMetadata>>> =
         Arc::new(RwLock::new(SimpleStoreMemory::default()));
@@ -99,7 +103,7 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
                 client_metadata_cache: Some(client_metadata_cache),
                 loopback_metadata: Some(loopback_metadata),
                 dpop_secret: options.dpop_secret,
-                dpop_step: Some(1),
+                dpop_step: Some(env::var("DPOP_STEP").unwrap().parse().unwrap()),
                 issuer: options.issuer,
                 keyset: Some(keyset.clone()),
                 // If the PDS is bosh an authorization server & resource server (no
@@ -116,25 +120,8 @@ pub async fn build_oauth_provider(options: AuthProviderOptions) -> SharedOAuthPr
 
 async fn build_keyset() -> Keyset {
     let mut keys = Vec::new();
-    let jwk = Jwk {
-        common: CommonParameters {
-            public_key_use: Some(PublicKeyUse::Signature),
-            key_operations: Some(vec![KeyOperations::Sign]),
-            key_algorithm: Some(KeyAlgorithm::PS256),
-            key_id: Some("test".to_string()),
-            x509_url: None,
-            x509_chain: None,
-            x509_sha1_fingerprint: None,
-            x509_sha256_fingerprint: None,
-        },
-        algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-            key_type: EllipticCurveKeyType::EC,
-            curve: EllipticCurve::P256,
-            x: "GgskXhf9OJFxYNovWiwq35akQopFXS6Tzuv0Y-B6q8I".to_string(),
-            y: "Cv8TnJVvra7TmYsaO-_nwhpD2jpfdnRE_TAeuvxLgJE".to_string(),
-        }),
-    };
-    let key = JoseKey::from_jwk(jwk, None).await;
+    let secret = Secret::bytes_from_str("secret");
+    let key = JoseKey::from_secret(secret, None, None).await;
     keys.push(Box::new(key) as Box<dyn Key>);
     Keyset::new(keys)
 }

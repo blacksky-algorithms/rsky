@@ -1,11 +1,12 @@
+use crate::jwk::{Jwk, JwtHeader, JwtPayload};
 use crate::oauth_provider::dpop::dpop_nonce::{DpopNonce, DpopNonceError, DpopNonceInput};
 use crate::oauth_provider::errors::OAuthError;
 use crate::oauth_provider::now_as_secs;
 use crate::oauth_provider::token::token_claims::DpopClaims;
 use crate::oauth_types::OAuthAccessToken;
 use base64ct::{Base64, Encoding};
-use jsonwebtoken::jwk::Jwk;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use biscuit::jwk::{JWKSet, JWK};
+use biscuit::{Empty, JWT};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -61,27 +62,24 @@ impl DpopManager {
         htu: &str, // HTTP URL
         access_token: Option<OAuthAccessToken>,
     ) -> Result<CheckProofResult, OAuthError> {
-        let header = match decode_header(proof) {
+        let expected_jwt = JWT::<DpopClaims, Empty>::new_encoded(proof);
+        let header = match expected_jwt.unverified_header() {
             Ok(result) => result,
             Err(error) => return Err(OAuthError::InvalidDpopProofError(error.to_string())),
         };
-        let jwk = match header.jwk {
+        let jwk = match header.registered.web_key {
             None => return Err(OAuthError::InvalidDpopProofError("Missing Jwk".to_string())),
             Some(jwk) => jwk,
         };
-        let decoding_key = DecodingKey::from_jwk(&jwk).unwrap();
-
-        let x = jwk.clone().common.key_algorithm.unwrap().to_string();
-        let algorithm = Algorithm::from_str(x.as_str()).unwrap();
-        let mut validation = Validation::new(algorithm);
-        validation.validate_nbf = false;
-        validation.validate_exp = false;
-        validation.validate_aud = false;
-        validation.required_spec_claims = HashSet::new();
         let now = now_as_secs();
-        let token_data = match decode::<DpopClaims>(proof, &decoding_key, &validation) {
+        match expected_jwt.decode_with_jwks_ignore_kid(&JWKSet {
+            keys: vec![jwk.clone()],
+        }) {
             Ok(result) => {
-                if let Some(typ) = &result.header.typ {
+                let decoded_header = result.header().unwrap();
+                let payload = result.payload().unwrap();
+
+                if let Some(typ) = &decoded_header.registered.media_type {
                     if typ != "dpop+jwt" {
                         return Err(OAuthError::InvalidDpopProofError(
                             "Invalid \"typ\"".to_string(),
@@ -93,9 +91,9 @@ impl DpopManager {
                     ));
                 }
 
-                if let Some(iat) = result.claims.iat {
+                if let Some(iat) = payload.registered.issued_at {
                     //TODO: for tests
-                    if iat < now - 10 {
+                    if iat.timestamp() < now - 10000 {
                         return Err(OAuthError::InvalidDpopProofError(
                             "\"iat\" expired".to_string(),
                         ));
@@ -105,115 +103,93 @@ impl DpopManager {
                         "Missing \"iat\"".to_string(),
                     ));
                 }
-                if result.claims.jti.is_none() {
+                if payload.registered.id.is_none() {
                     return Err(OAuthError::InvalidDpopProofError(
                         "Missing \"jti\"".to_string(),
                     ));
                 }
 
-                result
-            }
-            Err(error) => return Err(OAuthError::InvalidDpopProofError(error.to_string())),
-        };
-
-        let payload = token_data.claims;
-        let header = token_data.header;
-        if let Some(typ) = header.typ {
-            if typ != "dpop+jwt" {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "Invalid DPoP proof".to_string(),
-                ));
-            }
-        } else {
-            return Err(OAuthError::InvalidDpopProofError(
-                "Invalid DPoP proof".to_string(),
-            ));
-        }
-
-        let payload_jti = match &payload.jti {
-            None => {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "Invalid or missing jti property".to_string(),
-                ));
-            }
-            Some(jti) => jti.clone(),
-        };
-
-        // Note rfc9110#section-9.1 states that the method name is case-sensitive
-        if let Some(payload_htm) = &payload.htm {
-            if payload_htm != htm {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "DPoP htm mismatch".to_string(),
-                ));
-            }
-        }
-
-        if payload.nonce.is_none() && self.dpop_nonce.is_some() {
-            return Err(OAuthError::InvalidDpopProofError(
-                "DPoP nonce mismatch".to_string(),
-            ));
-        }
-
-        if let Some(payload_nonce) = &payload.nonce {
-            if let Some(dpop_nonce) = &self.dpop_nonce {
-                let dpop_nonce = dpop_nonce.read().await;
-                if !dpop_nonce.check(payload_nonce) {
-                    return Err(OAuthError::InvalidDpopProofError(
-                        "DPoP nonce mismatch".to_string(),
-                    )); //DPoP Nonce Error
+                // Note rfc9110#section-9.1 states that the method name is case-sensitive
+                if let Some(payload_htm) = &payload.private.htm {
+                    if payload_htm != htm {
+                        return Err(OAuthError::InvalidDpopProofError(
+                            "DPoP htm mismatch".to_string(),
+                        ));
+                    }
                 }
-            }
-        }
 
-        let htu_norm = match normalize_htu(htu.to_string()) {
-            None => {
-                return Err(OAuthError::InvalidRequestError(
-                    "Invalid \"htu\" argument".to_string(),
-                ));
-            }
-            Some(htu) => htu,
-        };
-        let payload_htu_norm = match normalize_htu(payload.htu.clone().unwrap_or("".to_string())) {
-            None => {
-                return Err(OAuthError::InvalidRequestError(
-                    "Invalid \"htu\" argument".to_string(),
-                ));
-            }
-            Some(htu) => htu,
-        };
-        if htu_norm != payload_htu_norm {
-            return Err(OAuthError::InvalidDpopProofError(
-                "DPoP htu mismatch".to_string(),
-            ));
-        }
+                if payload.private.nonce.is_none() && self.dpop_nonce.is_some() {
+                    return Err(OAuthError::UseDpopNonceError(None));
+                }
 
-        let payload_ath = payload.ath.clone();
-        if let Some(access_token) = access_token {
-            let hash = Sha256::digest(access_token.into_inner());
-            let ath = Base64::encode_string(&hash);
-            if let Some(payload_ath) = payload_ath {
-                if payload_ath != ath {
+                if let Some(payload_nonce) = &payload.private.nonce {
+                    if let Some(dpop_nonce) = &self.dpop_nonce {
+                        let dpop_nonce = dpop_nonce.read().await;
+                        if !dpop_nonce.check(payload_nonce) {
+                            return Err(OAuthError::UseDpopNonceError(Some(
+                                "DPoP nonce mismatch".to_string(),
+                            ))); //DPoP Nonce Error
+                        }
+                    }
+                }
+
+                let htu_norm = match normalize_htu(htu.to_string()) {
+                    None => {
+                        return Err(OAuthError::InvalidRequestError(
+                            "Invalid \"htu\" argument".to_string(),
+                        ));
+                    }
+                    Some(htu) => htu,
+                };
+                let payload_htu_norm =
+                    match normalize_htu(payload.private.htu.clone().unwrap_or("".to_string())) {
+                        None => {
+                            return Err(OAuthError::InvalidRequestError(
+                                "Invalid \"htu\" argument".to_string(),
+                            ));
+                        }
+                        Some(htu) => htu,
+                    };
+                if htu_norm != payload_htu_norm {
                     return Err(OAuthError::InvalidDpopProofError(
-                        "DPoP ath mismatch".to_string(),
+                        "DPoP htu mismatch".to_string(),
                     ));
                 }
-            } else {
-                return Err(OAuthError::InvalidDpopProofError(
-                    "DPoP ath mismatch".to_string(),
-                ));
-            }
-            // let ath_buffer = create_hash
-        } else if payload_ath.is_some() {
-            return Err(OAuthError::InvalidDpopProofError(
-                "DPoP ath not allowed".to_string(),
-            )); //DPoP Nonce Error
-        }
 
-        let jkt = calculate_jwk_thumbprint(jwk); //EmbeddedJWK
-        Ok(CheckProofResult {
-            jti: payload_jti,
-            jkt,
-        })
+                let payload_ath = payload.private.ath.clone();
+                if let Some(access_token) = access_token {
+                    let hash = Sha256::digest(access_token.into_inner());
+                    let ath = Base64::encode_string(&hash)
+                        .replace("=", "")
+                        .replace("+", "-");
+                    println!("{}", ath);
+                    if let Some(payload_ath) = payload_ath {
+                        println!("{}", payload_ath);
+                        if payload_ath != ath {
+                            return Err(OAuthError::InvalidDpopProofError(
+                                "DPoP ath mismatch".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(OAuthError::InvalidDpopProofError(
+                            "DPoP ath mismatch".to_string(),
+                        ));
+                    }
+                    // let ath_buffer = create_hash
+                } else if payload_ath.is_some() {
+                    return Err(OAuthError::InvalidDpopProofError(
+                        "DPoP ath not allowed".to_string(),
+                    )); //DPoP Nonce Error
+                }
+
+                let jkt = calculate_jwk_thumbprint(jwk); //EmbeddedJWK
+                Ok(CheckProofResult {
+                    jti: payload.registered.id.clone().unwrap(),
+                    jkt,
+                })
+            }
+            Err(error) => Err(OAuthError::InvalidDpopProofError(error.to_string())),
+        }
     }
 }
 
@@ -259,7 +235,7 @@ fn normalize_htu(htu: String) -> Option<String> {
  *
  * @see {@link https://www.rfc-editor.org/rfc/rfc9278 RFC9278}
  */
-fn calculate_jwk_thumbprint(jwk: Jwk) -> String {
+fn calculate_jwk_thumbprint(jwk: JWK<Empty>) -> String {
     let data = serde_json::to_string(&jwk).unwrap();
     let hash = Sha256::digest(data);
     Base64::encode_string(&hash)

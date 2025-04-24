@@ -126,7 +126,7 @@ impl<'r> FromRequest<'r> for AuthorizeAccept {
         };
 
         let url_reference = UrlReference {
-            origin: Some(String::from("https://pds.ripperoni.com")),
+            origin: Some(String::from("https://inspired-amusing-tick.ngrok-free.app")),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {

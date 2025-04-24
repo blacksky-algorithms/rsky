@@ -26,4 +26,6 @@ serde_urlencoded = "0.7.1"
 lru = "0.13.0"
 reqwest = { version = "0.12.15", features = ["json"] }
 base64ct = { version = "1.7.3", features = ["alloc"] }
-jsonwebtoken = { version = "9.3.1", features = ["use_pem"] }
+biscuit = "0.7.0"
+base64-url = "3.0.0"
+num-bigint = "0.4.6"

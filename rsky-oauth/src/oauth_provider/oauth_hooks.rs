@@ -5,10 +5,12 @@ use crate::oauth_types::{
     OAuthAuthorizationDetails, OAuthAuthorizationRequestParameters, OAuthClientId,
     OAuthClientMetadata,
 };
-use jsonwebtoken::jwk::JwkSet;
+use biscuit::jwk::JWKSet;
+use biscuit::Empty;
 
-pub type OnClientInfo =
-    Box<dyn Fn(OAuthClientId, OAuthClientMetadata, Option<JwkSet>) -> ClientInfo + Send + Sync>;
+pub type OnClientInfo = Box<
+    dyn Fn(OAuthClientId, OAuthClientMetadata, Option<JWKSet<Empty>>) -> ClientInfo + Send + Sync,
+>;
 
 pub type OnAuthorizationDetails = Box<
     dyn Fn(Client, OAuthAuthorizationRequestParameters, Account) -> OAuthAuthorizationDetails

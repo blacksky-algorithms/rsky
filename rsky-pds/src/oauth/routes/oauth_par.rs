@@ -1,14 +1,17 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::oauth::{OAuthResponse, SharedOAuthProvider, SharedReplayStore};
+use crate::oauth::{OAuthOptions, OAuthResponse, SharedOAuthProvider, SharedReplayStore};
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
-use rocket::{post, Data, Request, State};
+use rocket::response::Responder;
+use rocket::{post, response, Data, Request, Response, State};
 use rsky_oauth::oauth_provider::errors::OAuthError;
 use rsky_oauth::oauth_types::{
     OAuthAuthorizationRequestPar, OAuthClientCredentials, OAuthParResponse,
 };
+use std::env;
+use std::io::Cursor;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -197,7 +200,7 @@ pub async fn oauth_par(
     shared_replay_store: &State<SharedReplayStore>,
     account_manager: AccountManager,
     body: OAuthParRequestBody,
-) -> Result<OAuthResponse<OAuthParResponse>, OAuthError> {
+) -> Result<OAuthResponse<OAuthParResponse>, OAuthParError> {
     let creator = shared_oauth_provider.oauth_provider.read().await;
     let account_manager = Arc::new(RwLock::new(account_manager));
     let mut oauth_provider = creator(
@@ -208,26 +211,64 @@ pub async fn oauth_par(
         Some(account_manager.clone()),
         Some(shared_replay_store.replay_store.clone()),
     );
-    let dpop_jkt = oauth_provider
+    let dpop_jkt = match oauth_provider
         .oauth_verifier
         .check_dpop_proof(
             body.dpop.as_str(),
             body.method.as_str(),
-            ("https://pds.ripperoni.com".to_string() + body.url.as_str()).as_str(),
+            (env::var("OAuthIssuerIdentifier").unwrap() + body.url.as_str()).as_str(),
             None,
         )
-        .await?;
-    let res = oauth_provider
+        .await
+    {
+        Ok(res) => res,
+        Err(error) => {
+            let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
+            return Err(OAuthParError { error, dpop_nonce });
+        }
+    };
+    let res = match oauth_provider
         .pushed_authorization_request(
             body.oauth_client_credentials.clone(),
             body.oauth_authorization_request_par.clone(),
             Some(dpop_jkt),
         )
-        .await?;
+        .await
+    {
+        Ok(res) => res,
+        Err(error) => {
+            let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
+            return Err(OAuthParError { error, dpop_nonce });
+        }
+    };
     let dpop_nonce = oauth_provider.oauth_verifier.next_dpop_nonce().await;
     Ok(OAuthResponse {
         body: res,
         status: Status::Created,
         dpop_nonce,
     })
+}
+
+#[tracing::instrument(skip_all)]
+#[rocket::options("/oauth/par")]
+pub async fn oauth_par_options() -> OAuthOptions {
+    OAuthOptions {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthParError {
+    pub error: OAuthError,
+    pub dpop_nonce: Option<String>,
+}
+
+impl<'r> Responder<'r, 'static> for OAuthParError {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let mut response = self.error.respond_to(request)?;
+        // https://datatracker.ietf.org/doc/html/rfc9449#section-8.2
+        if let Some(dpop_nonce) = self.dpop_nonce {
+            response.set_raw_header("DPoP-Nonce", dpop_nonce);
+            response.adjoin_raw_header("Access-Control-Expose-Headers", "DPoP-Nonce");
+        }
+        Ok(response)
+    }
 }

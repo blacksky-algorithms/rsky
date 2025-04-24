@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::oauth::{OAuthResponse, SharedOAuthProvider, SharedReplayStore};
+use crate::oauth::{OAuthOptions, OAuthResponse, SharedOAuthProvider, SharedReplayStore};
 use http::header;
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
@@ -210,4 +210,10 @@ pub async fn post_oauth_revoke(
         status: Status::Ok,
         dpop_nonce,
     })
+}
+
+#[tracing::instrument(skip_all)]
+#[rocket::options("/oauth/revoke")]
+pub async fn oauth_revoke_options() -> OAuthOptions {
+    OAuthOptions {}
 }

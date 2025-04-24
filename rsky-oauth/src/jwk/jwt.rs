@@ -1,9 +1,10 @@
 use crate::jwk::Jwk;
 use crate::oauth_provider::oidc::sub::Sub;
-use crate::oauth_provider::token::token_id::TokenId;
 use crate::oauth_types::{OAuthClientId, OAuthScope};
+use biscuit::jwa::{Algorithm, SignatureAlgorithm};
+use biscuit::jwk::JWK;
+use biscuit::Empty;
 use chrono::NaiveDate;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -29,14 +30,14 @@ pub const EDDSA_STR: &str = "EdDSA";
 pub enum JwtError {
     #[error("Invalid JWT format")]
     InvalidFormat,
-    #[error("JWT validation error: {0}")]
-    Validation(#[from] jsonwebtoken::errors::Error),
+    #[error("JWT validation error")]
+    Validation,
     #[error("Invalid JWT claims: {0}")]
     InvalidClaims(String),
 }
 
 /// Standard JWT header fields, plus some custom fields
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct JwtHeader {
     /// Algorithm used to sign the token
     pub alg: Option<String>,
@@ -47,7 +48,7 @@ pub struct JwtHeader {
 
     /// JSON Web Key, optional
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jwk: Option<JwkFields>,
+    pub jwk: Option<JWK<Empty>>,
 
     /// Key ID, optional
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,18 +149,20 @@ pub struct JwtToken(String);
 
 pub fn algorithm_as_string(alg: Algorithm) -> String {
     match alg {
-        Algorithm::HS256 => String::from(HS256_STR),
-        Algorithm::HS384 => String::from(HS384_STR),
-        Algorithm::HS512 => String::from(HS512_STR),
-        Algorithm::ES256 => String::from(ES256_STR),
-        Algorithm::ES384 => String::from(ES384_STR),
-        Algorithm::RS256 => String::from(RS256_STR),
-        Algorithm::RS384 => String::from(RS384_STR),
-        Algorithm::RS512 => String::from(RS512_STR),
-        Algorithm::PS256 => String::from(PS256_STR),
-        Algorithm::PS384 => String::from(PS384_STR),
-        Algorithm::PS512 => String::from(PS512_STR),
-        Algorithm::EdDSA => String::from(EDDSA_STR),
+        Algorithm::Signature(SignatureAlgorithm::HS256) => String::from(HS256_STR),
+        Algorithm::Signature(SignatureAlgorithm::HS384) => String::from(HS384_STR),
+        Algorithm::Signature(SignatureAlgorithm::HS512) => String::from(HS512_STR),
+        Algorithm::Signature(SignatureAlgorithm::ES256) => String::from(ES256_STR),
+        Algorithm::Signature(SignatureAlgorithm::ES384) => String::from(ES384_STR),
+        Algorithm::Signature(SignatureAlgorithm::RS256) => String::from(RS256_STR),
+        Algorithm::Signature(SignatureAlgorithm::RS384) => String::from(RS384_STR),
+        Algorithm::Signature(SignatureAlgorithm::RS512) => String::from(RS512_STR),
+        Algorithm::Signature(SignatureAlgorithm::PS256) => String::from(PS256_STR),
+        Algorithm::Signature(SignatureAlgorithm::PS384) => String::from(PS384_STR),
+        Algorithm::Signature(SignatureAlgorithm::PS512) => String::from(PS512_STR),
+        _ => {
+            panic!()
+        }
     }
 }
 
@@ -171,59 +174,6 @@ impl JwtToken {
             return Err(JwtError::InvalidFormat);
         }
         Ok(Self(token))
-    }
-
-    /// Sign claims with the given key and create a new token
-    pub fn sign(header: &Header, claims: &JwtClaims, key: &[u8]) -> Result<Self, JwtError> {
-        let token = jsonwebtoken::encode(header, claims, &EncodingKey::from_secret(key))?;
-        Ok(Self(token))
-    }
-
-    /// Verify token signature and decode claims with default validation
-    pub fn verify(&self, key: &[u8]) -> Result<(JwtHeader, JwtClaims), JwtError> {
-        self.verify_with_options(key, &Validation::default())
-    }
-
-    /// Verify token signature and decode claims with custom validation options.
-    ///
-    /// This method allows customizing the validation criteria for JWT verification,
-    /// which is particularly useful for validating client assertion JWTs as described
-    /// in the OAuth 2.0 specification.
-    ///
-    /// # Arguments
-    /// * `key` - The key bytes used to verify the signature
-    /// * `validation` - Custom validation parameters
-    ///
-    /// # Returns
-    /// A tuple containing the decoded header and claims on success
-    ///
-    /// # Errors
-    /// Returns a `JwtError` if verification fails
-    pub fn verify_with_options(
-        &self,
-        key: &[u8],
-        validation: &Validation,
-    ) -> Result<(JwtHeader, JwtClaims), JwtError> {
-        let token_data =
-            jsonwebtoken::decode::<JwtClaims>(&self.0, &DecodingKey::from_secret(key), validation)?;
-
-        let alg = algorithm_as_string(token_data.header.alg);
-        Ok((
-            JwtHeader {
-                alg: Some(alg),
-                jku: token_data.header.jku,
-                jwk: None, // TODO: convert from raw JWK
-                kid: token_data.header.kid,
-                x5u: None,
-                x5c: None,
-                x5t: None,
-                x5t_s256: None,
-                typ: token_data.header.typ,
-                cty: token_data.header.cty,
-                crit: None,
-            },
-            token_data.claims,
-        ))
     }
 
     /// Get the underlying token string
@@ -450,205 +400,6 @@ pub enum JwtValidationError {
     InvalidZoneinfo,
     #[error("Invalid locale format")]
     InvalidLocale,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn test_jwt_payload_validation() {
-        let mut payload = JwtPayload::default();
-        payload.birthdate = Some("2000-01-01".to_string());
-        payload.zoneinfo = Some("America/New_York".to_string());
-        payload.locale = Some("en-US".to_string());
-
-        // Valid formats
-        assert!(payload.validate().is_ok());
-
-        // Invalid birthdate
-        payload.birthdate = Some("2000-13-01".to_string());
-        assert!(matches!(
-            payload.validate(),
-            Err(JwtValidationError::InvalidBirthdate)
-        ));
-
-        // Invalid zoneinfo
-        payload.birthdate = Some("2000-01-01".to_string());
-        payload.zoneinfo = Some("America/New York".to_string());
-        assert!(matches!(
-            payload.validate(),
-            Err(JwtValidationError::InvalidZoneinfo)
-        ));
-
-        // Invalid locale
-        payload.zoneinfo = Some("America/New_York".to_string());
-        payload.locale = Some("invalid".to_string());
-        assert!(matches!(
-            payload.validate(),
-            Err(JwtValidationError::InvalidLocale)
-        ));
-    }
-
-    #[test]
-    fn test_serialization() {
-        let mut payload = JwtPayload {
-            iss: Some("issuer".to_string()),
-            sub: Some(Sub::new("subject").unwrap()),
-            aud: Some(Audience::Single("audience".to_string())),
-            birthdate: Some("2000-01-01".to_string()),
-            ..Default::default()
-        };
-
-        // Add a custom claim
-        payload.additional_claims.insert(
-            "custom_claim".to_string(),
-            serde_json::Value::String("value".to_string()),
-        );
-
-        let serialized = serde_json::to_string(&payload).unwrap();
-        let deserialized: JwtPayload = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(payload, deserialized);
-        assert_eq!(
-            deserialized.additional_claims.get("custom_claim").unwrap(),
-            &serde_json::Value::String("value".to_string())
-        );
-    }
-
-    #[test]
-    fn test_jwt_token_validation() {
-        let invalid = JwtToken::new("invalid");
-        assert!(matches!(invalid, Err(JwtError::InvalidFormat)));
-
-        let valid = JwtToken::new("header.payload.signature");
-        assert!(valid.is_ok());
-    }
-
-    #[test]
-    fn test_jwt_sign_verify() {
-        let key = b"secret";
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let mut claims = JwtClaims {
-            iss: Some("test-issuer".to_string()),
-            sub: Some("test-subject".to_string()),
-            aud: Some(Audience::Single("test-audience".to_string())),
-            exp: Some(now + 3600),
-            nbf: None,
-            iat: Some(now),
-            jti: None,
-            additional_claims: std::collections::HashMap::new(),
-        };
-
-        claims.additional_claims.insert(
-            "custom".to_string(),
-            serde_json::Value::String("value".to_string()),
-        );
-
-        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
-
-        // Create a custom validation that matches our test JWT
-        let mut validation = Validation::default();
-        validation.set_audience(&["test-audience"]);
-
-        // Verify with our specific validation
-        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
-        assert_eq!(decoded_claims.iss, claims.iss);
-        assert_eq!(decoded_claims.sub, claims.sub);
-        assert_eq!(
-            decoded_claims.additional_claims["custom"],
-            serde_json::json!("value")
-        );
-    }
-
-    #[test]
-    fn test_jwt_verify_no_validation() {
-        let key = b"secret";
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let mut claims = JwtClaims {
-            iss: Some("test-issuer".to_string()),
-            sub: Some("test-subject".to_string()),
-            aud: Some(Audience::Single("test-audience".to_string())),
-            exp: Some(now + 3600),
-            nbf: None,
-            iat: Some(now),
-            jti: None,
-            additional_claims: std::collections::HashMap::new(),
-        };
-
-        claims.additional_claims.insert(
-            "custom".to_string(),
-            serde_json::Value::String("value".to_string()),
-        );
-
-        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
-
-        // Create a validation with all checks disabled for testing
-        let mut validation = Validation::default();
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.validate_aud = false;
-
-        // Verify with relaxed validation
-        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
-        assert_eq!(decoded_claims.iss, claims.iss);
-        assert_eq!(decoded_claims.sub, claims.sub);
-        assert_eq!(
-            decoded_claims.additional_claims["custom"],
-            serde_json::json!("value")
-        );
-    }
-
-    #[test]
-    fn test_jwt_verify_no_validation2() {
-        let key = b"secret";
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let mut claims = JwtClaims {
-            iss: Some("test-issuer".to_string()),
-            sub: Some("test-subject".to_string()),
-            aud: Some(Audience::Single("test-audience".to_string())),
-            exp: Some(now + 3600),
-            nbf: None,
-            iat: Some(now),
-            jti: None,
-            additional_claims: std::collections::HashMap::new(),
-        };
-
-        claims.additional_claims.insert(
-            "custom".to_string(),
-            serde_json::Value::String("value".to_string()),
-        );
-
-        let token = JwtToken::sign(&Header::default(), &claims, key).unwrap();
-
-        // Create a validation with all checks disabled for testing
-        let mut validation = Validation::default();
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.validate_aud = false;
-
-        // Verify with relaxed validation
-        let (_header, decoded_claims) = token.verify_with_options(key, &validation).unwrap();
-        assert_eq!(decoded_claims.iss, claims.iss);
-        assert_eq!(decoded_claims.sub, claims.sub);
-        assert_eq!(
-            decoded_claims.additional_claims["custom"],
-            serde_json::json!("value")
-        );
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

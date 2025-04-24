@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+pub mod html;
 pub mod http;
 pub mod util;
 

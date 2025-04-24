@@ -34,7 +34,7 @@ impl RefreshToken {
     pub fn generate() -> RefreshToken {
         let token: String = rand::rng()
             .sample_iter(&Alphanumeric)
-            .take(TOKEN_ID_BYTES_LENGTH)
+            .take(REFRESH_TOKEN_BYTES_LENGTH)
             .map(char::from)
             .collect();
         let val = REFRESH_TOKEN_PREFIX.to_string() + token.as_str();

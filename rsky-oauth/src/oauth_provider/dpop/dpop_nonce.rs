@@ -62,7 +62,7 @@ impl DpopNonce {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("timestamp in micros since UNIX epoch")
             .as_millis() as u64;
-        let counter = now / self.step;
+        let counter = now / self.step | 0;
         match counter - self.counter {
             0 => return,
             1 => {

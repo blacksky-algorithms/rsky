@@ -1,7 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::oauth::routes::csrf_cookie;
-use crate::oauth::{OAuthResponse, SharedOAuthProvider, SharedReplayStore};
+use crate::oauth::{OAuthOptions, OAuthResponse, SharedOAuthProvider, SharedReplayStore};
 use rocket::data::{FromData, ToByteUnit};
 use rocket::http::Status;
 use rocket::{post, Data, Request, State};
@@ -61,7 +61,7 @@ impl<'r> FromData<'r> for SignIn {
                 return rocket::data::Outcome::Error((Status::new(400), ()));
             }
         }
-        match validate_same_origin(req, "https://pds.ripperoni.com") {
+        match validate_same_origin(req, "https://inspired-amusing-tick.ngrok-free.app") {
             Ok(_) => {}
             Err(e) => {
                 let error = ApiError::InvalidRequest("Invalid same-origin header".to_string());
@@ -76,7 +76,7 @@ impl<'r> FromData<'r> for SignIn {
         let sign_in_payload: SignInPayload = serde_json::from_str(datastream.as_str()).unwrap();
 
         let url_reference = UrlReference {
-            origin: Some(String::from("https://pds.ripperoni.com")),
+            origin: Some(String::from("https://inspired-amusing-tick.ngrok-free.app")),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {
@@ -91,7 +91,7 @@ impl<'r> FromData<'r> for SignIn {
             req,
             sign_in_payload.csrf_token.as_str(),
             csrf_cookie(&sign_in_payload.request_uri).as_str(),
-            true,
+            false,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -169,4 +169,10 @@ pub async fn oauth_authorize_sign_in(
         status: Status::Ok,
         dpop_nonce,
     })
+}
+
+#[tracing::instrument(skip_all)]
+#[rocket::options("/oauth/authorize/sign-in")]
+pub async fn oauth_signin_options() -> OAuthOptions {
+    OAuthOptions {}
 }
