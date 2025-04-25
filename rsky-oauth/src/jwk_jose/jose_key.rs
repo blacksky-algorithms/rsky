@@ -3,20 +3,15 @@ use crate::jwk::{
     VerifyOptions, VerifyResult,
 };
 use crate::oauth_provider::oidc::sub::Sub;
-use base64::Engine as _;
-use base64ct::{Base64, Encoding};
 use biscuit::jwa::*;
 use biscuit::jwk::{
     AlgorithmParameters, EllipticCurve, JWKSet, OctetKeyParameters, PublicKeyUse, JWK,
 };
 use biscuit::jws::*;
 use biscuit::*;
-use num_bigint::BigUint;
 use ring::rsa::{KeyPairComponents, PublicKeyComponents};
 use ring::signature;
 use ring::signature::KeyPair;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -69,7 +64,7 @@ impl Key for JoseKey {
                 params.d = None;
                 jwk.algorithm = AlgorithmParameters::RSA(params);
             }
-            AlgorithmParameters::OctetKey(mut params) => return None,
+            AlgorithmParameters::OctetKey(_params) => return None,
             AlgorithmParameters::OctetKeyPair(mut params) => {
                 params.d = None;
             }
@@ -107,16 +102,17 @@ impl Key for JoseKey {
             Secret::None => jwk_algorithms(&self.jwk),
             _ => {
                 let mut algs = vec![];
+                // Secret::RsaKeyPair(secret) => {}
+                // Secret::EcdsaKeyPair(secret) => {
+                //
+                // }
+                // Secret::PublicKey(secret) => {}
+                // Secret::RSAModulusExponent { .. } => {}
                 algs.push(Algorithm::Signature(SignatureAlgorithm::HS256));
                 algs.push(Algorithm::Signature(SignatureAlgorithm::HS384));
                 algs.push(Algorithm::Signature(SignatureAlgorithm::HS512));
-                return algs;
-            } // Secret::RsaKeyPair(secret) => {}
-              // Secret::EcdsaKeyPair(secret) => {
-              //
-              // }
-              // Secret::PublicKey(secret) => {}
-              // Secret::RSAModulusExponent { .. } => {}
+                algs
+            }
         }
     }
 
@@ -376,7 +372,7 @@ impl JoseKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_types::{OAuthIssuerIdentifier, OAuthScope};
+    use crate::oauth_types::OAuthIssuerIdentifier;
     use biscuit::jwk::{
         AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
         EllipticCurveKeyType, RSAKeyParameters,

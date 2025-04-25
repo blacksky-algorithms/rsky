@@ -92,13 +92,6 @@ impl Keyset {
         false
     }
 
-    async fn get(&self, search: KeySearch) {
-        if let Some(key) = (self.list(search).await).into_iter().next() {
-            unimplemented!()
-        }
-        unimplemented!()
-    }
-
     async fn list(&self, search: KeySearch) -> Vec<&Box<dyn Key>> {
         let mut result = vec![];
         for key in &self.keys {

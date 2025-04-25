@@ -20,7 +20,7 @@ use rsky_oauth::oauth_provider::output::send_authorize_redirect::AuthorizationRe
 use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
 use rsky_oauth::oauth_types::{
     OAuthAuthorizationRequestQuery, OAuthClientCredentials, OAuthClientId,
-    OAuthTokenIdentification, Prompt, ResponseMode,
+    OAuthTokenIdentification, Prompt, ResponseMode, WebUri,
 };
 use serde_json::json;
 use std::hash::Hash;
@@ -253,6 +253,16 @@ impl<'r> Responder<'r, 'static> for OAuthAuthorizeResponse {
                 let request_uri = page.authorize.uri.into_inner();
                 let csrf_cookie = "csrf-".to_string() + request_uri.as_str();
                 let login_hint = page.parameters.login_hint.unwrap_or("".to_string());
+                let client_name = page
+                    .client
+                    .metadata
+                    .client_name
+                    .clone()
+                    .unwrap_or(client_id.to_string());
+                let client_uri = match page.client.metadata.client_uri {
+                    None => "".to_string(),
+                    Some(client_uri) => client_uri.to_string(),
+                };
                 let new_session_requires_consent = match page.parameters.prompt {
                     None => "false",
                     Some(prompt) => {
@@ -276,7 +286,7 @@ impl<'r> Responder<'r, 'static> for OAuthAuthorizeResponse {
                             </head>
                             <body>
                                 <div id=\"root\"></div>
-                                <script>window[\"__authorizeData\"]={{\"clientId\":\"{client_id}\",\"clientMetadata\":{{\"redirect_uris\":[\"{issuer}/\"],\"response_types\":[\"code\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scope\":\"atproto transition:generic\",\"token_endpoint_auth_method\":\"none\",\"application_type\":\"web\",\"client_id\":\"{client_id}\",\"client_name\":\"cleanfollow-bsky\",\"client_uri\":\"https://cleanfollow-bsky.pages.dev\",\"dpop_bound_access_tokens\":true}},\"clientTrusted\":false,\"requestUri\":\"{request_uri}\",\"csrfCookie\":\"{csrf_cookie}\",\"loginHint\":\"{login_hint}\",\"newSessionsRequireConsent\":true,\"scopeDetails\":[{{\"scope\":\"atproto\"}},{{\"scope\":\"transition:generic\"}}],\"sessions\":[]}};document.currentScript.remove();</script><script>window[\"__customizationData\"]={{\"name\":\"Personal PDS\",\"links\":[]}};document.currentScript.remove();</script><script type=\"module\" src=\"/@atproto/oauth-provider/~assets/main.js\"></script>
+                                <script>window[\"__authorizeData\"]={{\"clientId\":\"{client_id}\",\"clientMetadata\":{{\"redirect_uris\":[\"{issuer}/\"],\"response_types\":[\"code\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scope\":\"atproto transition:generic\",\"token_endpoint_auth_method\":\"none\",\"application_type\":\"web\",\"client_id\":\"{client_id}\",\"client_name\":\"{client_name}\",\"client_uri\":\"{client_uri}\",\"dpop_bound_access_tokens\":true}},\"clientTrusted\":false,\"requestUri\":\"{request_uri}\",\"csrfCookie\":\"{csrf_cookie}\",\"loginHint\":\"{login_hint}\",\"newSessionsRequireConsent\":{new_session_requires_consent},\"scopeDetails\":[{{\"scope\":\"atproto\"}},{{\"scope\":\"transition:generic\"}}],\"sessions\":[]}};document.currentScript.remove();</script><script>window[\"__customizationData\"]={{\"name\":\"Personal PDS\",\"links\":[]}};document.currentScript.remove();</script><script type=\"module\" src=\"/@atproto/oauth-provider/~assets/main.js\"></script>
                             </body>
                         </html>",
                 );

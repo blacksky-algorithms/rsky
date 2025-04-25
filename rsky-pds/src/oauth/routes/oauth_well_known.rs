@@ -7,6 +7,7 @@ use rsky_oauth::oauth_types::{
     BearerMethod, OAuthAuthorizationServerMetadata, OAuthIssuerIdentifier,
     OAuthProtectedResourceMetadata, ValidUri, WebUri,
 };
+use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -35,9 +36,9 @@ pub async fn oauth_well_known(
 #[get("/.well-known/oauth-protected-resource")]
 pub async fn oauth_well_known_resources() -> Json<OAuthProtectedResourceMetadata> {
     let result = OAuthProtectedResourceMetadata {
-        resource: WebUri::validate("https://inspired-amusing-tick.ngrok-free.app").unwrap(),
+        resource: WebUri::validate(env::var("OAuthIssuerIdentifier").unwrap().as_str()).unwrap(),
         authorization_servers: Some(vec![OAuthIssuerIdentifier::from_str(
-            "https://inspired-amusing-tick.ngrok-free.app",
+            env::var("OAuthIssuerIdentifier").unwrap().as_str(),
         )
         .unwrap()]),
         jwks_uri: None,

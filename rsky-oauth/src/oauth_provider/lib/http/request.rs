@@ -58,7 +58,7 @@ pub fn validate_csrf_token(
     cookie_name: &str,
     clear_cookie: bool,
 ) -> Result<(), ()> {
-    let mut cookies = req.cookies();
+    let cookies = req.cookies();
     let csrf_cookie: &Cookie = match cookies.get(cookie_name) {
         None => return Err(()),
         Some(cookie) => cookie,

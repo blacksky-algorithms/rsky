@@ -18,6 +18,7 @@ use rsky_oauth::oauth_provider::output::send_authorize_redirect::{
 };
 use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
 use rsky_oauth::oauth_types::OAuthClientId;
+use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -25,7 +26,6 @@ pub struct AuthorizeReject {
     pub device_id: DeviceId,
     pub request_uri: RequestUri,
     pub client_id: OAuthClientId,
-    pub account_sub: Sub,
 }
 
 #[rocket::async_trait]
@@ -86,28 +86,6 @@ impl<'r> FromRequest<'r> for AuthorizeReject {
                 }
             },
         };
-        let sub = match req.query_value::<&str>("account_sub") {
-            None => {
-                let error = ApiError::InvalidRequest("Missing account_sub".to_string());
-                req.local_cache(|| Some(error.clone()));
-                return rocket::request::Outcome::Error((Status::new(400), ()));
-            }
-            Some(val) => match val {
-                Ok(val) => match Sub::new(val) {
-                    Ok(sub) => sub,
-                    Err(e) => {
-                        let error = ApiError::InvalidRequest("Invalid account_sub".to_string());
-                        req.local_cache(|| Some(error.clone()));
-                        return rocket::request::Outcome::Error((Status::new(400), ()));
-                    }
-                },
-                Err(e) => {
-                    let error = ApiError::InvalidRequest("Invalid account_sub".to_string());
-                    req.local_cache(|| Some(error.clone()));
-                    return rocket::request::Outcome::Error((Status::new(400), ()));
-                }
-            },
-        };
         let csrf_token = match req.query_value::<&str>("csrf_token") {
             None => {
                 let error = ApiError::InvalidRequest("Missing csrf_token".to_string());
@@ -125,7 +103,7 @@ impl<'r> FromRequest<'r> for AuthorizeReject {
         };
 
         let url_reference = UrlReference {
-            origin: Some(String::from("https://inspired-amusing-tick.ngrok-free.app")),
+            origin: Some(env::var("OAuthIssuerIdentifier").unwrap()),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {
@@ -178,7 +156,6 @@ impl<'r> FromRequest<'r> for AuthorizeReject {
             device_id,
             request_uri,
             client_id,
-            account_sub: sub,
         })
     }
 }
@@ -210,11 +187,10 @@ pub async fn oauth_authorize_reject(
         Some(shared_replay_store.replay_store.clone()),
     );
     let data = oauth_provider
-        .accept_request(
+        .reject_request(
             authorize_reject.device_id,
             authorize_reject.request_uri,
             authorize_reject.client_id,
-            authorize_reject.account_sub,
         )
         .await?;
     Ok(OAuthAuthorizeResponse::Redirect(data))

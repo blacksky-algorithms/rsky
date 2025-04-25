@@ -18,6 +18,7 @@ use rsky_oauth::oauth_provider::oauth_provider::SignInResponse;
 use rsky_oauth::oauth_provider::oidc::sub::Sub;
 use rsky_oauth::oauth_provider::request::request_uri::RequestUri;
 use rsky_oauth::oauth_types::OAuthClientId;
+use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -61,7 +62,7 @@ impl<'r> FromData<'r> for SignIn {
                 return rocket::data::Outcome::Error((Status::new(400), ()));
             }
         }
-        match validate_same_origin(req, "https://inspired-amusing-tick.ngrok-free.app") {
+        match validate_same_origin(req, env::var("OAuthIssuerIdentifier").unwrap().as_str()) {
             Ok(_) => {}
             Err(e) => {
                 let error = ApiError::InvalidRequest("Invalid same-origin header".to_string());
@@ -76,7 +77,7 @@ impl<'r> FromData<'r> for SignIn {
         let sign_in_payload: SignInPayload = serde_json::from_str(datastream.as_str()).unwrap();
 
         let url_reference = UrlReference {
-            origin: Some(String::from("https://inspired-amusing-tick.ngrok-free.app")),
+            origin: Some(env::var("OAuthIssuerIdentifier").unwrap()),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {

@@ -333,7 +333,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(replay_store)
         .mount(
             "/@atproto/oauth-provider/~assets",
-            FileServer::from("/Users/trentoncoleman/temporary/rsky/rsky-pds"),
+            FileServer::from("/pds/assets"),
         )
 }
 

@@ -3,7 +3,8 @@ use anyhow::Result;
 use hickory_resolver::config::*;
 use hickory_resolver::error::ResolveResult;
 use hickory_resolver::lookup_ip::LookupIp;
-use hickory_resolver::Resolver;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::{AsyncResolver, Resolver};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use url::Url;
@@ -41,8 +42,12 @@ impl HandleResolver {
     }
 
     pub async fn resolve_dns(&self, handle: &String) -> Result<Option<String>> {
-        let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
-        let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")) {
+        let resolver = AsyncResolver::new(
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+            TokioConnectionProvider::default(),
+        );
+        let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")).await {
             Ok(res) => res,
             Err(_) => return Ok(None),
         };
@@ -97,9 +102,13 @@ impl HandleResolver {
                     })
                     .collect::<Vec<()>>();
 
-                let resolver = Resolver::new(config, ResolverOpts::default())?;
+                let resolver = AsyncResolver::new(
+                    config,
+                    ResolverOpts::default(),
+                    TokioConnectionProvider::default(),
+                );
 
-                let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")) {
+                let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")).await {
                     Ok(res) => res,
                     Err(_) => return Ok(None),
                 };
