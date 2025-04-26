@@ -6,8 +6,9 @@ use crate::actor_store::blob::BlobReader;
 use crate::actor_store::preference::PreferenceReader;
 use crate::actor_store::record::RecordReader;
 use crate::actor_store::repo::sql_repo::SqlRepoReader;
+use crate::actor_store::repo::types::SyncEvtData;
 use crate::db::DbConn;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use diesel::*;
 use futures::stream::{self, StreamExt};
 use lexicon_cid::Cid;
@@ -16,15 +17,40 @@ use rsky_repo::repo::Repo;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::types::{
-    write_to_op, CommitData, PreparedCreateOrUpdate, PreparedWrite, RecordCreateOrUpdateOp,
-    RecordWriteEnum, RecordWriteOp, WriteOpAction,
+    write_to_op, CommitAction, CommitData, CommitDataWithOps, CommitOp, PreparedCreateOrUpdate,
+    PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp, WriteOpAction,
 };
+use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+#[derive(Debug)]
+enum FormatCommitError {
+    BadRecordSwap(String),
+    RecordSwapMismatch(String),
+    BadCommitSwap(String),
+    MissingRepoRoot(String),
+}
+
+impl fmt::Display for FormatCommitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadRecordSwap(record) => write!(f, "BadRecordSwapError: `{:?}`", record),
+            Self::RecordSwapMismatch(record) => {
+                write!(f, "BadRecordSwapError: current record is `{:?}`", record)
+            }
+            Self::BadCommitSwap(cid) => write!(f, "BadCommitSwapError: {}", cid),
+            Self::MissingRepoRoot(did) => write!(f, "No repo root found for `{}`", did),
+        }
+    }
+}
+
+impl std::error::Error for FormatCommitError {}
 
 pub struct ActorStore {
     pub did: String,
@@ -100,7 +126,7 @@ impl ActorStore {
         &self,
         keypair: Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
-    ) -> Result<CommitData> {
+    ) -> Result<CommitDataWithOps> {
         let write_ops = writes
             .clone()
             .into_iter()
@@ -123,12 +149,29 @@ impl ActorStore {
         .await?;
         let storage_guard = self.storage.read().await;
         storage_guard.apply_commit(commit.clone(), None).await?;
+        let write_commit_ops = writes.iter().try_fold(
+            Vec::with_capacity(writes.len()),
+            |mut acc, w| -> Result<Vec<CommitOp>> {
+                let aturi: AtUri = w.uri.clone().try_into()?;
+                acc.push(CommitOp {
+                    action: CommitAction::Create,
+                    path: format_data_key(aturi.get_collection(), aturi.get_rkey()),
+                    cid: Some(w.cid.clone()),
+                    prev: None,
+                });
+                Ok(acc)
+            },
+        )?;
         let writes = writes
             .into_iter()
             .map(PreparedWrite::Create)
             .collect::<Vec<PreparedWrite>>();
         self.blob.process_write_blobs(writes).await?;
-        Ok(commit)
+        Ok(CommitDataWithOps {
+            commit_data: commit,
+            ops: write_commit_ops,
+            prev_data: None,
+        })
     }
 
     pub async fn process_import_repo(
@@ -155,28 +198,47 @@ impl ActorStore {
         &mut self,
         writes: Vec<PreparedWrite>,
         swap_commit_cid: Option<Cid>,
-    ) -> Result<CommitData> {
+    ) -> Result<CommitDataWithOps> {
+        // NOTE: In the typescript PR on sync v1.1
+        // there are some safeguards added for adding
+        // very large commits and very many commits
+        // for which I'm sure we could safeguard on
+        // but may not be necessary.
+        // https://github.com/bluesky-social/atproto/pull/3585/files#diff-7627844a4a6b50190014e947d1331a96df3c64d4c5273fa0ce544f85c3c1265f
         let commit = self.format_commit(writes.clone(), swap_commit_cid).await?;
         {
             let immutable_borrow = &self;
             // & send to indexing
             immutable_borrow
-                .index_writes(writes.clone(), &commit.rev)
+                .index_writes(writes.clone(), &commit.commit_data.rev)
                 .await?;
         }
         // persist the commit to repo storage
         let storage_guard = self.storage.read().await;
-        storage_guard.apply_commit(commit.clone(), None).await?;
+        storage_guard
+            .apply_commit(commit.commit_data.clone(), None)
+            .await?;
         // process blobs
         self.blob.process_write_blobs(writes).await?;
         Ok(commit)
+    }
+
+    pub async fn get_sync_event_data(&mut self) -> Result<SyncEvtData> {
+        let storage_guard = self.storage.read().await;
+        let current_root = storage_guard.get_root_detailed().await?;
+        let blocks_and_missing = storage_guard.get_blocks(vec![current_root.cid]).await?;
+        Ok(SyncEvtData {
+            cid: current_root.cid,
+            rev: current_root.rev,
+            blocks: blocks_and_missing.blocks,
+        })
     }
 
     pub async fn format_commit(
         &mut self,
         writes: Vec<PreparedWrite>,
         swap_commit: Option<Cid>,
-    ) -> Result<CommitData> {
+    ) -> Result<CommitDataWithOps> {
         let current_root = {
             let storage_guard = self.storage.read().await;
             storage_guard.get_root_detailed().await
@@ -184,7 +246,9 @@ impl ActorStore {
         if let Ok(current_root) = current_root {
             if let Some(swap_commit) = swap_commit {
                 if !current_root.cid.eq(&swap_commit) {
-                    bail!("BadCommitSwapError: {0}", current_root.cid)
+                    return Err(
+                        FormatCommitError::BadCommitSwap(current_root.cid.to_string()).into(),
+                    );
                 }
             }
             {
@@ -193,7 +257,9 @@ impl ActorStore {
             }
             let mut new_record_cids: Vec<Cid> = vec![];
             let mut delete_and_update_uris = vec![];
+            let mut commit_ops = vec![];
             for write in &writes {
+                let commit_action: CommitAction = write.action().into();
                 match write.clone() {
                     PreparedWrite::Create(c) => new_record_cids.push(c.cid),
                     PreparedWrite::Update(u) => {
@@ -218,18 +284,41 @@ impl ActorStore {
                     Some(record) => Some(Cid::from_str(&record.cid)?),
                     None => None,
                 };
+                let cid = match &write {
+                    &PreparedWrite::Delete(_) => None,
+                    &PreparedWrite::Create(w) | &PreparedWrite::Update(w) => Some(w.cid),
+                };
+                let mut op = CommitOp {
+                    action: commit_action,
+                    path: format_data_key(write_at_uri.get_collection(), write_at_uri.get_rkey()),
+                    cid,
+                    prev: None,
+                };
+                if let Some(_) = current_record {
+                    op.prev = current_record;
+                };
+                commit_ops.push(op);
                 match write {
                     // There should be no current record for a create
                     PreparedWrite::Create(_) if write.swap_cid().is_some() => {
-                        bail!("BadRecordSwapError: `{0:?}`", current_record)
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     // There should be a current record for an update
                     PreparedWrite::Update(_) if write.swap_cid().is_none() => {
-                        bail!("BadRecordSwapError: `{0:?}`", current_record)
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     // There should be a current record for a delete
                     PreparedWrite::Delete(_) if write.swap_cid().is_none() => {
-                        bail!("BadRecordSwapError: `{0:?}`", current_record)
+                        Err::<(), anyhow::Error>(
+                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                .into(),
+                        )
                     }
                     _ => Ok::<(), anyhow::Error>(()),
                 }?;
@@ -237,13 +326,14 @@ impl ActorStore {
                     (Some(current_record), Some(swap_cid)) if current_record.eq(swap_cid) => {
                         Ok::<(), anyhow::Error>(())
                     }
-                    _ => bail!(
-                        "BadRecordSwapError: current record is `{0:?}`",
-                        current_record
+                    _ => Err::<(), anyhow::Error>(
+                        FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record))
+                            .into(),
                     ),
                 }?;
             }
             let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;
+            let previous_data = repo.commit.data;
             let write_ops: Vec<RecordWriteOp> = writes
                 .into_iter()
                 .map(write_to_op)
@@ -277,9 +367,14 @@ impl ActorStore {
                 };
                 commit.relevant_blocks.add_map(missing_blocks.blocks)?;
             }
-            Ok(commit)
+            let commit_with_data_ops = CommitDataWithOps {
+                ops: commit_ops,
+                commit_data: commit,
+                prev_data: Some(previous_data),
+            };
+            Ok(commit_with_data_ops)
         } else {
-            bail!("No repo root found for `{0}`", self.did)
+            Err(FormatCommitError::MissingRepoRoot(self.did.clone()).into())
         }
     }
 

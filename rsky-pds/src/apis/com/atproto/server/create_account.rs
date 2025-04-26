@@ -10,6 +10,7 @@ use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
+use crate::sequencer::events::sync_evt_data_from_commit;
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
 use aws_config::SdkConfig;
@@ -56,6 +57,7 @@ pub async fn server_create_account(
         Some(access) => access.credentials.iss,
         _ => None,
     };
+    // @TODO: Evaluate if we need to validate for entryway PDS
     let TransformedCreateAccountInput {
         email,
         handle,
@@ -125,8 +127,8 @@ pub async fn server_create_account(
             handle: handle.clone(),
             email: Some(email),
             password: Some(password),
-            repo_cid: commit.cid,
-            repo_rev: commit.rev.clone(),
+            repo_cid: commit.commit_data.cid,
+            repo_rev: commit.commit_data.rev.clone(),
             invite_code,
             deactivated: Some(deactivated),
         })
@@ -168,10 +170,7 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
-        match lock
-            .sequence_commit(did.clone(), commit.clone(), vec![])
-            .await
-        {
+        match lock.sequence_commit(did.clone(), commit.clone()).await {
             Ok(_) => {
                 tracing::debug!("Sequence commit succeeded");
             }
@@ -180,9 +179,24 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
+        match lock
+            .sequence_sync_evt(
+                did.clone(),
+                sync_evt_data_from_commit(commit.clone()).await?,
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::debug!("Sequence sync event data from commit succeeded");
+            }
+            Err(error) => {
+                tracing::error!("Sequence sync event data from commit failed\n{error}");
+                return Err(ApiError::RuntimeError);
+            }
+        }
     }
     match account_manager
-        .update_repo_root(did.clone(), commit.cid, commit.rev)
+        .update_repo_root(did.clone(), commit.commit_data.cid, commit.commit_data.rev)
         .await
     {
         Ok(_) => {

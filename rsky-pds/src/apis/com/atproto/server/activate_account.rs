@@ -9,9 +9,6 @@ use crate::db::DbConn;
 use crate::SharedSequencer;
 use aws_config::SdkConfig;
 use rocket::State;
-use rsky_repo::cid_set::CidSet;
-use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
-use rsky_repo::types::CommitData;
 use rsky_syntax::handle::INVALID_HANDLE;
 
 #[tracing::instrument(skip_all)]
@@ -38,34 +35,22 @@ async fn inner_activate_account(
     if let Some(account) = account {
         account_manager.activate_account(&requester).await?;
 
-        let actor_store = ActorStore::new(
+        let mut actor_store = ActorStore::new(
             requester.clone(),
             S3BlobStore::new(requester.clone(), s3_config),
             db,
         );
-        let storage_guard = actor_store.storage.read().await;
-        let root = storage_guard.get_root_detailed().await?;
-        let blocks = storage_guard.get_blocks(vec![root.cid]).await?;
-        let commit_data = CommitData {
-            cid: root.cid,
-            rev: root.rev,
-            since: None,
-            prev: None,
-            new_blocks: blocks.blocks.clone(),
-            relevant_blocks: blocks.blocks,
-            removed_cids: CidSet::new(None),
-        };
+        let sync_data = actor_store.get_sync_event_data().await?;
 
         // @NOTE: we're over-emitting for now for backwards compatibility, can reduce this in the future
         let status = account_manager.get_account_status(&requester).await?;
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_account_evt(requester.clone(), status).await?;
-        lock.sequence_handle_update(
-            requester.clone(),
-            account.handle.unwrap_or(INVALID_HANDLE.to_string()),
-        )
-        .await?;
-        lock.sequence_commit(requester, commit_data, vec![]).await?;
+
+        let handle = account.handle.unwrap_or(INVALID_HANDLE.to_string());
+        lock.sequence_identity_evt(requester.clone(), Some(handle))
+            .await?;
+        lock.sequence_sync_evt(requester, sync_data).await?;
         Ok(())
     } else {
         tracing::error!("User not found");
