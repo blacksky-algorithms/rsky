@@ -16,7 +16,7 @@ async fn inner_put_preferences(
     db: DbConn,
 ) -> Result<(), ApiError> {
     let PutPreferencesInput { preferences } = body.into_inner();
-    let auth = auth.access.credentials.unwrap();
+    let auth = auth.access.credentials;
     let requester = auth.did.unwrap().clone();
     let actor_store = ActorStore::new(
         requester.clone(),

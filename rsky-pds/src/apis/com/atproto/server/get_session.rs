@@ -11,7 +11,7 @@ pub async fn get_session(
     auth: AccessStandard,
     account_manager: AccountManager,
 ) -> Result<Json<GetSessionOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     match account_manager.get_account(&did, None).await {
         Ok(Some(user)) => Ok(Json(GetSessionOutput {
             handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),

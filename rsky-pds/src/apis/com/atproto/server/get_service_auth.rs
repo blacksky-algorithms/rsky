@@ -18,7 +18,7 @@ pub async fn inner_get_service_auth(
     lxm: Option<String>,
     auth: AccessFull,
 ) -> Result<String> {
-    let credentials = auth.access.credentials.unwrap();
+    let credentials = auth.access.credentials;
     let did = credentials.clone().did.unwrap();
     // We just use the repo signing key
     let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();

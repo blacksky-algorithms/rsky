@@ -87,7 +87,7 @@ async fn inner_get_account_invite_codes(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<GetAccountInviteCodesOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
     let account = account_manager.get_account(&requester, None).await?;
     let mut user_codes = account_manager.get_account_invite_codes(&requester).await?;
 

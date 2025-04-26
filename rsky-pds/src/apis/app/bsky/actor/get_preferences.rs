@@ -14,7 +14,7 @@ async fn inner_get_preferences(
     auth: AccessStandard,
     db: DbConn,
 ) -> Result<GetPreferencesOutput> {
-    let auth = auth.access.credentials.unwrap();
+    let auth = auth.access.credentials;
     let requester = auth.did.unwrap().clone();
     let actor_store = ActorStore::new(
         requester.clone(),

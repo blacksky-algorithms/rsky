@@ -54,7 +54,7 @@ pub async fn server_create_account(
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
-        Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
+        Some(access) => access.credentials.iss,
         _ => None,
     };
     // @TODO: Evaluate if we need to validate for entryway PDS

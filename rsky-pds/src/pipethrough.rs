@@ -54,10 +54,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
         match AccessStandard::from_request(req).await {
             Outcome::Success(output) => {
                 let AccessOutput { credentials, .. } = output.access;
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
-                };
+                let requester: Option<String> = credentials.did;
                 let headers = req.headers().clone().into_iter().fold(
                     BTreeMap::new(),
                     |mut acc: BTreeMap<String, String>, cur| {

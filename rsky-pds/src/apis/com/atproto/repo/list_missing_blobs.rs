@@ -19,7 +19,7 @@ pub async fn list_missing_blobs(
     db: DbConn,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<ListMissingBlobsOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     let limit: u16 = limit.unwrap_or(500);
 
     let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);

@@ -244,7 +244,7 @@ where
         } else {
             // now "the use of PAR is *mandatory* for all clients"
             // https://github.com/bluesky-social/proposals/tree/main/0004-oauth#framework
-            todo!()
+            unimplemented!()
         }
     }
     pub async fn callback(&self, params: CallbackParams) -> Result<TokenSet> {

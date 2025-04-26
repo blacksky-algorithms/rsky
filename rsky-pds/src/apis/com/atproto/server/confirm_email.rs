@@ -11,7 +11,7 @@ async fn inner_confirm_email(
     auth: AccessStandardIncludeChecks,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
 
     let user = match account_manager
         .get_account(

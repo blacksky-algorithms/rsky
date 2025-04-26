@@ -49,7 +49,7 @@ async fn inner_put_record(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != auth.access.credentials.did.unwrap() {
             bail!("AuthRequiredError")
         }
         let uri = AtUri::make(did.clone(), Some(collection.clone()), Some(rkey.clone()))?;

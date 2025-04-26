@@ -11,7 +11,7 @@ async fn inner_request_account_delete(
     auth: AccessStandardIncludeChecks,
     account_manager: AccountManager,
 ) -> Result<()> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     let account = account_manager
         .get_account(
             &did,

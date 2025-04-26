@@ -38,10 +38,7 @@ pub async fn bsky_api_get_forwarder(
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.access.credentials.did;
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(res) => {
             let headers = res.headers.expect("Upstream responded without headers.");
@@ -69,10 +66,7 @@ pub async fn bsky_api_post_forwarder(
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.access.credentials.did;
 
     let res = pipethrough_procedure_post(&req, requester, Some(body)).await?;
     let headers = res.headers.expect("Upstream responded without headers.");
@@ -128,11 +122,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 500u16 });
                 Ok(res)
             }
@@ -173,11 +163,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -188,11 +174,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -203,11 +185,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -218,11 +196,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -233,11 +207,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -248,11 +218,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -263,11 +229,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -278,11 +240,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -293,11 +251,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -308,11 +262,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -323,11 +273,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -338,11 +284,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -353,11 +295,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -368,11 +306,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -395,11 +329,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 let body = Json(ErrorBody { error, message });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
@@ -425,11 +355,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
+                res.set_header(ContentType::JSON);
                 res.set_status(Status { code: 404u16 });
                 Ok(res)
             }

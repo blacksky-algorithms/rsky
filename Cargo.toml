@@ -1,5 +1,5 @@
 [workspace]
-members = [ "rsky-common", "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo", "cypher/backend", "cypher/frontend", "rsky-satnav"]
+members = ["rsky-common", "rsky-crypto", "rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo", "cypher/backend", "cypher/frontend", "rsky-satnav", "rsky-oauth"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -24,6 +24,7 @@ rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
 rsky-common = {path = "rsky-common", version = "0.1.1"}
 rsky-repo = {path = "rsky-repo", version = "0.0.1"}
 rsky-firehose = {path = "rsky-firehose", version = "0.2.0"}
+rsky-oauth = { path = "rsky-oauth", version = "0.1.0" }
 
 [profile.release]
 debug = 2  # Or any level from 0 to 2

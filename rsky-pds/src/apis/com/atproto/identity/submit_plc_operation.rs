@@ -14,18 +14,12 @@ use std::env;
 
 #[tracing::instrument(skip_all)]
 fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
-    match &auth.access.credentials {
+    match &auth.access.credentials.did {
         None => {
-            tracing::error!("Failed to find access credentials");
+            tracing::error!("Failed to find did");
             Err(ApiError::RuntimeError)
         }
-        Some(res) => match &res.did {
-            None => {
-                tracing::error!("Failed to find did");
-                Err(ApiError::RuntimeError)
-            }
-            Some(did) => Ok(did.clone()),
-        },
+        Some(did) => Ok(did.clone()),
     }
 }
 

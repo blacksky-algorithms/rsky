@@ -47,7 +47,7 @@ async fn inner_create_record(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != auth.access.credentials.did.unwrap() {
             bail!("AuthRequiredError")
         }
         let swap_commit_cid = match swap_commit {

@@ -10,7 +10,7 @@ pub async fn list_app_passwords(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<Json<ListAppPasswordsOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     match account_manager.list_app_passwords(&did).await {
         Ok(passwords) => {
             let passwords: Vec<AppPassword> = passwords

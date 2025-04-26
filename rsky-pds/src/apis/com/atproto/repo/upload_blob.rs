@@ -44,7 +44,7 @@ async fn inner_upload_blob(
     s3_config: &State<SdkConfig>,
     db: DbConn,
 ) -> Result<BlobOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
 
     let actor_store = ActorStore::new(
         requester.clone(),

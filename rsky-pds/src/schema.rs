@@ -43,6 +43,19 @@ pub mod pds {
     }
 
     diesel::table! {
+        pds.authorization_request (id) {
+            id -> Varchar,
+            did -> Nullable<Varchar>,
+            deviceId -> Nullable<Varchar>,
+            clientId -> Varchar,
+            clientAuth -> Varchar,
+            parameters -> Varchar,
+            expiresAt -> Timestamptz,
+            code -> Nullable<Varchar>,
+        }
+    }
+
+    diesel::table! {
         pds.backlink (uri, path) {
             uri -> Varchar,
             path -> Varchar,
@@ -61,6 +74,26 @@ pub mod pds {
             height -> Nullable<Int4>,
             createdAt -> Varchar,
             takedownRef -> Nullable<Varchar>,
+        }
+    }
+
+    diesel::table! {
+        pds.device (id) {
+            id -> Varchar,
+            sessionId -> Nullable<Varchar>,
+            userAgent -> Nullable<Varchar>,
+            ipAddress -> Varchar,
+            lastSeenAt -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        pds.device_account (deviceId, did) {
+            did -> Varchar,
+            deviceId -> Varchar,
+            authenticatedAt -> Timestamptz,
+            remember -> Bool,
+            authorizedClients -> Varchar,
         }
     }
 
@@ -161,13 +194,41 @@ pub mod pds {
         }
     }
 
+    diesel::table! {
+        pds.token (id) {
+            id -> Varchar,
+            did -> Varchar,
+            tokenId -> Varchar,
+            createdAt -> Timestamptz,
+            updatedAt -> Timestamptz,
+            expiresAt -> Timestamptz,
+            clientId -> Varchar,
+            clientAuth -> Varchar,
+            deviceId -> Nullable<Varchar>,
+            parameters -> Varchar,
+            details -> Nullable<Varchar>,
+            code -> Nullable<Varchar>,
+            currentRefreshToken -> Nullable<Varchar>,
+        }
+    }
+
+    diesel::table! {
+        pds.used_refresh_token (refreshToken) {
+            refreshToken -> Varchar,
+            tokenId -> Varchar,
+        }
+    }
+
     diesel::allow_tables_to_appear_in_same_query!(
         account,
         account_pref,
         actor,
         app_password,
+        authorization_request,
         backlink,
         blob,
+        device,
+        device_account,
         did_doc,
         email_token,
         invite_code,
@@ -178,5 +239,7 @@ pub mod pds {
         repo_block,
         repo_root,
         repo_seq,
+        token,
+        used_refresh_token,
     );
 }

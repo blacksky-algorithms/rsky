@@ -165,7 +165,7 @@ pub fn validate_existing_did(
     input_did: &str,
     signing_key: Keypair
 ) -> Result<String> {
-    todo!()
+    unimplemented!()
 }*/
 
 pub mod activate_account;

@@ -56,10 +56,7 @@ pub async fn inner_get_post_thread(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
-    let requester: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let requester: String = auth.access.credentials.did.unwrap_or("".to_string());
     match res {
         Ok(res) => {
             let read_afer_write_response = handle_read_after_write(

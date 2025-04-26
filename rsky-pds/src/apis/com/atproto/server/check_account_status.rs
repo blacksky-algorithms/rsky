@@ -18,7 +18,7 @@ async fn inner_check_account_status(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<CheckAccountStatusOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.access.credentials.did.unwrap();
 
     let mut actor_store = ActorStore::new(
         requester.clone(),

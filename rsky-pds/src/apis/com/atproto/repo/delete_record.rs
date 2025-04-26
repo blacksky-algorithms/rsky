@@ -46,7 +46,7 @@ async fn inner_delete_record(
         Some(account) if account.deactivated_at.is_some() => bail!("Account is deactivated"),
         Some(account) => {
             let did = account.did;
-            if did != auth.access.credentials.unwrap().did.unwrap() {
+            if did != auth.access.credentials.did.unwrap() {
                 bail!("AuthRequiredError")
             }
 

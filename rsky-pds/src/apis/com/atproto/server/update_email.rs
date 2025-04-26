@@ -12,7 +12,7 @@ async fn inner_update_email(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<()> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.access.credentials.did.unwrap();
     let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
         bail!("This email address is not supported, please use a different email.")
