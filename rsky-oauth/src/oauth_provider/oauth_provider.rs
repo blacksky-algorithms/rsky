@@ -1367,7 +1367,30 @@ mod tests {
             sub: Sub,
         ) -> Pin<Box<dyn Future<Output = Result<Option<AccountInfo>, OAuthError>> + Send + Sync + '_>>
         {
-            unimplemented!()
+            Box::pin(async move {
+                if device_id == DeviceId::new("dev-64976a0a962c4b7521abd679989c44a1").unwrap()
+                    && sub == Sub::new("sub").unwrap()
+                {
+                    Ok(Some(AccountInfo {
+                        account: Account {
+                            sub,
+                            aud: Audience::Single("did:web:pds.ripperoni.com".to_string()),
+                            preferred_username: None,
+                            email: None,
+                            email_verified: None,
+                            picture: None,
+                            name: None,
+                        },
+                        info: DeviceAccountInfo {
+                            remembered: false,
+                            authenticated_at: Default::default(),
+                            authorized_clients: vec![],
+                        },
+                    }))
+                } else {
+                    panic!()
+                }
+            })
         }
 
         fn remove_device_account(
@@ -1583,7 +1606,10 @@ mod tests {
             id: RequestId,
             data: RequestData,
         ) -> Pin<Box<dyn Future<Output = Result<(), OAuthError>> + Send + Sync + '_>> {
-            unimplemented!()
+            Box::pin(async move {
+                //TODO
+                Ok(())
+            })
         }
 
         fn read_request(
@@ -1630,6 +1656,43 @@ mod tests {
                         sub: None,
                         code: None,
                     }))
+                } else if id == RequestId::new("req-f776c3fd9760348fc92e1600448b71a9").unwrap() {
+                    Ok(Some(RequestData {
+                        client_id: OAuthClientId::new(
+                            "https://cleanfollow-bsky.pages.dev/client-metadata.json",
+                        )
+                        .unwrap(),
+                        client_auth: ClientAuth::new(None),
+                        parameters: OAuthAuthorizationRequestParameters {
+                            client_id: OAuthClientId::new(
+                                "https://client.com/client-metadata.json",
+                            )
+                            .unwrap(),
+                            state: None,
+                            redirect_uri: None,
+                            scope: None,
+                            response_type: OAuthResponseType::Code,
+                            code_challenge: None,
+                            code_challenge_method: None,
+                            dpop_jkt: None,
+                            response_mode: None,
+                            nonce: None,
+                            max_age: None,
+                            claims: None,
+                            login_hint: None,
+                            ui_locales: None,
+                            id_token_hint: None,
+                            display: None,
+                            prompt: None,
+                            authorization_details: None,
+                        },
+                        expires_at: "2026-11-28T12:00:09Z".parse::<DateTime<Utc>>().unwrap(),
+                        device_id: Some(
+                            DeviceId::new("dev-64976a0a962c4b7521abd679989c44a1").unwrap(),
+                        ),
+                        sub: None,
+                        code: None,
+                    }))
                 } else {
                     panic!()
                 }
@@ -1645,6 +1708,8 @@ mod tests {
             Box::pin(async move {
                 if id == RequestId::new("req-f46e8a935aa5343574848e8a3c260fae").unwrap() {
                     Ok(())
+                } else if id == RequestId::new("req-f776c3fd9760348fc92e1600448b71a9").unwrap() {
+                    Ok(())
                 } else {
                     panic!()
                 }
@@ -1658,6 +1723,8 @@ mod tests {
             let id = id;
             Box::pin(async move {
                 if id == RequestId::new("req-f46e8a935aa5343574848e8a3c260fae").unwrap() {
+                    Ok(())
+                } else if id == RequestId::new("req-f776c3fd9760348fc92e1600448b71a9").unwrap() {
                     Ok(())
                 } else {
                     panic!("Delete Request Error")
@@ -2182,7 +2249,7 @@ mod tests {
     #[tokio::test]
     async fn test_accept_request() {
         let mut oauth_provider = create_oauth_provider().await;
-        let device_id = DeviceId::generate();
+        let device_id = DeviceId::new("dev-64976a0a962c4b7521abd679989c44a1").unwrap();
         let uri = RequestUri::new(
             "urn:ietf:params:oauth:request_uri:req-f776c3fd9760348fc92e1600448b71a9",
         )

@@ -36,9 +36,9 @@ pub async fn oauth_well_known(
 #[get("/.well-known/oauth-protected-resource")]
 pub async fn oauth_well_known_resources() -> Json<OAuthProtectedResourceMetadata> {
     let result = OAuthProtectedResourceMetadata {
-        resource: WebUri::validate(env::var("OAuthIssuerIdentifier").unwrap().as_str()).unwrap(),
+        resource: WebUri::validate(env::var("OAUTH_ISSUER_IDENTIFIER").unwrap().as_str()).unwrap(),
         authorization_servers: Some(vec![OAuthIssuerIdentifier::from_str(
-            env::var("OAuthIssuerIdentifier").unwrap().as_str(),
+            env::var("OAUTH_ISSUER_IDENTIFIER").unwrap().as_str(),
         )
         .unwrap()]),
         jwks_uri: None,

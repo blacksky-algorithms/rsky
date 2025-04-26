@@ -103,7 +103,7 @@ impl<'r> FromRequest<'r> for AuthorizeReject {
         };
 
         let url_reference = UrlReference {
-            origin: Some(env::var("OAuthIssuerIdentifier").unwrap()),
+            origin: Some(env::var("OAUTH_ISSUER_IDENTIFIER").unwrap()),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {

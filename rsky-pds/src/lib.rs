@@ -291,7 +291,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     //Setup OAuth Provider
     let oauth_provider = build_oauth_provider(AuthProviderOptions {
         issuer: OAuthIssuerIdentifier::new(
-            env::var("OAuthIssuerIdentifier").unwrap_or("https://pds.ripperoni.com".to_owned()),
+            env::var("OAUTH_ISSUER_IDENTIFIER").unwrap_or("https://pds.ripperoni.com".to_owned()),
         )
         .unwrap(),
         dpop_secret: Some(DpopNonceInput::Uint8Array(Vec::from(dpop_secret))),
@@ -333,7 +333,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(replay_store)
         .mount(
             "/@atproto/oauth-provider/~assets",
-            FileServer::from("/pds/assets"),
+            FileServer::from(env::var("OAUTH_ASSET_LOCATION").unwrap_or("/pds/assets".to_owned())),
         )
 }
 

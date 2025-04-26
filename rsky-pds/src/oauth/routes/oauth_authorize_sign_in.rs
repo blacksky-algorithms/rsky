@@ -62,7 +62,7 @@ impl<'r> FromData<'r> for SignIn {
                 return rocket::data::Outcome::Error((Status::new(400), ()));
             }
         }
-        match validate_same_origin(req, env::var("OAuthIssuerIdentifier").unwrap().as_str()) {
+        match validate_same_origin(req, env::var("OAUTH_ISSUER_IDENTIFIER").unwrap().as_str()) {
             Ok(_) => {}
             Err(e) => {
                 let error = ApiError::InvalidRequest("Invalid same-origin header".to_string());
@@ -77,7 +77,7 @@ impl<'r> FromData<'r> for SignIn {
         let sign_in_payload: SignInPayload = serde_json::from_str(datastream.as_str()).unwrap();
 
         let url_reference = UrlReference {
-            origin: Some(env::var("OAuthIssuerIdentifier").unwrap()),
+            origin: Some(env::var("OAUTH_ISSUER_IDENTIFIER").unwrap()),
             pathname: Some(String::from("/oauth/authorize")),
         };
         match validate_referer(req, url_reference) {

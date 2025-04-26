@@ -216,7 +216,7 @@ pub async fn oauth_par(
         .check_dpop_proof(
             body.dpop.as_str(),
             body.method.as_str(),
-            (env::var("OAuthIssuerIdentifier").unwrap() + body.url.as_str()).as_str(),
+            (env::var("OAUTH_ISSUER_IDENTIFIER").unwrap() + body.url.as_str()).as_str(),
             None,
         )
         .await

@@ -1,10 +1,8 @@
 use crate::common::{create_account, get_admin_token};
 use diesel::row::NamedRow;
-use jsonwebtoken::jwk::{
-    AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
-    EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
-};
+use jsonwebtoken::jwk::JwkSet;
 use rocket::http::{ContentType, Header, Status};
+use rsky_lexicon::com::atproto::identity::ResolveHandleOutput;
 use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
 use rsky_oauth::oauth_provider::oauth_provider::SignInResponse;
 use rsky_oauth::oauth_types::{
@@ -61,6 +59,26 @@ async fn test_create_invite_code() {
         .into_json::<CreateInviteCodeOutput>()
         .await
         .unwrap();
+}
+
+//TODO clean up
+#[tokio::test]
+async fn test_resolve_handle() {
+    let postgres = common::get_postgres().await;
+    let client = common::get_client(&postgres).await;
+
+    let response = client
+        .get("/xrpc/com.atproto.identity.resolveHandle?handle=ripperoni.com")
+        .dispatch()
+        .await;
+    let response_status = response.status();
+
+    assert_eq!(response_status, Status::Ok);
+    let output = response.into_json::<ResolveHandleOutput>().await.unwrap();
+    let expected = ResolveHandleOutput {
+        did: "did:plc:khvyd3oiw46vif5gm7hijslk".to_string(),
+    };
+    assert_eq!(output.did, expected.did);
 }
 
 #[tokio::test]
