@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::convert::Infallible;
 use std::io::Write;
 use std::{fmt, io};
@@ -76,7 +77,38 @@ pub enum SubscribeReposCommitOperation {
     Delete { path: String, prev_data: Option<Cid> },
 }
 
+impl PartialEq for SubscribeReposCommitOperation {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.path().eq(other.path())
+    }
+}
+
+impl Eq for SubscribeReposCommitOperation {}
+
+impl PartialOrd for SubscribeReposCommitOperation {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SubscribeReposCommitOperation {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.path().cmp(other.path())
+    }
+}
+
 impl SubscribeReposCommitOperation {
+    const fn path(&self) -> &String {
+        match self {
+            Self::Create { path, .. } | Self::Update { path, .. } | Self::Delete { path, .. } => {
+                path
+            }
+        }
+    }
+
     pub const fn is_valid(&self) -> bool {
         match self {
             Self::Create { .. } => true,

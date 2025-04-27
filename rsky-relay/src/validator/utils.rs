@@ -77,24 +77,47 @@ pub fn verify_commit_msg(
             tracing::debug!("[{}] unable to read MST", commit.repo);
             return false;
         };
+        // TODO: check that commit CID matches root? re-compute?
+
+        // TODO: do we need to "load out all the records"?
+
         for op in &commit.ops {
             if !op.is_valid() {
                 tracing::trace!("[{}] unable to invert legacy op", commit.repo);
                 // TODO: once firehose format is fully shipped, remove this
                 return true;
             }
-            if !tree.invert(op) {
+        }
+
+        // TODO: do we need to "normalize ops"?
+
+        for op in &commit.ops {
+            match tree.invert(op) {
+                Ok(inv) => {
+                    if !inv {
+                        return false;
+                    }
+                }
+                Err(err) => {
+                    tracing::trace!("[{}] error while inverting: {err} ({op:?})", commit.repo);
+                    return false;
+                }
+            };
+        }
+
+        let found = match tree.root() {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::trace!("[{}] error while computing root: {err}", commit.repo);
+                return false;
+            }
+        };
+        if let Some(expected) = commit.prev_data {
+            if expected != found {
+                tracing::debug!("inverted tree root mismatch: {found} ({expected})");
                 return false;
             }
         }
-
-        // let found = tree.cid;
-        // if let Some(expected) = commit.prev_data {
-        //     if expected != found {
-        //         tracing::debug!("inverted tree root mismatch: {found} ({expected})");
-        //         return false;
-        //     }
-        // }
     }
 
     true
