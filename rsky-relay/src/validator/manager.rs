@@ -16,7 +16,7 @@ use crate::validator::resolver::{Resolver, ResolverError};
 use crate::validator::types::RepoState;
 use crate::validator::utils;
 
-const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
+const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 8);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -60,11 +60,12 @@ impl Manager {
         let queue = DB.open_tree("queue")?;
         let firehose = DB.open_tree("firehose")?;
         let this = Self { message_rx, hosts, repos, resolver, queue, firehose };
-        this.expire()?;
+        this.expire_persist()?;
         Ok(this)
     }
 
     pub async fn run(mut self) -> Result<(), ManagerError> {
+        // TODO: move this to sqlite
         let mut hosts = 0;
         for res in &DB.open_tree("hosts")? {
             let (host, state) = res?;
@@ -72,6 +73,7 @@ impl Manager {
             self.hosts.insert(host, (state.into(), DateTime::default()));
             hosts += 1;
         }
+        // TODO: move this to sqlite
         let mut repos = 0;
         for res in &DB.open_tree("repos")? {
             let (did, state) = res?;
@@ -96,7 +98,8 @@ impl Manager {
         Ok(())
     }
 
-    fn expire(&self) -> Result<(), ManagerError> {
+    fn expire_persist(&self) -> Result<(), ManagerError> {
+        // expire old firehose data
         let mut batch: Option<Batch> = None;
         for res in &self.firehose {
             let (cursor, data) = res?;
@@ -110,7 +113,25 @@ impl Manager {
         }
         if let Some(batch) = batch {
             self.firehose.apply_batch(batch)?;
+            return Ok(());
         }
+
+        // persist hosts data
+        let mut batch = sled::Batch::default();
+        for (host, (cursor, _)) in &self.hosts {
+            batch.insert(host.as_bytes(), *cursor);
+        }
+        match DB.open_tree("hosts") {
+            Ok(hosts) => {
+                if let Err(err) = hosts.apply_batch(batch) {
+                    tracing::warn!("unable to persist host state: {err}\n{:#?}", self.hosts);
+                }
+            }
+            Err(err) => {
+                tracing::warn!("unable to open hosts tree: {err}\n{:#?}", self.hosts);
+            }
+        }
+
         Ok(())
     }
 
@@ -120,7 +141,7 @@ impl Manager {
             return Ok(false);
         }
 
-        self.expire()?;
+        self.expire_persist()?;
 
         for _ in 0..1024 {
             match self.message_rx.try_recv_ref() {

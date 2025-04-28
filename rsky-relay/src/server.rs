@@ -8,7 +8,6 @@ use std::time::Duration;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
-use sled::Tree;
 use thiserror::Error;
 use tungstenite::stream::MaybeTlsStream;
 use url::Url;
@@ -16,7 +15,6 @@ use url::Url;
 use crate::SHUTDOWN;
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{SubscribeRepos, SubscribeReposSender};
-use crate::types::DB;
 
 const SLEEP: Duration = Duration::from_millis(10);
 
@@ -28,8 +26,6 @@ pub enum ServerError {
     PushError(#[from] rtrb::PushError<RequestCrawl>),
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
 }
 
 #[derive(Debug)]
@@ -52,7 +48,6 @@ pub struct Server {
     listener: TcpListener,
     base_url: Url,
     buf: Vec<u8>,
-    hosts: Tree,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -64,24 +59,10 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:9000")?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
-        let hosts = DB.open_tree("hosts")?;
-        Ok(Self {
-            listener,
-            base_url,
-            buf: vec![0; 1024],
-            hosts,
-            request_crawl_tx,
-            subscribe_repos_tx,
-        })
+        Ok(Self { listener, base_url, buf: vec![0; 1024], request_crawl_tx, subscribe_repos_tx })
     }
 
     pub fn run(mut self) -> Result<(), ServerError> {
-        for res in &self.hosts {
-            let (hostname, cursor) = res?;
-            let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
-            let cursor = cursor.into();
-            self.request_crawl_tx.push(RequestCrawl { hostname, cursor: Some(cursor) })?;
-        }
         while self.update()? {
             thread::sleep(SLEEP);
         }
@@ -143,9 +124,7 @@ impl Server {
                     if let Ok(request_crawl) =
                         serde_json::from_reader::<_, RequestCrawl>(&self.buf[offset..len])
                     {
-                        if !self.hosts.contains_key(&request_crawl.hostname)? {
-                            self.request_crawl_tx.push(request_crawl)?;
-                        }
+                        self.request_crawl_tx.push(request_crawl)?;
                         #[expect(clippy::unwrap_used)]
                         let mut stream = stream.0.take().unwrap();
                         stream.write_all(b"HTTP/1.1 200 OK\n")?;

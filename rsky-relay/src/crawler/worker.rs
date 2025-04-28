@@ -2,12 +2,13 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 use std::{io, thread};
 
+use magnetic::Producer;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 
 use crate::crawler::connection::{Connection, ConnectionError};
-use crate::crawler::types::{Command, CommandReceiver};
+use crate::crawler::types::{Command, CommandReceiver, Status, StatusSender};
 use crate::types::MessageSender;
 
 const INTEREST: Interest = Interest::READABLE;
@@ -26,17 +27,27 @@ pub struct Worker {
     next_idx: usize,
     message_tx: MessageSender,
     command_rx: CommandReceiver,
+    status_tx: StatusSender,
     poll: Poll,
     events: Events,
 }
 
 impl Worker {
     pub fn new(
-        id: usize, message_tx: MessageSender, command_rx: CommandReceiver,
+        id: usize, message_tx: MessageSender, command_rx: CommandReceiver, status_tx: StatusSender,
     ) -> Result<Self, WorkerError> {
         let poll = Poll::new()?;
         let events = Events::with_capacity(1024);
-        Ok(Self { id, connections: Vec::new(), next_idx: 0, message_tx, command_rx, poll, events })
+        Ok(Self {
+            id,
+            connections: Vec::new(),
+            next_idx: 0,
+            message_tx,
+            command_rx,
+            status_tx,
+            poll,
+            events,
+        })
     }
 
     #[expect(clippy::unnecessary_wraps)]
@@ -64,7 +75,11 @@ impl Worker {
                     config.hostname,
                     config.cursor
                 );
-                match Connection::connect(config.hostname, config.cursor, self.message_tx.clone()) {
+                match Connection::connect(
+                    config.hostname.clone(),
+                    config.cursor,
+                    self.message_tx.clone(),
+                ) {
                     Ok(conn) => {
                         let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(
                             || {
@@ -82,6 +97,10 @@ impl Worker {
                     }
                     Err(err) => {
                         tracing::warn!("unable to requestCrawl: {err}");
+                        #[expect(clippy::expect_used)]
+                        self.status_tx
+                            .push(Status::Disconnected(self.id, config.hostname))
+                            .expect("unable to send status");
                     }
                 }
             }
@@ -141,6 +160,10 @@ impl Worker {
                         .registry()
                         .deregister(&mut SourceFd(&conn.as_raw_fd()))
                         .expect("failed to deregister");
+                    #[expect(clippy::expect_used)]
+                    self.status_tx
+                        .push(Status::Disconnected(self.id, conn.hostname.clone()))
+                        .expect("unable to send status");
                     self.connections[idx] = None;
                 }
             }

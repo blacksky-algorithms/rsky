@@ -201,6 +201,7 @@ impl Resolver {
                         for line in bytes.reader().lines() {
                             count += 1;
                             if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
+                                // TODO: remove duplicates
                                 stmt.execute((
                                     &doc.did,
                                     &doc.cid,
