@@ -1,6 +1,7 @@
 use std::io::BufRead;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
@@ -26,8 +27,12 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 const MAX_CACHED: usize = 1 << 16;
 const EXPORT_INTERVAL: Duration = Duration::from_secs(60);
 
-const PLC_URL: &str = "https://plc.directory/export?count=1000&after";
-const DOC_PATH: &str = "/.well-known/did.json";
+const PLC_URL: &str = "https://plc.directory";
+const PLC_EXPORT: &str = "export?count=1000&after";
+const DOC_PATH: &str = ".well-known/did.json";
+
+static DO_PLC_EXPORT: LazyLock<bool> =
+    LazyLock::new(|| std::env::args().filter(|arg| arg == "--no-plc-export").count() == 0);
 
 type RequestFuture = Pin<Box<dyn Future<Output = (Option<String>, reqwest::Result<Bytes>)> + Send>>;
 
@@ -54,9 +59,14 @@ pub struct Resolver {
 impl Resolver {
     pub fn new() -> Result<Self, ResolverError> {
         let cache = LruCache::new(unsafe { NonZeroUsize::new_unchecked(MAX_CACHED) });
+        let flag = if *DO_PLC_EXPORT {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        };
         let conn = Connection::open_with_flags(
             "plc_directory.db",
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            flag | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let now = Instant::now();
         let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
@@ -148,47 +158,55 @@ impl Resolver {
 
     pub fn request(&mut self, did: &str) {
         self.inflight.insert(did.to_owned());
-        if did.starts_with("did:plc:") {
-            self.send_req(None);
+        if let Some(plc) = did.strip_prefix("did:plc:") {
+            let plc = if *DO_PLC_EXPORT { None } else { Some(plc) };
+            self.send_req(None, plc);
         } else if let Some(id) = did.strip_prefix("did:web:") {
             let Ok(hostname) = urlencoding::decode(id) else {
                 tracing::debug!("invalid did");
                 return;
             };
-            self.send_req(Some(&hostname));
+            self.send_req(Some(&hostname), None);
         } else {
             tracing::debug!("invalid did");
+            self.inflight.remove(did);
         }
     }
 
-    fn send_req(&mut self, hostname: Option<&str>) {
-        let (req, hostname) = if let Some(hostname) = hostname {
+    fn send_req(&mut self, hostname: Option<&str>, plc: Option<&str>) {
+        let (req, query) = if let Some(hostname) = hostname {
             tracing::trace!("fetching did");
             (self.client.get(format!("https://{hostname}/{DOC_PATH}")), Some(hostname.to_owned()))
+        } else if let Some(plc) = plc {
+            tracing::trace!("fetching did");
+            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Some(plc.to_owned()))
         } else if let Some(after) = self.after.take() {
             tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
-            (self.client.get(format!("{PLC_URL}={after}")), None)
+            (self.client.get(format!("{PLC_URL}/{PLC_EXPORT}={after}")), None)
         } else {
             return;
         };
         self.futures.push(Box::pin(async move {
             match req.send().await {
                 Ok(req) => match req.bytes().await {
-                    Ok(bytes) => (hostname, Ok(bytes)),
-                    Err(err) => (hostname, Err(err)),
+                    Ok(bytes) => (query, Ok(bytes)),
+                    Err(err) => (query, Err(err)),
                 },
-                Err(err) => (hostname, Err(err)),
+                Err(err) => (query, Err(err)),
             }
         }));
     }
 
     pub async fn poll(&mut self) -> Result<Vec<String>, ResolverError> {
-        if let Ok(Some((hostname, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await {
+        if let Ok(Some((query, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await {
             match res {
                 Ok(bytes) => {
-                    if hostname.is_some() {
+                    if let Some(query) = query {
                         if let Some((did, pds, key)) = parse_did_doc(&bytes) {
+                            if query != did[8..] {
+                                tracing::warn!("did query mismatch: {query} -> {}", &did[8..]);
+                            }
                             self.inflight.remove(&did);
                             self.cache.put(did.clone(), (pds, key));
                             return Ok(vec![did]);
@@ -218,7 +236,7 @@ impl Resolver {
                         drop(stmt);
                         tx.commit()?;
                         if count == 1000 {
-                            self.send_req(None);
+                            self.send_req(None, None);
                         } else {
                             // no more plc operations, drain inflight dids
                             dids.extend(
@@ -232,8 +250,8 @@ impl Resolver {
                     tracing::debug!(%err, "fetch error");
                 }
             }
-        } else if self.last.elapsed() > EXPORT_INTERVAL {
-            self.send_req(None);
+        } else if *DO_PLC_EXPORT && self.last.elapsed() > EXPORT_INTERVAL {
+            self.send_req(None, None);
         }
         Ok(Vec::new())
     }
