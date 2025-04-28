@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ScopedJoinHandle};
 
+use clap::Parser;
 use color_eyre::Result;
 use mimalloc::MiMalloc;
 use rustls::crypto::aws_lc_rs::default_provider;
@@ -26,6 +28,16 @@ const WORKERS: usize = 4;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+#[derive(Debug, clap::Parser)]
+pub struct Args {
+    #[clap(short, long, requires = "private_key")]
+    certs: Option<PathBuf>,
+    #[clap(short, long, requires = "certs")]
+    private_key: Option<PathBuf>,
+    #[clap(long)]
+    no_plc_export: (),
+}
+
 #[tokio::main]
 pub async fn main() -> Result<()> {
     let file_appender = tracing_appender::rolling::daily(".", "rsky-relay.log");
@@ -40,6 +52,8 @@ pub async fn main() -> Result<()> {
 
     default_provider().install_default().unwrap();
 
+    let args = Args::parse();
+
     let terminate_now = Arc::new(AtomicBool::new(false));
     flag::register_conditional_shutdown(SIGINT, 1, Arc::clone(&terminate_now))?;
     flag::register(SIGINT, Arc::clone(&terminate_now))?;
@@ -48,11 +62,12 @@ pub async fn main() -> Result<()> {
         thingbuf::mpsc::blocking::with_recycle(CAPACITY1, MessageRecycle);
     let (request_crawl_tx, request_crawl_rx) = rtrb::RingBuffer::new(CAPACITY2);
     let (subscribe_repos_tx, subscribe_repos_rx) = rtrb::RingBuffer::new(CAPACITY2);
+    let server =
+        Server::new(args.certs.zip(args.private_key), request_crawl_tx, subscribe_repos_tx)?;
     let validator = ValidatorManager::new(message_rx)?;
     let handle = tokio::spawn(validator.run());
     let crawler = CrawlerManager::new(WORKERS, &message_tx, request_crawl_rx)?;
     let publisher = PublisherManager::new(WORKERS, subscribe_repos_rx)?;
-    let server = Server::new(request_crawl_tx, subscribe_repos_tx)?;
     #[expect(clippy::vec_init_then_push)]
     let ret = thread::scope(move |s| {
         let mut handles = Vec::<ScopedJoinHandle<Result<_, RelayError>>>::new();

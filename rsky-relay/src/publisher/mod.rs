@@ -4,4 +4,4 @@ mod types;
 mod worker;
 
 pub use manager::{Manager, ManagerError};
-pub use types::{SubscribeRepos, SubscribeReposSender};
+pub use types::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};

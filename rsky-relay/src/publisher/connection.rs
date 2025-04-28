@@ -7,9 +7,9 @@ use thiserror::Error;
 use tungstenite::handshake::server::NoCallback;
 use tungstenite::protocol::CloseFrame;
 use tungstenite::protocol::frame::coding::CloseCode;
-use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Bytes, HandshakeError, Message, ServerHandshake, Utf8Bytes, WebSocket};
 
+use crate::publisher::types::MaybeTlsStream;
 use crate::types::Cursor;
 
 const OUTDATED_MSG: &[u8] = b"\xa2ate#infobop\x01\xa2dnamenOutdatedCursorgmessagex8Requested cursor exceeded limit. Possibly missing events.";
@@ -43,7 +43,6 @@ impl AsRawFd for Connection {
         match self.client.get_ref() {
             MaybeTlsStream::Plain(stream) => stream.as_raw_fd(),
             MaybeTlsStream::Rustls(stream) => stream.get_ref().as_raw_fd(),
-            _ => todo!(),
         }
     }
 }
@@ -60,7 +59,6 @@ impl Connection {
             MaybeTlsStream::Plain(stream) => {
                 stream.set_nonblocking(true)?;
             }
-            _ => {}
         }
         Ok(Self { addr, client, cursor })
     }

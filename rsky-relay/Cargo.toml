@@ -9,6 +9,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 cid = { version = "0.10", features = ["serde-codec"] }
+clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hashbrown = "0.15"
@@ -26,6 +27,7 @@ rs-car-sync = "0.4"
 rtrb = "0.3"
 rusqlite = { version = "0.35", features = ["bundled"] }
 rustls = "0.23"
+rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_ipld_dagcbor = "0.6"
