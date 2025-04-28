@@ -43,6 +43,8 @@ mod validator;
 
 use std::sync::atomic::AtomicBool;
 
+use thiserror::Error;
+
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 pub use crawler::Manager as CrawlerManager;
@@ -50,3 +52,15 @@ pub use publisher::Manager as PublisherManager;
 pub use server::Server;
 pub use types::MessageRecycle;
 pub use validator::Manager as ValidatorManager;
+
+#[derive(Debug, Error)]
+pub enum RelayError {
+    #[error("crawler error: {0}")]
+    Crawler(#[from] crawler::ManagerError),
+    #[error("publisher error: {0}")]
+    Publisher(#[from] publisher::ManagerError),
+    #[error("validator error: {0}")]
+    Validator(#[from] validator::ManagerError),
+    #[error("server error: {0}")]
+    Server(#[from] server::ServerError),
+}

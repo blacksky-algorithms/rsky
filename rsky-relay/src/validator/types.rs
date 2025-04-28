@@ -13,15 +13,102 @@ use thiserror::Error;
 
 use rsky_common::tid::TID;
 
-use crate::validator::event::{ParseError, SubscribeReposCommit, SubscribeReposCommitOperation};
+use crate::validator::event::{
+    Commit, ParseError, SubscribeReposCommit, SubscribeReposCommitOperation, SubscribeReposEvent,
+};
+
+// const FUTURE_REV_MAX: Duration = Duration::from_secs(60 * 5);
+const MAX_BLOCKS_BYTES: usize = 2_000_000;
+const MAX_COMMIT_OPS: usize = 200;
+const ATPROTO_REPO_VERSION: u8 = 3;
 
 pub type BlockMap = HashMap<Cid, Vec<u8>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepoState {
     pub rev: TID,
-    pub head: Cid,
     pub data: Cid,
+    pub head: Cid,
+}
+
+impl SubscribeReposEvent {
+    pub fn validate(&self, commit: &Commit, head: &Cid) -> bool {
+        let rev = match &self {
+            Self::Commit(commit) => {
+                if commit.too_big {
+                    tracing::debug!("deprecated tooBig commit flag set");
+                    return false;
+                }
+                if commit.rebase {
+                    tracing::debug!("deprecated rebase commit flag set");
+                    return false;
+                }
+                if &commit.commit != head {
+                    tracing::debug!("mismatched inner commit cid: {}", commit.commit);
+                    return false;
+                }
+                if commit.ops.len() > MAX_COMMIT_OPS {
+                    tracing::debug!("too many ops in commit: {}", commit.ops.len());
+                    return false;
+                }
+                if commit.blocks.is_empty() {
+                    tracing::debug!("commit messaging missing blocks");
+                    return false;
+                }
+                if commit.blocks.len() > MAX_BLOCKS_BYTES {
+                    tracing::debug!(
+                        "blocks size ({} bytes) exceeds protocol limit",
+                        commit.blocks.len()
+                    );
+                    return false;
+                }
+                &commit.rev
+            }
+            Self::Sync(sync) => {
+                if sync.blocks.len() > MAX_BLOCKS_BYTES {
+                    tracing::debug!(
+                        "blocks size ({} bytes) exceeds protocol limit",
+                        sync.blocks.len()
+                    );
+                    return false;
+                }
+                &sync.rev
+            }
+            _ => return true,
+        };
+        if commit.did != self.did() {
+            tracing::debug!("mismatched inner commit did: {}", commit.did);
+            return false;
+        }
+        if &commit.rev != rev {
+            tracing::debug!("mismatched inner commit rev: {rev}");
+            return false;
+        }
+        if commit.version != ATPROTO_REPO_VERSION {
+            tracing::debug!("unsupported repo version: {}", commit.version);
+            return false;
+        }
+        true
+    }
+
+    pub fn commit(&self) -> Result<Option<(Commit, Cid)>, ParseError> {
+        let mut blocks = match self {
+            Self::Commit(commit) => commit.blocks.as_slice(),
+            Self::Sync(sync) => sync.blocks.as_slice(),
+            Self::Identity(_) | Self::Account(_) => {
+                return Ok(None);
+            }
+        };
+        let reader = CarReader::new(&mut blocks, true)?;
+        let root_cid = reader.header.roots[0];
+        for next in reader {
+            let (cid, block) = next?;
+            if cid == root_cid {
+                return Ok(Some((serde_ipld_dagcbor::from_slice(&block)?, cid)));
+            }
+        }
+        Err(ParseError::MissingRoot(root_cid))
+    }
 }
 
 impl SubscribeReposCommit {

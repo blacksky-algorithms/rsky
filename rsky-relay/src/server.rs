@@ -90,7 +90,7 @@ impl Server {
 
     fn update(&mut self) -> Result<bool, ServerError> {
         if SHUTDOWN.load(Ordering::Relaxed) {
-            tracing::debug!("shutting down server");
+            tracing::info!("shutting down server");
             return Ok(false);
         }
 

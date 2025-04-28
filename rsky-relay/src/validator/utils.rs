@@ -4,9 +4,7 @@ use cid::Cid;
 use p256::ecdsa::signature::Verifier;
 use thiserror::Error;
 
-use rsky_common::tid::TID;
-
-use crate::validator::event::{Commit, SubscribeReposEvent};
+use crate::validator::event::{Commit, SubscribeReposCommit};
 use crate::validator::types::RepoState;
 
 const P256_DID_PREFIX: &[u8] = &[0x80, 0x24];
@@ -39,84 +37,77 @@ pub fn verify_commit_sig(commit: &Commit, key: &[u8; 35]) -> Result<bool, Verifi
     }
 }
 
-pub fn verify_commit_msg(
-    event: &SubscribeReposEvent, rev: &TID, root: Cid, prev: &RepoState,
-) -> bool {
-    let did = event.did();
-    if !prev.rev.older_than(rev) {
-        tracing::debug!(
-            "[{did}] old msg: {rev} -> {} ({})",
-            prev.rev,
-            rev.timestamp() - prev.rev.timestamp()
-        );
+pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &RepoState) -> bool {
+    if !prev.rev.older_than(&commit.rev) {
+        tracing::debug!(diff = %commit.rev.timestamp() - prev.rev.timestamp(), "old rev");
         return false;
     }
 
-    if let SubscribeReposEvent::Commit(commit) = &event {
-        if let Some(rev) = &commit.since {
-            if rev != &prev.rev.0 {
-                tracing::debug!("[{did}] prev_rev mismatch: {rev} (expected: {})", prev.rev);
-                return false;
-            }
-        } else {
-            // NOTE: some PDSs don't send this field, so we continue verifying
-            tracing::trace!("[{did}] missing since");
-        }
-
-        if let Some(data) = &commit.prev_data {
-            if data != &prev.data {
-                tracing::debug!("[{did}] prev_data mismatch");
-                return false;
-            }
-        } else {
-            tracing::trace!("[{did}] missing prev_data");
+    if let Some(since) = &commit.since {
+        if since != &prev.rev {
+            tracing::debug!(%since, "commit with miss-matching since");
             return false;
         }
+    } else {
+        // NOTE: some PDSs don't send this field, so we continue verifying
+        tracing::trace!("missing since");
+    }
 
-        let Ok(mut tree) = commit.tree(root) else {
-            tracing::debug!("[{}] unable to read MST", commit.repo);
+    if let Some(prev_data) = &commit.prev_data {
+        if prev_data != &prev.data {
+            tracing::debug!(%prev_data, "commit with miss-matching prevData");
             return false;
-        };
-        // TODO: check that commit CID matches root? re-compute?
-
-        // TODO: do we need to "load out all the records"?
-
-        for op in &commit.ops {
-            if !op.is_valid() {
-                tracing::trace!("[{}] unable to invert legacy op", commit.repo);
-                // TODO: once firehose format is fully shipped, remove this
-                return true;
-            }
         }
+    } else {
+        tracing::trace!("missing prev_data");
+        return false;
+    }
 
-        // TODO: do we need to "normalize ops"?
+    let mut tree = match commit.tree(root) {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::debug!(%err, "unable to read MST");
+            return false;
+        }
+    };
 
-        for op in &commit.ops {
-            match tree.invert(op) {
-                Ok(inv) => {
-                    if !inv {
-                        return false;
-                    }
-                }
-                Err(err) => {
-                    tracing::trace!("[{}] error while inverting: {err} ({op:?})", commit.repo);
+    // TODO: do we need to "load out all the records"?
+
+    // TODO: once firehose format is fully shipped, remove this
+    for op in &commit.ops {
+        if !op.is_valid() {
+            tracing::trace!(?op, "unable to invert legacy op");
+            return true;
+        }
+    }
+
+    // TODO: do we need to "normalize ops"?
+    for (idx, op) in commit.ops.iter().enumerate() {
+        match tree.invert(op) {
+            Ok(inv) => {
+                if !inv {
+                    tracing::debug!(%idx, ?op, "unable to invert op");
                     return false;
                 }
-            };
-        }
-
-        let found = match tree.root() {
-            Ok(found) => found,
+            }
             Err(err) => {
-                tracing::trace!("[{}] error while computing root: {err}", commit.repo);
+                tracing::debug!(%idx, ?op, %err, "error while inverting op");
                 return false;
             }
         };
-        if let Some(expected) = commit.prev_data {
-            if expected != found {
-                tracing::debug!("inverted tree root mismatch: {found} ({expected})");
-                return false;
-            }
+    }
+
+    let root = match tree.root() {
+        Ok(computed) => computed,
+        Err(err) => {
+            tracing::debug!(%err, "error while computing old root");
+            return false;
+        }
+    };
+    if let Some(prev_data) = commit.prev_data {
+        if prev_data != root {
+            tracing::debug!(%root, "inverted tree root didn't match prevData");
+            return false;
         }
     }
 

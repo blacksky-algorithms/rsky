@@ -78,7 +78,7 @@ impl Resolver {
     pub fn expire(&mut self, did: &str, time: DateTime<Utc>) {
         if let Some(after) = &self.after {
             if DateTime::parse_from_rfc3339(after).map_or(true, |after| after < time) {
-                tracing::trace!("expiring did: {did}");
+                tracing::trace!("expiring did");
                 self.cache.pop(did);
                 self.request(did);
             }
@@ -122,11 +122,11 @@ impl Resolver {
                             return Ok(Some((pds, key)));
                         }
                         Err(_) => {
-                            tracing::debug!("[{key}] invalid key length");
+                            tracing::debug!(%key, "invalid key length");
                         }
                     },
                     Err(err) => {
-                        tracing::debug!("[{key}] invalid key: {err}");
+                        tracing::debug!(%key, %err, "invalid key");
                     }
                 }
             }
@@ -138,7 +138,7 @@ impl Resolver {
             }
             Ok(None) => {}
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                tracing::trace!("not found in db: {did}");
+                tracing::trace!("not found in db");
             }
             Err(err) => Err(err)?,
         }
@@ -151,22 +151,22 @@ impl Resolver {
         if did.starts_with("did:plc:") {
             self.send_req(None);
         } else if let Some(id) = did.strip_prefix("did:web:") {
-            tracing::trace!("fetching did: {did}");
             let Ok(hostname) = urlencoding::decode(id) else {
-                tracing::debug!("invalid did: {did}");
+                tracing::debug!("invalid did");
                 return;
             };
             self.send_req(Some(&hostname));
         } else {
-            tracing::debug!("invalid did: {did}");
+            tracing::debug!("invalid did");
         }
     }
 
     fn send_req(&mut self, hostname: Option<&str>) {
         let (req, hostname) = if let Some(hostname) = hostname {
+            tracing::trace!("fetching did");
             (self.client.get(format!("https://{hostname}/{DOC_PATH}")), Some(hostname.to_owned()))
         } else if let Some(after) = self.after.take() {
-            tracing::trace!("fetching after: {after}");
+            tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
             (self.client.get(format!("{PLC_URL}={after}")), None)
         } else {
@@ -228,7 +228,7 @@ impl Resolver {
                     }
                 }
                 Err(err) => {
-                    tracing::debug!("fetch error: {err:?}");
+                    tracing::debug!(%err, "fetch error");
                 }
             }
         } else if self.last.elapsed() > EXPORT_INTERVAL {
@@ -255,7 +255,7 @@ fn parse_plc_doc(input: &str) -> Option<PlcDocument<'_>> {
             return Some(doc);
         }
         Err(err) => {
-            tracing::debug!("[{input}] parse error: {err}");
+            tracing::debug!(%input, %err, "parse error");
         }
     }
     None
@@ -281,19 +281,19 @@ fn parse_did_doc(input: &Bytes) -> Option<(String, Option<Box<str>>, [u8; 35])> 
                             });
                             return Some((doc.id, pds, key));
                         }
-                        tracing::debug!("[{key}] invalid key length");
+                        tracing::debug!(%key, "invalid key length");
                     }
                     Err(err) => {
-                        tracing::debug!("[{key}] invalid key: {err}",);
+                        tracing::debug!(%key, %err, "invalid key");
                     }
                 }
             }
             None => {
-                tracing::debug!("no valid key found: {doc:?}");
+                tracing::debug!(?doc, "no valid key found");
             }
         },
         Err(err) => {
-            tracing::debug!("[{input:?}] parse error: {err}");
+            tracing::debug!(?input, %err, "parse error");
         }
     }
     None

@@ -15,6 +15,7 @@ Rocket.toml
 db/
 *.db
 *.db-journal
+rsky-relay.log.*
 
 # dotenv environment variable files
 .env

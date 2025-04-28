@@ -6,7 +6,7 @@ use std::{fmt, io};
 
 use chrono::{DateTime, Utc};
 use cid::Cid;
-use rs_car_sync::{CarDecodeError, CarReader};
+use rs_car_sync::CarDecodeError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -63,8 +63,8 @@ pub struct Commit {
     pub did: String,
     pub rev: TID,
     pub data: Cid,
-    pub prev: Option<Cid>,
-    pub version: u8, // Should be 3
+    pub prev: Option<Cid>, // NOTE: this field is virtually always None
+    pub version: u8,       // Should always be 3
     #[serde(with = "serde_bytes", skip_serializing)]
     pub sig: Vec<u8>,
 }
@@ -123,16 +123,17 @@ impl SubscribeReposCommitOperation {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeReposCommit {
     pub seq: u64,
-    pub rebase: bool,
-    pub too_big: bool,
-    pub repo: String,
+    pub rebase: bool,  // NOTE: DEPRECATED
+    pub too_big: bool, // NOTE: DEPRECATED
+    #[serde(rename = "repo")]
+    pub did: String,
     pub commit: Cid,
     pub rev: TID,
-    pub since: Option<String>,
+    pub since: Option<TID>,
     #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
     pub ops: Vec<SubscribeReposCommitOperation>,
-    pub blobs: Vec<String>,
+    pub blobs: Vec<String>, // NOTE: DEPRECATED
     pub prev_data: Option<Cid>,
     pub time: DateTime<Utc>,
 }
@@ -198,7 +199,7 @@ pub struct Header<'a> {
 }
 
 impl SubscribeReposEvent {
-    pub fn parse(data: &[u8], hostname: &str) -> Result<Option<Self>, ParseError> {
+    pub fn parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
         let mut reader = io::Cursor::new(data);
 
         let header = match ciborium::de::from_reader::<Header<'static>, _>(&mut reader) {
@@ -217,7 +218,7 @@ impl SubscribeReposEvent {
             "#account" => Self::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#info" => {
                 let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
-                tracing::debug!("[{hostname}] received info: {} ({})", info.name, info.message);
+                tracing::debug!(name = %info.name, message = %info.message, "received #info");
                 return Ok(None);
             }
             _ => {
@@ -289,29 +290,10 @@ impl SubscribeReposEvent {
 
     pub fn did(&self) -> &str {
         match self {
-            Self::Commit(commit) => &commit.repo,
+            Self::Commit(commit) => &commit.did,
             Self::Sync(sync) => &sync.did,
             Self::Identity(identity) => &identity.did,
             Self::Account(account) => &account.did,
         }
-    }
-
-    pub fn commit(&self) -> Result<Option<(Commit, Cid, &TID)>, ParseError> {
-        let (mut blocks, rev) = match self {
-            Self::Commit(commit) => (commit.blocks.as_slice(), &commit.rev),
-            Self::Sync(sync) => (sync.blocks.as_slice(), &sync.rev),
-            Self::Identity(_) | Self::Account(_) => {
-                return Ok(None);
-            }
-        };
-        let reader = CarReader::new(&mut blocks, true)?;
-        let root_cid = reader.header.roots[0];
-        for next in reader {
-            let (cid, block) = next?;
-            if cid == root_cid {
-                return Ok(Some((serde_ipld_dagcbor::from_slice(&block)?, cid, rev)));
-            }
-        }
-        Err(ParseError::MissingRoot(root_cid))
     }
 }

@@ -1,18 +1,22 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::thread::{self, ScopedJoinHandle};
 
 use color_eyre::Result;
-
 use mimalloc::MiMalloc;
 use rustls::crypto::aws_lc_rs::default_provider;
 use signal_hook::consts::{SIGINT, TERM_SIGNALS};
 use signal_hook::flag;
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::iterator::exfiltrator::WithOrigin;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use rsky_relay::{
-    CrawlerManager, MessageRecycle, PublisherManager, SHUTDOWN, Server, ValidatorManager,
+    CrawlerManager, MessageRecycle, PublisherManager, RelayError, SHUTDOWN, Server,
+    ValidatorManager,
 };
 
 const CAPACITY1: usize = 1 << 16;
@@ -24,9 +28,15 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    let file_appender = tracing_appender::rolling::daily(".", "rsky-relay.log");
+    let (json_writer, _guard_json) = tracing_appender::non_blocking(file_appender);
+    let (pretty_writer, _guard_pretty) = tracing_appender::non_blocking(std::io::stdout());
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(Layer::new().json().with_ansi(false).with_writer(json_writer))
+        .with(Layer::new().pretty().with_writer(pretty_writer))
         .init();
+    color_eyre::install()?;
 
     default_provider().install_default().unwrap();
 
@@ -43,10 +53,24 @@ pub async fn main() -> Result<()> {
     let crawler = CrawlerManager::new(WORKERS, &message_tx, request_crawl_rx)?;
     let publisher = PublisherManager::new(WORKERS, subscribe_repos_rx)?;
     let server = Server::new(request_crawl_tx, subscribe_repos_tx)?;
+    #[expect(clippy::vec_init_then_push)]
     let ret = thread::scope(move |s| {
-        thread::Builder::new().name("rsky-crawl".into()).spawn_scoped(s, move || crawler.run())?;
-        thread::Builder::new().name("rsky-pub".into()).spawn_scoped(s, move || publisher.run())?;
-        thread::Builder::new().name("rsky-server".into()).spawn_scoped(s, move || server.run())?;
+        let mut handles = Vec::<ScopedJoinHandle<Result<_, RelayError>>>::new();
+        handles.push(
+            thread::Builder::new()
+                .name("rsky-crawl".into())
+                .spawn_scoped(s, move || crawler.run().map_err(Into::into))?,
+        );
+        handles.push(
+            thread::Builder::new()
+                .name("rsky-pub".into())
+                .spawn_scoped(s, move || publisher.run().map_err(Into::into))?,
+        );
+        handles.push(
+            thread::Builder::new()
+                .name("rsky-server".into())
+                .spawn_scoped(s, move || server.run().map_err(Into::into))?,
+        );
         let mut signals =
             SignalsInfo::<WithOrigin>::new(TERM_SIGNALS).expect("failed to init signals");
         for signal_info in &mut signals {
@@ -56,6 +80,11 @@ pub async fn main() -> Result<()> {
         }
         tracing::info!("shutting down");
         SHUTDOWN.store(true, Ordering::Relaxed);
+        for handle in handles {
+            if let Ok(res) = handle.join() {
+                res?;
+            }
+        }
         Ok(())
     });
     handle.await??;
