@@ -89,10 +89,7 @@ pub fn get_handle(doc: &DidDocument) -> Option<String> {
     }
 }
 
-pub fn get_verification_material(
-    doc: &DidDocument,
-    key_id: &str,
-) -> Option<VerificationMaterial> {
+pub fn get_verification_material(doc: &DidDocument, key_id: &str) -> Option<VerificationMaterial> {
     let did = get_did(doc);
     let keys = &doc.verification_method;
     if let Some(keys) = keys {

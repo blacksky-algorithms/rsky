@@ -205,7 +205,7 @@ impl Resolver {
                     if let Some(query) = query {
                         if let Some((did, pds, key)) = parse_did_doc(&bytes) {
                             if query != did[8..] {
-                                tracing::warn!("did query mismatch: {query} -> {}", &did[8..]);
+                                tracing::warn!(%query, found = %&did[8..], "did query mismatch");
                             }
                             self.inflight.remove(&did);
                             self.cache.put(did.clone(), (pds, key));

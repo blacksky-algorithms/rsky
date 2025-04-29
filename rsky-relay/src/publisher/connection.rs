@@ -34,7 +34,7 @@ pub enum ConnectionError {
 pub struct Connection {
     pub(crate) addr: SocketAddr,
     client: WebSocket<MaybeTlsStream<TcpStream>>,
-    cursor: Cursor,
+    pub(crate) cursor: Cursor,
 }
 
 impl AsRawFd for Connection {

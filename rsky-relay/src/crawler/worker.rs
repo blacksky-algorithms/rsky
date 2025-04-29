@@ -52,10 +52,12 @@ impl Worker {
 
     #[expect(clippy::unnecessary_wraps)]
     pub fn run(mut self) -> Result<(), WorkerError> {
+        let span = tracing::debug_span!("crawler", id = %self.id);
+        let _enter = span.enter();
         while self.update() {
             thread::yield_now();
         }
-        tracing::info!("shutting down crawler: {}", self.id);
+        tracing::info!("shutting down");
         self.shutdown();
         Ok(())
     }
@@ -69,12 +71,7 @@ impl Worker {
     fn handle_command(&mut self, command: Command) -> bool {
         match command {
             Command::Connect(config) => {
-                tracing::info!(
-                    "[{}] starting crawl: {} ({:?})",
-                    self.id,
-                    config.hostname,
-                    config.cursor
-                );
+                tracing::info!(host = %config.hostname, cursor = ?config.cursor, "starting crawl");
                 match Connection::connect(
                     config.hostname.clone(),
                     config.cursor,
@@ -96,7 +93,7 @@ impl Worker {
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
-                        tracing::warn!("unable to requestCrawl: {err}");
+                        tracing::warn!(%err, "unable to requestCrawl");
                         #[expect(clippy::expect_used)]
                         self.status_tx
                             .push(Status::Disconnected(self.id, config.hostname))
@@ -154,7 +151,7 @@ impl Worker {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(err) => {
-                    tracing::info!("[{}] disconnected: {err}", conn.hostname);
+                    tracing::info!(host = %conn.hostname, %err, "disconnected");
                     #[expect(clippy::expect_used)]
                     self.poll
                         .registry()

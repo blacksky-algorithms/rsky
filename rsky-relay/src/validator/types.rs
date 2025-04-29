@@ -44,11 +44,11 @@ impl SubscribeReposEvent {
                     return false;
                 }
                 if &commit.commit != head {
-                    tracing::debug!("mismatched inner commit cid: {}", commit.commit);
+                    tracing::debug!(inner = %commit.commit, "mismatched inner commit cid");
                     return false;
                 }
                 if commit.ops.len() > MAX_COMMIT_OPS {
-                    tracing::debug!("too many ops in commit: {}", commit.ops.len());
+                    tracing::debug!(len = %commit.ops.len(), "too many ops in commit");
                     return false;
                 }
                 if commit.blocks.is_empty() {
@@ -77,15 +77,15 @@ impl SubscribeReposEvent {
             _ => return true,
         };
         if commit.did != self.did() {
-            tracing::debug!("mismatched inner commit did: {}", commit.did);
+            tracing::debug!(inner = %commit.did, "mismatched inner commit did");
             return false;
         }
         if &commit.rev != rev {
-            tracing::debug!("mismatched inner commit rev: {rev}");
+            tracing::debug!(inner = %rev, "mismatched inner commit rev");
             return false;
         }
         if commit.version != ATPROTO_REPO_VERSION {
-            tracing::debug!("unsupported repo version: {}", commit.version);
+            tracing::debug!(version = %commit.version, "unsupported repo version");
             return false;
         }
         true
@@ -194,28 +194,28 @@ pub struct Node {
 impl Node {
     pub fn invert(&mut self, op: &SubscribeReposCommitOperation) -> Result<bool, InvertError> {
         match op {
-            SubscribeReposCommitOperation::Create { path, cid } => {
+            SubscribeReposCommitOperation::Create { path, cid: expected } => {
                 let Some(found) = self.remove(path.as_str(), -1)? else {
-                    tracing::debug!("unable to invert create: not found (expected: {cid})");
+                    tracing::debug!(%expected, "unable to invert create: not found");
                     return Ok(false);
                 };
-                if found == *cid {
+                if found == *expected {
                     Ok(true)
                 } else {
-                    tracing::debug!("unable to invert create: {found} (expected: {cid})");
+                    tracing::debug!(%expected, %found, "unable to invert create");
                     Ok(false)
                 }
             }
-            SubscribeReposCommitOperation::Update { path, cid, prev_data } => {
+            SubscribeReposCommitOperation::Update { path, cid: expected, prev_data } => {
                 #[expect(clippy::unwrap_used)]
                 let Some(found) = self.insert(path.as_str(), prev_data.unwrap(), -1)? else {
-                    tracing::debug!("unable to invert update: not found (expected: {cid})");
+                    tracing::debug!(%expected, "unable to invert update: not found");
                     return Ok(false);
                 };
-                if found == *cid {
+                if found == *expected {
                     Ok(true)
                 } else {
-                    tracing::debug!("unable to invert update: {found} (expected: {cid})");
+                    tracing::debug!(%expected, %found, "unable to invert update");
                     Ok(false)
                 }
             }
@@ -224,7 +224,7 @@ impl Node {
                 let Some(found) = self.insert(path.as_str(), prev_data.unwrap(), -1)? else {
                     return Ok(true);
                 };
-                tracing::debug!("unable to invert delete: {found}");
+                tracing::debug!(%found, "unable to invert delete");
                 Ok(false)
             }
         }

@@ -43,11 +43,13 @@ impl Worker {
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
+        let span = tracing::debug_span!("publisher", id = %self.id);
+        let _enter = span.enter();
         let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
         while self.update(&mut seq)? {
             thread::yield_now();
         }
-        tracing::info!("shutting down publisher: {}", self.id);
+        tracing::info!("shutting down");
         self.shutdown();
         Ok(())
     }
@@ -61,12 +63,7 @@ impl Worker {
     fn handle_command(&mut self, command: Command, mut seq: Cursor) -> bool {
         match command {
             Command::Connect(config) => {
-                tracing::info!(
-                    "[{}] starting publish: {} ({:?})",
-                    self.id,
-                    config.addr,
-                    config.cursor
-                );
+                tracing::info!(addr = %config.addr, cursor = ?config.cursor, "starting publish");
                 match Connection::connect(
                     config.addr,
                     config.stream,
@@ -88,7 +85,7 @@ impl Worker {
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
-                        tracing::warn!("unable to subscribeRepos: {err}");
+                        tracing::warn!(%err, "unable to subscribeRepos");
                     }
                 }
             }
@@ -142,7 +139,7 @@ impl Worker {
         for conn in &mut self.connections {
             if let Some(inner) = conn.as_mut() {
                 if let Err(err) = inner.send(seq, data.clone()) {
-                    tracing::info!("[{}] disconnected: {err}", inner.addr);
+                    tracing::info!(addr = %inner.addr, cursor = %inner.cursor, %err, "disconnected");
                     #[expect(clippy::expect_used)]
                     self.poll
                         .registry()
@@ -160,10 +157,10 @@ impl Worker {
             match conn.poll(seq, &self.firehose) {
                 Ok(true) => return true,
                 Ok(false) => {
-                    tracing::info!("[{}] closed due to invalid cursor", conn.addr);
+                    tracing::info!(addr = %conn.addr, cursor = %conn.cursor, "closed due to invalid cursor");
                 }
                 Err(err) => {
-                    tracing::info!("[{}] disconnected: {err}", conn.addr);
+                    tracing::info!(addr = %conn.addr, cursor = %conn.cursor, %err, "disconnected");
                 }
             }
             #[expect(clippy::expect_used)]

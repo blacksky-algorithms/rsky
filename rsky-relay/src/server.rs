@@ -106,11 +106,11 @@ impl Server {
 
         match self.listener.accept() {
             Ok((mut stream, addr)) => {
-                tracing::trace!("received request from: {addr}");
+                tracing::trace!(%addr, "received request");
                 let stream = if let Some(tls_config) = self.tls_config.clone() {
                     let mut conn = ServerConnection::new(tls_config)?;
                     if let Err(err) = conn.complete_io(&mut stream) {
-                        tracing::info!("[{addr}] handshake error: {err:?}");
+                        tracing::info!(%addr, %err, "tls handshake error");
                     }
                     let stream = StreamOwned::new(conn, stream);
                     MaybeTlsStream::Rustls(stream)
@@ -118,7 +118,7 @@ impl Server {
                     MaybeTlsStream::Plain(stream)
                 };
                 if let Err(err) = self.handle_stream(ErrorOnDropTcpStream(Some(stream)), addr) {
-                    tracing::info!("[{addr}] invalid request: {err:?}");
+                    tracing::info!(%addr, %err, "invalid request");
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {

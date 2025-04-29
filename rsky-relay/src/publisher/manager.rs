@@ -72,7 +72,7 @@ impl Manager {
         }
         for (id, worker) in self.workers.into_iter().enumerate() {
             if let Err(err) = worker.thread_handle.join().map_err(|_| ManagerError::Join)? {
-                tracing::warn!("publisher worker {id} error: {err}");
+                tracing::warn!(%id, %err, "publisher worker error");
             }
         }
         Ok(())

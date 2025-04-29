@@ -124,11 +124,11 @@ impl Manager {
         match DB.open_tree("hosts") {
             Ok(hosts) => {
                 if let Err(err) = hosts.apply_batch(batch) {
-                    tracing::warn!("unable to persist host state: {err}\n{:#?}", self.hosts);
+                    tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
                 }
             }
             Err(err) => {
-                tracing::warn!("unable to open hosts tree: {err}\n{:#?}", self.hosts);
+                tracing::warn!(%err, "unable to open hosts tree\n{:#?}", self.hosts);
             }
         }
 
@@ -348,40 +348,40 @@ impl Drop for Manager {
     fn drop(&mut self) {
         let mut batch = sled::Batch::default();
         for (host, (cursor, time)) in &self.hosts {
-            tracing::info!("[{host}] persisting cursor: {time}");
+            tracing::info!(%time, %cursor, %host, "persisting cursor");
             batch.insert(host.as_bytes(), *cursor);
         }
         match DB.open_tree("hosts") {
             Ok(hosts) => {
                 if let Err(err) = hosts.apply_batch(batch) {
-                    tracing::warn!("unable to persist host state: {err}\n{:#?}", self.hosts);
+                    tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
                 }
             }
             Err(err) => {
-                tracing::warn!("unable to open hosts tree: {err}\n{:#?}", self.hosts);
+                tracing::warn!(%err, "unable to open hosts tree\n{:#?}", self.hosts);
             }
         }
 
-        let repos = self.repos.len();
+        let len = self.repos.len();
         let mut batch = sled::Batch::default();
         for (did, state) in self.repos.drain() {
             #[expect(clippy::unwrap_used)]
             batch.insert(did.into_bytes(), serde_ipld_dagcbor::to_vec(&state).unwrap());
         }
-        tracing::info!("persisting repos: {repos}");
+        tracing::info!(%len, "persisting repos");
         match DB.open_tree("repos") {
             Ok(repos) => {
                 if let Err(err) = repos.apply_batch(batch) {
-                    tracing::warn!("unable to persist repo state: {err}");
+                    tracing::warn!(%err, "unable to persist repo state");
                 }
             }
             Err(err) => {
-                tracing::warn!("unable to open repos tree: {err}");
+                tracing::warn!(%err, "unable to open repos tree");
             }
         }
 
         if let Err(err) = DB.flush() {
-            tracing::warn!("unable to flush db: {err}");
+            tracing::warn!(%err, "unable to flush db");
         }
     }
 }

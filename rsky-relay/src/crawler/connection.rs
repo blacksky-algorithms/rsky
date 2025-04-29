@@ -88,11 +88,11 @@ impl Connection {
                     continue;
                 }
                 Message::Close(close) => {
-                    tracing::debug!("[{}] received close: {close:?}", self.hostname);
+                    tracing::debug!(host = %self.hostname, ?close, "received close");
                     continue;
                 }
                 _ => {
-                    tracing::debug!("[{}] unknown message: {msg:?}", self.hostname);
+                    tracing::debug!(host = %self.hostname, ?msg, "unknown ws message");
                     continue;
                 }
             };
