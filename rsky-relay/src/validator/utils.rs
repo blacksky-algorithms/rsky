@@ -66,7 +66,11 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
     let mut tree = match commit.tree(root) {
         Ok(tree) => tree,
         Err(err) => {
-            tracing::debug!(%err, "unable to read MST");
+            if commit.ops.is_empty() && prev.data == root {
+                tracing::debug!(%err, "empty #commit");
+                return true;
+            }
+            tracing::debug!(%err, ops = %commit.ops.len(), "unable to read MST");
             return false;
         }
     };
