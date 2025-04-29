@@ -58,7 +58,8 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new() -> Result<Self, ResolverError> {
-        let cache = LruCache::new(unsafe { NonZeroUsize::new_unchecked(MAX_CACHED) });
+        #[expect(clippy::unwrap_used)]
+        let cache = LruCache::new(NonZeroUsize::new(MAX_CACHED).unwrap());
         let flag = if *DO_PLC_EXPORT {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         } else {

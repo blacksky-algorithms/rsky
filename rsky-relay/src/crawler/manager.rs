@@ -82,7 +82,8 @@ impl Manager {
     pub fn run(mut self) -> Result<(), ManagerError> {
         for res in &self.hosts {
             let (hostname, cursor) = res?;
-            let hostname = unsafe { String::from_utf8_unchecked(hostname.to_vec()) };
+            #[expect(clippy::unwrap_used)]
+            let hostname = String::from_utf8(hostname.to_vec()).unwrap();
             let cursor = cursor.into();
             self.handle_connect(RequestCrawl { hostname, cursor: Some(cursor) })?;
         }

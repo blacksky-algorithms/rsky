@@ -69,7 +69,8 @@ impl Manager {
         let mut hosts = 0;
         for res in &DB.open_tree("hosts")? {
             let (host, state) = res?;
-            let host = unsafe { String::from_utf8_unchecked(host.to_vec()) };
+            #[expect(clippy::unwrap_used)]
+            let host = String::from_utf8(host.to_vec()).unwrap();
             self.hosts.insert(host, (state.into(), DateTime::default()));
             hosts += 1;
         }
@@ -77,7 +78,8 @@ impl Manager {
         let mut repos = 0;
         for res in &DB.open_tree("repos")? {
             let (did, state) = res?;
-            let did = unsafe { String::from_utf8_unchecked(did.to_vec()) };
+            #[expect(clippy::unwrap_used)]
+            let did = String::from_utf8(did.to_vec()).unwrap();
             let state = serde_ipld_dagcbor::from_slice(&state)?;
             self.repos.insert(did, state);
             repos += 1;
@@ -85,7 +87,8 @@ impl Manager {
         let mut queue = 0;
         for res in &self.queue {
             let (key, _) = res?;
-            let key = unsafe { std::str::from_utf8_unchecked(&key) };
+            #[expect(clippy::unwrap_used)]
+            let key = std::str::from_utf8(&key).unwrap();
             #[expect(clippy::unwrap_used)]
             self.resolver.resolve(key.split('>').next().unwrap())?;
             queue += 1;
@@ -272,8 +275,7 @@ impl Manager {
                 for res in self.queue.scan_prefix(&did) {
                     let (k, input) = res?;
                     #[expect(clippy::unwrap_used)]
-                    let host =
-                        unsafe { std::str::from_utf8_unchecked(&k) }.split('>').nth(1).unwrap();
+                    let host = std::str::from_utf8(&k).unwrap().split('>').nth(1).unwrap();
                     let span = tracing::debug_span!("msg_read", %host, len = %input.len());
                     let _enter = span.enter();
 
