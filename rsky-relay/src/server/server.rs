@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
@@ -18,8 +18,15 @@ use url::Url;
 use crate::SHUTDOWN;
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
+use crate::server::types::{HostStatus, ListHosts};
 
 const SLEEP: Duration = Duration::from_millis(10);
+
+const HOSTS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const HOSTS_TIMEOUT: Duration = Duration::from_secs(30);
+
+const BSKY_RELAY: &str = "relay1.us-west.bsky.network";
+const LIST_HOSTS: &str = "xrpc/com.atproto.sync.listHosts";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -54,6 +61,7 @@ pub struct Server {
     tls_config: Option<Arc<ServerConfig>>,
     base_url: Url,
     buf: Vec<u8>,
+    last: Instant,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -81,11 +89,14 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:9000")?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
+        let now = Instant::now();
+        let last = now.checked_sub(HOSTS_INTERVAL).unwrap_or(now);
         Ok(Self {
             listener,
             tls_config,
             base_url,
             buf: vec![0; 1024],
+            last,
             request_crawl_tx,
             subscribe_repos_tx,
         })
@@ -102,6 +113,12 @@ impl Server {
         if SHUTDOWN.load(Ordering::Relaxed) {
             tracing::info!("shutting down server");
             return Ok(false);
+        }
+
+        if self.last.elapsed() > HOSTS_INTERVAL {
+            if let Err(err) = self.query_hosts() {
+                tracing::info!(%err, "unable to query hosts");
+            }
         }
 
         match self.listener.accept() {
@@ -176,5 +193,37 @@ impl Server {
             }
             _ => Err(eyre!("unknown request")),
         }
+    }
+
+    fn query_hosts(&mut self) -> Result<()> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("rsky-relay")
+            .timeout(HOSTS_TIMEOUT)
+            .https_only(true)
+            .build()?;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut params = vec![("limit", "1000")];
+            if let Some(cursor) = &cursor {
+                params.push(("cursor", cursor));
+            }
+            let url =
+                Url::parse_with_params(&format!("https://{BSKY_RELAY}/{LIST_HOSTS}"), params)?;
+            let hosts: ListHosts = client.get(url).send()?.json()?;
+            for host in hosts.hosts {
+                if host.account_count > 100
+                    && matches!(host.status, HostStatus::Active | HostStatus::Idle)
+                {
+                    self.request_crawl_tx
+                        .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
+                }
+            }
+            cursor = hosts.cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        self.last = Instant::now();
+        Ok(())
     }
 }

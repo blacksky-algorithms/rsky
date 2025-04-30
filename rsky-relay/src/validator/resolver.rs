@@ -77,6 +77,7 @@ impl Resolver {
             |row| Ok(Some(row.get("created_at")?)),
         )?;
         let client = Client::builder()
+            .user_agent("rsky-relay")
             .timeout(REQ_TIMEOUT)
             .tcp_keepalive(Some(TCP_KEEPALIVE))
             .https_only(true)

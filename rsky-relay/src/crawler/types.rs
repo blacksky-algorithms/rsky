@@ -16,7 +16,7 @@ pub type RequestCrawlReceiver = Consumer<RequestCrawl>;
 pub struct RequestCrawl {
     pub hostname: String,
     #[serde(skip)]
-    pub(super) cursor: Option<Cursor>,
+    pub cursor: Option<Cursor>,
 }
 
 #[derive(Debug)]

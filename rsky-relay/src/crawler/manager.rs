@@ -120,6 +120,7 @@ impl Manager {
 
         if let Ok(request_crawl) = self.request_crawl_rx.pop() {
             if !self.hosts.contains_key(&request_crawl.hostname)? {
+                thread::sleep(SLEEP);
                 self.handle_connect(request_crawl)?;
             }
         }
