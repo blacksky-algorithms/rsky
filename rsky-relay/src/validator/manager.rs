@@ -16,7 +16,7 @@ use crate::validator::resolver::{Resolver, ResolverError};
 use crate::validator::types::RepoState;
 use crate::validator::utils;
 
-const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 8);
+const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -269,8 +269,9 @@ impl Manager {
 
             let mut batch: Option<Batch> = None;
             for did in self.resolver.poll().await? {
-                #[expect(clippy::unwrap_used)]
-                let (pds, key) = self.resolver.resolve(&did)?.unwrap();
+                let Some((pds, key)) = self.resolver.resolve(&did)? else {
+                    continue;
+                };
 
                 for res in self.queue.scan_prefix(&did) {
                     let (k, input) = res?;
@@ -348,6 +349,8 @@ impl Manager {
 
 impl Drop for Manager {
     fn drop(&mut self) {
+        SHUTDOWN.store(true, Ordering::Relaxed);
+
         let mut batch = sled::Batch::default();
         for (host, (cursor, time)) in &self.hosts {
             tracing::info!(%time, %cursor, %host, "persisting cursor");
