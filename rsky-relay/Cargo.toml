@@ -34,7 +34,7 @@ serde_ipld_dagcbor = "0.6"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 signal-hook = { version = "0.3", features = ["extended-siginfo"] }
-sled = { version = "0.34", features = ["compression"] }
+sled = { git = "https://github.com/spacejam/sled.git", rev = "005c023" }
 thingbuf = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
