@@ -1,0 +1,54 @@
+[package]
+name = "rsky-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# external
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ciborium = "0.2"
+cid = { version = "0.10", features = ["serde-codec"] }
+clap = { version = "4", features = ["derive", "env"] }
+color-eyre = "0.6"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+hashbrown = "0.15"
+httparse = "1.10"
+ipld-core = "0.4"
+k256 = "0.13"
+lru = "0.14"
+magnetic = "2"
+mimalloc = "0.1"
+multibase = "0.9"
+p256 = "0.13"
+polling = "3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
+rs-car-sync = "0.4"
+rtrb = "0.3"
+rusqlite = { version = "0.35", features = ["bundled"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_ipld_dagcbor = "0.6"
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+signal-hook = { version = "0.3", features = ["extended-siginfo"] }
+sled = { git = "https://github.com/spacejam/sled.git", rev = "005c023" }
+thingbuf = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = { version = "0.1", features = ["release_max_level_debug"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
+url = "2"
+urlencoding = "2"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+# internal
+rsky-common = { workspace = true }
+rsky-identity = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["serde_bytes"]

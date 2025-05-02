@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::time::SystemTime;
 
@@ -27,7 +28,7 @@ pub fn dedash(str: String) -> String {
     str.replace("-", "")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TID(pub String);
 
 impl TID {
