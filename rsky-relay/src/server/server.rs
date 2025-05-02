@@ -28,6 +28,26 @@ const HOSTS_TIMEOUT: Duration = Duration::from_secs(30);
 const BSKY_RELAY: &str = "relay1.us-west.bsky.network";
 const LIST_HOSTS: &str = "xrpc/com.atproto.sync.listHosts";
 
+const INDEX_ASCII: &str = r#"
+    .------..------..------..------.
+    |R.--. ||S.--. ||K.--. ||Y.--. |
+    | :(): || :/\: || :/\: || (\/) |
+    | ()() || :\/: || :\/: || :\/: |
+    | '--'R|| '--'S|| '--'K|| '--'Y|
+    `------'`------'`------'`------'
+    .------..------..------..------..------.
+    |R.--. ||E.--. ||L.--. ||A.--. ||Y.--. |
+    | :(): || (\/) || :/\: || (\/) || (\/) |
+    | ()() || :\/: || (__) || :\/: || :\/: |
+    | '--'R|| '--'E|| '--'L|| '--'A|| '--'Y|
+    `------'`------'`------'`------'`------'
+
+ This is an atproto relay instance running the
+ 'rsky-relay' codebase [https://github.com/blacksky-algorithms/rsky]
+
+ The firehose WebSocket path is at:  /xrpc/com.atproto.sync.subscribeRepos
+"#;
+
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("io error: {0}")]
@@ -159,6 +179,26 @@ impl Server {
         let path = parser.path.ok_or_else(|| eyre!("path missing"))?;
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
         match (method, url.path()) {
+            ("GET", "/") => {
+                let body = INDEX_ASCII;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: text/plain; charset=utf-8\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                );
+
+                #[expect(clippy::unwrap_used)]
+                let mut stream = stream.0.take().unwrap();
+                stream.write_all(response.as_bytes())?;
+                stream.flush()?;
+                stream.shutdown()?;
+                return Ok(());
+            }
             ("GET", "/xrpc/com.atproto.sync.subscribeRepos") => {
                 let mut cursor = None;
                 for (key, value) in url.query_pairs() {
