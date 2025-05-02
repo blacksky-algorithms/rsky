@@ -174,7 +174,7 @@ impl Manager {
                         let curr: u64 = seq.into();
                         if prev >= curr {
                             if prev > curr {
-                                tracing::debug!(%prev, diff = %prev - curr, "old seq");
+                                tracing::trace!(%prev, diff = %prev - curr, "old seq");
                             }
                             continue;
                         } else if prev + 1 != curr {
