@@ -1,18 +1,14 @@
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 use std::{io, thread};
 
 use bytes::Bytes;
-use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token};
+use polling::{Event, Events, PollMode, Poller};
 use sled::Tree;
 use thiserror::Error;
 
 use crate::publisher::connection::{Connection, ConnectionError};
 use crate::publisher::types::{Command, CommandReceiver};
 use crate::types::{Cursor, DB};
-
-const INTEREST: Interest = Interest::WRITABLE;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -30,16 +26,16 @@ pub struct Worker {
     next_idx: usize,
     command_rx: CommandReceiver,
     firehose: Tree,
-    poll: Poll,
+    poller: Poller,
     events: Events,
 }
 
 impl Worker {
     pub fn new(id: usize, command_rx: CommandReceiver) -> Result<Self, WorkerError> {
         let firehose = DB.open_tree("firehose")?;
-        let poll = Poll::new()?;
-        let events = Events::with_capacity(1024);
-        Ok(Self { id, connections: Vec::new(), next_idx: 0, command_rx, firehose, poll, events })
+        let poller = Poller::new()?;
+        let events = Events::new();
+        Ok(Self { id, connections: Vec::new(), next_idx: 0, command_rx, firehose, poller, events })
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
@@ -78,10 +74,11 @@ impl Worker {
                             },
                         );
                         #[expect(clippy::expect_used)]
-                        self.poll
-                            .registry()
-                            .register(&mut SourceFd(&conn.as_raw_fd()), Token(idx), INTEREST)
-                            .expect("unable to register");
+                        unsafe {
+                            self.poller
+                                .add_with_mode(&conn, Event::all(idx), PollMode::Level)
+                                .expect("unable to register");
+                        }
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
@@ -110,14 +107,14 @@ impl Worker {
                 self.send(*seq, &Bytes::from_owner(v).slice(8..));
             }
 
-            let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
+            let mut events = std::mem::take(&mut self.events);
             'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
-                self.poll
-                    .poll(&mut events, Some(Duration::from_millis(1)))
+                self.poller
+                    .wait(&mut events, Some(Duration::from_millis(1)))
                     .expect("failed to poll");
-                for ev in &events {
-                    if !self.poll(*seq, ev.token().0) {
+                for ev in events.iter() {
+                    if !self.poll(*seq, ev.key) {
                         break 'outer;
                     }
                 }
@@ -141,10 +138,7 @@ impl Worker {
                 if let Err(err) = inner.send(seq, data.clone()) {
                     tracing::info!(addr = %inner.addr, cursor = %inner.cursor, %err, "disconnected");
                     #[expect(clippy::expect_used)]
-                    self.poll
-                        .registry()
-                        .deregister(&mut SourceFd(&inner.as_raw_fd()))
-                        .expect("failed to deregister");
+                    self.poller.delete(inner).expect("failed to deregister");
                     *conn = None;
                 }
             }
@@ -164,10 +158,7 @@ impl Worker {
                 }
             }
             #[expect(clippy::expect_used)]
-            self.poll
-                .registry()
-                .deregister(&mut SourceFd(&conn.as_raw_fd()))
-                .expect("failed to deregister");
+            self.poller.delete(conn).expect("failed to deregister");
             self.connections[idx] = None;
         }
 

@@ -19,9 +19,9 @@ k256 = "0.13"
 lru = "0.14"
 magnetic = "2"
 mimalloc = "0.1"
-mio = { version = "1", features = ["os-ext", "os-poll"] }
 multibase = "0.9"
 p256 = "0.13"
+polling = "3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
 rs-car-sync = "0.4"
 rtrb = "0.3"
