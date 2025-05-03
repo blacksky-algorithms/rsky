@@ -84,7 +84,7 @@ impl Worker {
                         #[expect(clippy::expect_used)]
                         unsafe {
                             self.poller
-                                .add_with_mode(&conn, Event::all(idx), PollMode::Level)
+                                .add_with_mode(&conn, Event::readable(idx), PollMode::Level)
                                 .expect("unable to register");
                         }
                         self.connections[idx] = Some(conn);
