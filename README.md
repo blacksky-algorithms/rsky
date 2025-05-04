@@ -41,6 +41,7 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 
 **Rust Services:**
 
+- `rsky-relay`: The Relay handles "big-world" networking. It crawls the network, gathering as much data as it can, and outputs it in one big stream for other services to use. It’s analogous to a firehose provider or a super-powered relay node.
 - `rsky-pds`: "Personal Data Server", hosting repo content for atproto accounts. It differs from the canonical Typescript implementation by using Postgres instead of SQLite, s3 compatible blob storage instead of on-disk, and mailgun for emailing. All to make the PDS easier to migrate between cloud hosting providers and more maintainable.
 - `rsky-feedgen`: Bluesky feed generator that closely follows the use cases of the Blacksky community.
 - `rsky-firehose`: Firehose consumer.
