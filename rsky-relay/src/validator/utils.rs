@@ -46,7 +46,6 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
     if let Some(since) = &commit.since {
         if since != &prev.rev {
             tracing::debug!(%since, "commit with miss-matching since");
-            return false;
         }
     } else {
         // NOTE: some PDSs don't send this field, so we continue verifying
@@ -56,7 +55,6 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
     if let Some(prev_data) = &commit.prev_data {
         if prev_data != &prev.data {
             tracing::debug!(%prev_data, "commit with miss-matching prevData");
-            return false;
         }
     } else {
         tracing::trace!("missing prev_data");
@@ -68,10 +66,10 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
         Err(err) => {
             if commit.ops.is_empty() && prev.data == root {
                 tracing::debug!(%err, "empty #commit");
-                return true;
+            } else {
+                tracing::debug!(%err, ops = %commit.ops.len(), "unable to read MST");
             }
-            tracing::debug!(%err, ops = %commit.ops.len(), "unable to read MST");
-            return false;
+            return true;
         }
     };
 
@@ -91,12 +89,12 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
             Ok(inv) => {
                 if !inv {
                     tracing::debug!(%idx, ?op, "unable to invert op");
-                    return false;
+                    return true;
                 }
             }
             Err(err) => {
                 tracing::debug!(%idx, ?op, %err, "error while inverting op");
-                return false;
+                return true;
             }
         };
     }
@@ -105,13 +103,13 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
         Ok(computed) => computed,
         Err(err) => {
             tracing::debug!(%err, "error while computing old root");
-            return false;
+            return true;
         }
     };
     if let Some(prev_data) = commit.prev_data {
         if prev_data != root {
             tracing::debug!(%root, "inverted tree root didn't match prevData");
-            return false;
+            return true;
         }
     }
 
