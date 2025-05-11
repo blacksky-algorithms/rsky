@@ -35,7 +35,7 @@ pub struct Args {
     #[clap(short, long, requires = "certs")]
     private_key: Option<PathBuf>,
     #[clap(long)]
-    no_plc_export: (),
+    no_plc_export: bool,
 }
 
 #[tokio::main]
