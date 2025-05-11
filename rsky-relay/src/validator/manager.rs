@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTimeError, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use hashbrown::HashMap;
 use hashbrown::hash_map::Entry;
+use rusqlite::Connection;
 use sled::{Batch, Tree};
 use thiserror::Error;
 use zerocopy::{CastError, FromBytes, Immutable, KnownLayout, SizeError, Unaligned};
@@ -30,6 +31,8 @@ pub enum ManagerError {
     SizeError,
     #[error("time error: {0}")]
     Time(#[from] SystemTimeError),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("sled error: {0}")]
     Sled(#[from] sled::Error),
     #[error("decode error: {0}")]
@@ -48,6 +51,7 @@ pub struct Manager {
     hosts: HashMap<String, (Cursor, DateTime<Utc>)>,
     repos: HashMap<String, RepoState>,
     resolver: Resolver,
+    conn: Connection,
     queue: Tree,
     firehose: Tree,
 }
@@ -57,22 +61,33 @@ impl Manager {
         let hosts = HashMap::new();
         let repos = HashMap::new();
         let resolver = Resolver::new()?;
+        let conn = Connection::open("relay.db")?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS hosts (
+                host TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                latest TEXT NOT NULL
+            )",
+            (),
+        )?;
         let queue = DB.open_tree("queue")?;
         let firehose = DB.open_tree("firehose")?;
-        let this = Self { message_rx, hosts, repos, resolver, queue, firehose };
+        let mut this = Self { message_rx, hosts, repos, resolver, conn, queue, firehose };
         this.expire_persist()?;
         Ok(this)
     }
 
     pub async fn run(mut self) -> Result<(), ManagerError> {
-        // TODO: move this to sqlite
         let mut hosts = 0;
-        for res in &DB.open_tree("hosts")? {
-            let (host, state) = res?;
-            #[expect(clippy::unwrap_used)]
-            let host = String::from_utf8(host.to_vec()).unwrap();
-            self.hosts.insert(host, (state.into(), DateTime::default()));
-            hosts += 1;
+        {
+            let mut stmt = self.conn.prepare_cached("SELECT host, cursor FROM hosts")?;
+            let mut rows = stmt.query(())?;
+            while let Some(row) = rows.next()? {
+                let host = row.get_unwrap("host");
+                let cursor: u64 = row.get_unwrap("cursor");
+                self.hosts.insert(host, (cursor.into(), DateTime::default()));
+                hosts += 1;
+            }
         }
         // TODO: move this to sqlite
         let mut repos = 0;
@@ -93,15 +108,15 @@ impl Manager {
             self.resolver.resolve(key.split('>').next().unwrap())?;
             queue += 1;
         }
-        tracing::info!(%hosts, %repos, %queue, "loaded state");
         let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
+        tracing::info!(%hosts, %repos, %queue, %seq, "loaded state");
         while self.update(&mut seq).await? {}
         tracing::info!("shutting down validator");
         SHUTDOWN.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    fn expire_persist(&self) -> Result<(), ManagerError> {
+    fn expire_persist(&mut self) -> Result<(), ManagerError> {
         // expire old firehose data
         let mut batch: Option<Batch> = None;
         for res in &self.firehose {
@@ -119,21 +134,25 @@ impl Manager {
             return Ok(());
         }
 
+        self.persist()
+    }
+
+    fn persist(&mut self) -> Result<(), ManagerError> {
         // persist hosts data
-        let mut batch = sled::Batch::default();
-        for (host, (cursor, _)) in &self.hosts {
-            batch.insert(host.as_bytes(), *cursor);
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare_cached(
+            "
+                INSERT INTO hosts (host, cursor, latest)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(host)
+                DO UPDATE SET cursor = excluded.cursor, latest = excluded.latest
+            ",
+        )?;
+        for (host, (cursor, time)) in &self.hosts {
+            stmt.execute((host, cursor.get(), time))?;
         }
-        match DB.open_tree("hosts") {
-            Ok(hosts) => {
-                if let Err(err) = hosts.apply_batch(batch) {
-                    tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(%err, "unable to open hosts tree\n{:#?}", self.hosts);
-            }
-        }
+        drop(stmt);
+        tx.commit()?;
 
         Ok(())
     }
@@ -351,20 +370,8 @@ impl Drop for Manager {
     fn drop(&mut self) {
         SHUTDOWN.store(true, Ordering::Relaxed);
 
-        let mut batch = sled::Batch::default();
-        for (host, (cursor, time)) in &self.hosts {
-            tracing::info!(%time, %cursor, %host, "persisting cursor");
-            batch.insert(host.as_bytes(), *cursor);
-        }
-        match DB.open_tree("hosts") {
-            Ok(hosts) => {
-                if let Err(err) = hosts.apply_batch(batch) {
-                    tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(%err, "unable to open hosts tree\n{:#?}", self.hosts);
-            }
+        if let Err(err) = self.persist() {
+            tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
         }
 
         let len = self.repos.len();

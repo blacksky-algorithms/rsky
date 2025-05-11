@@ -4,14 +4,14 @@ use std::{io, thread};
 
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
-use sled::Tree;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
 use crate::crawler::RequestCrawl;
 use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status, StatusReceiver};
 use crate::crawler::worker::{Worker, WorkerError};
-use crate::types::{DB, MessageSender};
+use crate::types::MessageSender;
 
 const CAPACITY: usize = 1024;
 const SLEEP: Duration = Duration::from_millis(10);
@@ -24,8 +24,8 @@ pub enum ManagerError {
     Worker(#[from] WorkerError),
     #[error("rtrb error: {0}")]
     Push(#[from] Box<rtrb::PushError<Command>>),
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("join error")]
     Join,
 }
@@ -45,7 +45,7 @@ struct WorkerHandle {
 pub struct Manager {
     workers: Box<[WorkerHandle]>,
     next_id: usize,
-    hosts: Tree,
+    conn: Connection,
     request_crawl_rx: RequestCrawlReceiver,
     status_rx: StatusReceiver,
 }
@@ -69,23 +69,32 @@ impl Manager {
                 Ok(WorkerHandle { command_tx, thread_handle })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let hosts = DB.open_tree("hosts")?;
+        let conn = Connection::open_with_flags(
+            "relay.db",
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: 0,
-            hosts,
+            conn,
             request_crawl_rx,
             status_rx,
         })
     }
 
     pub fn run(mut self) -> Result<(), ManagerError> {
-        for res in &self.hosts {
-            let (hostname, cursor) = res?;
-            #[expect(clippy::unwrap_used)]
-            let hostname = String::from_utf8(hostname.to_vec()).unwrap();
-            let cursor = cursor.into();
-            self.handle_connect(RequestCrawl { hostname, cursor: Some(cursor) })?;
+        let mut requests = Vec::new();
+        {
+            let mut stmt = self.conn.prepare_cached("SELECT host, cursor FROM hosts")?;
+            let mut rows = stmt.query(())?;
+            while let Some(row) = rows.next()? {
+                let hostname = row.get_unwrap("host");
+                let cursor: u64 = row.get_unwrap("cursor");
+                requests.push(RequestCrawl { hostname, cursor: Some(cursor.into()) });
+            }
+        }
+        for request in requests {
+            self.handle_connect(request)?;
         }
         while self.update()? {
             thread::sleep(SLEEP);
@@ -119,7 +128,11 @@ impl Manager {
         }
 
         if let Ok(request_crawl) = self.request_crawl_rx.pop() {
-            if !self.hosts.contains_key(&request_crawl.hostname)? {
+            let exists = {
+                let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
+                stmt.exists((&request_crawl.hostname,))?
+            };
+            if !exists {
                 thread::sleep(SLEEP);
                 self.handle_connect(request_crawl)?;
             }
@@ -143,7 +156,12 @@ impl Manager {
     }
 
     fn handle_connect(&mut self, mut request_crawl: RequestCrawl) -> Result<(), ManagerError> {
-        if let Some(cursor) = self.hosts.get(&request_crawl.hostname)? {
+        let cursor: Option<u64> = {
+            let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
+            stmt.query_row((&request_crawl.hostname,), |row| Ok(row.get_unwrap("cursor")))
+                .optional()?
+        };
+        if let Some(cursor) = cursor {
             request_crawl.cursor = Some(cursor.into());
         }
         self.workers[self.next_id].command_tx.push(Command::Connect(request_crawl))?;
