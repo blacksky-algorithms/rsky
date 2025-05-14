@@ -1,9 +1,8 @@
 use crate::common::{create_account, get_admin_token};
-use diesel::row::NamedRow;
 use rocket::http::{ContentType, Header, Status};
-use rsky_lexicon::com::atproto::server::{CreateInviteCodeOutput, CreateSessionOutput};
+use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
+use rsky_pds::config::ServerConfig;
 use serde_json::json;
-use testcontainers::runners::AsyncRunner;
 
 mod common;
 
@@ -57,6 +56,14 @@ async fn test_create_invite_code() {
 async fn test_create_invite_code_and_account() {
     let postgres = common::get_postgres().await;
     let client = common::get_client(&postgres).await;
+    let domain = client
+        .rocket()
+        .state::<ServerConfig>()
+        .unwrap()
+        .identity
+        .service_handle_domains
+        .first()
+        .unwrap();
 
     let input = json!({
         "useCount": 1
@@ -77,8 +84,8 @@ async fn test_create_invite_code_and_account() {
 
     let account_input = json!({
         "did": "did:plc:khvyd3oiw46vif5gm7hijslk",
-        "email": "dummyemail@rsky.com",
-        "handle": "dummaccount.rsky.com",
+        "email": "foo@example.com",
+        "handle": format!("foo{domain}"),
         "password": "password",
         "inviteCode": invite_code
     });

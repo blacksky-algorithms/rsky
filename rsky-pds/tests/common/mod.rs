@@ -1,21 +1,18 @@
 use anyhow::Result;
 use diesel::{Connection, PgConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use dotenvy::dotenv;
 use http_auth_basic::Credentials;
-use rocket::http::{ContentType, Header, Status};
+use rocket::http::{ContentType, Header};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
+use rsky_pds::config::ServerConfig;
 use rsky_pds::{build_rocket, RocketConfig};
-use std::env;
-use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, Image, ImageExt};
+use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres;
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::OnceCell;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
@@ -49,11 +46,6 @@ pub async fn get_postgres() -> ContainerAsync<Postgres> {
         .start()
         .await
         .expect("Valid postgres instance");
-    let ip_address = postgres
-        .get_bridge_ip_address()
-        .await
-        .expect("get bridged Ip")
-        .to_string();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
     let mut conn =
@@ -66,7 +58,6 @@ pub async fn get_postgres() -> ContainerAsync<Postgres> {
     Start Client for the RSky-PDS and have it use the provided postgres container
 */
 pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
-    let ip_address = postgres.get_bridge_ip_address().await.unwrap().to_string();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
     Client::untracked(
@@ -80,9 +71,17 @@ pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
 }
 
 /**
-    Creates a dummy account for testing purposes
+    Creates a mock account for testing purposes
 */
 pub async fn create_account(client: &Client) -> (String, String) {
+    let domain = client
+        .rocket()
+        .state::<ServerConfig>()
+        .unwrap()
+        .identity
+        .service_handle_domains
+        .first()
+        .unwrap();
     let input = json!({
         "useCount": 1
     });
@@ -102,8 +101,8 @@ pub async fn create_account(client: &Client) -> (String, String) {
 
     let account_input = json!({
         "did": "did:plc:khvyd3oiw46vif5gm7hijslk",
-        "email": "dummyemail@rsky.com",
-        "handle": "dummaccount.rsky.com",
+        "email": "foo@example.com",
+        "handle": format!("foo{domain}"),
         "password": "password",
         "inviteCode": invite_code
     });
@@ -116,5 +115,5 @@ pub async fn create_account(client: &Client) -> (String, String) {
         .dispatch()
         .await;
 
-    ("dummyemail@rsky.com".to_string(), "password".to_string())
+    ("foo@example.com".to_string(), "password".to_string())
 }
