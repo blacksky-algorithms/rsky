@@ -2,7 +2,7 @@ use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Servic
 use anyhow::Result;
 use data_encoding::BASE32;
 use indexmap::IndexMap;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_common::ipld::cid_for_cbor;
 use rsky_common::sign::atproto_sign;
 use secp256k1::SecretKey;

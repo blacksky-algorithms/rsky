@@ -1,4 +1,4 @@
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_lexicon::app::bsky::actor::Profile;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_syntax::aturi::AtUri;
