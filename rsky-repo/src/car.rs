@@ -1,9 +1,9 @@
 use crate::block_map::BlockMap;
 use crate::util::stream_to_buffer;
-use crate::vendored::iroh_car::{CarHeader, CarReader, CarWriter};
 use anyhow::{bail, Result};
 use async_stream::stream;
 use futures::{pin_mut, Stream, StreamExt};
+use iroh_car::{CarHeader, CarReader, CarWriter};
 use lexicon_cid::Cid;
 use std::future::Future;
 use tokio::io::AsyncRead;
@@ -133,7 +133,7 @@ pub async fn blocks_to_car_file(root: Option<&Cid>, blocks: BlockMap) -> Result<
 pub async fn car_to_blocks<R: AsyncRead + Send + Unpin>(
     car: CarReader<R>,
 ) -> Result<CarToBlocksOutput> {
-    let roots = car.get_roots().to_vec();
+    let roots = car.header().roots().to_vec();
     let mut blocks = BlockMap::new();
     let mut stream = Box::pin(car.stream());
     while let Some(Ok((cid, bytes))) = stream.next().await {
