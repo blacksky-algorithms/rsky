@@ -1,0 +1,3 @@
+[submodule "rsky-repo/tests/interop_src"]
+	path = rsky-repo/tests/interop_src
+	url = https://github.com/DavidBuchanan314/mst-test-suite
