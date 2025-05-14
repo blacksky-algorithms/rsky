@@ -5,6 +5,9 @@ use std::thread::{self, ScopedJoinHandle};
 
 use clap::Parser;
 use color_eyre::Result;
+use file_rotate::compression::Compression;
+use file_rotate::suffix::{AppendTimestamp, FileLimit};
+use file_rotate::{ContentLimit, FileRotate, TimeFrequency};
 use mimalloc::MiMalloc;
 use rustls::crypto::aws_lc_rs::default_provider;
 use signal_hook::consts::{SIGINT, TERM_SIGNALS};
@@ -40,7 +43,13 @@ pub struct Args {
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    let file_appender = tracing_appender::rolling::daily(".", "rsky-relay.log");
+    let file_appender = FileRotate::new(
+        "rsky-relay.log",
+        AppendTimestamp::default(FileLimit::MaxFiles(7)),
+        ContentLimit::Time(TimeFrequency::Daily),
+        Compression::OnRotate(0),
+        None,
+    );
     let (json_writer, _guard_json) = tracing_appender::non_blocking(file_appender);
     let (pretty_writer, _guard_pretty) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::registry()
