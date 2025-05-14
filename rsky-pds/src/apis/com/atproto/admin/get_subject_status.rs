@@ -7,7 +7,7 @@ use crate::db::DbConn;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use futures::try_join;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::{RepoBlobRef, RepoRef, Subject, SubjectStatus};

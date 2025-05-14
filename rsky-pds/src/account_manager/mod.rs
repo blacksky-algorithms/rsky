@@ -15,7 +15,7 @@ use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use futures::try_join;
 use helpers::{account, auth, email_token, invite, password};
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;

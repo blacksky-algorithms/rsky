@@ -8,7 +8,7 @@ use crate::auth_verifier::OptionalAccessOrAdminToken;
 use crate::db::DbConn;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::{Responder, State};
 use rsky_repo::car::blocks_to_car_file;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;

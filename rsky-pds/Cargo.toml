@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"

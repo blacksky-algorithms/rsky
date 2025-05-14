@@ -1,7 +1,7 @@
 use crate::db::DbConn;
 use anyhow::Result;
 use diesel::*;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_common;
 
 pub async fn update_root(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {

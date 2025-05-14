@@ -10,7 +10,7 @@ use anyhow::Result;
 use aws_config::SdkConfig;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::AggregatedBytes;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::http::Header;
 use rocket::{Responder, State};
 use std::str::FromStr;

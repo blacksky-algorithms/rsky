@@ -9,7 +9,7 @@ use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, Pr
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{CreateRecordInput, CreateRecordOutput};
