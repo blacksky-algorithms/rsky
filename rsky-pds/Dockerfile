@@ -4,7 +4,7 @@ FROM --platform=linux/amd64 rust AS builder
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
-COPY Cargo.toml Cargo.lock rust-toolchain ./
+COPY Cargo.toml ./
 COPY rsky-lexicon rsky-lexicon
 COPY rsky-identity rsky-identity
 COPY rsky-syntax rsky-syntax
@@ -37,4 +37,4 @@ WORKDIR /usr/src/rsky
 COPY --from=builder /usr/src/rsky/target/release/rsky-pds rsky-pds
 
 # Run the web service on container startup with the same environment variables
-CMD ["sh", "-c", "ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0 ./rsky-pds"]
+CMD ["sh", "-c", "ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0" "./rsky-pds"]
