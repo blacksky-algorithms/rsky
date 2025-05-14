@@ -36,7 +36,8 @@ COPY rsky-pds/diesel.toml rsky-pds/diesel.toml
 RUN cargo build --release --package rsky-pds
 
 # FROM --platform=linux/amd64 rust
-FROM rust
+FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y extra-runtime-dependencies && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/rsky
 
