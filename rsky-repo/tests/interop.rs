@@ -1,9 +1,9 @@
+use std::fs::File;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use std::fs::File;
 
 use anyhow::{Context, Result};
 use glob::glob;
@@ -72,7 +72,8 @@ async fn load_car_into(bs: &mut MemoryBlockstore, path: &Path) -> Result<Cid> {
 
 /// ----------------- one-shot test runner ----------------------------------
 async fn run_single(case_path: &Path) -> Result<()> {
-    let tc: TestCase = serde_json::from_reader(File::open(case_path).context("Test case file missing")?)?;
+    let tc: TestCase =
+        serde_json::from_reader(File::open(case_path).context("Test case file missing")?)?;
 
     // Shared MemoryBlockstore so that both CARs live in the same space.
     let mut storage = MemoryBlockstore::default();

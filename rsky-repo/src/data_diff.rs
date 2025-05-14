@@ -35,7 +35,7 @@ pub struct DataDiff {
     pub new_mst_blocks: BlockMap,
     pub new_leaf_cids: CidSet,
     pub removed_cids: CidSet,
-    pub removed_mst_blocks: CidSet
+    pub removed_mst_blocks: CidSet,
 }
 
 impl DataDiff {
