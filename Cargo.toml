@@ -7,7 +7,7 @@ cargo = { version = "0.84.0",features = ["vendored-openssl"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
-lexicon_cid = { package = "cid", version = "0.11.1", features = ["serde-codec"] }
+lexicon_cid = { package = "cid", version = "0.10.1", features = ["serde-codec"] }
 libipld = "0.16.0"
 serde_cbor = "0.11.2"
 serde_bytes = "0.11.15"
