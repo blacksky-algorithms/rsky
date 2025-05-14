@@ -1,6 +1,6 @@
 [package]
 name = "rsky-repo"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust crate for atproto repositories, an in particular the Merkle Search Tree (MST) data structure."
 license = "Apache-2.0"
@@ -35,6 +35,11 @@ rand = "0.8.5"
 rand_core = "0.6.4"
 secp256k1 = {workspace = true}
 libipld = {workspace = true}
+iroh-car = "0.5.1"
 
 regex = "1.10.3"
 lazy_static = "1.4.0"
+
+[dev-dependencies]
+glob = "0.3"
+indexmap = "2"

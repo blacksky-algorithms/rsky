@@ -9,21 +9,21 @@ use std::fmt::Debug;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataAdd {
-    pub(crate) key: String,
-    pub(crate) cid: Cid,
+    pub key: String,
+    pub cid: Cid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataUpdate {
-    pub(crate) key: String,
-    pub(crate) prev: Cid,
-    pub(crate) cid: Cid,
+    pub key: String,
+    pub prev: Cid,
+    pub cid: Cid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataDelete {
-    pub(crate) key: String,
-    pub(crate) cid: Cid,
+    pub key: String,
+    pub cid: Cid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +35,7 @@ pub struct DataDiff {
     pub new_mst_blocks: BlockMap,
     pub new_leaf_cids: CidSet,
     pub removed_cids: CidSet,
+    pub removed_mst_blocks: CidSet
 }
 
 impl DataDiff {
@@ -46,6 +47,7 @@ impl DataDiff {
             new_mst_blocks: BlockMap::new(),
             new_leaf_cids: CidSet::new(None),
             removed_cids: CidSet::new(None),
+            removed_mst_blocks: CidSet::new(None),
         }
     }
 
@@ -136,6 +138,7 @@ impl DataDiff {
     pub fn tree_add(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
         if self.removed_cids.has(cid) {
             self.removed_cids.delete(cid);
+            self.removed_mst_blocks.delete(cid);
         } else {
             self.new_mst_blocks.set(cid, bytes);
         }
@@ -147,6 +150,7 @@ impl DataDiff {
             self.new_mst_blocks.delete(cid)?;
         } else {
             self.removed_cids.add(cid);
+            self.removed_mst_blocks.add(cid);
         }
         Ok(())
     }
