@@ -118,6 +118,7 @@ impl Worker {
             }
 
             let mut events = std::mem::take(&mut self.events);
+            events.clear();
             'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
                 self.poller
