@@ -48,7 +48,7 @@ impl Worker {
 
     #[expect(clippy::unnecessary_wraps)]
     pub fn run(mut self) -> Result<(), WorkerError> {
-        let span = tracing::debug_span!("crawler", id = %self.id);
+        let span = tracing::info_span!("crawler", id = %self.id);
         let _enter = span.enter();
         while self.update() {
             thread::yield_now();
@@ -90,7 +90,7 @@ impl Worker {
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "unable to requestCrawl");
+                        tracing::warn!(host = %config.hostname, cursor = ?config.cursor, %err, "unable to requestCrawl");
                     }
                 }
             }
