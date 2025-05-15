@@ -91,10 +91,6 @@ impl Worker {
                     }
                     Err(err) => {
                         tracing::warn!(%err, "unable to requestCrawl");
-                        #[expect(clippy::expect_used)]
-                        self.status_tx
-                            .push(Status::Disconnected(self.id, config.hostname))
-                            .expect("unable to send status");
                     }
                 }
             }
