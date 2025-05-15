@@ -169,7 +169,7 @@ impl Manager {
             match self.message_rx.try_recv_ref() {
                 Ok(msg) => {
                     let host = &msg.hostname;
-                    let span = tracing::debug_span!("msg_recv", %host, len = %msg.data.len());
+                    let span = tracing::info_span!("msg_recv", %host, len = %msg.data.len());
                     let _enter = span.enter();
                     let event = match SubscribeReposEvent::parse(&msg.data) {
                         Ok(Some(event)) => event,
