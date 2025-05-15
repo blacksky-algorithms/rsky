@@ -28,7 +28,7 @@ const HOSTS_TIMEOUT: Duration = Duration::from_secs(30);
 const BSKY_RELAY: &str = "relay1.us-west.bsky.network";
 const LIST_HOSTS: &str = "xrpc/com.atproto.sync.listHosts";
 
-const INDEX_ASCII: &str = r#"
+const INDEX_ASCII: &str = r"
     .------..------..------..------.
     |R.--. ||S.--. ||K.--. ||Y.--. |
     | :(): || :/\: || :/\: || (\/) |
@@ -46,7 +46,7 @@ const INDEX_ASCII: &str = r#"
  'rsky-relay' codebase [https://github.com/blacksky-algorithms/rsky]
 
  The firehose WebSocket path is at:  /xrpc/com.atproto.sync.subscribeRepos
-"#;
+";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -197,7 +197,7 @@ impl Server {
                 stream.write_all(response.as_bytes())?;
                 stream.flush()?;
                 stream.shutdown()?;
-                return Ok(());
+                Ok(())
             }
             ("GET", "/xrpc/com.atproto.sync.subscribeRepos") => {
                 let mut cursor = None;
