@@ -2,7 +2,7 @@
 
 use dotenvy::dotenv;
 use futures::StreamExt as _;
-use libipld::Cid;
+use lexicon_cid::Cid;
 use rsky_lexicon::app::bsky::feed::like::Like;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::app::bsky::graph::follow::Follow;

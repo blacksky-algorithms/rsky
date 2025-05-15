@@ -1,6 +1,6 @@
 [package]
 name = "rsky-lexicon"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 publish = true
 description = "Bluesky API library"
@@ -24,6 +24,5 @@ serde_derive = "^1.0"
 serde_bytes = "0.11.9"
 thiserror = "1.0.40"
 secp256k1 = {workspace = true}
-libipld = {workspace = true}
 lexicon_cid = {workspace = true}
 anyhow = "1.0.79" # @TODO: Remove anyhow in lib
