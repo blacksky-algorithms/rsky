@@ -39,7 +39,7 @@ impl Worker {
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
-        let span = tracing::debug_span!("publisher", id = %self.id);
+        let span = tracing::info_span!("publisher", id = %self.id);
         let _enter = span.enter();
         let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
         while self.update(&mut seq)? {
@@ -82,7 +82,7 @@ impl Worker {
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "unable to subscribeRepos");
+                        tracing::warn!(addr = %config.addr, cursor = ?config.cursor, %err, "unable to subscribeRepos");
                     }
                 }
             }
@@ -108,6 +108,7 @@ impl Worker {
             }
 
             let mut events = std::mem::take(&mut self.events);
+            events.clear();
             'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
                 self.poller

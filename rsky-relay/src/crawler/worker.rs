@@ -48,7 +48,7 @@ impl Worker {
 
     #[expect(clippy::unnecessary_wraps)]
     pub fn run(mut self) -> Result<(), WorkerError> {
-        let span = tracing::debug_span!("crawler", id = %self.id);
+        let span = tracing::info_span!("crawler", id = %self.id);
         let _enter = span.enter();
         while self.update() {
             thread::yield_now();
@@ -90,11 +90,7 @@ impl Worker {
                         self.connections[idx] = Some(conn);
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "unable to requestCrawl");
-                        #[expect(clippy::expect_used)]
-                        self.status_tx
-                            .push(Status::Disconnected(self.id, config.hostname))
-                            .expect("unable to send status");
+                        tracing::warn!(host = %config.hostname, cursor = ?config.cursor, %err, "unable to requestCrawl");
                     }
                 }
             }
@@ -118,6 +114,7 @@ impl Worker {
             }
 
             let mut events = std::mem::take(&mut self.events);
+            events.clear();
             'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
                 self.poller
