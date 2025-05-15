@@ -45,7 +45,8 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
 
     if let Some(since) = &commit.since {
         if since != &prev.rev {
-            tracing::debug!(%since, "commit with miss-matching since");
+            // TODO: change back to debug
+            tracing::trace!(%since, "commit with miss-matching since");
         }
     } else {
         // NOTE: some PDSs don't send this field, so we continue verifying
@@ -54,7 +55,8 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
 
     if let Some(prev_data) = &commit.prev_data {
         if prev_data != &prev.data {
-            tracing::debug!(%prev_data, "commit with miss-matching prevData");
+            // TODO: change back to debug
+            tracing::trace!(%prev_data, "commit with miss-matching prevData");
         }
     } else {
         tracing::trace!("missing prev_data");
