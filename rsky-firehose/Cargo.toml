@@ -1,6 +1,6 @@
 [package]
 name = "rsky-firehose"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "A framework for subscribing to the AT Protocol firehose, in Rust."
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ documentation = "https://docs.rs/rsky-firehose"
 
 [dependencies]
 rsky-lexicon = { workspace = true }
+lexicon_cid = {workspace = true}
 ciborium = "0.2.0"
 futures = "0.3.28"
 tokio = { version = "1.28.0", features = ["full"] }
@@ -32,4 +33,4 @@ thiserror = "1.0.40"
 dotenvy = "0.15.7"
 retry = "2.0.0"
 anyhow = "1.0.81"
-libipld = { version = "0.16.0", features = ["serde-codec"] }
+multihash = "0.19"

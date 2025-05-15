@@ -1,4 +1,4 @@
-use libipld::cid::Cid;
+use lexicon_cid::Cid;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -78,7 +78,7 @@ pub fn read_blocks<T: Read>(mut reader: &mut T) -> Result<HashMap<Cid, Vec<u8>>,
 #[cfg(test)]
 mod tests {
 
-    use libipld::Multihash;
+    use multihash::Multihash;
 
     use super::*;
 
@@ -110,12 +110,10 @@ mod tests {
     fn test_read_header() {
         let header = Header {
             version: 1,
-            roots: vec![Cid::new(
-                libipld::cid::Version::V1,
+            roots: vec![Cid::new_v1(
                 1,
                 Multihash::from_bytes(&[0x01, 0x03, 0x01, 0x02, 0x03]).unwrap(),
-            )
-            .unwrap()],
+            )],
         };
         let serialized = serde_ipld_dagcbor::to_vec(&header).unwrap();
         let mut buffer = vec![serialized.len() as u8];
@@ -131,7 +129,7 @@ mod tests {
         let bytes = vec![0x01, 0x01, 0x02, 0x01, 0x01];
         let bytes_reader = Cursor::new(&bytes);
         let hash = Multihash::read(bytes_reader).unwrap();
-        let cid = Cid::new(libipld::cid::Version::V1, 1, hash).unwrap();
+        let cid = Cid::new_v1(1, hash);
 
         let chunk_len = bytes.len() + block.len();
 
