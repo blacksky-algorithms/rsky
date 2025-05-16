@@ -124,6 +124,11 @@ jobs:
   docker-build-push:
     needs: [build-and-test, determine-packages]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -209,6 +214,15 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Generate artifact attestation
+      - name: Generate artifact attestation
+        if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
