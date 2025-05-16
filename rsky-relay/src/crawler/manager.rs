@@ -4,14 +4,14 @@ use std::{io, thread};
 
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
 use crate::crawler::RequestCrawl;
 use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status, StatusReceiver};
 use crate::crawler::worker::{Worker, WorkerError};
-use crate::types::MessageSender;
+use crate::types::{Cursor, MessageSender};
 
 const CAPACITY: usize = 1024;
 const SLEEP: Duration = Duration::from_millis(10);
@@ -156,16 +156,29 @@ impl Manager {
     }
 
     fn handle_connect(&mut self, mut request_crawl: RequestCrawl) -> Result<(), ManagerError> {
-        let cursor: Option<u64> = {
-            let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
-            stmt.query_row((&request_crawl.hostname,), |row| Ok(row.get_unwrap("cursor")))
-                .optional()?
-        };
-        if let Some(cursor) = cursor {
-            request_crawl.cursor = Some(cursor.into());
+        if request_crawl.cursor.is_none() {
+            request_crawl.cursor = loop {
+                match self.get_cursor(&request_crawl.hostname) {
+                    Ok(cursor) => break cursor,
+                    Err(ManagerError::Sqlite(err))
+                        if err.sqlite_error_code() == Some(ErrorCode::DatabaseLocked) =>
+                    {
+                        continue;
+                    }
+                    Err(err) => Err(err)?,
+                }
+            };
         }
         self.workers[self.next_id].command_tx.push(Command::Connect(request_crawl))?;
         self.next_id = (self.next_id + 1) % self.workers.len();
         Ok(())
+    }
+
+    fn get_cursor(&self, host: &str) -> Result<Option<Cursor>, ManagerError> {
+        let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
+        Ok(stmt
+            .query_row((&host,), |row| Ok(row.get_unwrap::<_, u64>("cursor")))
+            .optional()?
+            .map(Into::into))
     }
 }
