@@ -78,8 +78,8 @@ jobs:
       - name: Run cargo check for ${{ matrix.package }}
         run: cargo check -p ${{ matrix.package }}
 
-  # Parallel build job for each package
-  build:
+  # Parallel build and test job for each package
+  build-and-test:
     needs: [determine-packages, check]
     runs-on: ubuntu-latest
     if: ${{ needs.determine-packages.outputs.packages != '[]' }}
@@ -106,25 +106,8 @@ jobs:
           shared-key: ${{ matrix.package }}
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
-
-  # Parallel test job for each package
-  test:
-    needs: [determine-packages, check, build]
-    runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.package }}
       - name: Run cargo test for ${{ matrix.package }}
-        run: cargo test -p ${{ matrix.package }}
+        run: cargo test --release -p ${{ matrix.package }}
 
   # Run formatting check on the entire workspace
   formatting:
@@ -137,9 +120,9 @@ jobs:
       - name: Run cargo fmt
         run: cargo fmt -- --check
 
-  # New job to build and push Docker images for specific packages
+  # Job to build and push Docker images for specific packages
   docker-build-push:
-    needs: [test, build, determine-packages]
+    needs: [build-and-test, determine-packages]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -230,7 +213,7 @@ jobs:
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
     runs-on: ubuntu-latest
-    needs: [check, build, test, formatting, docker-build-push]
+    needs: [check, build-and-test, formatting, docker-build-push]
     if: always()
     steps:
       - name: CI Success
