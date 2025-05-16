@@ -15,7 +15,20 @@ env:
   ORGANIZATION: blacksky-algorithms
 
 jobs:
+  # Wait for Rust CI workflow to complete
+  wait-for-rust-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Rust CI
+        uses: lewagon/wait-on-check-action@v1.3.1
+        with:
+          ref: ${{ github.ref }}
+          check-name: 'ci-success'  # This is the final job in the rust.yml workflow
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
   build-and-push:
+    needs: wait-for-rust-ci
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -53,8 +66,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
           tags: |
             type=sha,format=long
-            type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=main,enable={{is_default_branch}}
 
       - name: Build and push ${{ matrix.service.name }} Docker image
         uses: docker/build-push-action@v4
