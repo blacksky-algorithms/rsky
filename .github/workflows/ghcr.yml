@@ -15,20 +15,7 @@ env:
   ORGANIZATION: blacksky-algorithms
 
 jobs:
-  # Wait for Rust CI workflow to complete
-  wait-for-rust-ci:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for Rust CI
-        uses: lewagon/wait-on-check-action@v1.3.1
-        with:
-          ref: ${{ github.ref }}
-          check-name: 'ci-success'  # This is the final job in the rust.yml workflow
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
-
   build-and-push:
-    needs: wait-for-rust-ci
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
