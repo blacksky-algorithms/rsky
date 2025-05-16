@@ -23,10 +23,10 @@ jobs:
         service:
           - name: rsky-pds
             dockerfile: rsky-pds/Dockerfile
-          - name: rsky-jetstream-subscriber
-            dockerfile: rsky-jetstream-subscriber/Dockerfile
-          - name: rsky-firehose
-            dockerfile: rsky-firehose/Dockerfile
+          # - name: rsky-jetstream-subscriber
+          #   dockerfile: rsky-jetstream-subscriber/Dockerfile
+          # - name: rsky-firehose
+          #   dockerfile: rsky-firehose/Dockerfile
 
     permissions:
       contents: read
