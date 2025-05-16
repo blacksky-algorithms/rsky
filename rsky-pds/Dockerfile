@@ -5,7 +5,7 @@ FROM rust AS builder
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
-COPY Cargo.toml ./
+COPY Cargo.toml rust-toolchain ./
 COPY cypher cypher
 COPY rsky-common rsky-common
 COPY rsky-crypto rsky-crypto
@@ -15,12 +15,11 @@ COPY rsky-identity rsky-identity
 COPY rsky-jetstream-subscriber rsky-jetstream-subscriber
 COPY rsky-labeler rsky-labeler
 COPY rsky-lexicon rsky-lexicon
+COPY rsky-pds/Cargo.toml rsky-pds/Cargo.toml
 COPY rsky-relay rsky-relay
 COPY rsky-repo rsky-repo
 COPY rsky-satnav rsky-satnav
 COPY rsky-syntax rsky-syntax
-
-COPY rsky-pds/Cargo.toml rsky-pds/Cargo.toml
 
 # Create an empty src directory to trick Cargo into thinking it's a valid Rust project
 RUN mkdir rsky-pds/src && echo "fn main() {}" > rsky-pds/src/main.rs

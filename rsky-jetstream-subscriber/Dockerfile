@@ -31,10 +31,8 @@ COPY rsky-jetstream-subscriber/src rsky-jetstream-subscriber/src
 RUN cargo build --release --package rsky-jetstream-subscriber
 
 
-FROM rust
-
+FROM debian:bullseye-slim
 WORKDIR /usr/src/rsky
-
 COPY --from=builder /usr/src/rsky/target/release/rsky-jetstream-subscriber rsky-jetstream-subscriber
 
 CMD ["./rsky-jetstream-subscriber"]
