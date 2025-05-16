@@ -2,13 +2,17 @@ name: Build and Publish Docker Images to GHCR
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
     paths:
-      - 'rsky-pds/**'
-      - 'rsky-jetstream-subscriber/**'
-      - 'rsky-firehose/**'
       - '.github/workflows/ghcr.yml'
-  workflow_dispatch:
+      - 'rsky-pds/**'
+      - 'Cargo.toml'       # Base workspace configuration
+      - 'Cargo.lock'       # Dependency lock file
+      - 'rust-toolchain'
+      # - 'rsky-jetstream-subscriber/**'
+      # - 'rsky-firehose/**'
+      # Add other important base paths as needed
 
 env:
   REGISTRY: ghcr.io
