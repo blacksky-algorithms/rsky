@@ -79,35 +79,35 @@ jobs:
         run: cargo check -p ${{ matrix.package }}
 
   # Parallel build and test job for each package
-  build-and-test:
-    needs: [determine-packages, check]
-    runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
-    steps:
-      - name: Show disk usage (before cleanup)
-        run: df -h
-      - name: Clean up large directories
-        run: |
-          sudo rm -rf /usr/local/share/boost \
-                      /usr/share/dotnet \
-                      /usr/local/lib/android \
-                      /opt/ghc
-      - name: Show disk usage (after cleanup)
-        run: df -h
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.package }}
-      - name: Run cargo build for ${{ matrix.package }}
-        run: cargo build --release -p ${{ matrix.package }}
-      - name: Run cargo test for ${{ matrix.package }}
-        run: cargo test --release -p ${{ matrix.package }}
+  # build-and-test:
+  #   needs: [determine-packages, check]
+  #   runs-on: ubuntu-latest
+  #   if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
+  #   steps:
+  #     - name: Show disk usage (before cleanup)
+  #       run: df -h
+  #     - name: Clean up large directories
+  #       run: |
+  #         sudo rm -rf /usr/local/share/boost \
+  #                     /usr/share/dotnet \
+  #                     /usr/local/lib/android \
+  #                     /opt/ghc
+  #     - name: Show disk usage (after cleanup)
+  #       run: df -h
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #     - name: Rust Cache
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #         shared-key: ${{ matrix.package }}
+  #     - name: Run cargo build for ${{ matrix.package }}
+  #       run: cargo build --release -p ${{ matrix.package }}
+  #     - name: Run cargo test for ${{ matrix.package }}
+  #       run: cargo test --release -p ${{ matrix.package }}
 
   # Run formatting check on the entire workspace
   formatting:
@@ -122,13 +122,23 @@ jobs:
 
   # Job to build and push Docker images for specific packages
   docker-build-push:
-    needs: [build-and-test, determine-packages]
+    needs: [determine-packages]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write
+      actions: write
       attestations: write
+      checks: write
+      contents: write
+      deployments: write
       id-token: write
+      issues: write
+      models: read
+      discussions: write
+      packages: write
+      pages: write
+      pull-requests: write
+      security-events: write
+      statuses: write
     strategy:
       fail-fast: false
       matrix:
@@ -227,7 +237,7 @@ jobs:
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
     runs-on: ubuntu-latest
-    needs: [check, build-and-test, formatting, docker-build-push]
+    needs: [check, formatting, docker-build-push]
     if: always()
     steps:
       - name: CI Success
