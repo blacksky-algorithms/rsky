@@ -181,7 +181,7 @@ jobs:
         with:
           buildkitd-flags: --debug
           driver-opts: |
-            image=moby/buildkit:v0.10.6
+            image=moby/buildkit:latest
         
       # Log in to GitHub Container Registry
       - name: Login to GitHub Container Registry
