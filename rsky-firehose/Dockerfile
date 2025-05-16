@@ -40,11 +40,11 @@ COPY rsky-syntax rsky-syntax
 RUN mkdir rsky-firehose/src && echo "fn main() {}" > rsky-firehose/src/main.rs
 
 ## Install production dependencies and build a release artifact.
-RUN cargo build --release --package rsky-jetstream-subscriber
+RUN cargo build --release --package rsky-firehose
 
-COPY rsky-jetstream-subscriber/src rsky-jetstream-subscriber/src
+COPY rsky-firehose/src rsky-firehose/src
 
-RUN cargo build --release --package rsky-jetstream-subscriber
+RUN cargo build --release --package 
 
 
 FROM rust
