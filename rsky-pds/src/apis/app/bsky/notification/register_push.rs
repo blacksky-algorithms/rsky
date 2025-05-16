@@ -9,7 +9,7 @@ use atrium_api::app::bsky::notification::register_push::{
 };
 use atrium_api::client::AtpServiceClient;
 use atrium_api::types::string::Did;
-use atrium_ipld::ipld::Ipld as AtriumIpld;
+use ipld_core::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use rocket::serde::json::Json;
 use rocket::State;

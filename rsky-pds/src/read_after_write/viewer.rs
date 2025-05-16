@@ -20,7 +20,7 @@ use atrium_api::app::bsky::graph::get_list::{
     ParametersData as AppBskyGraphGetListData,
 };
 use atrium_api::client::AtpServiceClient;
-use atrium_ipld::ipld::Ipld as AtriumIpld;
+use ipld_core::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use diesel::*;
 use futures::stream::{self, StreamExt};
