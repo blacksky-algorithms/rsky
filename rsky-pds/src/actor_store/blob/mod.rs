@@ -14,7 +14,7 @@ use futures::try_join;
 use lexicon_cid::Cid;
 use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
-use rsky_common::ipld::{sha256_to_cid};
+use rsky_common::ipld::sha256_to_cid;
 use rsky_common::now;
 use rsky_lexicon::blob_refs::BlobRef;
 use rsky_lexicon::com::atproto::admin::StatusAttr;

@@ -20,10 +20,10 @@ use atrium_api::app::bsky::graph::get_list::{
     ParametersData as AppBskyGraphGetListData,
 };
 use atrium_api::client::AtpServiceClient;
-use ipld_core::ipld::Ipld as AtriumIpld;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
 use diesel::*;
 use futures::stream::{self, StreamExt};
+use ipld_core::ipld::Ipld as AtriumIpld;
 use lexicon_cid::Cid;
 use reqwest::header::HeaderMap;
 use rsky_common::beginning_of_time;
