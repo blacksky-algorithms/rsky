@@ -1,7 +1,7 @@
 # Use the official Rust image.
 # https://hub.docker.com/_/rust
 # FROM --platform=linux/amd64 rust AS builder
-FROM rust as builder
+FROM rust AS builder
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
@@ -37,11 +37,8 @@ RUN cargo build --release --package rsky-pds
 
 # FROM --platform=linux/amd64 rust
 FROM debian:bullseye-slim
-RUN apt-get update && apt-get install -y extra-runtime-dependencies && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /usr/src/rsky
-
 COPY --from=builder /usr/src/rsky/target/release/rsky-pds rsky-pds
 
 # Run the web service on container startup with the same environment variables
-CMD ["sh", "-c", "ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0" "./rsky-pds"]
+CMD ["sh", "-c", "ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0", "./rsky-pds"]
