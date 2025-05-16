@@ -1,10 +1,10 @@
 # Use the official Rust image.
 # https://hub.docker.com/_/rust
-FROM --platform=linux/amd64 rust AS builder
+FROM rust AS builder
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
-COPY Cargo.toml Cargo.lock rust-toolchain ./
+COPY Cargo.toml rust-toolchain ./
 COPY rsky-lexicon rsky-lexicon
 COPY rsky-identity rsky-identity
 COPY rsky-syntax rsky-syntax
@@ -27,7 +27,7 @@ COPY rsky-jetstream-subscriber/src rsky-jetstream-subscriber/src
 RUN cargo build --release --package rsky-jetstream-subscriber
 
 
-FROM --platform=linux/amd64 rust
+FROM rust
 
 WORKDIR /usr/src/rsky
 
