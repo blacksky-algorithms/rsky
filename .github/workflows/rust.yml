@@ -128,14 +128,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        service:
-          - name: rsky-pds
-            dockerfile: rsky-pds/Dockerfile
-          - name: rsky-jetstream-subscriber
-            dockerfile: rsky-jetstream-subscriber/Dockerfile
-          - name: rsky-firehose
-            dockerfile: rsky-firehose/Dockerfile
+      # matrix:
+      #   service:
+      #     - name: rsky-pds
+      #       dockerfile: rsky-pds/Dockerfile
+      #     - name: rsky-jetstream-subscriber
+      #       dockerfile: rsky-jetstream-subscriber/Dockerfile
+      #     - name: rsky-firehose
+      #       dockerfile: rsky-firehose/Dockerfile
     # We need to run job-level if to check matrix values
     if: ${{ always() }}
     steps:
@@ -149,11 +149,11 @@ jobs:
           PACKAGES="${PACKAGES//,/ }"
           
           # Check if our service name is in the list
-          if [[ $PACKAGES == *"${{ matrix.service.name }}"* ]]; then
+          if [[ $PACKAGES == *"rsky-pds"* ]]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Package ${{ matrix.service.name }} not in determined packages, skipping"
+            echo "Package rsky-pds not in determined packages, skipping"
           fi
       
       - name: Checkout code
@@ -178,28 +178,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      # Extract metadata for Docker
       - name: Extract Docker metadata
         if: steps.check-package.outputs.should_run == 'true'
         id: meta
         uses: docker/metadata-action@v5.7.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
+          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-pds
           tags: |
             # Always add the git commit SHA
             type=sha,format=long
             # Add 'main' tag if this is on the main branch
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            
+                
       # Check if Dockerfile exists for the package
       - name: Check for Dockerfile
         if: steps.check-package.outputs.should_run == 'true'
         id: dockerfile-check
         run: |
-          if [ -f "${{ matrix.service.dockerfile }}" ]; then
+          if [ -f "rsky-pds/Dockerfile" ]; then
             echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
           else
-            echo "No Dockerfile found at ${{ matrix.service.dockerfile }}, skipping Docker build"
+            echo "No Dockerfile found at rsky-pds/Dockerfile, skipping Docker build"
             echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
           fi
       
@@ -209,7 +208,7 @@ jobs:
         uses: docker/build-push-action@v6.17.0
         with:
           context: .
-          file: ${{ matrix.service.dockerfile }}
+          file: rsky-pds/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -221,7 +220,7 @@ jobs:
         if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-pds
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
@@ -239,3 +238,64 @@ jobs:
         run: |
           echo "Some CI jobs failed!"
           exit 1
+      # Extract metadata for Docker
+  #     - name: Extract Docker metadata
+  #       if: steps.check-package.outputs.should_run == 'true'
+  #       id: meta
+  #       uses: docker/metadata-action@v5.7.0
+  #       with:
+  #         images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
+  #         tags: |
+  #           # Always add the git commit SHA
+  #           type=sha,format=long
+  #           # Add 'main' tag if this is on the main branch
+  #           type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            
+  #     # Check if Dockerfile exists for the package
+  #     - name: Check for Dockerfile
+  #       if: steps.check-package.outputs.should_run == 'true'
+  #       id: dockerfile-check
+  #       run: |
+  #         if [ -f "${{ matrix.service.dockerfile }}" ]; then
+  #           echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "No Dockerfile found at ${{ matrix.service.dockerfile }}, skipping Docker build"
+  #           echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
+  #         fi
+      
+  #     # Build and push the Docker image
+  #     - name: Build and push Docker image
+  #       if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+  #       uses: docker/build-push-action@v6.17.0
+  #       with:
+  #         context: .
+  #         file: ${{ matrix.service.dockerfile }}
+  #         push: true
+  #         tags: ${{ steps.meta.outputs.tags }}
+  #         labels: ${{ steps.meta.outputs.labels }}
+  #         cache-from: type=gha
+  #         cache-to: type=gha,mode=max
+
+  #     # Generate artifact attestation
+  #     - name: Generate artifact attestation
+  #       if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+  #       uses: actions/attest-build-provenance@v2
+  #       with:
+  #         subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
+  #         subject-digest: ${{ steps.push.outputs.digest }}
+  #         push-to-registry: true
+
+  # # Optional: Add a final job that depends on all tests to signal success
+  # ci-success:
+  #   runs-on: ubuntu-latest
+  #   needs: [check, formatting, docker-build-push]
+  #   if: always()
+  #   steps:
+  #     - name: CI Success
+  #       if: ${{ !contains(needs.*.result, 'failure') }}
+  #       run: echo "All CI jobs passed!"
+  #     - name: CI Failed
+  #       if: ${{ contains(needs.*.result, 'failure') }}
+  #       run: |
+  #         echo "Some CI jobs failed!"
+  #         exit 1
