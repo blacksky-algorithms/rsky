@@ -34,7 +34,7 @@ integer-encoding = { version = "3", features = ["tokio_async"] }
 rand = "0.8.5"
 rand_core = "0.6.4"
 secp256k1 = {workspace = true}
-libipld = {workspace = true}
+ipld-core = {workspace = true}
 iroh-car = "0.5.1"
 
 regex = "1.10.3"

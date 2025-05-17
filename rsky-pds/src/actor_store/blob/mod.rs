@@ -14,7 +14,7 @@ use futures::try_join;
 use lexicon_cid::Cid;
 use rocket::data::{Data, ToByteUnit};
 use rocket::form::validate::Contains;
-use rsky_common::ipld::sha256_raw_to_cid;
+use rsky_common::ipld::sha256_to_cid;
 use rsky_common::now;
 use rsky_lexicon::blob_refs::BlobRef;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
@@ -152,8 +152,7 @@ impl BlobReader {
             image::maybe_get_info(bytes.clone()),
             image::mime_type_from_bytes(bytes.clone())
         )?;
-
-        let cid = sha256_raw_to_cid(sha256);
+        let cid = sha256_to_cid(sha256);
         let mime_type = sniffed_mime.unwrap_or(user_suggested_mime);
 
         Ok(BlobMetadata {
