@@ -10,7 +10,7 @@ use atrium_api::app::bsky::feed::get_feed_generator::{
     Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
     ParametersData as AppBskyFeedGetFeedGeneratorData,
 };
-use atrium_ipld::ipld::Ipld as AtriumIpld;
+use ipld_core::ipld::Ipld as AtriumIpld;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
