@@ -27,5 +27,5 @@ pub enum Command {
 
 #[derive(Debug)]
 pub enum Status {
-    Disconnected(usize, String),
+    Disconnected { worker_id: usize, hostname: String, connected: bool },
 }

@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
+use exponential_backoff::{Backoff, IntoIter as BackoffIter};
+use hashbrown::HashMap;
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
@@ -45,6 +48,8 @@ struct WorkerHandle {
 pub struct Manager {
     workers: Box<[WorkerHandle]>,
     next_id: usize,
+    hosts: HashMap<String, [BackoffIter; 2]>,
+    retries: BTreeMap<Instant, (usize, String)>,
     conn: Connection,
     request_crawl_rx: RequestCrawlReceiver,
     status_rx: StatusReceiver,
@@ -76,6 +81,8 @@ impl Manager {
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: 0,
+            hosts: HashMap::new(),
+            retries: BTreeMap::new(),
             conn,
             request_crawl_rx,
             status_rx,
@@ -83,19 +90,6 @@ impl Manager {
     }
 
     pub fn run(mut self) -> Result<(), ManagerError> {
-        let mut requests = Vec::new();
-        {
-            let mut stmt = self.conn.prepare_cached("SELECT host, cursor FROM hosts")?;
-            let mut rows = stmt.query(())?;
-            while let Some(row) = rows.next()? {
-                let hostname = row.get_unwrap("host");
-                let cursor: u64 = row.get_unwrap("cursor");
-                requests.push(RequestCrawl { hostname, cursor: Some(cursor.into()) });
-            }
-        }
-        for request in requests {
-            self.handle_connect(request)?;
-        }
         while self.update()? {
             thread::sleep(SLEEP);
         }
@@ -121,19 +115,22 @@ impl Manager {
             return Ok(false);
         }
 
-        if let Ok(status) = self.status_rx.try_pop() {
-            if !self.handle_status(status)? {
-                return Ok(false);
+        if let Some(entry) = self.retries.first_entry() {
+            if *entry.key() < Instant::now() {
+                let (id, hostname) = entry.remove();
+                let prev = self.next_id;
+                self.next_id = id;
+                self.handle_connect(RequestCrawl { hostname, cursor: None })?;
+                self.next_id = prev;
             }
         }
 
+        if let Ok(status) = self.status_rx.try_pop() {
+            self.handle_status(status);
+        }
+
         if let Ok(request_crawl) = self.request_crawl_rx.pop() {
-            let exists = {
-                let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
-                stmt.exists((&request_crawl.hostname,))?
-            };
-            if !exists {
-                thread::sleep(SLEEP);
+            if !self.hosts.contains_key(&request_crawl.hostname) {
                 self.handle_connect(request_crawl)?;
             }
         }
@@ -141,21 +138,27 @@ impl Manager {
         Ok(true)
     }
 
-    fn handle_status(&mut self, status: Status) -> Result<bool, ManagerError> {
+    fn handle_status(&mut self, status: Status) {
         match status {
-            Status::Disconnected(id, hostname) => {
-                // TODO: add proper backoff
-                thread::sleep(SLEEP * 1000);
-                let prev = self.next_id;
-                self.next_id = id;
-                self.handle_connect(RequestCrawl { hostname, cursor: None })?;
-                self.next_id = prev;
+            Status::Disconnected { worker_id: id, hostname, connected } => {
+                #[expect(clippy::unwrap_used)]
+                let backoff =
+                    self.hosts.get_mut(&hostname).unwrap().get_mut(usize::from(connected)).unwrap();
+                let Some(Some(delay)) = backoff.next() else { unreachable!() };
+                let next = Instant::now() + delay;
+                assert!(self.retries.insert(next, (id, hostname)).is_none());
             }
         }
-        Ok(true)
     }
 
     fn handle_connect(&mut self, mut request_crawl: RequestCrawl) -> Result<(), ManagerError> {
+        self.hosts.entry(request_crawl.hostname.clone()).or_insert_with(|| {
+            let backoff_connect =
+                Backoff::new(u32::MAX, Duration::from_secs(60), Duration::from_secs(60 * 60 * 6));
+            let backoff_reconnect =
+                Backoff::new(u32::MAX, Duration::from_secs(1), Duration::from_secs(60 * 60));
+            [backoff_connect.iter(), backoff_reconnect.iter()]
+        });
         if request_crawl.cursor.is_none() {
             request_crawl.cursor = loop {
                 match self.get_cursor(&request_crawl.hostname) {
@@ -171,6 +174,7 @@ impl Manager {
         }
         self.workers[self.next_id].command_tx.push(Command::Connect(request_crawl))?;
         self.next_id = (self.next_id + 1) % self.workers.len();
+        thread::sleep(SLEEP);
         Ok(())
     }
 

@@ -91,6 +91,14 @@ impl Worker {
                     }
                     Err(err) => {
                         tracing::warn!(host = %config.hostname, cursor = ?config.cursor, %err, "unable to requestCrawl");
+                        #[expect(clippy::expect_used)]
+                        self.status_tx
+                            .push(Status::Disconnected {
+                                worker_id: self.id,
+                                hostname: config.hostname,
+                                connected: false,
+                            })
+                            .expect("unable to send status");
                     }
                 }
             }
@@ -150,7 +158,11 @@ impl Worker {
                     self.poller.delete(&mut *conn).expect("failed to deregister");
                     #[expect(clippy::expect_used)]
                     self.status_tx
-                        .push(Status::Disconnected(self.id, conn.hostname.clone()))
+                        .push(Status::Disconnected {
+                            worker_id: self.id,
+                            hostname: conn.hostname.clone(),
+                            connected: true,
+                        })
                         .expect("unable to send status");
                     self.connections[idx] = None;
                 }

@@ -11,6 +11,7 @@ ciborium = "0.2"
 cid = { version = "0.10", features = ["serde-codec"] }
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
+exponential-backoff = "2"
 file-rotate = "0.8"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hashbrown = "0.15"
