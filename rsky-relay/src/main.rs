@@ -24,8 +24,8 @@ use rsky_relay::{
     ValidatorManager,
 };
 
-const CAPACITY1: usize = 1 << 16;
-const CAPACITY2: usize = 1 << 10;
+const CAPACITY1: usize = 1 << 18;
+const CAPACITY2: usize = 1 << 16;
 const WORKERS: usize = 4;
 
 #[global_allocator]

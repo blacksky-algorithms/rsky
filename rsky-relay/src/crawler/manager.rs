@@ -16,7 +16,7 @@ use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status
 use crate::crawler::worker::{Worker, WorkerError};
 use crate::types::{Cursor, MessageSender};
 
-const CAPACITY: usize = 1024;
+const CAPACITY: usize = 1 << 12;
 const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
