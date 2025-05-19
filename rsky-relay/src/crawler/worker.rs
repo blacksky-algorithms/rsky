@@ -1,13 +1,20 @@
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
 use magnetic::Producer;
 use polling::{Event, Events, PollMode, Poller};
 use thiserror::Error;
 
+use crate::SHUTDOWN;
 use crate::crawler::connection::{Connection, ConnectionError};
-use crate::crawler::types::{Command, CommandReceiver, Status, StatusSender};
+use crate::crawler::types::{
+    Command, CommandReceiver, DecomposeError, HandshakeResult, Handshaking, Status, StatusSender,
+};
 use crate::types::MessageSender;
+
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -19,6 +26,7 @@ pub enum WorkerError {
 
 pub struct Worker {
     id: usize,
+    pending: VecDeque<(Instant, String, Handshaking)>,
     connections: Vec<Option<Connection>>,
     next_idx: usize,
     message_tx: MessageSender,
@@ -36,6 +44,7 @@ impl Worker {
         let events = Events::new();
         Ok(Self {
             id,
+            pending: VecDeque::new(),
             connections: Vec::new(),
             next_idx: 0,
             message_tx,
@@ -64,48 +73,66 @@ impl Worker {
         }
     }
 
-    fn handle_command(&mut self, command: Command) -> bool {
+    fn handle_command(&mut self, command: Command) {
         match command {
             Command::Connect(config) => {
                 tracing::info!(host = %config.hostname, cursor = ?config.cursor, "starting crawl");
-                match Connection::connect(
-                    config.hostname.clone(),
-                    config.cursor,
-                    self.message_tx.clone(),
-                ) {
-                    Ok(conn) => {
-                        let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(
-                            || {
-                                let idx = self.connections.len();
-                                self.connections.push(None);
-                                idx
-                            },
-                        );
-                        #[expect(clippy::expect_used)]
-                        unsafe {
-                            self.poller
-                                .add_with_mode(&conn, Event::readable(idx), PollMode::Level)
-                                .expect("unable to register");
-                        }
-                        self.connections[idx] = Some(conn);
-                    }
-                    Err(err) => {
-                        tracing::warn!(host = %config.hostname, cursor = ?config.cursor, %err, "unable to requestCrawl");
-                    }
-                }
-            }
-            Command::Shutdown => {
-                return false;
+                let res = Connection::connect(&config.hostname, config.cursor);
+                self.handle_connect(Instant::now(), config.hostname, res);
             }
         }
-        true
+    }
+
+    fn handle_connect(&mut self, start: Instant, hostname: String, result: HandshakeResult) {
+        match result {
+            Ok(Ok(client)) => {
+                let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(|| {
+                    let idx = self.connections.len();
+                    self.connections.push(None);
+                    idx
+                });
+                let conn = Connection::new(hostname, client, self.message_tx.clone());
+                #[expect(clippy::expect_used)]
+                unsafe {
+                    self.poller
+                        .add_with_mode(&conn, Event::readable(idx), PollMode::Level)
+                        .expect("unable to register");
+                }
+                self.connections[idx] = Some(conn);
+                return;
+            }
+            Ok(Err(handshaking)) if start.elapsed() < TIMEOUT => {
+                self.pending.push_back((Instant::now(), hostname, handshaking));
+                return;
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(host = %hostname, "requestCrawl timeout");
+            }
+            Err(err) => {
+                tracing::warn!(host = %hostname, %err, "unable to requestCrawl");
+            }
+        }
+
+        #[expect(clippy::expect_used)]
+        self.status_tx
+            .push(Status::Disconnected { worker_id: self.id, hostname, connected: false })
+            .expect("unable to send status");
     }
 
     fn update(&mut self) -> bool {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return false;
+        }
+
         for _ in 0..32 {
-            if let Ok(command) = self.command_rx.pop() {
-                if !self.handle_command(command) {
-                    return false;
+            if let Some((start, hostname, handshaking)) = self.pending.pop_front() {
+                let res = handshaking.handshake().decompose();
+                self.handle_connect(start, hostname, res);
+            }
+
+            if self.pending.len() < 16 {
+                if let Ok(command) = self.command_rx.pop() {
+                    self.handle_command(command);
                 }
             }
 
@@ -150,7 +177,11 @@ impl Worker {
                     self.poller.delete(&mut *conn).expect("failed to deregister");
                     #[expect(clippy::expect_used)]
                     self.status_tx
-                        .push(Status::Disconnected(self.id, conn.hostname.clone()))
+                        .push(Status::Disconnected {
+                            worker_id: self.id,
+                            hostname: conn.hostname.clone(),
+                            connected: true,
+                        })
                         .expect("unable to send status");
                     self.connections[idx] = None;
                 }

@@ -62,14 +62,11 @@ impl Manager {
             thread::sleep(SLEEP);
         }
         tracing::info!("shutting down publisher");
-        SHUTDOWN.store(true, Ordering::Relaxed);
         self.shutdown()
     }
 
-    pub fn shutdown(mut self) -> Result<(), ManagerError> {
-        for worker in &mut self.workers {
-            worker.command_tx.push(Command::Shutdown)?;
-        }
+    pub fn shutdown(self) -> Result<(), ManagerError> {
+        SHUTDOWN.store(true, Ordering::Relaxed);
         for (id, worker) in self.workers.into_iter().enumerate() {
             if let Err(err) = worker.thread_handle.join().map_err(|_| ManagerError::Join)? {
                 tracing::warn!(%id, %err, "publisher worker error");

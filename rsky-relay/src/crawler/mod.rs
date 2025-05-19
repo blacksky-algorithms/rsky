@@ -1,3 +1,4 @@
+mod client;
 mod connection;
 mod manager;
 mod types;
