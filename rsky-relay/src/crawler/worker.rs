@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::{io, thread};
 
@@ -5,6 +6,7 @@ use magnetic::Producer;
 use polling::{Event, Events, PollMode, Poller};
 use thiserror::Error;
 
+use crate::SHUTDOWN;
 use crate::crawler::connection::{Connection, ConnectionError};
 use crate::crawler::types::{Command, CommandReceiver, Status, StatusSender};
 use crate::types::MessageSender;
@@ -64,7 +66,7 @@ impl Worker {
         }
     }
 
-    fn handle_command(&mut self, command: Command) -> bool {
+    fn handle_command(&mut self, command: Command) {
         match command {
             Command::Connect(config) => {
                 tracing::info!(host = %config.hostname, cursor = ?config.cursor, "starting crawl");
@@ -102,19 +104,17 @@ impl Worker {
                     }
                 }
             }
-            Command::Shutdown => {
-                return false;
-            }
         }
-        true
     }
 
     fn update(&mut self) -> bool {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return false;
+        }
+
         for _ in 0..32 {
             if let Ok(command) = self.command_rx.pop() {
-                if !self.handle_command(command) {
-                    return false;
-                }
+                self.handle_command(command);
             }
 
             if self.message_tx.remaining() < 16 {

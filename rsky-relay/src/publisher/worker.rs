@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::{io, thread};
 
@@ -6,6 +7,7 @@ use polling::{Event, Events, PollMode, Poller};
 use sled::Tree;
 use thiserror::Error;
 
+use crate::SHUTDOWN;
 use crate::publisher::connection::{Connection, ConnectionError};
 use crate::publisher::types::{Command, CommandReceiver};
 use crate::types::{Cursor, DB};
@@ -56,7 +58,7 @@ impl Worker {
         }
     }
 
-    fn handle_command(&mut self, command: Command, mut seq: Cursor) -> bool {
+    fn handle_command(&mut self, command: Command, mut seq: Cursor) {
         match command {
             Command::Connect(config) => {
                 tracing::info!(addr = %config.addr, cursor = ?config.cursor, "starting publish");
@@ -86,19 +88,17 @@ impl Worker {
                     }
                 }
             }
-            Command::Shutdown => {
-                return false;
-            }
         }
-        true
     }
 
     fn update(&mut self, seq: &mut Cursor) -> Result<bool, WorkerError> {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
         for _ in 0..32 {
             if let Ok(command) = self.command_rx.pop() {
-                if !self.handle_command(command, *seq) {
-                    return Ok(false);
-                }
+                self.handle_command(command, *seq);
             }
 
             for msg in self.firehose.range((*seq + 1)..=(*seq + 32)) {

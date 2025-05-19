@@ -22,7 +22,6 @@ pub struct RequestCrawl {
 #[derive(Debug)]
 pub enum Command {
     Connect(RequestCrawl),
-    Shutdown,
 }
 
 #[derive(Debug)]
