@@ -13,7 +13,7 @@ on:
       - 'rust-toolchain'
       # Add other important base paths as needed
 
-permissions: write-all
+
 
 env:
   PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
@@ -124,6 +124,7 @@ jobs:
 
   # Job to build and push Docker images for specific packages
   docker-build-push:
+    permissions: write-all
     needs: [determine-packages]
     runs-on: ubuntu-latest
     strategy:
@@ -149,11 +150,11 @@ jobs:
           PACKAGES="${PACKAGES//,/ }"
           
           # Check if our service name is in the list
-          if [[ $PACKAGES == *"rsky-pds"* ]]; then
+          if [[ $PACKAGES == *"rsky-firehose"* ]]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Package rsky-pds not in determined packages, skipping"
+            echo "Package rsky-firehose not in determined packages, skipping"
           fi
       
       - name: Checkout code
@@ -183,7 +184,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5.7.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-pds
+          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-firehose
           tags: |
             # Always add the git commit SHA
             type=sha,format=long
@@ -195,10 +196,10 @@ jobs:
         if: steps.check-package.outputs.should_run == 'true'
         id: dockerfile-check
         run: |
-          if [ -f "rsky-pds/Dockerfile" ]; then
+          if [ -f "rsky-firehose/Dockerfile" ]; then
             echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
           else
-            echo "No Dockerfile found at rsky-pds/Dockerfile, skipping Docker build"
+            echo "No Dockerfile found at rsky-firehose/Dockerfile, skipping Docker build"
             echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
           fi
       
@@ -208,7 +209,7 @@ jobs:
         uses: docker/build-push-action@v6.17.0
         with:
           context: .
-          file: rsky-pds/Dockerfile
+          file: rsky-firehose/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -220,7 +221,7 @@ jobs:
         if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-pds
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
