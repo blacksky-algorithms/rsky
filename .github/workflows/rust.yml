@@ -124,7 +124,8 @@ jobs:
 
   # Job to build and push Docker images for specific packages
   docker-build-push:
-    permissions: write-all
+    permissions:
+      packages: write
     needs: [determine-packages]
     runs-on: ubuntu-latest
     strategy:
@@ -177,7 +178,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Extract Docker metadata
         if: steps.check-package.outputs.should_run == 'true'
