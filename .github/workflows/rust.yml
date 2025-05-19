@@ -128,7 +128,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
-      contents: read
+      contents: write
+      attestations: write
     strategy:
       fail-fast: false
       # matrix:
@@ -223,7 +224,7 @@ jobs:
         if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-firehose
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
