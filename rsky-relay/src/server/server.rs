@@ -171,7 +171,7 @@ impl Server {
         // only peek to allow tungstenite to complete the handshake
         #[expect(clippy::unwrap_used)]
         let len = stream.0.as_mut().unwrap().peek(&mut self.buf)?;
-        let mut headers = [EMPTY_HEADER; 16];
+        let mut headers = [EMPTY_HEADER; 32];
         let mut parser = httparse::Request::new(&mut headers);
         // try parsing as an HTTP request
         let res = parser.parse(&self.buf)?;
