@@ -1,13 +1,14 @@
 use std::io;
-use std::net::TcpStream;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use thingbuf::mpsc;
 use thiserror::Error;
+use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 use url::Url;
 
+use crate::crawler::client;
+use crate::crawler::types::{HandshakeResult, WebSocketClient};
 use crate::types::{Cursor, MessageSender};
 
 #[derive(Debug, Error)]
@@ -22,7 +23,7 @@ pub enum ConnectionError {
 
 pub struct Connection {
     pub(crate) hostname: String,
-    client: WebSocket<MaybeTlsStream<TcpStream>>,
+    client: WebSocketClient,
     message_tx: MessageSender,
 }
 
@@ -49,26 +50,18 @@ impl AsRawFd for Connection {
 }
 
 impl Connection {
-    pub fn connect(
-        hostname: String, cursor: Option<Cursor>, message_tx: MessageSender,
-    ) -> Result<Self, ConnectionError> {
+    pub const fn new(hostname: String, client: WebSocketClient, message_tx: MessageSender) -> Self {
+        Self { hostname, client, message_tx }
+    }
+
+    pub fn connect(hostname: &str, cursor: Option<Cursor>) -> HandshakeResult {
         #[expect(clippy::unwrap_used)]
         let mut url =
             Url::parse(&format!("wss://{hostname}/xrpc/com.atproto.sync.subscribeRepos")).unwrap();
         if let Some(cursor) = cursor {
             url.query_pairs_mut().append_pair("cursor", &cursor.to_string());
         }
-        let (client, _) = tungstenite::connect(url)?;
-        match client.get_ref() {
-            MaybeTlsStream::Rustls(stream) => {
-                stream.get_ref().set_nonblocking(true)?;
-            }
-            MaybeTlsStream::Plain(stream) => {
-                stream.set_nonblocking(true)?;
-            }
-            _ => {}
-        }
-        Ok(Self { hostname, client, message_tx })
+        client::connect(url)
     }
 
     pub fn close(&mut self) -> Result<(), ConnectionError> {
