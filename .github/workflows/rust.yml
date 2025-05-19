@@ -124,10 +124,11 @@ jobs:
 
   # Job to build and push Docker images for specific packages
   docker-build-push:
-    permissions:
-      packages: write
     needs: [determine-packages]
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
     strategy:
       fail-fast: false
       # matrix:
