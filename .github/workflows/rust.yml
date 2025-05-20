@@ -35,7 +35,7 @@ env:
   PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: 71cfcf4882a6cff494c3d0affadd3858eb3a5838e7b5e15170e696a590a4fa01
   # Docker build configuration
   REGISTRY: ghcr.io
-  ORGANIZATION: afbase
+  ORGANIZATION: blacksky-algorithms
 
 jobs:
   # First determine which workspace packages need to be processed
