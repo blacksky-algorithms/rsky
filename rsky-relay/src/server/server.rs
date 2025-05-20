@@ -171,7 +171,7 @@ impl Server {
         // only peek to allow tungstenite to complete the handshake
         #[expect(clippy::unwrap_used)]
         let len = stream.0.as_mut().unwrap().peek(&mut self.buf)?;
-        let mut headers = [EMPTY_HEADER; 16];
+        let mut headers = [EMPTY_HEADER; 32];
         let mut parser = httparse::Request::new(&mut headers);
         // try parsing as an HTTP request
         let res = parser.parse(&self.buf)?;
@@ -249,11 +249,10 @@ impl Server {
             }
             let url =
                 Url::parse_with_params(&format!("https://{BSKY_RELAY}/{LIST_HOSTS}"), params)?;
-            let hosts: ListHosts = client.get(url).send()?.json()?;
-            for host in hosts.hosts {
-                if host.account_count > 100
-                    && matches!(host.status, HostStatus::Active | HostStatus::Idle)
-                {
+            let mut hosts: ListHosts = client.get(url).send()?.json()?;
+            hosts.hosts.sort_unstable_by_key(|host| host.account_count);
+            for host in hosts.hosts.into_iter().rev() {
+                if matches!(host.status, HostStatus::Active | HostStatus::Idle) {
                     self.request_crawl_tx
                         .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
                 }

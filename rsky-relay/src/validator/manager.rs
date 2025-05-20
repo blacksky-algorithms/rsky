@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTimeError, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTimeError, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use hashbrown::HashMap;
@@ -18,6 +18,7 @@ use crate::validator::types::RepoState;
 use crate::validator::utils;
 
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
+const EXPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -51,6 +52,7 @@ pub struct Manager {
     hosts: HashMap<String, (Cursor, DateTime<Utc>)>,
     repos: HashMap<String, RepoState>,
     resolver: Resolver,
+    last: Instant,
     conn: Connection,
     queue: Tree,
     firehose: Tree,
@@ -61,6 +63,8 @@ impl Manager {
         let hosts = HashMap::new();
         let repos = HashMap::new();
         let resolver = Resolver::new()?;
+        let now = Instant::now();
+        let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
         let conn = Connection::open("relay.db")?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS hosts (
@@ -72,8 +76,8 @@ impl Manager {
         )?;
         let queue = DB.open_tree("queue")?;
         let firehose = DB.open_tree("firehose")?;
-        let mut this = Self { message_rx, hosts, repos, resolver, conn, queue, firehose };
-        this.expire_persist()?;
+        let this = Self { message_rx, hosts, repos, resolver, last, conn, queue, firehose };
+        this.expire()?;
         Ok(this)
     }
 
@@ -116,10 +120,10 @@ impl Manager {
         Ok(())
     }
 
-    fn expire_persist(&mut self) -> Result<(), ManagerError> {
+    fn expire(&self) -> Result<(), ManagerError> {
         // expire old firehose data
         let mut batch: Option<Batch> = None;
-        for res in &self.firehose {
+        for res in self.firehose.iter().take(1024) {
             let (cursor, data) = res?;
             let msg = TimedMessage::ref_from_bytes(&data)?;
             let time = UNIX_EPOCH + Duration::from_secs(msg.timestamp.get());
@@ -131,10 +135,8 @@ impl Manager {
         }
         if let Some(batch) = batch {
             self.firehose.apply_batch(batch)?;
-            return Ok(());
         }
-
-        self.persist()
+        Ok(())
     }
 
     fn persist(&mut self) -> Result<(), ManagerError> {
@@ -163,7 +165,11 @@ impl Manager {
             return Ok(false);
         }
 
-        self.expire_persist()?;
+        self.expire()?;
+        if self.last.elapsed() > EXPORT_INTERVAL {
+            self.persist()?;
+            self.last = Instant::now();
+        }
 
         for _ in 0..1024 {
             match self.message_rx.try_recv_ref() {

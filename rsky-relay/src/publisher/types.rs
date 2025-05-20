@@ -18,11 +18,9 @@ pub struct SubscribeRepos {
     pub cursor: Option<Cursor>,
 }
 
-#[expect(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Command {
     Connect(SubscribeRepos),
-    Shutdown,
 }
 
 mod maybe_tls_stream {
