@@ -112,7 +112,7 @@ jobs:
 
   # Parallel build and test job for each package
   build-and-test:
-    needs: check
+    needs: [determine-workspace-members, check]
     runs-on: ubuntu-latest
     if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
     strategy:
@@ -249,10 +249,10 @@ jobs:
       - name: CI Success (no docker build needed)
         if: |
           steps.should-docker-build.outputs.docker_build_needed == 'false' &&
-          !contains(needs.check.result, 'failure') && 
-          !contains(needs.check.result, 'cancelled') && 
-          !contains(needs.build-and-test.result, 'failure') &&
-          !contains(needs.build-and-test.result, 'cancelled') &&
+          (!contains(needs.check.result, 'failure') || needs.check.result == 'skipped') && 
+          (!contains(needs.check.result, 'cancelled') || needs.check.result == 'skipped') && 
+          (!contains(needs.build-and-test.result, 'failure') || needs.build-and-test.result == 'skipped') &&
+          (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
           !contains(needs.formatting.result, 'failure') &&
           !contains(needs.formatting.result, 'cancelled')
         run: echo "All CI jobs passed! (Docker build not needed)"
@@ -260,27 +260,27 @@ jobs:
       - name: CI Success (with docker build)
         if: |
           steps.should-docker-build.outputs.docker_build_needed == 'true' &&
-          !contains(needs.check.result, 'failure') && 
-          !contains(needs.check.result, 'cancelled') && 
-          !contains(needs.build-and-test.result, 'failure') &&
-          !contains(needs.build-and-test.result, 'cancelled') &&
+          (!contains(needs.check.result, 'failure') || needs.check.result == 'skipped') && 
+          (!contains(needs.check.result, 'cancelled') || needs.check.result == 'skipped') && 
+          (!contains(needs.build-and-test.result, 'failure') || needs.build-and-test.result == 'skipped') &&
+          (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
           !contains(needs.formatting.result, 'failure') &&
           !contains(needs.formatting.result, 'cancelled') &&
-          !contains(needs.docker-build.result, 'failure') &&
-          !contains(needs.docker-build.result, 'cancelled')
+          (!contains(needs.docker-build.result, 'failure') || needs.docker-build.result == 'skipped') &&
+          (!contains(needs.docker-build.result, 'cancelled') || needs.docker-build.result == 'skipped')
         run: echo "All CI jobs passed! (Including Docker build)"
 
       - name: CI Failed
         if: |
-          contains(needs.check.result, 'failure') || 
-          contains(needs.check.result, 'cancelled') || 
-          contains(needs.build-and-test.result, 'failure') ||
-          contains(needs.build-and-test.result, 'cancelled') ||
+          (contains(needs.check.result, 'failure') && needs.check.result != 'skipped') || 
+          (contains(needs.check.result, 'cancelled') && needs.check.result != 'skipped') || 
+          (contains(needs.build-and-test.result, 'failure') && needs.build-and-test.result != 'skipped') ||
+          (contains(needs.build-and-test.result, 'cancelled') && needs.build-and-test.result != 'skipped') ||
           contains(needs.formatting.result, 'failure') ||
           contains(needs.formatting.result, 'cancelled') ||
           (steps.should-docker-build.outputs.docker_build_needed == 'true' && 
-           (contains(needs.docker-build.result, 'failure') || 
-            contains(needs.docker-build.result, 'cancelled')))
+           ((contains(needs.docker-build.result, 'failure') && needs.docker-build.result != 'skipped') || 
+            (contains(needs.docker-build.result, 'cancelled') && needs.docker-build.result != 'skipped')))
         run: |
           echo "Some CI jobs failed!"
           exit 1
