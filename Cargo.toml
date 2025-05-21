@@ -1,5 +1,22 @@
 [workspace]
-members = [ "rsky-common", "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo", "cypher/backend", "cypher/frontend", "rsky-satnav", "rsky-relay"]
+members = [
+  "cypher/backend",
+  "cypher/frontend",
+  "rsky-common",
+  "rsky-crypto",
+  "rsky-feedgen",
+  "rsky-firehose",
+  "rsky-identity",
+  "rsky-jetstream-subscriber",
+  "rsky-labeler",
+  "rsky-lexicon",
+  "rsky-pds",
+  "rsky-pdsadmin",
+  "rsky-relay",
+  "rsky-repo",
+  "rsky-satnav",
+  "rsky-syntax"
+]
 resolver = "2"
 
 [workspace.dependencies]
