@@ -12,7 +12,11 @@ on:
       - 'Cargo.lock'       # Dependency lock file
       - 'rust-toolchain'
       # Add other important base paths as needed
-
+permissions:
+  packages: write
+  contents: write
+  attestations: write
+  id-token: write
 
 
 env:
@@ -126,11 +130,6 @@ jobs:
   docker-build-push:
     needs: [determine-packages]
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: write
-      attestations: write
-      id-token: write
     strategy:
       fail-fast: false
       # matrix:
