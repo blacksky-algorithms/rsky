@@ -130,6 +130,7 @@ jobs:
       packages: write
       contents: write
       attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       # matrix:
