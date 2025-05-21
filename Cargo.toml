@@ -3,7 +3,11 @@ members = [ "cypher/backend", "cypher/frontend", "rsky-common", "rsky-crypto", "
 resolver = "2"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 cargo = { version = "0.84.0",features = ["vendored-openssl"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+clap = { version = "4.5.38", features = ["derive", "env"] }
+diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
@@ -24,6 +28,23 @@ rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
 rsky-common = {path = "rsky-common", version = "0.1.2"}
 rsky-repo = {path = "rsky-repo", version = "0.0.2"}
 rsky-firehose = {path = "rsky-firehose", version = "0.2.1"}
+
+# Dependencies for rsky-pdsadmin and other projects
+anyhow = "1.0.98"
+
+
+dotenv = "0.15.0"
+uuid = { version = "1.4.1", features = ["v4", "serde"] }
+dialoguer = "0.11.0"
+diesel_cli = { version = "2.2.10", features = ["postgres"] }
+diesel_migrations = { version = "2.1.0", features = ["postgres"] }
+dirs = "5.0"
+which = "4.4.0"
+thiserror = "1.0.49"
+indicatif = "0.17.7"
+shellexpand = "3.1.0"
+mockito = "1.2.0"
+tempfile = "3.8.0"
 
 [profile.release]
 debug = 2  # Or any level from 0 to 2
