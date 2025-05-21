@@ -1,5 +1,3 @@
-name: Rust CI
-
 on:
   push:
     branches: [main]
@@ -170,8 +168,15 @@ jobs:
         uses: docker/setup-buildx-action@v3.10.0
         with:
           buildkitd-flags: --debug
-          driver-opts: |
-            image=moby/buildkit:latest
+          
+      # Create a cache directory for Docker builds
+      - name: Set up cache for Docker builds
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.dockerfile }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.dockerfile }}-
         
       # Log in to GitHub Container Registry if not a fork
       - name: Login to GitHub Container Registry
@@ -204,8 +209,10 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Disable cache for forks to avoid permission issues
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: ""
+          load: true
 
       # Build and push the Docker image (only if not from fork)
       - name: Build and push Docker image
@@ -218,10 +225,15 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Move cache to avoid unbounded cache growth
+      - name: Move cache
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
       # Generate artifact attestation if not a fork
       - name: Generate artifact attestation
         if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
@@ -229,7 +241,7 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
           subject-digest: ${{ steps.build-push.outputs.digest }}
-          push-to-registry: true
+          push-to-registry: truename: Rust CI
 
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
