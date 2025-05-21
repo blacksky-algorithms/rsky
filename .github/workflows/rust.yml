@@ -5,7 +5,8 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - '.github/scripts/determine-packages.sh'
+      - '.github/scripts/determine-workspace-members.sh'
+      - '.github/scripts/determine-dockerfiles.sh'
       - '.github/workflows/rust.yml'
       - 'rsky*/**'         # Matches any directory starting with "rsky"
       - 'Cargo.toml'       # Base workspace configuration
@@ -42,11 +43,11 @@ env:
   ORGANIZATION: blacksky-algorithms
 
 jobs:
-  # First determine which workspace packages need to be processed
-  determine-packages:
+  # First determine which workspace members need to be processed
+  determine-workspace-members:
     runs-on: ubuntu-latest
     outputs:
-      packages: ${{ steps.set-packages.outputs.packages }}
+      workspace_members: ${{ steps.set-members.outputs.workspace_members }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -54,26 +55,51 @@ jobs:
           fetch-depth: 0  # Fetch all history to properly check changes
       
       - name: Make script executable
-        run: chmod +x .github/scripts/determine-packages.sh
+        run: chmod +x .github/scripts/determine-workspace-members.sh
       
-      - name: Set packages
-        id: set-packages
+      - name: Set workspace members
+        id: set-members
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: .github/scripts/determine-packages.sh
+        run: .github/scripts/determine-workspace-members.sh
+        shell: bash
+
+  # Determine which Dockerfiles need to be processed
+  determine-dockerfiles:
+    runs-on: ubuntu-latest
+    outputs:
+      dockerfiles: ${{ steps.set-dockerfiles.outputs.dockerfiles }}
+      is_fork: ${{ steps.set-dockerfiles.outputs.is_fork }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to properly check changes
+      
+      - name: Make script executable
+        run: chmod +x .github/scripts/determine-dockerfiles.sh
+      
+      - name: Set dockerfiles
+        id: set-dockerfiles
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: .github/scripts/determine-dockerfiles.sh
         shell: bash
 
   # Parallel check job for each package
   check:
-    needs: determine-packages
+    needs: determine-workspace-members
     runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
+        package: ${{ fromJson(needs.determine-workspace-members.outputs.workspace_members) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -85,35 +111,35 @@ jobs:
         run: cargo check -p ${{ matrix.package }}
 
   # Parallel build and test job for each package
-  # build-and-test:
-  #   needs: [determine-packages, check]
-  #   runs-on: ubuntu-latest
-  #   if: ${{ needs.determine-packages.outputs.packages != '[]' }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
-  #   steps:
-  #     - name: Show disk usage (before cleanup)
-  #       run: df -h
-  #     - name: Clean up large directories
-  #       run: |
-  #         sudo rm -rf /usr/local/share/boost \
-  #                     /usr/share/dotnet \
-  #                     /usr/local/lib/android \
-  #                     /opt/ghc
-  #     - name: Show disk usage (after cleanup)
-  #       run: df -h
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #       with:
-  #         shared-key: ${{ matrix.package }}
-  #     - name: Run cargo build for ${{ matrix.package }}
-  #       run: cargo build --release -p ${{ matrix.package }}
-  #     - name: Run cargo test for ${{ matrix.package }}
-  #       run: cargo test --release -p ${{ matrix.package }}
+  build-and-test:
+    needs: check
+    runs-on: ubuntu-latest
+    if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.determine-workspace-members.outputs.workspace_members) }}
+    steps:
+      - name: Show disk usage (before cleanup)
+        run: df -h
+      - name: Clean up large directories
+        run: |
+          sudo rm -rf /usr/local/share/boost \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc
+      - name: Show disk usage (after cleanup)
+        run: df -h
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.package }}
+      - name: Run cargo build for ${{ matrix.package }}
+        run: cargo build --release -p ${{ matrix.package }}
+      - name: Run cargo test for ${{ matrix.package }}
+        run: cargo test --release -p ${{ matrix.package }}
 
   # Run formatting check on the entire workspace
   formatting:
@@ -126,56 +152,30 @@ jobs:
       - name: Run cargo fmt
         run: cargo fmt -- --check
 
-  # Job to build and push Docker images for specific packages
-  docker-build-push:
-    needs: [determine-packages]
+  # Job to build Docker images for packages with Dockerfiles
+  docker-build:
+    needs: [determine-dockerfiles, build-and-test]
     runs-on: ubuntu-latest
+    if: ${{ needs.determine-dockerfiles.outputs.dockerfiles != '[]' }}
     strategy:
       fail-fast: false
-      # matrix:
-      #   service:
-      #     - name: rsky-pds
-      #       dockerfile: rsky-pds/Dockerfile
-      #     - name: rsky-jetstream-subscriber
-      #       dockerfile: rsky-jetstream-subscriber/Dockerfile
-      #     - name: rsky-firehose
-      #       dockerfile: rsky-firehose/Dockerfile
-    # We need to run job-level if to check matrix values
-    if: ${{ always() }}
+      matrix:
+        dockerfile: ${{ fromJson(needs.determine-dockerfiles.outputs.dockerfiles) }}
     steps:
-      - name: Check if package was in determined packages
-        id: check-package
-        run: |
-          # Convert the JSON array to a space-separated string for easier checking
-          PACKAGES="${{ needs.determine-packages.outputs.packages }}"
-          # Remove brackets and quotes, replace commas with spaces
-          PACKAGES="${PACKAGES//[\[\]\"]/}"
-          PACKAGES="${PACKAGES//,/ }"
-          
-          # Check if our service name is in the list
-          if [[ $PACKAGES == *"rsky-firehose"* ]]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Package rsky-firehose not in determined packages, skipping"
-          fi
-      
       - name: Checkout code
-        if: steps.check-package.outputs.should_run == 'true'
         uses: actions/checkout@v4
-        
+          
       # Set up Docker Buildx
       - name: Set up Docker Buildx
-        if: steps.check-package.outputs.should_run == 'true'
         uses: docker/setup-buildx-action@v3.10.0
         with:
           buildkitd-flags: --debug
           driver-opts: |
             image=moby/buildkit:latest
         
-      # Log in to GitHub Container Registry
+      # Log in to GitHub Container Registry if not a fork
       - name: Login to GitHub Container Registry
-        if: steps.check-package.outputs.should_run == 'true'
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
         uses: docker/login-action@v3.4.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -183,123 +183,104 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Extract Docker metadata
-        if: steps.check-package.outputs.should_run == 'true'
         id: meta
         uses: docker/metadata-action@v5.7.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-firehose
+          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
           tags: |
             # Always add the git commit SHA
             type=sha,format=long
             # Add 'main' tag if this is on the main branch
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-                
-      # Check if Dockerfile exists for the package
-      - name: Check for Dockerfile
-        if: steps.check-package.outputs.should_run == 'true'
-        id: dockerfile-check
-        run: |
-          if [ -f "rsky-firehose/Dockerfile" ]; then
-            echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "No Dockerfile found at rsky-firehose/Dockerfile, skipping Docker build"
-            echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
-          fi
       
-      # Build and push the Docker image
-      - name: Build and push Docker image
-        if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+      # Build the Docker image (no push if from fork)
+      - name: Build Docker image
+        id: build
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'true' }}
         uses: docker/build-push-action@v6.17.0
         with:
           context: .
-          file: rsky-firehose/Dockerfile
+          file: ${{ matrix.dockerfile }}/Dockerfile
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build and push the Docker image (only if not from fork)
+      - name: Build and push Docker image
+        id: build-push
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        uses: docker/build-push-action@v6.17.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Generate artifact attestation
+      # Generate artifact attestation if not a fork
       - name: Generate artifact attestation
-        if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/rsky-firehose
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
           push-to-registry: true
 
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
     runs-on: ubuntu-latest
-    needs: [check, formatting, docker-build-push]
+    needs: [check, build-and-test, formatting, determine-dockerfiles]
     if: always()
     steps:
-      - name: CI Success
-        if: ${{ !contains(needs.*.result, 'failure') }}
-        run: echo "All CI jobs passed!"
+      - name: Check if docker-build should run
+        id: should-docker-build
+        run: |
+          DOCKERFILES='${{ needs.determine-dockerfiles.outputs.dockerfiles }}'
+          if [[ "$DOCKERFILES" == "[]" ]]; then
+            echo "docker_build_needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "docker_build_needed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: CI Success (no docker build needed)
+        if: |
+          steps.should-docker-build.outputs.docker_build_needed == 'false' &&
+          !contains(needs.check.result, 'failure') && 
+          !contains(needs.check.result, 'cancelled') && 
+          !contains(needs.build-and-test.result, 'failure') &&
+          !contains(needs.build-and-test.result, 'cancelled') &&
+          !contains(needs.formatting.result, 'failure') &&
+          !contains(needs.formatting.result, 'cancelled')
+        run: echo "All CI jobs passed! (Docker build not needed)"
+
+      - name: CI Success (with docker build)
+        if: |
+          steps.should-docker-build.outputs.docker_build_needed == 'true' &&
+          !contains(needs.check.result, 'failure') && 
+          !contains(needs.check.result, 'cancelled') && 
+          !contains(needs.build-and-test.result, 'failure') &&
+          !contains(needs.build-and-test.result, 'cancelled') &&
+          !contains(needs.formatting.result, 'failure') &&
+          !contains(needs.formatting.result, 'cancelled') &&
+          !contains(needs.docker-build.result, 'failure') &&
+          !contains(needs.docker-build.result, 'cancelled')
+        run: echo "All CI jobs passed! (Including Docker build)"
+
       - name: CI Failed
-        if: ${{ contains(needs.*.result, 'failure') }}
+        if: |
+          contains(needs.check.result, 'failure') || 
+          contains(needs.check.result, 'cancelled') || 
+          contains(needs.build-and-test.result, 'failure') ||
+          contains(needs.build-and-test.result, 'cancelled') ||
+          contains(needs.formatting.result, 'failure') ||
+          contains(needs.formatting.result, 'cancelled') ||
+          (steps.should-docker-build.outputs.docker_build_needed == 'true' && 
+           (contains(needs.docker-build.result, 'failure') || 
+            contains(needs.docker-build.result, 'cancelled')))
         run: |
           echo "Some CI jobs failed!"
           exit 1
-      # Extract metadata for Docker
-  #     - name: Extract Docker metadata
-  #       if: steps.check-package.outputs.should_run == 'true'
-  #       id: meta
-  #       uses: docker/metadata-action@v5.7.0
-  #       with:
-  #         images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
-  #         tags: |
-  #           # Always add the git commit SHA
-  #           type=sha,format=long
-  #           # Add 'main' tag if this is on the main branch
-  #           type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            
-  #     # Check if Dockerfile exists for the package
-  #     - name: Check for Dockerfile
-  #       if: steps.check-package.outputs.should_run == 'true'
-  #       id: dockerfile-check
-  #       run: |
-  #         if [ -f "${{ matrix.service.dockerfile }}" ]; then
-  #           echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
-  #         else
-  #           echo "No Dockerfile found at ${{ matrix.service.dockerfile }}, skipping Docker build"
-  #           echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
-  #         fi
-      
-  #     # Build and push the Docker image
-  #     - name: Build and push Docker image
-  #       if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
-  #       uses: docker/build-push-action@v6.17.0
-  #       with:
-  #         context: .
-  #         file: ${{ matrix.service.dockerfile }}
-  #         push: true
-  #         tags: ${{ steps.meta.outputs.tags }}
-  #         labels: ${{ steps.meta.outputs.labels }}
-  #         cache-from: type=gha
-  #         cache-to: type=gha,mode=max
-
-  #     # Generate artifact attestation
-  #     - name: Generate artifact attestation
-  #       if: steps.check-package.outputs.should_run == 'true' && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
-  #       uses: actions/attest-build-provenance@v2
-  #       with:
-  #         subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.service.name }}
-  #         subject-digest: ${{ steps.push.outputs.digest }}
-  #         push-to-registry: true
-
-  # # Optional: Add a final job that depends on all tests to signal success
-  # ci-success:
-  #   runs-on: ubuntu-latest
-  #   needs: [check, formatting, docker-build-push]
-  #   if: always()
-  #   steps:
-  #     - name: CI Success
-  #       if: ${{ !contains(needs.*.result, 'failure') }}
-  #       run: echo "All CI jobs passed!"
-  #     - name: CI Failed
-  #       if: ${{ contains(needs.*.result, 'failure') }}
-  #       run: |
-  #         echo "Some CI jobs failed!"
-  #         exit 1

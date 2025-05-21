@@ -9,7 +9,7 @@ GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/stdout}"
 
 # Extract all packages from Cargo.toml - improved parsing
 # This uses a more robust approach to extract package names
-PACKAGES=$(grep -E 'members\s*=\s*\[' Cargo.toml | 
+WORKSPACE_MEMBERS=$(grep -E 'members\s*=\s*\[' Cargo.toml | 
            sed -e 's/.*\[\s*//' -e 's/\s*\].*//' | 
            grep -o '"[^"]*"' | 
            tr -d '"')
@@ -34,14 +34,14 @@ fi
 echo "GitHub directory changes: $GITHUB_CHANGES"
 
 # Get list of packages with changes
-CHANGED_PACKAGES=()
+CHANGED_MEMBERS=()
 
 if [[ "$GITHUB_CHANGES" == "true" ]]; then
     # If .github has changes, include all packages (except skipped ones)
     echo "Changes detected in .github directory, including all packages"
     while IFS= read -r pkg; do
-        CHANGED_PACKAGES+=("$pkg")
-    done <<< "$PACKAGES"
+        CHANGED_MEMBERS+=("$pkg")
+    done <<< "$WORKSPACE_MEMBERS"
 else
     # Otherwise, only include packages with changes
     if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -57,15 +57,15 @@ else
 
     while IFS= read -r pkg; do
         if echo "$DIFF_FILES" | grep -q "^$pkg/"; then
-            CHANGED_PACKAGES+=("$pkg")
+            CHANGED_MEMBERS+=("$pkg")
             echo "Package with changes: $pkg"
         fi
-    done <<< "$PACKAGES"
+    done <<< "$WORKSPACE_MEMBERS"
 fi
 
 # Filter out packages to skip
-FILTERED_PACKAGES=()
-for pkg in "${CHANGED_PACKAGES[@]}"; do
+FILTERED_MEMBERS=()
+for pkg in "${CHANGED_MEMBERS[@]}"; do
     skip=false
     for skip_pkg in "${SKIP_PACKAGES[@]}"; do
         if [[ "$pkg" == "$skip_pkg" ]]; then
@@ -74,21 +74,19 @@ for pkg in "${CHANGED_PACKAGES[@]}"; do
         fi
     done
     if [[ "$skip" == "false" ]]; then
-        FILTERED_PACKAGES+=("$pkg")
+        FILTERED_MEMBERS+=("$pkg")
     fi
 done
 
 # Handle case where no packages have changes (avoid empty matrix)
-if [ ${#FILTERED_PACKAGES[@]} -eq 0 ]; then
-    echo "No packages with changes found, defaulting to a minimal package"
-    # You could set a default minimal package here if needed
-    # FILTERED_PACKAGES=("some-default-package")
-    echo "packages=[]" >> "$GITHUB_OUTPUT"
-    echo "No packages to process"
+if [ ${#FILTERED_MEMBERS[@]} -eq 0 ]; then
+    echo "No workspace members with changes found, defaulting to an empty matrix"
+    echo "workspace_members=[]" >> "$GITHUB_OUTPUT"
+    echo "No workspace members to process"
     exit 0
 fi
 
 # Convert to JSON array for matrix
-JSON_PACKAGES=$(printf '%s\n' "${FILTERED_PACKAGES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-echo "packages=$JSON_PACKAGES" >> "$GITHUB_OUTPUT"
-echo "Found packages with changes (excluding skipped ones): $JSON_PACKAGES"
+JSON_MEMBERS=$(printf '%s\n' "${FILTERED_MEMBERS[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+echo "workspace_members=$JSON_MEMBERS" >> "$GITHUB_OUTPUT"
+echo "Found workspace members with changes (excluding skipped ones): $JSON_MEMBERS"
