@@ -1,3 +1,5 @@
+name: Rust CI
+
 on:
   push:
     branches: [main]
@@ -225,8 +227,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          sbom: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
       # Move cache to avoid unbounded cache growth
       - name: Move cache
@@ -234,6 +237,7 @@ jobs:
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          
       # Generate artifact attestation if not a fork
       - name: Generate artifact attestation
         if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
@@ -241,7 +245,7 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
           subject-digest: ${{ steps.build-push.outputs.digest }}
-          push-to-registry: truename: Rust CI
+          push-to-registry: true
 
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
