@@ -23,7 +23,8 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run cargo fmt
-        run: cargo fmt --manifest-path rsky-pdsadmin/Cargo.toml -- --check
+        working-directory: ./rsky-pdsadmin
+        run: cargo fmt -- --check
 
   # Check job for rsky-pdsadmin
   check:
@@ -38,7 +39,8 @@ jobs:
         with:
           shared-key: rsky-pdsadmin
       - name: Run cargo check
-        run: cargo check -p rsky-pdsadmin
+        working-directory: ./rsky-pdsadmin
+        run: cargo check
 
   # Build and test job for rsky-pdsadmin
   build-and-test:
@@ -54,9 +56,11 @@ jobs:
         with:
           shared-key: rsky-pdsadmin
       - name: Run cargo build
-        run: cargo build --release -p rsky-pdsadmin
+        working-directory: ./rsky-pdsadmin
+        run: cargo build --release
       - name: Run cargo test
-        run: cargo test -p rsky-pdsadmin
+        working-directory: ./rsky-pdsadmin
+        run: cargo test
 
   # Final job that depends on all tests to signal success
   ci-success:
