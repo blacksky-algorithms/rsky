@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use rsky_common::get_verification_material;
 use rsky_identity::types::DidDocument;
 
-const POLL_TIMEOUT: Duration = Duration::from_micros(1);
+const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 

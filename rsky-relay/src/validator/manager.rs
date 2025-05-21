@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
+use std::thread;
 use std::time::{Duration, Instant, SystemTimeError, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -19,6 +20,7 @@ use crate::validator::utils;
 
 const KEY_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 const EXPORT_INTERVAL: Duration = Duration::from_secs(10);
+const SLEEP: Duration = Duration::from_micros(100);
 
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -172,200 +174,204 @@ impl Manager {
         }
 
         for _ in 0..1024 {
-            match self.message_rx.try_recv_ref() {
-                Ok(msg) => {
-                    let host = &msg.hostname;
-                    let span = tracing::info_span!("msg_recv", %host, len = %msg.data.len());
-                    let _enter = span.enter();
-                    let event = match SubscribeReposEvent::parse(&msg.data) {
-                        Ok(Some(event)) => event,
-                        Ok(None) => continue,
-                        Err(err) => {
-                            tracing::debug!(%err, "parse error");
-                            continue;
-                        }
-                    };
-
-                    // check/record per-host seq/time
-                    let type_ = event.type_();
-                    let seq = event.seq();
-                    let mut time = event.time();
-                    let did = event.did();
-                    let span = tracing::debug_span!("msg_data", type = %type_, %seq, %time, %did);
-                    let _enter = span.enter();
-                    if let Some((prev, old)) = self.hosts.get(host) {
-                        time = time.max(*old);
-                        let prev: u64 = (*prev).into();
-                        let curr: u64 = seq.into();
-                        if prev >= curr {
-                            if prev > curr {
-                                tracing::trace!(%prev, diff = %prev - curr, "old seq");
-                            }
-                            continue;
-                        } else if prev + 1 != curr {
-                            tracing::trace!(%prev, diff = %curr - prev - 1, "seq gap");
-                        }
-                    }
-
-                    // get commit object for #commit/#sync or add to the firehose
-                    let span;
-                    let _enter;
-                    let (commit, head) = match event.commit() {
-                        Ok(Some((commit, head))) => {
-                            span = tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
-                            _enter = span.enter();
-
-                            if !event.validate(&commit, &head) {
-                                continue;
-                            }
-                            (commit, head)
-                        }
-                        Ok(None) => {
-                            if let SubscribeReposEvent::Identity(_) = &event {
-                                self.resolver.expire(did, event.time());
-                            }
-                            let data = event.serialize(msg.data.len(), cursor.next())?;
-                            self.firehose.insert(*cursor, data)?;
-                            self.hosts.insert(host.clone(), (seq, time));
-                            continue;
-                        }
-                        Err(err) => {
-                            tracing::debug!(%err, "commit decode error");
-                            continue;
-                        }
-                    };
-
-                    // resolve identity & check pds
-                    let Some((pds, key)) = self.resolver.resolve(did)? else {
-                        self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
-                        self.hosts.insert(host.clone(), (seq, time));
-                        continue;
-                    };
-
-                    if let Some(pds) = pds {
-                        if host != pds {
-                            // expire the identity & queue message in case the user has migrated
-                            self.resolver.expire(did, time);
-                            self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
-                            self.hosts.insert(host.clone(), (seq, time));
-                            continue;
-                        }
-                    }
-
-                    // verify signature
-                    match utils::verify_commit_sig(&commit, key) {
-                        Ok(valid) => {
-                            if !valid {
-                                tracing::debug!(?key, "signature mismatch");
-                                continue;
-                            }
-                        }
-                        Err(err) => {
-                            tracing::debug!(%err, ?key, "signature check error");
-                            continue;
-                        }
-                    }
-
-                    // verify commit message
-                    let rev = commit.rev;
-                    let data = commit.data;
-                    let entry = self.repos.entry(commit.did);
-                    if let SubscribeReposEvent::Commit(commit) = &event {
-                        // TODO: should still validate records existing in blocks, etc
-                        if let Entry::Occupied(prev) = &entry {
-                            let prev = prev.get();
-                            let span = tracing::debug_span!("previous", rev = %prev.rev, data = %prev.data, head = %prev.head);
-                            let _enter = span.enter();
-                            if !utils::verify_commit_event(commit, data, prev) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    let msg = event.serialize(msg.data.len(), cursor.next())?;
-                    self.firehose.insert(*cursor, msg)?;
-                    entry.insert(RepoState { rev, data, head });
-                    self.hosts.insert(host.clone(), (seq, time));
+            let msg = match self.message_rx.try_recv_ref() {
+                Ok(msg) => msg,
+                Err(thingbuf::mpsc::errors::TryRecvError::Empty) => {
+                    thread::sleep(SLEEP);
+                    break;
                 }
-                Err(thingbuf::mpsc::errors::TryRecvError::Empty) => {}
                 Err(thingbuf::mpsc::errors::TryRecvError::Closed) => return Ok(false),
                 Err(_) => unreachable!(),
-            }
+            };
 
-            let mut batch: Option<Batch> = None;
-            for did in self.resolver.poll().await? {
-                let Some((pds, key)) = self.resolver.resolve(&did)? else {
+            let host = &msg.hostname;
+            let span = tracing::info_span!("msg_recv", %host, len = %msg.data.len());
+            let _enter = span.enter();
+            let event = match SubscribeReposEvent::parse(&msg.data) {
+                Ok(Some(event)) => event,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::debug!(%err, "parse error");
                     continue;
-                };
+                }
+            };
 
-                for res in self.queue.scan_prefix(&did) {
-                    let (k, input) = res?;
-                    #[expect(clippy::unwrap_used)]
-                    let host = std::str::from_utf8(&k).unwrap().split('>').nth(1).unwrap();
-                    let span = tracing::debug_span!("msg_read", %host, len = %input.len());
-                    let _enter = span.enter();
-
-                    #[expect(clippy::unwrap_used)]
-                    let event = SubscribeReposEvent::parse(&input)?.unwrap(); // already parsed
-                    let type_ = event.type_();
-                    let seq = event.seq();
-                    let time = event.time();
-                    let did = event.did();
-                    let span = tracing::debug_span!("msg_data", type = %type_, %seq, %time, %did);
-                    let _enter = span.enter();
-
-                    #[expect(clippy::unwrap_used)]
-                    let (commit, head) = event.commit()?.unwrap(); // already parsed
-                    let span = tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
-                    let _enter = span.enter();
-
-                    if let Some(pds) = pds {
-                        if host != pds {
-                            tracing::debug!(%pds, "hostname pds mismatch");
-                            continue;
-                        }
+            // check/record per-host seq/time
+            let type_ = event.type_();
+            let seq = event.seq();
+            let mut time = event.time();
+            let did = event.did();
+            let span = tracing::debug_span!("msg_data", type = %type_, %seq, %time, %did);
+            let _enter = span.enter();
+            if let Some((prev, old)) = self.hosts.get(host) {
+                time = time.max(*old);
+                let prev: u64 = (*prev).into();
+                let curr: u64 = seq.into();
+                if prev >= curr {
+                    if prev > curr {
+                        tracing::trace!(%prev, diff = %prev - curr, "old seq");
                     }
-
-                    // verify signature
-                    match utils::verify_commit_sig(&commit, key) {
-                        Ok(valid) => {
-                            if !valid {
-                                tracing::debug!(?key, "signature mismatch");
-                                continue;
-                            }
-                        }
-                        Err(err) => {
-                            tracing::debug!(%err, ?key, "signature check error");
-                            continue;
-                        }
-                    }
-
-                    // verify commit message
-                    let rev = commit.rev;
-                    let data = commit.data;
-                    let entry = self.repos.entry(commit.did);
-                    if let SubscribeReposEvent::Commit(commit) = &event {
-                        // TODO: should still validate records existing in blocks, etc
-                        if let Entry::Occupied(prev) = &entry {
-                            let prev = prev.get();
-                            let span = tracing::debug_span!("previous", rev = %prev.rev, data = %prev.data, head = %prev.head);
-                            let _enter = span.enter();
-                            if !utils::verify_commit_event(commit, data, prev) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    let msg = event.serialize(input.len(), cursor.next())?;
-                    self.firehose.insert(*cursor, msg)?;
-                    entry.insert(RepoState { rev, data, head });
-
-                    batch.get_or_insert_default().remove(k);
+                    continue;
+                } else if prev + 1 != curr {
+                    tracing::trace!(%prev, diff = %curr - prev - 1, "seq gap");
                 }
             }
-            if let Some(batch) = batch {
-                self.queue.apply_batch(batch)?;
+
+            // get commit object for #commit/#sync or add to the firehose
+            let span;
+            let _enter;
+            let (commit, head) = match event.commit() {
+                Ok(Some((commit, head))) => {
+                    span = tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
+                    _enter = span.enter();
+
+                    if !event.validate(&commit, &head) {
+                        continue;
+                    }
+                    (commit, head)
+                }
+                Ok(None) => {
+                    if let SubscribeReposEvent::Identity(_) = &event {
+                        self.resolver.expire(did, event.time());
+                    }
+                    let data = event.serialize(msg.data.len(), cursor.next())?;
+                    self.firehose.insert(*cursor, data)?;
+                    self.hosts.insert(host.clone(), (seq, time));
+                    continue;
+                }
+                Err(err) => {
+                    tracing::debug!(%err, "commit decode error");
+                    continue;
+                }
+            };
+
+            // resolve identity & check pds
+            let Some((pds, key)) = self.resolver.resolve(did)? else {
+                self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
+                self.hosts.insert(host.clone(), (seq, time));
+                continue;
+            };
+
+            if let Some(pds) = pds {
+                if host != pds {
+                    // expire the identity & queue message in case the user has migrated
+                    self.resolver.expire(did, time);
+                    self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
+                    self.hosts.insert(host.clone(), (seq, time));
+                    continue;
+                }
             }
+
+            // verify signature
+            match utils::verify_commit_sig(&commit, key) {
+                Ok(valid) => {
+                    if !valid {
+                        tracing::debug!(?key, "signature mismatch");
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(%err, ?key, "signature check error");
+                    continue;
+                }
+            }
+
+            // verify commit message
+            let rev = commit.rev;
+            let data = commit.data;
+            let entry = self.repos.entry(commit.did);
+            if let SubscribeReposEvent::Commit(commit) = &event {
+                // TODO: should still validate records existing in blocks, etc
+                if let Entry::Occupied(prev) = &entry {
+                    let prev = prev.get();
+                    let span = tracing::debug_span!("previous", rev = %prev.rev, data = %prev.data, head = %prev.head);
+                    let _enter = span.enter();
+                    if !utils::verify_commit_event(commit, data, prev) {
+                        continue;
+                    }
+                }
+            }
+
+            let msg = event.serialize(msg.data.len(), cursor.next())?;
+            self.firehose.insert(*cursor, msg)?;
+            entry.insert(RepoState { rev, data, head });
+            self.hosts.insert(host.clone(), (seq, time));
+        }
+
+        let mut batch: Option<Batch> = None;
+        for did in self.resolver.poll().await? {
+            let Some((pds, key)) = self.resolver.resolve(&did)? else {
+                continue;
+            };
+
+            for res in self.queue.scan_prefix(&did) {
+                let (k, input) = res?;
+                batch.get_or_insert_default().remove(k.clone());
+
+                #[expect(clippy::unwrap_used)]
+                let host = std::str::from_utf8(&k).unwrap().split('>').nth(1).unwrap();
+                let span = tracing::debug_span!("msg_read", %host, len = %input.len());
+                let _enter = span.enter();
+
+                #[expect(clippy::unwrap_used)]
+                let event = SubscribeReposEvent::parse(&input)?.unwrap(); // already parsed
+                let type_ = event.type_();
+                let seq = event.seq();
+                let time = event.time();
+                let did = event.did();
+                let span = tracing::debug_span!("msg_data", type = %type_, %seq, %time, %did);
+                let _enter = span.enter();
+
+                #[expect(clippy::unwrap_used)]
+                let (commit, head) = event.commit()?.unwrap(); // already parsed
+                let span =
+                    tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
+                let _enter = span.enter();
+
+                if let Some(pds) = pds {
+                    if host != pds {
+                        tracing::debug!(%pds, "hostname pds mismatch");
+                        continue;
+                    }
+                }
+
+                // verify signature
+                match utils::verify_commit_sig(&commit, key) {
+                    Ok(valid) => {
+                        if !valid {
+                            tracing::debug!(?key, "signature mismatch");
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::debug!(%err, ?key, "signature check error");
+                        continue;
+                    }
+                }
+
+                // verify commit message
+                let rev = commit.rev;
+                let data = commit.data;
+                let entry = self.repos.entry(commit.did);
+                if let SubscribeReposEvent::Commit(commit) = &event {
+                    // TODO: should still validate records existing in blocks, etc
+                    if let Entry::Occupied(prev) = &entry {
+                        let prev = prev.get();
+                        let span = tracing::debug_span!("previous", rev = %prev.rev, data = %prev.data, head = %prev.head);
+                        let _enter = span.enter();
+                        if !utils::verify_commit_event(commit, data, prev) {
+                            continue;
+                        }
+                    }
+                }
+
+                let msg = event.serialize(input.len(), cursor.next())?;
+                self.firehose.insert(*cursor, msg)?;
+                entry.insert(RepoState { rev, data, head });
+            }
+        }
+        if let Some(batch) = batch {
+            self.queue.apply_batch(batch)?;
         }
 
         Ok(true)

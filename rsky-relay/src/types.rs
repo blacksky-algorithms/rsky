@@ -30,10 +30,7 @@ impl Recycle<Message> for MessageRecycle {
         Message { data: Bytes::new(), hostname: String::new() }
     }
 
-    fn recycle(&self, element: &mut Message) {
-        element.data.clear();
-        element.hostname.clear();
-    }
+    fn recycle(&self, _: &mut Message) {}
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
