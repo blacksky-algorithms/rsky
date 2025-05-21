@@ -38,6 +38,6 @@ RUN cargo build --release --package rsky-pds
 FROM debian:bullseye-slim
 WORKDIR /usr/src/rsky
 COPY --from=builder /usr/src/rsky/target/release/rsky-pds rsky-pds
-
+LABEL org.opencontainers.image.source=https://github.com/blacksky-algorithms/rsky
 # Run the web service on container startup with the same environment variables
 CMD ["sh", "-c", "ROCKET_PORT=$PORT ROCKET_ADDRESS=0.0.0.0", "./rsky-pds"]

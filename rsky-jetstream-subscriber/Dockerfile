@@ -34,5 +34,5 @@ RUN cargo build --release --package rsky-jetstream-subscriber
 FROM debian:bullseye-slim
 WORKDIR /usr/src/rsky
 COPY --from=builder /usr/src/rsky/target/release/rsky-jetstream-subscriber rsky-jetstream-subscriber
-
+LABEL org.opencontainers.image.source=https://github.com/blacksky-algorithms/rsky
 CMD ["./rsky-jetstream-subscriber"]
