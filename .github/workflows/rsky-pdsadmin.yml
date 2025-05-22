@@ -1,0 +1,79 @@
+name: rsky-pdsadmin CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/rsky-pdsadmin.yml'
+      - 'rsky-pdsadmin/**'
+      - 'rust-toolchain'
+
+jobs:
+  # Run formatting check
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run cargo fmt
+        working-directory: ./rsky-pdsadmin
+        run: cargo fmt -- --check
+
+  # Check job for rsky-pdsadmin
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rsky-pdsadmin
+      - name: Run cargo check
+        working-directory: ./rsky-pdsadmin
+        run: cargo check
+
+  # Build and test job for rsky-pdsadmin
+  build-and-test:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rsky-pdsadmin
+      - name: Run cargo build
+        working-directory: ./rsky-pdsadmin
+        run: cargo build --release
+      - name: Run cargo test
+        working-directory: ./rsky-pdsadmin
+        run: cargo test
+
+  # Final job that depends on all tests to signal success
+  ci-success:
+    runs-on: ubuntu-latest
+    needs: [check, build-and-test, formatting]
+    if: always()
+    steps:
+      - name: CI Success
+        if: ${{ !contains(needs.*.result, 'failure') }}
+        run: echo "All CI jobs passed!"
+      - name: CI Failed
+        if: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          echo "Some CI jobs failed!"
+          exit 1
+:wq

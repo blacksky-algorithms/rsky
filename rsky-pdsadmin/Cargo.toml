@@ -1,0 +1,48 @@
+[workspace]
+members = ["."]
+
+[package]
+name = "rsky-pdsadmin"
+version = "0.1.0"
+edition = "2024"
+description = "Administrative CLI tool for rsky-pds"
+authors = ["RSKY Team"]
+license = "MIT"
+
+[lib]
+name = "rsky_pdsadmin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pdsadmin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.38", features = ["derive", "env"] }
+dialoguer = "0.11"
+diesel = { version = "2.2.10", features = ["postgres"] }
+diesel_cli = { version = "2.2.10", features = ["postgres"], optional = true }
+diesel_migrations = { version = "2.1.0", features = ["postgres"] }
+dirs = "5.0"
+dotenv = "0.15"
+indicatif = "0.17"
+rand = "0.8"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shellexpand = "3.1"
+thiserror = "1.0"
+tokio = { version = "1.36", features = ["full"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+which = "5.0"
+
+[dev-dependencies]
+mockito = "1.2"
+tempfile = "3.9"
+
+[features]
+default = []
+db_cli = ["diesel_cli"]

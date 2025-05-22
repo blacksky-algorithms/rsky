@@ -64,7 +64,7 @@ fi
 echo "Found workspace members: ${WORKSPACE_MEMBERS[*]}"
 
 # Define packages to skip
-SKIP_PACKAGES=("cypher/frontend" "cypher/backend")
+SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-pdsadmin")
 
 # Check if .github directory has changes
 GITHUB_CHANGES=false
