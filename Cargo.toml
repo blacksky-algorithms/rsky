@@ -1,12 +1,9 @@
 [workspace]
-members = [ "cypher/backend", "cypher/frontend", "rsky-common", "rsky-crypto", "rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-jetstream-subscriber", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-relay", "rsky-repo", "rsky-satnav", "rsky-syntax"]
+members = [ "rsky-common", "rsky-crypto","rsky-feedgen", "rsky-firehose", "rsky-identity", "rsky-labeler", "rsky-lexicon", "rsky-pds", "rsky-syntax", "rsky-jetstream-subscriber", "rsky-repo", "cypher/backend", "cypher/frontend", "rsky-satnav", "rsky-relay"]
 resolver = "2"
 
 [workspace.dependencies]
-base64 = "0.22.1"
 cargo = { version = "0.84.0",features = ["vendored-openssl"] }
-chrono = { version = "0.4.41", features = ["serde"] }
-diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
