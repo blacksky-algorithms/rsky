@@ -76,4 +76,3 @@ jobs:
         run: |
           echo "Some CI jobs failed!"
           exit 1
-:wq
