@@ -5,13 +5,20 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - '.github/scripts/determine-packages.sh'
+      - '.github/scripts/determine-workspace-members.sh'
+      - '.github/scripts/determine-dockerfiles.sh'
       - '.github/workflows/rust.yml'
       - 'rsky*/**'         # Matches any directory starting with "rsky"
       - 'Cargo.toml'       # Base workspace configuration
       - 'Cargo.lock'       # Dependency lock file
       - 'rust-toolchain'
       # Add other important base paths as needed
+permissions:
+  packages: write
+  contents: write
+  attestations: write
+  id-token: write
+
 
 env:
   PDS_EMAIL_FROM_ADDRESS: "noreply@blacksky.app"
@@ -31,13 +38,16 @@ env:
   #PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: ${{ secrets.PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX }}
   PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: fb478b39dd2ddf84bef135dd60f90381903eefadbb9df4b18a2b9b174ae72582
   PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: 71cfcf4882a6cff494c3d0affadd3858eb3a5838e7b5e15170e696a590a4fa01
+  # Docker build configuration
+  REGISTRY: ghcr.io
+  ORGANIZATION: blacksky-algorithms
 
 jobs:
-  # First determine which workspace packages need to be processed
-  determine-packages:
+  # First determine which workspace members need to be processed
+  determine-workspace-members:
     runs-on: ubuntu-latest
     outputs:
-      packages: ${{ steps.set-packages.outputs.packages }}
+      workspace_members: ${{ steps.set-members.outputs.workspace_members }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,26 +55,51 @@ jobs:
           fetch-depth: 0  # Fetch all history to properly check changes
       
       - name: Make script executable
-        run: chmod +x .github/scripts/determine-packages.sh
+        run: chmod +x .github/scripts/determine-workspace-members.sh
       
-      - name: Set packages
-        id: set-packages
+      - name: Set workspace members
+        id: set-members
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: .github/scripts/determine-packages.sh
+        run: .github/scripts/determine-workspace-members.sh
+        shell: bash
+
+  # Determine which Dockerfiles need to be processed
+  determine-dockerfiles:
+    runs-on: ubuntu-latest
+    outputs:
+      dockerfiles: ${{ steps.set-dockerfiles.outputs.dockerfiles }}
+      is_fork: ${{ steps.set-dockerfiles.outputs.is_fork }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to properly check changes
+      
+      - name: Make script executable
+        run: chmod +x .github/scripts/determine-dockerfiles.sh
+      
+      - name: Set dockerfiles
+        id: set-dockerfiles
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: .github/scripts/determine-dockerfiles.sh
         shell: bash
 
   # Parallel check job for each package
   check:
-    needs: determine-packages
+    needs: determine-workspace-members
     runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
+        package: ${{ fromJson(needs.determine-workspace-members.outputs.workspace_members) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -75,15 +110,15 @@ jobs:
       - name: Run cargo check for ${{ matrix.package }}
         run: cargo check -p ${{ matrix.package }}
 
-  # Parallel build job for each package
-  build:
-    needs: [determine-packages, check]
+  # Parallel build and test job for each package
+  build-and-test:
+    needs: [determine-workspace-members, check]
     runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
+    if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
+        package: ${{ fromJson(needs.determine-workspace-members.outputs.workspace_members) }}
     steps:
       - name: Show disk usage (before cleanup)
         run: df -h
@@ -103,25 +138,8 @@ jobs:
           shared-key: ${{ matrix.package }}
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
-
-  # Parallel test job for each package
-  test:
-    needs: [determine-packages, check, build]
-    runs-on: ubuntu-latest
-    if: ${{ needs.determine-packages.outputs.packages != '[]' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        package: ${{ fromJson(needs.determine-packages.outputs.packages) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.package }}
       - name: Run cargo test for ${{ matrix.package }}
-        run: cargo test -p ${{ matrix.package }}
+        run: cargo test --release -p ${{ matrix.package }}
 
   # Run formatting check on the entire workspace
   formatting:
@@ -134,17 +152,152 @@ jobs:
       - name: Run cargo fmt
         run: cargo fmt -- --check
 
+  # Job to build Docker images for packages with Dockerfiles
+  docker-build:
+    needs: [determine-dockerfiles, build-and-test]
+    runs-on: ubuntu-latest
+    if: ${{ needs.determine-dockerfiles.outputs.dockerfiles != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: ${{ fromJson(needs.determine-dockerfiles.outputs.dockerfiles) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+          
+      # Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+        with:
+          buildkitd-flags: --debug
+          
+      # Create a cache directory for Docker builds
+      - name: Set up cache for Docker builds
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.dockerfile }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.dockerfile }}-
+        
+      # Log in to GitHub Container Registry if not a fork
+      - name: Login to GitHub Container Registry
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        uses: docker/login-action@v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.7.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
+          tags: |
+            # Always add the git commit SHA
+            type=sha,format=long
+            # Add 'main' tag if this is on the main branch
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+      
+      # Build the Docker image (no push if from fork)
+      - name: Build Docker image
+        id: build
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'true' }}
+        uses: docker/build-push-action@v6.17.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}/Dockerfile
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Disable cache for forks to avoid permission issues
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: ""
+          load: true
+
+      # Build and push the Docker image (only if not from fork)
+      - name: Build and push Docker image
+        id: build-push
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        uses: docker/build-push-action@v6.17.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # Move cache to avoid unbounded cache growth
+      - name: Move cache
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          
+      # Generate artifact attestation if not a fork
+      - name: Generate artifact attestation
+        if: ${{ needs.determine-dockerfiles.outputs.is_fork == 'false' }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/${{ matrix.dockerfile }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
+          push-to-registry: true
+
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
     runs-on: ubuntu-latest
-    needs: [check, build, test, formatting]
+    needs: [check, build-and-test, formatting, determine-dockerfiles]
     if: always()
     steps:
-      - name: CI Success
-        if: ${{ !contains(needs.*.result, 'failure') }}
-        run: echo "All CI jobs passed!"
+      - name: Check if docker-build should run
+        id: should-docker-build
+        run: |
+          DOCKERFILES='${{ needs.determine-dockerfiles.outputs.dockerfiles }}'
+          if [[ "$DOCKERFILES" == "[]" ]]; then
+            echo "docker_build_needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "docker_build_needed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: CI Success (no docker build needed)
+        if: |
+          steps.should-docker-build.outputs.docker_build_needed == 'false' &&
+          (!contains(needs.check.result, 'failure') || needs.check.result == 'skipped') && 
+          (!contains(needs.check.result, 'cancelled') || needs.check.result == 'skipped') && 
+          (!contains(needs.build-and-test.result, 'failure') || needs.build-and-test.result == 'skipped') &&
+          (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
+          !contains(needs.formatting.result, 'failure') &&
+          !contains(needs.formatting.result, 'cancelled')
+        run: echo "All CI jobs passed! (Docker build not needed)"
+
+      - name: CI Success (with docker build)
+        if: |
+          steps.should-docker-build.outputs.docker_build_needed == 'true' &&
+          (!contains(needs.check.result, 'failure') || needs.check.result == 'skipped') && 
+          (!contains(needs.check.result, 'cancelled') || needs.check.result == 'skipped') && 
+          (!contains(needs.build-and-test.result, 'failure') || needs.build-and-test.result == 'skipped') &&
+          (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
+          !contains(needs.formatting.result, 'failure') &&
+          !contains(needs.formatting.result, 'cancelled') &&
+          (!contains(needs.docker-build.result, 'failure') || needs.docker-build.result == 'skipped') &&
+          (!contains(needs.docker-build.result, 'cancelled') || needs.docker-build.result == 'skipped')
+        run: echo "All CI jobs passed! (Including Docker build)"
+
       - name: CI Failed
-        if: ${{ contains(needs.*.result, 'failure') }}
+        if: |
+          (contains(needs.check.result, 'failure') && needs.check.result != 'skipped') || 
+          (contains(needs.check.result, 'cancelled') && needs.check.result != 'skipped') || 
+          (contains(needs.build-and-test.result, 'failure') && needs.build-and-test.result != 'skipped') ||
+          (contains(needs.build-and-test.result, 'cancelled') && needs.build-and-test.result != 'skipped') ||
+          contains(needs.formatting.result, 'failure') ||
+          contains(needs.formatting.result, 'cancelled') ||
+          (steps.should-docker-build.outputs.docker_build_needed == 'true' && 
+           ((contains(needs.docker-build.result, 'failure') && needs.docker-build.result != 'skipped') || 
+            (contains(needs.docker-build.result, 'cancelled') && needs.docker-build.result != 'skipped')))
         run: |
           echo "Some CI jobs failed!"
           exit 1
