@@ -1,6 +1,6 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 
 use sled::Tree;
 use thiserror::Error;
@@ -35,16 +35,6 @@ pub struct Connection {
     pub(crate) addr: SocketAddr,
     client: WebSocket<MaybeTlsStream<TcpStream>>,
     pub(crate) cursor: Cursor,
-}
-
-impl AsFd for Connection {
-    #[inline]
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        match self.client.get_ref() {
-            MaybeTlsStream::Plain(stream) => stream.as_fd(),
-            MaybeTlsStream::Rustls(stream) => stream.get_ref().as_fd(),
-        }
-    }
 }
 
 impl AsRawFd for Connection {

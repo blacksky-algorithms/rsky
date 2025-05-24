@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 
 use thingbuf::mpsc;
 use thiserror::Error;
@@ -25,17 +25,6 @@ pub struct Connection {
     pub(crate) hostname: String,
     client: WebSocketClient,
     message_tx: MessageSender,
-}
-
-impl AsFd for Connection {
-    #[inline]
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        match self.client.get_ref() {
-            MaybeTlsStream::Plain(stream) => stream.as_fd(),
-            MaybeTlsStream::Rustls(stream) => stream.get_ref().as_fd(),
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl AsRawFd for Connection {
