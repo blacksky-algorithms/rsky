@@ -4,9 +4,9 @@ use std::time::Duration;
 use std::{io, thread};
 
 use bytes::Bytes;
+use fjall::{PartitionCreateOptions, PartitionHandle};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
-use sled::Tree;
 use thiserror::Error;
 
 use crate::SHUTDOWN;
@@ -22,8 +22,8 @@ pub enum WorkerError {
     Io(#[from] io::Error),
     #[error("connection error: {0}")]
     ConnectionError(#[from] ConnectionError),
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    #[error("fjall error: {0}")]
+    Fjall(#[from] fjall::Error),
 }
 
 pub struct Worker {
@@ -31,14 +31,14 @@ pub struct Worker {
     connections: Vec<Option<Connection>>,
     next_idx: usize,
     command_rx: CommandReceiver,
-    firehose: Tree,
+    firehose: PartitionHandle,
     poll: Poll,
     events: Events,
 }
 
 impl Worker {
     pub fn new(id: usize, command_rx: CommandReceiver) -> Result<Self, WorkerError> {
-        let firehose = DB.open_tree("firehose")?;
+        let firehose = DB.open_partition("firehose", PartitionCreateOptions::default())?;
         let poll = Poll::new()?;
         let events = Events::with_capacity(1024);
         Ok(Self { id, connections: Vec::new(), next_idx: 0, command_rx, firehose, poll, events })
@@ -47,7 +47,7 @@ impl Worker {
     pub fn run(mut self) -> Result<(), WorkerError> {
         let span = tracing::info_span!("publisher", id = %self.id);
         let _enter = span.enter();
-        let mut seq = self.firehose.last()?.map(|(k, _)| k.into()).unwrap_or_default();
+        let mut seq = self.firehose.last_key_value()?.map(|(k, _)| k.into()).unwrap_or_default();
         while self.update(&mut seq)? {
             thread::yield_now();
         }
@@ -107,7 +107,7 @@ impl Worker {
             for msg in self.firehose.range((*seq + 1)..=(*seq + 32)) {
                 let (k, v) = msg?;
                 *seq = k.into();
-                self.send(*seq, &Bytes::from_owner(v).slice(8..));
+                self.send(*seq, &Bytes::from_owner(v));
             }
 
             let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
