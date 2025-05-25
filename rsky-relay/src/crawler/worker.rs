@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use std::{io, thread};
 
 use magnetic::Producer;
-use polling::{Event, Events, PollMode, Poller};
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
@@ -14,6 +16,7 @@ use crate::crawler::types::{
 };
 use crate::types::MessageSender;
 
+const INTEREST: Interest = Interest::READABLE;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -32,7 +35,7 @@ pub struct Worker {
     message_tx: MessageSender,
     command_rx: CommandReceiver,
     status_tx: StatusSender,
-    poller: Poller,
+    poll: Poll,
     events: Events,
 }
 
@@ -40,8 +43,8 @@ impl Worker {
     pub fn new(
         id: usize, message_tx: MessageSender, command_rx: CommandReceiver, status_tx: StatusSender,
     ) -> Result<Self, WorkerError> {
-        let poller = Poller::new()?;
-        let events = Events::new();
+        let poll = Poll::new()?;
+        let events = Events::with_capacity(1024);
         Ok(Self {
             id,
             pending: VecDeque::new(),
@@ -50,7 +53,7 @@ impl Worker {
             message_tx,
             command_rx,
             status_tx,
-            poller,
+            poll,
             events,
         })
     }
@@ -93,11 +96,10 @@ impl Worker {
                 });
                 let conn = Connection::new(hostname, client, self.message_tx.clone());
                 #[expect(clippy::expect_used)]
-                unsafe {
-                    self.poller
-                        .add_with_mode(&conn, Event::readable(idx), PollMode::Level)
-                        .expect("unable to register");
-                }
+                self.poll
+                    .registry()
+                    .register(&mut SourceFd(&conn.as_raw_fd()), Token(idx), INTEREST)
+                    .expect("unable to register");
                 self.connections[idx] = Some(conn);
                 return;
             }
@@ -140,15 +142,14 @@ impl Worker {
                 break;
             }
 
-            let mut events = std::mem::take(&mut self.events);
-            events.clear();
+            let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
             'outer: for _ in 0..32 {
                 #[expect(clippy::expect_used)]
-                self.poller
-                    .wait(&mut events, Some(Duration::from_millis(1)))
+                self.poll
+                    .poll(&mut events, Some(Duration::from_millis(1)))
                     .expect("failed to poll");
-                for ev in events.iter() {
-                    if !self.poll(ev.key) {
+                for ev in &events {
+                    if !self.poll(ev.token().0) {
                         break 'outer;
                     }
                 }
@@ -174,7 +175,10 @@ impl Worker {
                 Err(err) => {
                     tracing::info!(host = %conn.hostname, %err, "disconnected");
                     #[expect(clippy::expect_used)]
-                    self.poller.delete(&mut *conn).expect("failed to deregister");
+                    self.poll
+                        .registry()
+                        .deregister(&mut SourceFd(&conn.as_raw_fd()))
+                        .expect("failed to deregister");
                     #[expect(clippy::expect_used)]
                     self.status_tx
                         .push(Status::Disconnected {

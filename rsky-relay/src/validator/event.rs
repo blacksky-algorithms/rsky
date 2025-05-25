@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::convert::Infallible;
-use std::io::Write;
 use std::{fmt, io};
 
 use chrono::{DateTime, Utc};
@@ -231,9 +230,6 @@ impl SubscribeReposEvent {
 
     pub fn serialize(self, capacity: usize, seq: Cursor) -> Result<Vec<u8>, SerializeError> {
         let mut writer = io::Cursor::new(Vec::with_capacity(capacity));
-        #[expect(clippy::cast_sign_loss)]
-        let time = self.time().timestamp() as u64;
-        writer.write_all(&time.to_be_bytes())?;
 
         let header = Header { operation_: 1, type_: Cow::Borrowed(self.type_()) };
         ciborium::ser::into_writer(&header, &mut writer)?;

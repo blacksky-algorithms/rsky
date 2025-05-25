@@ -1,8 +1,8 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 
-use sled::Tree;
+use fjall::PartitionHandle;
 use thiserror::Error;
 use tungstenite::handshake::server::NoCallback;
 use tungstenite::protocol::CloseFrame;
@@ -27,24 +27,14 @@ pub enum ConnectionError {
     Handshake(#[from] HandshakeError<ServerHandshake<MaybeTlsStream<TcpStream>, NoCallback>>),
     #[error("tungstenite error: {0}")]
     Tungstenite(#[from] tungstenite::Error),
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    #[error("fjall error: {0}")]
+    Fjall(#[from] fjall::Error),
 }
 
 pub struct Connection {
     pub(crate) addr: SocketAddr,
     client: WebSocket<MaybeTlsStream<TcpStream>>,
     pub(crate) cursor: Cursor,
-}
-
-impl AsFd for Connection {
-    #[inline]
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        match self.client.get_ref() {
-            MaybeTlsStream::Plain(stream) => stream.as_fd(),
-            MaybeTlsStream::Rustls(stream) => stream.get_ref().as_fd(),
-        }
-    }
 }
 
 impl AsRawFd for Connection {
@@ -101,7 +91,9 @@ impl Connection {
 
     /// false: closed
     /// true: not closed
-    pub fn poll(&mut self, mut seq: Cursor, firehose: &Tree) -> Result<bool, ConnectionError> {
+    pub fn poll(
+        &mut self, mut seq: Cursor, firehose: &PartitionHandle,
+    ) -> Result<bool, ConnectionError> {
         if self.cursor.get() != 0 && self.cursor.get() > seq.get() + 1 {
             self.send(self.cursor, Bytes::from_static(FUTURE_MSG))?;
             self.close(FUTURE_CLOSE)?;
@@ -116,7 +108,7 @@ impl Connection {
                 }
                 self.cursor = seq;
             }
-            if !self.send(seq, Bytes::from_owner(v).slice(8..))? {
+            if !self.send(seq, Bytes::from_owner(v))? {
                 break;
             }
         }
