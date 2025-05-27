@@ -25,11 +25,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 4. The audience (`aud`) specified in the JWT does not match the provided `service_did`.
 /// 5. The payload cannot be serialized back to a JSON `String` after validation.
 ///
-/// # Note
-///
-/// Currently, the function does not verify the cryptographic signature of the JWT. 
-/// Implementing this step is marked as a "TO DO" in the code.
-///
 /// # Example
 ///
 /// ```rust
