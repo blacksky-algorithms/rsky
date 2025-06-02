@@ -14,30 +14,66 @@ DB_FILE = "plc_directory.db"
 def create_database():
     """Create SQLite database and table if they don't exist."""
     conn = sqlite3.connect(DB_FILE)
+    conn.execute("""PRAGMA auto_vacuum = INCREMENTAL""")
+    conn.execute("""PRAGMA journal_mode = WAL""")
     cursor = conn.cursor()
+
+    # Set PRAGMAs
+    conn.execute("""PRAGMA cache_size = -64000""")
+    conn.execute("""PRAGMA journal_size_limit = 6144000""")
+    conn.execute("""PRAGMA mmap_size = 268435456""")
+    conn.execute("""PRAGMA secure_delete = OFF""")
+    conn.execute("""PRAGMA synchronous = NORMAL""")
+    conn.execute("""PRAGMA temp_store = MEMORY""")
 
     # Create table for PLC operations
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS plc_operations (
-        did TEXT,
-        created_at TEXT,
-        nullified BOOLEAN,
-        cid TEXT,
-        operation TEXT
+        cid TEXT NOT NULL PRIMARY KEY ON CONFLICT REPLACE,
+        did TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        nullified BOOLEAN NOT NULL,
+        operation BLOB NOT NULL,
+        pds_endpoint TEXT GENERATED ALWAYS AS (
+            json_extract(operation, '$.services.atproto_pds.endpoint')
+        ) STORED,
+        atproto_key TEXT GENERATED ALWAYS AS (
+            json_extract(operation, '$.verificationMethods.atproto')
+        ) STORED,
+        labeler_endpoint TEXT GENERATED ALWAYS AS (
+            json_extract(operation, '$.services.atproto_labeler.endpoint')
+        ) STORED,
+        atproto_label_key TEXT GENERATED ALWAYS AS (
+            json_extract(operation, '$.verificationMethods.atproto_label')
+        ) STORED
     )
     """)
+
+    # Drop all views
+    cursor.execute("""DROP VIEW IF EXISTS plc_labelers""")
+    cursor.execute("""DROP VIEW IF EXISTS plc_pdses""")
+    cursor.execute("""DROP VIEW IF EXISTS plc_keys""")
+    cursor.execute("""DROP VIEW IF EXISTS plc_latest""")
+
+    # Create indexes
     cursor.execute("""
-    CREATE INDEX IF NOT EXISTS did_index ON plc_operations (
-	    did
-    )
+    CREATE INDEX IF NOT EXISTS idx_plc_operations_did_created_at
+        ON plc_operations (did, created_at DESC)
     """)
     cursor.execute("""
-    CREATE INDEX IF NOT EXISTS created_at_index ON plc_operations (
-	    created_at ASC
-    )
+    CREATE INDEX IF NOT EXISTS idx_plc_operations_pds_endpoint
+        ON plc_operations (pds_endpoint, created_at)
+        WHERE pds_endpoint IS NOT NULL
     """)
     cursor.execute("""
-    CREATE VIEW IF NOT EXISTS plc_latest AS
+    CREATE INDEX IF NOT EXISTS idx_plc_operations_labeler_endpoint
+        ON plc_operations (labeler_endpoint, created_at)
+        WHERE labeler_endpoint IS NOT NULL
+    """)
+
+    # Create views
+    cursor.execute("""
+    CREATE VIEW plc_latest AS
         SELECT *
         FROM plc_operations
         WHERE created_at = (
@@ -47,16 +83,45 @@ def create_database():
         )
     """)
     cursor.execute("""
-    CREATE VIEW IF NOT EXISTS plc_keys AS
+    CREATE VIEW plc_keys AS
         SELECT
-	        did,
-	        created_at,
-	        json_extract(operation, '$.services.atproto_pds.endpoint') AS endpoint,
-	        json_extract(operation, '$.verificationMethods.atproto') AS key
+            did,
+            created_at,
+            pds_endpoint,
+            atproto_key AS pds_key,
+            labeler_endpoint,
+            atproto_label_key AS labeler_key
         FROM plc_latest
+    """)
+    cursor.execute("""
+    CREATE VIEW plc_pdses AS
+        SELECT
+            MIN(created_at) AS first,
+            MAX(created_at) AS last,
+            count() AS accounts,
+            pds_endpoint
+        FROM plc_latest
+        WHERE pds_endpoint IS NOT NULL
+        GROUP BY pds_endpoint
+        ORDER BY last
+    """)
+    cursor.execute("""
+    CREATE VIEW plc_labelers AS
+        SELECT
+            did,
+            created_at,
+            labeler_endpoint
+        FROM plc_latest
+        WHERE labeler_endpoint IS NOT NULL
+        ORDER BY created_at
     """)
 
     conn.commit()
+
+    # Vacuum & optimize
+    cursor.execute("""PRAGMA incremental_vacuum""")
+    cursor.execute("""PRAGMA optimize = 0x10002""")
+
     return conn
 
 
@@ -83,15 +148,15 @@ def insert_operations(conn, operations):
     for op in operations:
         cursor.execute(
             """
-            INSERT INTO plc_operations (did, cid, nullified, created_at, operation)
+            INSERT INTO plc_operations (cid, did, created_at, nullified, operation)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
-                op.get("did"),
                 op.get("cid"),
-                op.get("nullified"),
+                op.get("did"),
                 op.get("createdAt"),
-                json.dumps(op.get("operation")),
+                op.get("nullified"),
+                json.dumps(op.get("operation"), separators=(",", ":")).encode("utf-8"),
             ),
         )
 
@@ -131,7 +196,7 @@ def main():
     after = latest_timestamp
 
     total_processed = get_count(conn) or 0
-    request_count = 0
+    request_count = total_processed // 999
 
     try:
         print("Starting PLC Directory API crawl...")
@@ -145,7 +210,8 @@ def main():
                 break
 
             insert_operations(conn, operations)
-            total_processed += len(operations)
+            prev_processed = total_processed
+            total_processed = get_count(conn) or 0
 
             # Get the last timestamp for the next request
             last_op = operations[-1]
@@ -156,6 +222,9 @@ def main():
                 f"Request #{request_count}: Fetched {len(operations)}, "
                 f"Total {total_processed}, Last timestamp: {after}"
             )
+            ignored = len(operations) - (total_processed - prev_processed)
+            if ignored != 1:
+                print(f"IGNORED: {ignored}")
 
             # Check if we got fewer records than requested (end of data)
             if len(operations) < COUNT_PER_REQUEST:

@@ -76,6 +76,15 @@ impl Resolver {
             "plc_directory.db",
             flag | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        if *DO_PLC_EXPORT {
+            match conn.execute("PRAGMA secure_delete = OFF", []) {
+                Ok(_) | Err(rusqlite::Error::ExecuteReturnedResults) => {}
+                Err(err) => Err(err)?,
+            };
+            conn.execute("PRAGMA synchronous = NORMAL", [])?;
+            conn.execute("PRAGMA incremental_vacuum", [])?;
+            conn.execute("PRAGMA optimize = 0x10002", [])?;
+        }
         let now = Instant::now();
         let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
         let after = conn.query_one(
@@ -118,12 +127,10 @@ impl Resolver {
     }
 
     pub fn query_db(&mut self, did: &str) -> Result<bool, ResolverError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT * FROM plc_keys WHERE did = ?1 ORDER BY created_at DESC LIMIT 1",
-        )?;
+        let mut stmt = self.conn.prepare_cached("SELECT * FROM plc_keys WHERE did = ?1")?;
         match stmt.query_one([did], |row| {
-            let endpoint = row.get_ref("endpoint")?.as_str_or_null()?;
-            let key = row.get_ref("key")?.as_str_or_null()?;
+            let endpoint = row.get_ref("pds_endpoint")?.as_str_or_null()?;
+            let key = row.get_ref("pds_key")?.as_str_or_null()?;
             Ok(parse_key_endpoint(endpoint, key))
         }) {
             Ok(Some((pds, key))) => {
@@ -201,17 +208,16 @@ impl Resolver {
                         let mut dids = Vec::new();
                         let mut count = 0;
                         let tx = self.conn.transaction()?;
-                        let mut stmt = tx.prepare_cached("INSERT INTO plc_operations (did, cid, nullified, created_at, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+                        let mut stmt = tx.prepare_cached("INSERT INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
                         for line in bytes.reader().lines() {
                             count += 1;
                             if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
-                                // TODO: remove duplicates
                                 stmt.execute((
-                                    &doc.did,
                                     &doc.cid,
-                                    &doc.nullified,
+                                    &doc.did,
                                     &doc.created_at,
-                                    doc.operation.get(),
+                                    &doc.nullified,
+                                    doc.operation.get().as_bytes(),
                                 ))?;
                                 self.after = Some(doc.created_at);
                                 if self.inflight.remove(&doc.did) {

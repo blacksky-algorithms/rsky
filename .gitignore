@@ -14,6 +14,8 @@ Rocket.toml
 **/data/
 db/
 *.db
+*.db-shm
+*.db-wal
 *.db-journal
 rsky-relay.log.*
 
