@@ -1,3 +1,94 @@
+//! This module contains functionality for parsing, validating, and managing repository events
+//! and commits within a decentralized version control system. It defines types and implementations
+//! that adhere to specific protocol requirements and version constraints.
+//!
+//! # Constants
+//! - `MAX_BLOCKS_BYTES`: Defines the maximum permitted size (in bytes) for blocks in a commit.
+//! - `MAX_COMMIT_OPS`: Sets the limit for the number of operations allowed in a commit.
+//! - `ATPROTO_REPO_VERSION`: Specifies the currently supported version of the repository protocol.
+//!
+//! # Types
+//!
+//! ## `RepoState`
+//! A structure that represents the state of a repository, including its revision, data CID, 
+//! and head CID. This is useful for tracking the evolution of a repository over time.
+//!
+//! ## `BlockMap`
+//! A type alias for `HashMap<Cid, Vec<u8>>`, which maps content identifiers (CIDs) to their 
+//! corresponding serialized block data.
+//!
+//! ## `InvertError`
+//! An enumeration of errors that may occur during operations involving Merkle Search Trees (MST), 
+//! serialization, multihash generation, or malformed data. This type provides detailed error messages
+//! for debugging and issue resolution.
+//!
+//! ## `NodeEntry`
+//! Represents an entry in a node of a Merkle Search Tree (MST), with variants for either a value
+//! (key-value pair) or a child reference. It includes utility functions for manipulation and validation.
+//!
+//! # Key Structures and Methods
+//!
+//! ## `SubscribeReposEvent::validate`
+//! Validates a given `Commit` against specific protocol rules, including size, structure, and
+//! consistency constraints. This method works on various types of repository events, such as
+//! commits or synchronization events, and provides detailed debug logging for failed validations.
+//!
+//! ### Arguments
+//! - `commit`: A reference to the `Commit` object to be validated.
+//! - `head`: A reference to the repository head (a `Cid`) for validation against the commit.
+//!
+//! ### Returns
+//! A boolean indicating whether the given commit passes all validation checks or not.
+//!
+//! ### Validation Criteria
+//! - Checks for deprecated flags (`too_big`, `rebase`) in the commit.
+//! - Validates CID alignment to ensure structural consistency.
+//! - Ensures blocks are non-empty and do not exceed specified size limits.
+//! - Verifies the revision, protocol version, and DID comply with the repository's expected state.
+//!
+//! ## `SubscribeReposEvent::commit`
+//! Parses the current repository event and attempts to extract the commit and its associated root CID.
+//! It leverages `CarReader` for interpreting serialized block data and handles potential parse errors
+//! gracefully.
+//!
+//! ### Returns
+//! - An `Ok` result containing an optional `(Commit, Cid)` tuple if parsing is successful.
+//! - An error of type `ParseError` if parsing fails, including cases where the root CID is missing.
+//!
+//! ## `SubscribeReposCommit::tree`
+//! Constructs a Merkle Search Tree (MST) node based on the provided root CID and the event's blocks.
+//! This method ensures the proper structure and integrity of the tree, handling any missing or malformed
+//! data with custom errors (`ParseError`).
+//!
+//! ### Arguments
+//! - `root`: The root `Cid` of the MST.
+//!
+//! ### Returns
+//! - An `Ok` result containing the `Node` representing the tree structure.
+//! - An error of type `ParseError` if the tree is incomplete or the root is missing.
+//!
+//! ## `NodeEntry::is_child`
+//! A utility function to verify whether the `NodeEntry` represents a child node.
+//!
+//! ### Returns
+//! - `true` if the entry is of variant `Child`.
+//! - `false` otherwise.
+//!
+//! ## `NodeEntry::child_mut`
+//! Attempts to retrieve a mutable reference to the `Node` child associated with the `NodeEntry`.
+//!
+//! ### Returns
+//! - A mutable reference to the child `Node` on success.
+//! - An error of type `InvertError` if the operation is invalid (e.g., the entry is not a child).
+//!
+//! # Logging
+//! All methods that involve validation, parsing, or error handling use `tracing::debug` for detailed
+//! logging. Logged information includes mismatched values, exceeded limits, and unsupported protocol versions.
+//!
+//! # Errors
+//! Errors encountered during parsing, validation, or tree manipulation are encapsulated in custom
+//! error types (`ParseError` and `InvertError`). These errors provide descriptive messages for easier
+//! debugging and error resolution.
 use std::cmp::Ordering;
 use std::{io, mem};
 
@@ -32,6 +123,46 @@ pub struct RepoState {
 }
 
 impl SubscribeReposEvent {
+    /// Validates a commit against several criteria to ensure the integrity of the data and adherence
+    /// to specific protocol rules. The function evaluates the provided `Commit` and compares it with
+    /// the provided `head` CID. Depending on the variant of `self`, it may perform additional checks.
+    ///
+    /// # Arguments
+    ///
+    /// * `commit` - A reference to the `Commit` structure that is being validated. This contains
+    ///   information about operations, blocks, revision, and other commit metadata.
+    /// * `head` - A reference to the `Cid` (Content Identifier) representing the head of the repository
+    ///   used for comparison against the `commit`.
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If the commit satisfies all validation criteria.
+    /// * `false` - If any of the criteria fail, logging a debug message for debugging purposes.
+    ///
+    /// # Validation Criteria
+    ///
+    /// 1. **Commit-Specific Validations:**
+    ///    - Deprecated flags: Fails validation if the `too_big` or `rebase` flags are set.
+    ///    - CID mismatch: Fails validation if the commit's inner CID does not match the given head.
+    ///    - Operations limit: Ensures the number of operations does not exceed `MAX_COMMIT_OPS`.
+    ///    - Blocks:
+    ///        - Must not be empty.
+    ///        - Must not exceed the maximum allowed size (`MAX_BLOCKS_BYTES`).
+    ///
+    /// 2. **Sync-Specific Validations:**
+    ///    - Blocks must not exceed the maximum size limit (`MAX_BLOCKS_BYTES`).
+    ///
+    /// 3. **General Criteria:**
+    ///    - DID (Decentralized Identifier): Ensures the commit's DID matches the expected value
+    ///      derived from `self.did()`.
+    ///    - Revision: Ensures the commit's revision matches the expected revision derived from the implementation.
+    ///    - Protocol version: Validates that the commit uses the supported repository version (`ATPROTO_REPO_VERSION`).
+    ///
+    /// # Logging
+    ///
+    /// For each failed validation criterion, a debug message is logged using `tracing::debug!`. These
+    /// messages include relevant information (e.g., mismatched values, exceeded limits) to help with
+    /// debugging during development or issue diagnosis.
     pub fn validate(&self, commit: &Commit, head: &Cid) -> bool {
         let rev = match &self {
             Self::Commit(commit) => {
@@ -91,6 +222,40 @@ impl SubscribeReposEvent {
         true
     }
 
+    /// Attempts to extract and deserialize a commit from the object.
+    ///
+    /// # Returns
+    /// - `Ok(Some((Commit, Cid)))` if a valid commit and its root CID are successfully retrieved and parsed.
+    /// - `Ok(None)` if the object does not represent a commit (e.g., it is an Identity or Account).
+    /// - `Err(ParseError)` if an error occurs during parsing or processing of the CAR file, including
+    ///   cases where the root CID is missing in the CAR blocks.
+    ///
+    /// # Errors
+    /// - Returns `ParseError::MissingRoot` if the root CID is not found in the CAR blocks.
+    /// - Propagates errors from other functions, such as block parsing or deserialization.
+    ///
+    /// # Notes
+    /// - This function differentiates between four variants of the object (`Commit`, `Sync`, `Identity`, 
+    ///   and `Account`). It only processes `Commit` and `Sync` variants.
+    /// - The function processes CAR (Content Addressable aRchive) format blocks and reads their contents 
+    ///   to identify and deserialize the root commit block.
+    ///
+    /// # Example
+    /// ```
+    /// let result = object.commit();
+    /// match result {
+    ///     Ok(Some((commit, cid))) => {
+    ///         println!("Successfully retrieved commit with CID: {:?}", cid);
+    ///     }
+    ///     Ok(None) => {
+    ///         println!("No commit found for the given object.");
+    ///     }
+    ///     Err(e) => {
+    ///         println!("Failed to parse commit: {:?}", e);
+    ///     }
+    /// }
+    /// ```
+    ///
     pub fn commit(&self) -> Result<Option<(Commit, Cid)>, ParseError> {
         let mut blocks = match self {
             Self::Commit(commit) => commit.blocks.as_slice(),
@@ -112,6 +277,53 @@ impl SubscribeReposEvent {
 }
 
 impl SubscribeReposCommit {
+    /// Constructs a tree structure from a given root CID using the provided block data.
+    ///
+    /// This function processes CAR (Content Addressable aRchive) encoded blocks to build a tree starting
+    /// from the specified `root` CID. The blocks are organized into a `HashMap` for lookup during the tree
+    /// construction process.
+    ///
+    /// # Arguments
+    /// - `self`: A reference to the current object that contains the block data.
+    /// - `root`: The root CID (`Cid`) representing the starting node of the tree to be generated.
+    ///
+    /// # Returns
+    /// - `Ok(Node)`: On success, returns the root node of the constructed tree with its structure
+    ///   properly set up.
+    /// - `Err(ParseError)`: Returns an error if tree construction fails due to missing blocks or
+    ///   an invalid root CID.
+    ///
+    /// # Errors
+    /// - `ParseError::MissingRoot(root)`: If the root CID is not found in the provided block data.
+    /// - Any other `ParseError` variants that occur during deserialization or tree construction.
+    ///
+    /// # Algorithm
+    /// 1. Retrieves the internal slice of blocks and prepares to map blocks by their CID.
+    /// 2. Uses `CarReader` to parse the CAR blocks, extracting their CIDs and underlying raw data.
+    /// 3. Builds a `HashMap` (`block_map`) associating each CID with its corresponding block data.
+    /// 4. Attempts to load the root `Node` from the `block_map`, returning an error if the root node
+    ///    cannot be constructed.
+    /// 5. Ensures that height information of all nodes is properly computed via `ensure_heights`.
+    /// 6. On success, returns the fully constructed tree.
+    ///
+    /// # Dependencies
+    /// - `Cid`: Represents the Content Identifier (CID) for nodes in the tree.
+    /// - `CarReader`: Handles the parsing of CAR file data.
+    /// - `Node`: Represents individual nodes in the tree and provides `load` and `ensure_heights` methods.
+    /// - `ParseError`: Enum encapsulating errors that could occur during the tree construction process.
+    ///
+    /// # Example
+    /// ```rust
+    /// let root_cid: Cid = // Obtain the root CID from somewhere
+    /// match your_struct.tree(root_cid) {
+    ///     Ok(tree) => {
+    ///         println!("Successfully built tree: {:?}", tree);
+    ///     }
+    ///     Err(e) => {
+    ///         eprintln!("Failed to build tree: {:?}", e);
+    ///     }
+    /// }
+    /// ```
     pub fn tree(&self, root: Cid) -> Result<Node, ParseError> {
         let mut blocks = self.blocks.as_slice();
         let mut block_map = HashMap::new();
@@ -899,7 +1111,38 @@ impl NodeData {
         Ok(d)
     }
 
-    // Computes the MST "height" for a key (bytestring).
+    /// Determines the height (or depth), in levels, of a key within a Merkle Search Tree (MST),
+    /// starting from the "bottom" of the tree at height 0. The height is calculated based on
+    /// the leading zero bits of the SHA-256 hash of the provided key.
+    ///
+    /// # Parameters
+    /// - `key`: A byte slice representing the key whose height in the MST is to be determined.
+    ///
+    /// # Returns
+    /// An `i8` value representing the height of the key in the tree.
+    ///
+    /// # Details
+    /// The function utilizes the following methodology:
+    ///  - It computes the SHA-256 hash of the input `key`.
+    ///  - Iterates over each byte of the hash, counting the leading pairs of zero bits.
+    ///  - The count translates to the height (`0` for no leading zero bits, increasing by 1 for every
+    ///    leading pair of zero bits).
+    ///
+    /// Additional notes about this specific MST implementation:
+    /// - The tree has a fanout value of 16 (uses 4 bits or 2 bits per level).
+    /// - The function stops counting once it encounters a non-zero leading bit pair.
+    ///
+    /// # Examples
+    /// ```
+    /// use sha2::{Digest, Sha256};
+    ///
+    /// let key = b"example_key";
+    /// let height = height_for_key(key);
+    /// println!("Height: {height}");
+    /// ```
+    ///
+    /// For the key `"example_key"` and fanout of 16, the `height_for_key` function calculates
+    /// the height in the MST by processing the SHA-256 hash of the key.
     // Layers are counted from the "bottom" of the tree, starting with zero.
     //
     // For atproto repository v3, uses SHA-256 as the hashing function and
@@ -936,11 +1179,80 @@ mod ipld_bytes {
     use serde::de::Error;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+    /// Serializes a `Vec<u8>` as an IPLD (Interplanetary Linked Data) `Bytes` variant.
+    ///
+    /// # Parameters
+    /// - `t`: A reference to a `Vec<u8>` that represents the data to be serialized.
+    /// - `s`: A serializer instance that implements the `Serializer` trait, used to perform the serialization.
+    ///
+    /// # Returns
+    /// - A `Result` containing the serialized data (`S::Ok`) if successful, or an error (`S::Error`) if the serialization fails.
+    ///
+    /// # Notes
+    /// - This function expects ownership of the data in the `Vec<u8>` before serialization, which is why it clones the vector before wrapping it in the `Ipld::Bytes` variant.
+    /// - The function is annotated with `#[expect(clippy::ptr_arg)]` to explicitly suppress the `clippy` lint warning about passing a `&Vec<u8>` instead of a `&[u8]`. This is likely done intentionally, as the clone operation requires ownership of the `Vec<u8>`.
+    ///
+    /// # Example
+    /// ```
+    /// use serde::Serialize;
+    /// use serde_json::to_string;
+    ///
+    /// let data = vec![1, 2, 3, 4];
+    /// let serialized = serialize(&data, to_string).expect("Serialization failed");
+    /// ```
+    ///
+    /// # Implementation Detail
+    /// This function wraps the vector in an `Ipld::Bytes` variant before serializing it. `Ipld` is assumed to be a custom enum that represents different data types for IPLD storage.
     #[expect(clippy::ptr_arg)]
     pub fn serialize<S: Serializer>(t: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
         Ipld::Bytes(t.clone()).serialize(s)
     }
 
+    /// Deserializes a vector of bytes (`Vec<u8>`) from a given deserializer.
+    ///
+    /// This function utilizes the `serde` library for deserialization. It attempts to deserialize
+    /// an `Ipld` (InterPlanetary Linked Data) structure from the input deserializer, and expects
+    /// the `Ipld` to contain a `Bytes` variant. If the deserialized `Ipld` does not match the
+    /// expected variant, an error is returned.
+    ///
+    /// # Type Parameters
+    /// - `'de`: A lifetime parameter required by the `Deserializer` trait.
+    /// - `D`: The specific type implementing the `Deserializer` trait, which will supply the data
+    ///   to be deserialized.
+    ///
+    /// # Arguments
+    /// - `d`: A deserializer implementing the `Deserializer` trait, used to parse the serialized data
+    ///   into an `Ipld` structure.
+    ///
+    /// # Returns
+    /// - `Ok(Vec<u8>)`: If the deserialization succeeds, the function returns a `Vec<u8>` containing
+    ///   the bytes extracted from the `Ipld` structure.
+    /// - `Err(D::Error)`: If the deserialization fails or the `Ipld` structure does not match the
+    ///   expected `Bytes` variant, the function returns an appropriate error.
+    ///
+    /// # Errors
+    /// - Returns a custom error if the deserialized `Ipld` is not the `Bytes` variant, including debugging
+    ///   information about the `Ipld`'s kind.
+    /// - Errors may also arise due to the inability to properly deserialize data through the given
+    ///   deserializer.
+    ///
+    /// # Example
+    /// ```rust
+    /// use serde::de::Deserializer;
+    ///
+    /// // Assuming `DeserializationContext` implements `Deserializer`
+    /// let deserializer: DeserializationContext = ...;
+    /// let result: Result<Vec<u8>, _> = deserialize(deserializer);
+    ///
+    /// match result {
+    ///     Ok(bytes) => {
+    ///         println!("Successfully deserialized bytes: {:?}", bytes);
+    ///     }
+    ///     Err(err) => {
+    ///         eprintln!("Error deserializing: {:?}", err);
+    ///     }
+    /// }
+    /// ```
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let ipld = Ipld::deserialize(d)?;
         let Ipld::Bytes(key_suffix) = ipld else {
