@@ -11,19 +11,36 @@ use std::time::{Duration, Instant};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
+#[cfg(feature = "labeler")]
+use rusqlite::{Connection, OpenFlags};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
 use url::Url;
 
 use crate::SHUTDOWN;
-use crate::config::{HOSTS_INTERVAL, HOSTS_MIN_ACCOUNTS, HOSTS_RELAY, PORT};
+use crate::config::{HOSTS_INTERVAL, PORT};
+#[cfg(not(feature = "labeler"))]
+use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
+#[cfg(not(feature = "labeler"))]
 use crate::server::types::{HostStatus, ListHosts};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
-const LIST_HOSTS: &str = "xrpc/com.atproto.sync.listHosts";
+#[cfg(not(feature = "labeler"))]
+const PATH_LIST_HOSTS: &str = "/xrpc/com.atproto.sync.listHosts";
+
+const PATH_SUBSCRIBE: &str = if cfg!(feature = "labeler") {
+    "/xrpc/com.atproto.label.subscribeLabels"
+} else {
+    "/xrpc/com.atproto.sync.subscribeRepos"
+};
+const PATH_REQUEST_CRAWL: &str = if cfg!(feature = "labeler") {
+    "/xrpc/com.atproto.label.requestCrawl"
+} else {
+    "/xrpc/com.atproto.sync.requestCrawl"
+};
 
 const INDEX_ASCII: &str = r"
     .------..------..------..------.
@@ -55,6 +72,9 @@ pub enum ServerError {
     PushError(#[from] rtrb::PushError<RequestCrawl>),
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    #[cfg(feature = "labeler")]
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 #[derive(Debug)]
@@ -79,6 +99,8 @@ pub struct Server {
     base_url: Url,
     buf: Vec<u8>,
     last: Instant,
+    #[cfg(feature = "labeler")]
+    conn: Connection,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -108,12 +130,19 @@ impl Server {
         let base_url = Url::parse("http://example.com")?;
         let now = Instant::now();
         let last = now.checked_sub(HOSTS_INTERVAL).unwrap_or(now);
+        #[cfg(feature = "labeler")]
+        let conn = Connection::open_with_flags(
+            "plc_directory.db",
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         Ok(Self {
             listener,
             tls_config,
             base_url,
             buf: vec![0; 1024],
             last,
+            #[cfg(feature = "labeler")]
+            conn,
             request_crawl_tx,
             subscribe_repos_tx,
         })
@@ -134,8 +163,9 @@ impl Server {
 
         if self.last.elapsed() > HOSTS_INTERVAL {
             if let Err(err) = self.query_hosts() {
-                tracing::info!(%err, "unable to query hosts");
+                tracing::warn!(%err, "unable to query hosts");
             }
+            self.last = Instant::now();
         }
 
         match self.listener.accept() {
@@ -196,7 +226,7 @@ impl Server {
                 stream.shutdown()?;
                 Ok(())
             }
-            ("GET", "/xrpc/com.atproto.sync.subscribeRepos") => {
+            ("GET", PATH_SUBSCRIBE) => {
                 let mut cursor = None;
                 for (key, value) in url.query_pairs() {
                     if key == "cursor" {
@@ -211,7 +241,7 @@ impl Server {
                 })?;
                 Ok(())
             }
-            ("POST", "/xrpc/com.atproto.sync.requestCrawl") => {
+            ("POST", PATH_REQUEST_CRAWL) => {
                 if let Status::Complete(offset) = res {
                     if let Ok(request_crawl) =
                         serde_json::from_reader::<_, RequestCrawl>(&self.buf[offset..len])
@@ -232,6 +262,7 @@ impl Server {
         }
     }
 
+    #[cfg(not(feature = "labeler"))]
     fn query_hosts(&mut self) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("rsky-relay")
@@ -244,7 +275,7 @@ impl Server {
                 params.push(("cursor", cursor));
             }
             let url =
-                Url::parse_with_params(&format!("https://{HOSTS_RELAY}/{LIST_HOSTS}"), params)?;
+                Url::parse_with_params(&format!("https://{HOSTS_RELAY}{PATH_LIST_HOSTS}"), params)?;
             let mut hosts: ListHosts = client.get(url).send()?.json()?;
             hosts.hosts.sort_unstable_by_key(|host| host.account_count);
             for host in hosts.hosts.into_iter().rev() {
@@ -260,7 +291,20 @@ impl Server {
                 break;
             }
         }
-        self.last = Instant::now();
+        Ok(())
+    }
+
+    #[cfg(feature = "labeler")]
+    fn query_hosts(&mut self) -> Result<()> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT DISTINCT labeler_endpoint FROM plc_labelers")?;
+        for res in stmt.query_map([], |row| row.get::<_, String>(0))? {
+            if let Some(hostname) = res?.strip_prefix("https://").map(|x| x.trim_end_matches('/')) {
+                self.request_crawl_tx
+                    .push(RequestCrawl { hostname: hostname.to_owned(), cursor: None })?;
+            }
+        }
+        drop(stmt);
         Ok(())
     }
 }

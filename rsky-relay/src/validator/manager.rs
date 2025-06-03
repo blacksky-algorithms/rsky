@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTimeError};
 use chrono::{DateTime, Utc};
 use fjall::{Batch, PartitionCreateOptions, PartitionHandle, PersistMode};
 use hashbrown::HashMap;
+#[cfg(not(feature = "labeler"))]
 use hashbrown::hash_map::Entry;
 use rusqlite::Connection;
 use thiserror::Error;
@@ -15,6 +16,7 @@ use crate::config::HOSTS_WRITE_INTERVAL;
 use crate::types::{Cursor, DB, MessageReceiver};
 use crate::validator::event::{ParseError, SerializeError, SubscribeReposEvent};
 use crate::validator::resolver::{Resolver, ResolverError};
+#[cfg(not(feature = "labeler"))]
 use crate::validator::types::RepoState;
 use crate::validator::utils;
 
@@ -41,6 +43,7 @@ pub enum ManagerError {
 pub struct Manager {
     message_rx: MessageReceiver,
     hosts: HashMap<String, (Cursor, DateTime<Utc>)>,
+    #[cfg(not(feature = "labeler"))]
     repos: HashMap<String, RepoState>,
     resolver: Resolver,
     last: Instant,
@@ -52,6 +55,7 @@ pub struct Manager {
 impl Manager {
     pub fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
         let hosts = HashMap::new();
+        #[cfg(not(feature = "labeler"))]
         let repos = HashMap::new();
         let resolver = Resolver::new()?;
         let now = Instant::now();
@@ -67,7 +71,17 @@ impl Manager {
         )?;
         let queue = DB.open_partition("queue", PartitionCreateOptions::default())?;
         let firehose = DB.open_partition("firehose", PartitionCreateOptions::default())?;
-        Ok(Self { message_rx, hosts, repos, resolver, last, conn, queue, firehose })
+        Ok(Self {
+            message_rx,
+            hosts,
+            #[cfg(not(feature = "labeler"))]
+            repos,
+            resolver,
+            last,
+            conn,
+            queue,
+            firehose,
+        })
     }
 
     pub async fn run(mut self) -> Result<(), ManagerError> {
@@ -78,13 +92,15 @@ impl Manager {
             while let Some(row) = rows.next()? {
                 let host = row.get_unwrap("host");
                 let cursor: u64 = row.get_unwrap("cursor");
-                self.hosts.insert(host, (cursor.into(), DateTime::default()));
+                self.hosts.insert(host, (cursor.into(), DateTime::UNIX_EPOCH));
                 hosts += 1;
             }
         }
-        // TODO: move this to sqlite
+        #[allow(unused_mut)]
         let mut repos = 0;
+        #[cfg(not(feature = "labeler"))]
         {
+            // TODO: move this to sqlite
             let handle = DB.open_partition("repos", PartitionCreateOptions::default())?;
             self.repos.reserve(handle.approximate_len());
             for res in handle.iter() {
@@ -133,7 +149,9 @@ impl Manager {
             ",
         )?;
         for (host, (cursor, time)) in &self.hosts {
-            stmt.execute((host, cursor.get(), time))?;
+            if *time != DateTime::UNIX_EPOCH {
+                stmt.execute((host, cursor.get(), time))?;
+            }
         }
         drop(stmt);
         tx.commit()?;
@@ -200,11 +218,20 @@ impl Manager {
             // get commit object for #commit/#sync or add to the firehose
             let span;
             let _enter;
+            #[allow(unused_variables)]
             let (commit, head) = match event.commit() {
                 Ok(Some((commit, head))) => {
-                    span = tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
+                    #[cfg(not(feature = "labeler"))]
+                    {
+                        span = tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
+                    }
+                    #[cfg(feature = "labeler")]
+                    {
+                        span = tracing::debug_span!("validate", n_labels = commit.len());
+                    }
                     _enter = span.enter();
 
+                    #[cfg(not(feature = "labeler"))]
                     if !event.validate(&commit, &head) {
                         continue;
                     }
@@ -243,6 +270,7 @@ impl Manager {
             }
 
             // verify signature
+            #[allow(clippy::needless_borrow)]
             match utils::verify_commit_sig(&commit, key) {
                 Ok(valid) => {
                     if !valid {
@@ -257,9 +285,9 @@ impl Manager {
             }
 
             // verify commit message
-            let rev = commit.rev;
-            let data = commit.data;
-            let entry = self.repos.entry(commit.did);
+            #[cfg(not(feature = "labeler"))]
+            let (rev, data, entry) = { (commit.rev, commit.data, self.repos.entry(commit.did)) };
+            #[cfg(not(feature = "labeler"))]
             if let SubscribeReposEvent::Commit(commit) = &event {
                 // TODO: should still validate records existing in blocks, etc
                 if let Entry::Occupied(prev) = &entry {
@@ -274,6 +302,7 @@ impl Manager {
 
             let msg = event.serialize(msg.data.len(), cursor.next())?;
             self.firehose.insert(*cursor, msg)?;
+            #[cfg(not(feature = "labeler"))]
             entry.insert(RepoState { rev, data, head });
             self.hosts.insert(host.clone(), (seq, time));
         }
@@ -286,7 +315,7 @@ impl Manager {
     }
 
     fn scan_did(&mut self, cursor: &mut Cursor, did: &str) -> Result<(), ManagerError> {
-        let Some((pds, key)) = self.resolver.resolve(did)? else { unreachable!() };
+        let Some((pds, key)) = self.resolver.resolve(did)? else { unreachable!("{did}") };
 
         let mut batch: Option<Batch> = None;
         for res in self.queue.prefix(&did) {
@@ -307,10 +336,14 @@ impl Manager {
             let span = tracing::debug_span!("msg_data", type = %type_, %seq, %time, %did);
             let _enter = span.enter();
 
+            #[allow(unused_variables)]
             #[expect(clippy::unwrap_used)]
             let (commit, head) = event.commit()?.unwrap(); // already parsed
+            #[cfg(not(feature = "labeler"))]
             let span =
                 tracing::debug_span!("validate", rev = %commit.rev, data = %commit.data, %head);
+            #[cfg(feature = "labeler")]
+            let span = tracing::debug_span!("validate", n_labels = commit.len());
             let _enter = span.enter();
 
             if let Some(pds) = pds {
@@ -321,6 +354,7 @@ impl Manager {
             }
 
             // verify signature
+            #[allow(clippy::needless_borrow)]
             match utils::verify_commit_sig(&commit, key) {
                 Ok(valid) => {
                     if !valid {
@@ -335,9 +369,9 @@ impl Manager {
             }
 
             // verify commit message
-            let rev = commit.rev;
-            let data = commit.data;
-            let entry = self.repos.entry(commit.did);
+            #[cfg(not(feature = "labeler"))]
+            let (rev, data, entry) = { (commit.rev, commit.data, self.repos.entry(commit.did)) };
+            #[cfg(not(feature = "labeler"))]
             if let SubscribeReposEvent::Commit(commit) = &event {
                 // TODO: should still validate records existing in blocks, etc
                 if let Entry::Occupied(prev) = &entry {
@@ -352,6 +386,7 @@ impl Manager {
 
             let msg = event.serialize(input.len(), cursor.next())?;
             self.firehose.insert(*cursor, msg)?;
+            #[cfg(not(feature = "labeler"))]
             entry.insert(RepoState { rev, data, head });
         }
         if let Some(batch) = batch {
@@ -370,6 +405,7 @@ impl Drop for Manager {
             tracing::warn!(%err, "unable to persist host state\n{:#?}", self.hosts);
         }
 
+        #[cfg(not(feature = "labeler"))]
         match DB.open_partition("repos", PartitionCreateOptions::default()) {
             Ok(repos) => {
                 let len = self.repos.len();

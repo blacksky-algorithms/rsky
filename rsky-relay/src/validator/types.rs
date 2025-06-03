@@ -95,7 +95,7 @@ impl SubscribeReposEvent {
         let mut blocks = match self {
             Self::Commit(commit) => commit.blocks.as_slice(),
             Self::Sync(sync) => sync.blocks.as_slice(),
-            Self::Identity(_) | Self::Account(_) => {
+            Self::Identity(_) | Self::Account(_) | Self::Labels(_) => {
                 return Ok(None);
             }
         };
