@@ -13,6 +13,9 @@ use rsky_common::tid::TID;
 
 use crate::types::Cursor;
 
+pub type DidEndpoint = Option<Box<str>>;
+pub type DidKey = [u8; 35];
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("header error: {0}")]

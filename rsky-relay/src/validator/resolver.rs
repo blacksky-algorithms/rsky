@@ -17,8 +17,9 @@ use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio::time::timeout;
 
-use rsky_common::get_verification_material;
 use rsky_identity::types::DidDocument;
+
+use crate::validator::event::{DidEndpoint, DidKey};
 
 const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,7 +35,13 @@ const DOC_PATH: &str = ".well-known/did.json";
 static DO_PLC_EXPORT: LazyLock<bool> =
     LazyLock::new(|| std::env::args().filter(|arg| arg == "--no-plc-export").count() == 0);
 
-type RequestFuture = Pin<Box<dyn Future<Output = (Option<String>, reqwest::Result<Bytes>)> + Send>>;
+type RequestFuture = Pin<Box<dyn Future<Output = (Query, reqwest::Result<Bytes>)> + Send>>;
+
+#[derive(Debug)]
+enum Query {
+    Did(String),
+    Export(String),
+}
 
 #[derive(Debug, Error)]
 pub enum ResolverError {
@@ -47,7 +54,7 @@ pub enum ResolverError {
 }
 
 pub struct Resolver {
-    cache: LruCache<String, (Option<Box<str>>, [u8; 35])>,
+    cache: LruCache<String, (DidEndpoint, DidKey)>,
     conn: Connection,
     last: Instant,
     after: Option<String>,
@@ -71,7 +78,7 @@ impl Resolver {
         )?;
         let now = Instant::now();
         let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
-        let after = conn.query_row(
+        let after = conn.query_one(
             "SELECT created_at FROM plc_operations ORDER BY created_at DESC LIMIT 1",
             [],
             |row| Ok(Some(row.get("created_at")?)),
@@ -97,10 +104,7 @@ impl Resolver {
         }
     }
 
-    #[expect(clippy::type_complexity)]
-    pub fn resolve(
-        &mut self, did: &str,
-    ) -> Result<Option<(Option<&str>, &[u8; 35])>, ResolverError> {
+    pub fn resolve(&mut self, did: &str) -> Result<Option<(Option<&str>, &DidKey)>, ResolverError> {
         // the identity might have expired, so check inflight dids first
         if self.inflight.contains(did) {
             return Ok(None);
@@ -114,35 +118,13 @@ impl Resolver {
     }
 
     pub fn query_db(&mut self, did: &str) -> Result<bool, ResolverError> {
-        let mut stmt = self.conn.prepare_cached("SELECT * FROM plc_keys WHERE did = ?1")?;
-        match stmt.query_row([did], |row| {
-            // key can be null for legacy doc formats
-            if let Some(key) = row.get_ref("key")?.as_str_or_null()? {
-                match multibase::decode(&key[8..]) {
-                    Ok((_, vec)) => match vec.try_into() {
-                        Ok(key) => {
-                            // endpoint can be null for legacy doc formats
-                            let pds =
-                                row.get_ref("endpoint")?.as_str_or_null()?.and_then(|endpoint| {
-                                    Some(
-                                        endpoint
-                                            .strip_prefix("https://")?
-                                            .trim_end_matches('/')
-                                            .into(),
-                                    )
-                                });
-                            return Ok(Some((pds, key)));
-                        }
-                        Err(_) => {
-                            tracing::debug!(%key, "invalid key length");
-                        }
-                    },
-                    Err(err) => {
-                        tracing::debug!(%key, %err, "invalid key");
-                    }
-                }
-            }
-            Ok(None)
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT * FROM plc_keys WHERE did = ?1 ORDER BY created_at DESC LIMIT 1",
+        )?;
+        match stmt.query_one([did], |row| {
+            let endpoint = row.get_ref("endpoint")?.as_str_or_null()?;
+            let key = row.get_ref("key")?.as_str_or_null()?;
+            Ok(parse_key_endpoint(endpoint, key))
         }) {
             Ok(Some((pds, key))) => {
                 self.cache.put(did.to_owned(), (pds, key));
@@ -163,29 +145,29 @@ impl Resolver {
         if let Some(plc) = did.strip_prefix("did:plc:") {
             let plc = if *DO_PLC_EXPORT { None } else { Some(plc) };
             self.send_req(None, plc);
-        } else if let Some(id) = did.strip_prefix("did:web:") {
-            let Ok(hostname) = urlencoding::decode(id) else {
+        } else if let Some(web) = did.strip_prefix("did:web:") {
+            let Ok(web) = urlencoding::decode(web) else {
                 tracing::debug!("invalid did");
                 return;
             };
-            self.send_req(Some(&hostname), None);
+            self.send_req(Some(&web), None);
         } else {
             tracing::debug!("invalid did");
             self.inflight.remove(did);
         }
     }
 
-    fn send_req(&mut self, hostname: Option<&str>, plc: Option<&str>) {
-        let (req, query) = if let Some(hostname) = hostname {
+    fn send_req(&mut self, web: Option<&str>, plc: Option<&str>) {
+        let (req, query) = if let Some(web) = web {
             tracing::trace!("fetching did");
-            (self.client.get(format!("https://{hostname}/{DOC_PATH}")), Some(hostname.to_owned()))
+            (self.client.get(format!("https://{web}/{DOC_PATH}")), Query::Did(web.to_owned()))
         } else if let Some(plc) = plc {
             tracing::trace!("fetching did");
-            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Some(plc.to_owned()))
+            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Query::Did(plc.to_owned()))
         } else if let Some(after) = self.after.take() {
             tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
-            (self.client.get(format!("{PLC_URL}/{PLC_EXPORT}={after}")), None)
+            (self.client.get(format!("{PLC_URL}/{PLC_EXPORT}={after}")), Query::Export(after))
         } else {
             return;
         };
@@ -203,9 +185,9 @@ impl Resolver {
     pub async fn poll(&mut self) -> Result<Vec<String>, ResolverError> {
         if let Ok(Some((query, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await {
             match res {
-                Ok(bytes) => {
-                    if let Some(query) = query {
-                        if let Some((did, pds, key)) = parse_did_doc(&bytes) {
+                Ok(bytes) => match query {
+                    Query::Did(query) => {
+                        if let Some((did, (pds, key))) = parse_did_doc(&bytes) {
                             if query != did[8..] {
                                 tracing::warn!(%query, found = %&did[8..], "did query mismatch");
                             }
@@ -213,7 +195,9 @@ impl Resolver {
                             self.cache.put(did.clone(), (pds, key));
                             return Ok(vec![did]);
                         }
-                    } else {
+                    }
+                    Query::Export(after) => {
+                        self.after = Some(after);
                         let mut dids = Vec::new();
                         let mut count = 0;
                         let tx = self.conn.transaction()?;
@@ -247,7 +231,7 @@ impl Resolver {
                         }
                         return Ok(dids);
                     }
-                }
+                },
                 Err(err) => {
                     tracing::debug!(%err, "fetch error");
                 }
@@ -282,39 +266,49 @@ fn parse_plc_doc(input: &str) -> Option<PlcDocument<'_>> {
     None
 }
 
-fn parse_did_doc(input: &Bytes) -> Option<(String, Option<Box<str>>, [u8; 35])> {
+fn parse_did_doc(input: &Bytes) -> Option<(String, (DidEndpoint, DidKey))> {
     match serde_json::from_slice::<DidDocument>(input) {
-        Ok(doc) => match get_verification_material(&doc, "atproto") {
-            Some(material) => {
-                let key = material.public_key_multibase;
-                match multibase::decode(&key) {
-                    Ok((_, vec)) => {
-                        if let Ok(key) = vec.try_into() {
-                            let pds = doc.service.and_then(|services| {
-                                Some(
-                                    services
-                                        .first()?
-                                        .service_endpoint
-                                        .strip_prefix("https://")?
-                                        .trim_end_matches('/')
-                                        .into(),
-                                )
-                            });
-                            return Some((doc.id, pds, key));
-                        }
-                        tracing::debug!(%key, "invalid key length");
-                    }
-                    Err(err) => {
-                        tracing::debug!(%key, %err, "invalid key");
-                    }
-                }
-            }
-            None => {
-                tracing::debug!(?doc, "no valid key found");
-            }
-        },
+        Ok(doc) => {
+            let endpoint = doc
+                .service
+                .as_ref()
+                .and_then(|services| {
+                    services.iter().find(|service| service.id.ends_with("#atproto_pds"))
+                })
+                .map(|service| service.service_endpoint.as_str());
+            let key = doc
+                .verification_method
+                .as_ref()
+                .and_then(|methods| methods.iter().find(|method| method.id.ends_with("#atproto")))
+                .and_then(|method| method.public_key_multibase.as_deref());
+            Some((doc.id, parse_key_endpoint(endpoint, key)?))
+        }
         Err(err) => {
             tracing::debug!(?input, %err, "parse error");
+            None
+        }
+    }
+}
+
+fn parse_key_endpoint(endpoint: Option<&str>, key: Option<&str>) -> Option<(DidEndpoint, DidKey)> {
+    // key can be null for legacy doc formats
+    if let Some(key) = key {
+        match multibase::decode(key.trim_start_matches("did:key:")) {
+            Ok((_, vec)) => match vec.try_into() {
+                Ok(key) => {
+                    // endpoint can be null for legacy doc formats
+                    let pds = endpoint.and_then(|endpoint| {
+                        Some(endpoint.strip_prefix("https://")?.trim_end_matches('/').into())
+                    });
+                    return Some((pds, key));
+                }
+                Err(_) => {
+                    tracing::debug!(%key, "invalid key length");
+                }
+            },
+            Err(err) => {
+                tracing::debug!(%key, %err, "invalid key");
+            }
         }
     }
     None
