@@ -24,6 +24,7 @@ pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
         .unwrap();
     db.open_partition("firehose", firehose_options()).unwrap();
     db.open_partition("queue", PartitionCreateOptions::default()).unwrap();
+    #[cfg(not(feature = "labeler"))]
     db.open_partition("repos", PartitionCreateOptions::default()).unwrap();
     db
 });

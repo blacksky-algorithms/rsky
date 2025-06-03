@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ScopedJoinHandle};
+use std::time::Duration;
 
 use clap::Parser;
 use color_eyre::Result;
@@ -28,12 +29,15 @@ use rsky_relay::{
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+const SLEEP: Duration = Duration::from_millis(10);
+
 #[derive(Debug, clap::Parser)]
 pub struct Args {
     #[clap(short, long, requires = "private_key")]
     certs: Option<PathBuf>,
     #[clap(short, long, requires = "certs")]
     private_key: Option<PathBuf>,
+    #[cfg(not(feature = "labeler"))]
     #[clap(long)]
     no_plc_export: bool,
 }
@@ -56,6 +60,7 @@ pub async fn main() -> Result<()> {
         .init();
     color_eyre::install()?;
 
+    #[expect(clippy::unwrap_used)]
     default_provider().install_default().unwrap();
 
     let args = Args::parse();
@@ -76,7 +81,7 @@ pub async fn main() -> Result<()> {
     let publisher = PublisherManager::new(WORKERS_PUBLISHERS, subscribe_repos_rx)?;
     #[expect(clippy::vec_init_then_push)]
     let ret = thread::scope(move |s| {
-        let mut handles = Vec::<ScopedJoinHandle<Result<_, RelayError>>>::new();
+        let mut handles = Vec::<ScopedJoinHandle<'_, Result<_, RelayError>>>::new();
         handles.push(
             thread::Builder::new()
                 .name("rsky-crawl".into())
@@ -92,12 +97,21 @@ pub async fn main() -> Result<()> {
                 .name("rsky-server".into())
                 .spawn_scoped(s, move || server.run().map_err(Into::into))?,
         );
+        #[expect(clippy::expect_used)]
         let mut signals =
             SignalsInfo::<WithOrigin>::new(TERM_SIGNALS).expect("failed to init signals");
-        for signal_info in &mut signals {
-            if TERM_SIGNALS.contains(&signal_info.signal) {
-                break;
+        'outer: loop {
+            for signal_info in signals.pending() {
+                if TERM_SIGNALS.contains(&signal_info.signal) {
+                    break 'outer;
+                }
             }
+            for handle in &handles {
+                if handle.is_finished() {
+                    break 'outer;
+                }
+            }
+            thread::sleep(SLEEP);
         }
         tracing::info!("shutting down");
         SHUTDOWN.store(true, Ordering::Relaxed);
