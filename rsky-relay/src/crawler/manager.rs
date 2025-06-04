@@ -178,7 +178,7 @@ impl Manager {
     fn get_cursor(&self, host: &str) -> Result<Option<Cursor>, ManagerError> {
         let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
         Ok(stmt
-            .query_row((&host,), |row| Ok(row.get_unwrap::<_, u64>("cursor")))
+            .query_one((&host,), |row| Ok(row.get_unwrap::<_, u64>("cursor")))
             .optional()?
             .map(Into::into))
     }

@@ -1,10 +1,15 @@
 use std::collections::TryReserveError;
 
+#[cfg(not(feature = "labeler"))]
 use cid::Cid;
 use p256::ecdsa::signature::Verifier;
 use thiserror::Error;
 
+#[cfg(feature = "labeler")]
+use crate::validator::event::SubscribeLabel;
+#[cfg(not(feature = "labeler"))]
 use crate::validator::event::{Commit, SubscribeReposCommit};
+#[cfg(not(feature = "labeler"))]
 use crate::validator::types::RepoState;
 
 const P256_DID_PREFIX: &[u8] = &[0x80, 0x24];
@@ -18,6 +23,37 @@ pub enum VerificationError {
     Key(#[from] p256::ecdsa::Error),
 }
 
+#[cfg(feature = "labeler")]
+pub fn verify_commit_sig(
+    labels: &[SubscribeLabel], key: &[u8; 35],
+) -> Result<bool, VerificationError> {
+    let mut ret = true;
+    for label in labels {
+        if let Some(sig) = &label.sig {
+            let mut label = label.clone();
+            label.sig = None;
+            let encoded = serde_ipld_dagcbor::to_vec(&label)?;
+            match &key[0..2] {
+                P256_DID_PREFIX => {
+                    let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key[2..])?;
+                    let sig = p256::ecdsa::Signature::from_slice(sig)?;
+                    ret &= key.verify(&encoded, &sig).is_ok();
+                }
+                K256_DID_PREFIX => {
+                    let key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&key[2..])?;
+                    let sig = k256::ecdsa::Signature::from_slice(sig)?;
+                    ret &= key.verify(&encoded, &sig).is_ok();
+                }
+                _ => {
+                    unreachable!()
+                }
+            }
+        }
+    }
+    Ok(ret)
+}
+
+#[cfg(not(feature = "labeler"))]
 pub fn verify_commit_sig(commit: &Commit, key: &[u8; 35]) -> Result<bool, VerificationError> {
     let encoded = serde_ipld_dagcbor::to_vec(commit)?;
     match &key[0..2] {
@@ -37,6 +73,7 @@ pub fn verify_commit_sig(commit: &Commit, key: &[u8; 35]) -> Result<bool, Verifi
     }
 }
 
+#[cfg(not(feature = "labeler"))]
 pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &RepoState) -> bool {
     if !prev.rev.older_than(&commit.rev) {
         tracing::debug!(diff = %commit.rev.timestamp() - prev.rev.timestamp(), "old rev");

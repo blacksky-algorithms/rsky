@@ -11,6 +11,7 @@ ciborium = "0.2"
 cid = { version = "0.10", features = ["serde-codec"] }
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
+derive_more = { version = "2", features = ["full"] }
 exponential-backoff = "2"
 file-rotate = "0.8"
 fjall = "2"
@@ -30,7 +31,7 @@ p256 = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
 rs-car-sync = "0.4"
 rtrb = "0.3"
-rusqlite = { version = "0.35", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.36", features = ["bundled", "chrono"] }
 rustls = "0.23"
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
@@ -49,10 +50,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
 urlencoding = "2"
+vec1 = { version = "1", features = ["serde"] }
 
 # internal
 rsky-common = { workspace = true }
 rsky-identity = { workspace = true }
+
+[features]
+# external
+default = []
+labeler = [] # run a labeler relay
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

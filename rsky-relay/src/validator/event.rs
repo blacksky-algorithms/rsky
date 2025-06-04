@@ -8,10 +8,14 @@ use cid::Cid;
 use rs_car_sync::CarDecodeError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use vec1::Vec1;
 
 use rsky_common::tid::TID;
 
 use crate::types::Cursor;
+
+pub type DidEndpoint = Option<Box<str>>;
+pub type DidKey = [u8; 35];
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -108,6 +112,7 @@ impl SubscribeReposCommitOperation {
         }
     }
 
+    #[cfg(not(feature = "labeler"))]
     pub const fn is_valid(&self) -> bool {
         match self {
             Self::Create { .. } => true,
@@ -180,6 +185,42 @@ pub struct SubscribeReposInfo {
     pub message: String,
 }
 
+/// Subscribe to stream of labels (and negations). Public endpoint implemented by mod services.
+/// Uses same sequencing scheme as repo event stream.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeLabels {
+    pub seq: u64,
+    pub labels: Vec1<SubscribeLabel>,
+}
+
+/// Metadata tag on an atproto resource (eg, repo or record).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeLabel {
+    /// The AT Protocol version of the label object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ver: Option<u8>,
+    /// DID of the actor who created this label.
+    pub src: String,
+    /// AT URI of the record, repository (account), or other resource that this label applies to.
+    pub uri: String,
+    /// Optionally, CID specifying the specific version of 'uri' resource this label applies to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    /// The short string name of the value or type of this label.
+    pub val: String,
+    /// If true, this is a negation label, overwriting a previous label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neg: Option<bool>,
+    /// Timestamp when this label was created.
+    pub cts: DateTime<Utc>,
+    /// Timestamp at which this label expires (no longer applies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp: Option<DateTime<Utc>>,
+    /// Signature of dag-cbor encoded label.
+    #[serde(with = "serde_bytes", skip_serializing_if = "Option::is_none")]
+    pub sig: Option<Vec<u8>>,
+}
+
 #[expect(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SubscribeReposEvent {
@@ -187,6 +228,7 @@ pub enum SubscribeReposEvent {
     Sync(SubscribeReposSync),
     Identity(SubscribeReposIdentity),
     Account(SubscribeReposAccount),
+    Labels(SubscribeLabels),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,6 +257,7 @@ impl SubscribeReposEvent {
             "#sync" => Self::Sync(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#identity" => Self::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#account" => Self::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
+            "#labels" => Self::Labels(serde_ipld_dagcbor::from_reader(&mut reader)?),
             "#info" => {
                 let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
                 tracing::debug!(name = %info.name, message = %info.message, "received #info");
@@ -251,6 +294,10 @@ impl SubscribeReposEvent {
                 account.seq = seq.get();
                 serde_ipld_dagcbor::to_writer(&mut writer, &account)?;
             }
+            Self::Labels(mut labels) => {
+                labels.seq = seq.get();
+                serde_ipld_dagcbor::to_writer(&mut writer, &labels)?;
+            }
         };
 
         Ok(writer.into_inner())
@@ -262,6 +309,7 @@ impl SubscribeReposEvent {
             Self::Sync(_) => "#sync",
             Self::Identity(_) => "#identity",
             Self::Account(_) => "#account",
+            Self::Labels(_) => "#labels",
         }
     }
 
@@ -271,16 +319,18 @@ impl SubscribeReposEvent {
             Self::Sync(sync) => sync.seq,
             Self::Identity(identity) => identity.seq,
             Self::Account(account) => account.seq,
+            Self::Labels(labels) => labels.seq,
         }
         .into()
     }
 
-    pub const fn time(&self) -> DateTime<Utc> {
+    pub fn time(&self) -> DateTime<Utc> {
         match self {
             Self::Commit(commit) => commit.time,
             Self::Sync(sync) => sync.time,
             Self::Identity(identity) => identity.time,
             Self::Account(account) => account.time,
+            Self::Labels(labels) => labels.labels.last().cts,
         }
     }
 
@@ -290,6 +340,15 @@ impl SubscribeReposEvent {
             Self::Sync(sync) => &sync.did,
             Self::Identity(identity) => &identity.did,
             Self::Account(account) => &account.did,
+            Self::Labels(labels) => &labels.labels.last().src,
+        }
+    }
+
+    #[cfg(feature = "labeler")]
+    pub fn commit(&self) -> Result<Option<(&[SubscribeLabel], ())>, ParseError> {
+        match self {
+            Self::Labels(labels) => Ok(Some((&labels.labels, ()))),
+            _ => unreachable!(),
         }
     }
 }
