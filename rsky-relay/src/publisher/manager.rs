@@ -5,10 +5,10 @@ use std::{io, thread};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
+use crate::config::CAPACITY_STATUS;
 use crate::publisher::types::{Command, CommandSender, SubscribeReposReceiver};
 use crate::publisher::worker::{Worker, WorkerError};
 
-const CAPACITY: usize = 1024;
 const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
@@ -47,7 +47,7 @@ impl Manager {
     ) -> Result<Self, ManagerError> {
         let workers = (0..n_workers)
             .map(|worker_id| -> Result<_, ManagerError> {
-                let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
+                let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY_STATUS);
                 let thread_handle = thread::Builder::new()
                     .name(format!("rsky-pub-{worker_id}"))
                     .spawn(move || Worker::new(worker_id, command_rx)?.run())?;
