@@ -11,12 +11,12 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
+use crate::config::CAPACITY_STATUS;
 use crate::crawler::RequestCrawl;
 use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status, StatusReceiver};
 use crate::crawler::worker::{Worker, WorkerError};
 use crate::types::{Cursor, MessageSender};
 
-const CAPACITY: usize = 1 << 12;
 const SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
@@ -61,12 +61,12 @@ impl Manager {
     ) -> Result<Self, ManagerError> {
         #[expect(clippy::unwrap_used)]
         let (status_tx, status_rx) =
-            magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY).unwrap());
+            magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(CAPACITY_STATUS).unwrap());
         let workers = (0..n_workers)
             .map(|worker_id| -> Result<_, ManagerError> {
                 let message_tx = message_tx.clone();
                 let status_tx = status_tx.clone();
-                let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY);
+                let (command_tx, command_rx) = rtrb::RingBuffer::new(CAPACITY_STATUS);
                 let thread_handle =
                     thread::Builder::new().name(format!("rsky-crawl-{worker_id}")).spawn(
                         move || Worker::new(worker_id, message_tx, command_rx, status_tx)?.run(),

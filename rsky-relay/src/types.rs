@@ -7,15 +7,15 @@ use fjall::compaction::{Fifo, Strategy};
 use fjall::{Keyspace, PartitionCreateOptions, Slice};
 use thingbuf::{Recycle, mpsc};
 
+use crate::config::{
+    BLOCK_SIZE, CACHE_SIZE, DISK_SIZE, FSYNC_MS, MEMTABLE_SIZE, TTL_SECONDS, WRITE_BUFFER_SIZE,
+};
+
 pub type MessageSender = mpsc::blocking::Sender<Message, MessageRecycle>;
 pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
 
 #[expect(clippy::unwrap_used)]
 pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
-    const CACHE_SIZE: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
-    const WRITE_BUFFER_SIZE: u64 = 512 * 1024 * 1024; // 512 MiB
-    const FSYNC_MS: Option<u16> = Some(1000); // 1 second
-
     let db = fjall::Config::new("db")
         .cache_size(CACHE_SIZE)
         .max_write_buffer_size(WRITE_BUFFER_SIZE)
@@ -29,11 +29,6 @@ pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
 });
 
 fn firehose_options() -> PartitionCreateOptions {
-    const DISK_SIZE: u64 = 320 * 1024 * 1024 * 1024; // 320 GiB
-    const TTL_SECONDS: Option<u64> = Some(24 * 60 * 60); // 24 hours
-    const MEMTABLE_SIZE: u32 = 64 * 1024 * 1024; // 64 MiB
-    const BLOCK_SIZE: u32 = 64 * 1024; // 64 KiB
-
     PartitionCreateOptions::default()
         .manual_journal_persist(true)
         .compaction_strategy(Strategy::Fifo(Fifo::new(DISK_SIZE, TTL_SECONDS)))

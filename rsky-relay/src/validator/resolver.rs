@@ -1,7 +1,6 @@
 use std::io::BufRead;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
@@ -19,21 +18,16 @@ use tokio::time::timeout;
 
 use rsky_identity::types::DidDocument;
 
+use crate::config::{CAPACITY_CACHE, DO_PLC_EXPORT, PLC_EXPORT_INTERVAL};
 use crate::validator::event::{DidEndpoint, DidKey};
 
 const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 
-const MAX_CACHED: usize = 1 << 16;
-const EXPORT_INTERVAL: Duration = Duration::from_secs(60);
-
 const PLC_URL: &str = "https://plc.directory";
 const PLC_EXPORT: &str = "export?count=1000&after";
 const DOC_PATH: &str = ".well-known/did.json";
-
-static DO_PLC_EXPORT: LazyLock<bool> =
-    LazyLock::new(|| std::env::args().filter(|arg| arg == "--no-plc-export").count() == 0);
 
 type RequestFuture = Pin<Box<dyn Future<Output = (Query, reqwest::Result<Bytes>)> + Send>>;
 
@@ -66,7 +60,7 @@ pub struct Resolver {
 impl Resolver {
     pub fn new() -> Result<Self, ResolverError> {
         #[expect(clippy::unwrap_used)]
-        let cache = LruCache::new(NonZeroUsize::new(MAX_CACHED).unwrap());
+        let cache = LruCache::new(NonZeroUsize::new(CAPACITY_CACHE).unwrap());
         let flag = if *DO_PLC_EXPORT {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         } else {
@@ -86,7 +80,7 @@ impl Resolver {
             conn.execute("PRAGMA optimize = 0x10002", [])?;
         }
         let now = Instant::now();
-        let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
+        let last = now.checked_sub(PLC_EXPORT_INTERVAL).unwrap_or(now);
         let after = conn.query_one(
             "SELECT created_at FROM plc_operations ORDER BY created_at DESC LIMIT 1",
             [],
@@ -242,7 +236,7 @@ impl Resolver {
                     tracing::debug!(%err, "fetch error");
                 }
             }
-        } else if *DO_PLC_EXPORT && self.last.elapsed() > EXPORT_INTERVAL {
+        } else if *DO_PLC_EXPORT && self.last.elapsed() > PLC_EXPORT_INTERVAL {
             self.send_req(None, None);
         }
         Ok(Vec::new())

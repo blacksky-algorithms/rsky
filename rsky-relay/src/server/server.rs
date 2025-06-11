@@ -16,16 +16,13 @@ use thiserror::Error;
 use url::Url;
 
 use crate::SHUTDOWN;
+use crate::config::{HOSTS_INTERVAL, HOSTS_MIN_ACCOUNTS, HOSTS_RELAY, PORT};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
 use crate::server::types::{HostStatus, ListHosts};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
-const HOSTS_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const HOSTS_TIMEOUT: Duration = Duration::from_secs(30);
-
-const BSKY_RELAY: &str = "relay1.us-west.bsky.network";
 const LIST_HOSTS: &str = "xrpc/com.atproto.sync.listHosts";
 
 const INDEX_ASCII: &str = r"
@@ -106,7 +103,7 @@ impl Server {
             None
         };
 
-        let listener = TcpListener::bind("127.0.0.1:9000")?;
+        let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
         let now = Instant::now();
@@ -238,7 +235,6 @@ impl Server {
     fn query_hosts(&mut self) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("rsky-relay")
-            .timeout(HOSTS_TIMEOUT)
             .https_only(true)
             .build()?;
         let mut cursor: Option<String> = None;
@@ -248,11 +244,13 @@ impl Server {
                 params.push(("cursor", cursor));
             }
             let url =
-                Url::parse_with_params(&format!("https://{BSKY_RELAY}/{LIST_HOSTS}"), params)?;
+                Url::parse_with_params(&format!("https://{HOSTS_RELAY}/{LIST_HOSTS}"), params)?;
             let mut hosts: ListHosts = client.get(url).send()?.json()?;
             hosts.hosts.sort_unstable_by_key(|host| host.account_count);
             for host in hosts.hosts.into_iter().rev() {
-                if matches!(host.status, HostStatus::Active | HostStatus::Idle) {
+                if host.account_count > HOSTS_MIN_ACCOUNTS
+                    && matches!(host.status, HostStatus::Active | HostStatus::Idle)
+                {
                     self.request_crawl_tx
                         .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
                 }

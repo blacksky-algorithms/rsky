@@ -11,13 +11,13 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 use crate::SHUTDOWN;
+use crate::config::HOSTS_WRITE_INTERVAL;
 use crate::types::{Cursor, DB, MessageReceiver};
 use crate::validator::event::{ParseError, SerializeError, SubscribeReposEvent};
 use crate::validator::resolver::{Resolver, ResolverError};
 use crate::validator::types::RepoState;
 use crate::validator::utils;
 
-const EXPORT_INTERVAL: Duration = Duration::from_secs(10);
 const SLEEP: Duration = Duration::from_micros(100);
 
 #[derive(Debug, Error)]
@@ -55,7 +55,7 @@ impl Manager {
         let repos = HashMap::new();
         let resolver = Resolver::new()?;
         let now = Instant::now();
-        let last = now.checked_sub(EXPORT_INTERVAL).unwrap_or(now);
+        let last = now.checked_sub(HOSTS_WRITE_INTERVAL).unwrap_or(now);
         let conn = Connection::open("relay.db")?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS hosts (
@@ -84,13 +84,17 @@ impl Manager {
         }
         // TODO: move this to sqlite
         let mut repos = 0;
-        for res in DB.open_partition("repos", PartitionCreateOptions::default())?.iter() {
-            let (did, state) = res?;
-            #[expect(clippy::unwrap_used)]
-            let did = String::from_utf8(did.to_vec()).unwrap();
-            let state = serde_ipld_dagcbor::from_slice(&state)?;
-            self.repos.insert(did, state);
-            repos += 1;
+        {
+            let handle = DB.open_partition("repos", PartitionCreateOptions::default())?;
+            self.repos.reserve(handle.approximate_len());
+            for res in handle.iter() {
+                let (did, state) = res?;
+                #[expect(clippy::unwrap_used)]
+                let did = String::from_utf8(did.to_vec()).unwrap();
+                let state = serde_ipld_dagcbor::from_slice(&state)?;
+                self.repos.insert(did, state);
+                repos += 1;
+            }
         }
 
         let mut cursor = self.firehose.last_key_value()?.map(|(k, _)| k.into()).unwrap_or_default();
@@ -144,7 +148,7 @@ impl Manager {
         }
 
         let now = Instant::now();
-        if self.last + EXPORT_INTERVAL < now {
+        if self.last + HOSTS_WRITE_INTERVAL < now {
             self.persist()?;
             self.last = now;
         }

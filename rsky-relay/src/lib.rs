@@ -41,6 +41,8 @@ mod server;
 mod types;
 mod validator;
 
+pub mod config;
+
 use std::sync::atomic::AtomicBool;
 
 use thiserror::Error;
