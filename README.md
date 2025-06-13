@@ -1,6 +1,6 @@
 <p align="center">
     <a href="https://blackskyweb.xyz">
-    <img src="https://cdn.prod.website-files.com/654d195a7700754d810d2693/66ef82384f93b80bfb132738_rsky-banner-2.jpg">
+    <img src="https://github.com/user-attachments/assets/e702e2ed-5c97-4dad-94fe-237dbfbd20c9">
     </a>
 </p>
 <h3 align="center">
