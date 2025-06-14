@@ -43,10 +43,17 @@ impl Connection {
         Self { hostname, client, message_tx }
     }
 
-    pub fn connect(hostname: &str, cursor: Option<Cursor>) -> HandshakeResult {
+    pub fn connect(hostname: &str, mut cursor: Option<Cursor>) -> HandshakeResult {
+        let path = if cfg!(feature = "labeler") {
+            if cursor.is_none() {
+                cursor = Some(0.into());
+            }
+            "com.atproto.label.subscribeLabels"
+        } else {
+            "com.atproto.sync.subscribeRepos"
+        };
         #[expect(clippy::unwrap_used)]
-        let mut url =
-            Url::parse(&format!("wss://{hostname}/xrpc/com.atproto.sync.subscribeRepos")).unwrap();
+        let mut url = Url::parse(&format!("wss://{hostname}/xrpc/{path}")).unwrap();
         if let Some(cursor) = cursor {
             url.query_pairs_mut().append_pair("cursor", &cursor.to_string());
         }
