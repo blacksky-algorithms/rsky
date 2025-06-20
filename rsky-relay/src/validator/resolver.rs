@@ -123,8 +123,11 @@ impl Resolver {
     pub fn query_db(&mut self, did: &str) -> Result<bool, ResolverError> {
         let mut stmt = self.conn.prepare_cached("SELECT * FROM plc_keys WHERE did = ?1")?;
         match stmt.query_one([did], |row| {
-            let endpoint = row.get_ref("pds_endpoint")?.as_str_or_null()?;
-            let key = row.get_ref("pds_key")?.as_str_or_null()?;
+            let endpoint =
+                if cfg!(feature = "labeler") { "labeler_endpoint" } else { "pds_endpoint" };
+            let key = if cfg!(feature = "labeler") { "labeler_key" } else { "pds_key" };
+            let endpoint = row.get_ref(endpoint)?.as_str_or_null()?;
+            let key = row.get_ref(key)?.as_str_or_null()?;
             Ok(parse_key_endpoint(endpoint, key))
         }) {
             Ok(Some((pds, key))) => {
@@ -148,12 +151,12 @@ impl Resolver {
             self.send_req(None, plc);
         } else if let Some(web) = did.strip_prefix("did:web:") {
             let Ok(web) = urlencoding::decode(web) else {
-                tracing::debug!("invalid did");
+                tracing::debug!(%did, "invalid did");
                 return;
             };
             self.send_req(Some(&web), None);
         } else {
-            tracing::debug!("invalid did");
+            tracing::debug!(%did, "invalid did");
             self.inflight.remove(did);
         }
     }
@@ -191,6 +194,7 @@ impl Resolver {
                         if let Some((did, (pds, key))) = parse_did_doc(&bytes) {
                             if query != did[8..] {
                                 tracing::warn!(%query, found = %&did[8..], "did query mismatch");
+                                return Ok(Vec::new());
                             }
                             self.inflight.remove(&did);
                             self.cache.put(did.clone(), (pds, key));
@@ -269,17 +273,18 @@ fn parse_plc_doc(input: &str) -> Option<PlcDocument<'_>> {
 fn parse_did_doc(input: &Bytes) -> Option<(String, (DidEndpoint, DidKey))> {
     match serde_json::from_slice::<DidDocument>(input) {
         Ok(doc) => {
+            let endpoint =
+                if cfg!(feature = "labeler") { "#atproto_labeler" } else { "#atproto_pds" };
+            let key = if cfg!(feature = "labeler") { "#atproto_label" } else { "#atproto" };
             let endpoint = doc
                 .service
                 .as_ref()
-                .and_then(|services| {
-                    services.iter().find(|service| service.id.ends_with("#atproto_pds"))
-                })
+                .and_then(|services| services.iter().find(|service| service.id.ends_with(endpoint)))
                 .map(|service| service.service_endpoint.as_str());
             let key = doc
                 .verification_method
                 .as_ref()
-                .and_then(|methods| methods.iter().find(|method| method.id.ends_with("#atproto")))
+                .and_then(|methods| methods.iter().find(|method| method.id.ends_with(key)))
                 .and_then(|method| method.public_key_multibase.as_deref());
             Some((doc.id, parse_key_endpoint(endpoint, key)?))
         }
