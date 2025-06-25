@@ -14,7 +14,7 @@
     </defs>
 
     <!-- Background -->
-    <rect width="840" height="200" fill="#f1ecec"/>
+    <rect width="840" height="200" fill="#EEF2FF"/>
 
     <!-- Orbit Paths (shifted right to better frame satellite) -->
     <g fill="none" stroke="#3642e3" stroke-width="1.5" class="path">

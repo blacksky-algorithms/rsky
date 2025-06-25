@@ -784,32 +784,41 @@ fn App() -> Element {
     };
 
     rsx! {
-        link { rel: "icon", href: FAVICON },
-        link { rel: "stylesheet", href: TAILWIND_CSS },
-        link { rel: "stylesheet", href: MAIN_CSS },
-
+        link { rel: "icon", href: FAVICON }
+        link { rel: "stylesheet", href: TAILWIND_CSS }
+        link { rel: "stylesheet", href: MAIN_CSS }
+    
+        // ⬆ Landing page
         Hero {}
-
-        div {
-            class: "p-4",
-            h1 {
-                class: "text-3xl font-bold mb-4",
-                "Directory Style DASL CAR Viewer"
+    
+        // ⬇ The actual tool, reachable via “#viewer”
+        section {
+            id: "viewer",
+            class: "py-16 px-4 sm:px-8 bg-white",   // white to contrast the hero’s tinted band
+    
+            div {
+                class: "max-w-4xl mx-auto",
+    
+                h2 { class: "text-3xl font-bold mb-6 text-gray-900",
+                     "Explore your CAR" }
+    
+                // File pickers (unchanged)
+                input {
+                    r#type: "file",
+                    accept: ".car",
+                    onchange: on_file_change(car_data1.clone()),
+                    class: "bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded"
+                }
+                span { " " }
+                input {
+                    r#type: "file",
+                    accept: ".car",
+                    onchange: on_file_change(car_data2.clone()),
+                    class: "bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded"
+                }
+    
+                div { class: "mt-8", {content} }
             }
-            input {
-                r#type: "file",
-                accept: ".car",
-                onchange: on_file_change(car_data1.clone()),
-                class: "bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
-            }
-            span { " " }
-            input {
-                r#type: "file",
-                accept: ".car",
-                onchange: on_file_change(car_data2.clone()),
-                class: "bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
-            }
-            {content}
         }
     }
 }
