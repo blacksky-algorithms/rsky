@@ -4,27 +4,11 @@ FROM rust AS builder
 
 # Copy local code to the container image.
 WORKDIR /usr/src/rsky
-
-# Start by copying the workspace configuration files
-COPY Cargo.toml rust-toolchain ./
-
-# Copy only the Cargo.toml from our package
-COPY rsky-firehose/Cargo.toml rsky-firehose/Cargo.toml
-
-# Copy all workspace members except our target package
-COPY cypher cypher
-COPY rsky-common rsky-common
-COPY rsky-crypto rsky-crypto
-COPY rsky-feedgen rsky-feedgen
-COPY rsky-identity rsky-identity
-COPY rsky-jetstream-subscriber rsky-jetstream-subscriber
-COPY rsky-labeler rsky-labeler
-COPY rsky-lexicon rsky-lexicon
-COPY rsky-pds rsky-pds
-COPY rsky-relay rsky-relay
-COPY rsky-repo rsky-repo
-COPY rsky-satnav rsky-satnav
-COPY rsky-syntax rsky-syntax
+RUN git clone --depth 1 https://github.com/blacksky-algorithms/rsky.git .
+# We can swap the line above for the lines below once we have stronger versioning
+# per workspace member
+# RUN git clone --depth 1 https://github.com/blacksky-algorithms/rsky.git . && \
+#     git checkout <TBD when we have stronger versioning>
 
 # Create an empty src directory to trick Cargo into thinking it's a valid Rust project
 RUN mkdir -p rsky-firehose/src && echo "fn main() {}" > rsky-firehose/src/main.rs
