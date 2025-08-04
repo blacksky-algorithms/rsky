@@ -1,7 +1,5 @@
 [workspace]
 members = [
-  "cypher/backend",
-  "cypher/frontend",
   "rsky-common",
   "rsky-crypto",
   "rsky-feedgen",
