@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::{io, mem};
 
-use cid::multihash::{Code, Hasher, MultihashDigest};
-use cid::{Cid, multihash};
+use cid::Cid;
+use cid::multihash::{self, Multihash};
 use hashbrown::HashMap;
 use ipld_core::codec::Codec;
 use rs_car_sync::CarReader;
@@ -21,6 +21,7 @@ use crate::validator::event::{
 const MAX_BLOCKS_BYTES: usize = 2_000_000;
 const MAX_COMMIT_OPS: usize = 200;
 const ATPROTO_REPO_VERSION: u8 = 3;
+const MULTIHASH_SHA2_256: u64 = 0x12;
 
 pub type BlockMap = HashMap<Cid, Vec<u8>>;
 
@@ -273,9 +274,9 @@ impl Node {
 
         // compute this block
         let nd = NodeData::from_node(self)?;
-        let mut hasher = multihash::Sha2_256::default();
+        let mut hasher = Sha256::new();
         serde_ipld_dagcbor::to_writer(&mut hasher, &nd)?;
-        let mh = Code::Sha2_256.wrap(hasher.finalize())?;
+        let mh = Multihash::<64>::wrap(MULTIHASH_SHA2_256, &hasher.finalize()[..])?;
         let cc = Cid::new_v1(<DagCborCodec as Codec<()>>::CODE, mh);
         self.cid = Some(cc);
         self.dirty = false;

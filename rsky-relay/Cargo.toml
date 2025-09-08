@@ -9,7 +9,7 @@ edition = "2024"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 ciborium = "0.2"
-cid = { version = "0.10", features = ["serde-codec"] }
+cid = { version = "0.11", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 derive_more = { version = "2", features = ["full"] }
@@ -30,7 +30,7 @@ mio = { version = "1", features = ["os-ext", "os-poll"] }
 multibase = "0.9"
 p256 = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
-rs-car-sync = "0.4"
+rs-car-sync = "0.5"
 rtrb = "0.3"
 rusqlite = { version = "0.36", features = ["bundled", "chrono"] }
 rustls = "0.23"
