@@ -1,5 +1,4 @@
 use anyhow::Result;
-use ipld_core::codec::Codec;
 use lexicon_cid::Cid;
 use multihash::Multihash;
 use serde::Serialize;

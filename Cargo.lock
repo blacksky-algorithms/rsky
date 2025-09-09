@@ -7569,7 +7569,6 @@ dependencies = [
  "cid 0.11.1",
  "futures",
  "indexmap 1.9.3",
- "ipld-core",
  "multihash 0.19.3",
  "multihash-codetable",
  "rand 0.8.5",
