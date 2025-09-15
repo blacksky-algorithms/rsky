@@ -345,7 +345,7 @@ impl Server {
             )?
             .collect::<Result<Vec<_>, _>>()?;
 
-        let cursor = hosts.last().map(|(rowid, _, _)| rowid.to_string());
+        let cursor = hosts.last().map(|(rowid, ..)| rowid.to_string());
 
         let hosts = hosts
             .into_iter()
