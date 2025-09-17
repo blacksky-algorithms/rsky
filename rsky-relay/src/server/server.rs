@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
-#[cfg(feature = "labeler")]
+#[cfg(not(feature = "labeler"))]
+use rusqlite::named_params;
 use rusqlite::{Connection, OpenFlags};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
@@ -24,7 +25,7 @@ use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
 #[cfg(not(feature = "labeler"))]
-use crate::server::types::{HostStatus, ListHosts};
+use crate::server::types::{Host, HostStatus, ListHosts};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
@@ -72,7 +73,6 @@ pub enum ServerError {
     PushError(#[from] rtrb::PushError<RequestCrawl>),
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
-    #[cfg(feature = "labeler")]
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -101,6 +101,8 @@ pub struct Server {
     last: Instant,
     #[cfg(feature = "labeler")]
     conn: Connection,
+    #[cfg(not(feature = "labeler"))]
+    relay_conn: Connection,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -130,6 +132,12 @@ impl Server {
         let base_url = Url::parse("http://example.com")?;
         let now = Instant::now();
         let last = now.checked_sub(HOSTS_INTERVAL).unwrap_or(now);
+        // Created by `ValidatorManager::new`.
+        #[cfg(not(feature = "labeler"))]
+        let relay_conn = Connection::open_with_flags(
+            "relay.db",
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         #[cfg(feature = "labeler")]
         let conn = Connection::open_with_flags(
             "plc_directory.db",
@@ -143,6 +151,8 @@ impl Server {
             last,
             #[cfg(feature = "labeler")]
             conn,
+            #[cfg(not(feature = "labeler"))]
+            relay_conn,
             request_crawl_tx,
             subscribe_repos_tx,
         })
@@ -226,6 +236,38 @@ impl Server {
                 stream.shutdown()?;
                 Ok(())
             }
+            #[cfg(not(feature = "labeler"))]
+            ("GET", PATH_LIST_HOSTS) => {
+                let (status, body) = match self.list_hosts(&url) {
+                    Ok(hosts) => ("200 OK", serde_json::to_string(&hosts)?),
+                    Err(e) => {
+                        let error = serde_json::json!({
+                            "error": "BadRequest",
+                            "message": e.to_string(),
+                        });
+                        ("400 Bad Request", serde_json::to_string(&error)?)
+                    }
+                };
+
+                let response = format!(
+                    "HTTP/1.1 {}\r\n\
+                     Content-Type: application/json; charset=utf-8\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    status,
+                    body.len(),
+                    body
+                );
+
+                #[expect(clippy::unwrap_used)]
+                let mut stream = stream.0.take().unwrap();
+                stream.write_all(response.as_bytes())?;
+                stream.flush()?;
+                stream.shutdown()?;
+                Ok(())
+            }
             ("GET", PATH_SUBSCRIBE) => {
                 let mut cursor = None;
                 for (key, value) in url.query_pairs() {
@@ -260,6 +302,64 @@ impl Server {
             }
             _ => Err(eyre!("unknown request")),
         }
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    fn list_hosts(&mut self, url: &Url) -> Result<ListHosts> {
+        // Default query parameters.
+        let mut limit = 200;
+        let mut cursor = None;
+
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "limit" => match value.parse::<u16>() {
+                    Ok(l @ 1..=1000) => limit = l,
+                    _ => {
+                        return Err(eyre!("limit parameter invalid or out of range: {value}"));
+                    }
+                },
+                "cursor" => match value.parse::<i64>() {
+                    Ok(c) => cursor = Some(c),
+                    Err(_) => {
+                        return Err(eyre!("cursor parameter invalid: {value}"));
+                    }
+                },
+                // Ignore unknown query parameters.
+                _ => (),
+            }
+        }
+
+        let mut stmt_hosts = self.relay_conn.prepare_cached(
+            "SELECT rowid, host, cursor
+            FROM hosts
+            WHERE :cursor is NULL OR rowid > :cursor
+            LIMIT :limit;",
+        )?;
+        let hosts = stmt_hosts
+            .query_map(
+                named_params! {
+                    ":cursor": cursor,
+                    ":limit": limit,
+                },
+                |row| Ok((row.get::<_, i64>("rowid")?, row.get("host")?, row.get("cursor")?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let cursor = hosts.last().map(|(rowid, ..)| rowid.to_string());
+
+        let hosts = hosts
+            .into_iter()
+            .map(|(_, hostname, seq)| Host {
+                // TODO: Track host account counts.
+                account_count: 0,
+                hostname,
+                seq,
+                // TODO: Track status of hosts.
+                status: HostStatus::Active,
+            })
+            .collect();
+
+        Ok(ListHosts { cursor, hosts })
     }
 
     #[cfg(not(feature = "labeler"))]

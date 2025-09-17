@@ -81,6 +81,12 @@ You can test the WebSocket connection using `websocat`:
 websocat -k wss://localhost:9000/xrpc/com.atproto.sync.subscribeRepos?cursor=0
 ```
 
+You can test the HTTP endpoints using `curl`:
+
+```bash
+curl https://localhost:9000/xrpc/com.atproto.sync.listHosts?limit=10
+```
+
 ## Command-Line Options
 
 - `-c, --cert <FILE>`: Path to SSL certificate file
