@@ -1,16 +1,14 @@
 use std::cmp::Ordering;
 use std::{io, mem};
 
-use cid::multihash::{Code, Hasher, MultihashDigest};
-use cid::{Cid, multihash};
+use cid::Cid;
 use hashbrown::HashMap;
-use ipld_core::codec::Codec;
 use rs_car_sync::CarReader;
 use serde::{Deserialize, Serialize};
-use serde_ipld_dagcbor::codec::DagCborCodec;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use rsky_common::ipld::cid_for_cbor;
 use rsky_common::tid::TID;
 
 use crate::validator::event::{
@@ -132,8 +130,6 @@ impl SubscribeReposCommit {
 pub enum InvertError {
     #[error("serde error: {0}")]
     Serde(#[from] serde_ipld_dagcbor::EncodeError<io::Error>),
-    #[error("multihash error: {0}")]
-    Multihash(#[from] multihash::Error),
     #[error("nil tree node")]
     InvalidTree,
     #[error("partial tree")]
@@ -273,10 +269,8 @@ impl Node {
 
         // compute this block
         let nd = NodeData::from_node(self)?;
-        let mut hasher = multihash::Sha2_256::default();
-        serde_ipld_dagcbor::to_writer(&mut hasher, &nd)?;
-        let mh = Code::Sha2_256.wrap(hasher.finalize())?;
-        let cc = Cid::new_v1(<DagCborCodec as Codec<()>>::CODE, mh);
+        let cc = cid_for_cbor(&nd)
+            .map_err(|error| serde_ipld_dagcbor::EncodeError::Msg(format!("{}", error)))?;
         self.cid = Some(cc);
         self.dirty = false;
         Ok(cc)
