@@ -1,2 +1,3 @@
 -- !no-transaction
-DROP INDEX CONCURRENTLY IF EXISTS video_postcid_idx;
+-- DROP INDEX CONCURRENTLY IF EXISTS video_postcid_idx;
+SELECT 1;

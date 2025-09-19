@@ -223,51 +223,51 @@ pub async fn get_blacksky_trending(
     // Construct the final SQL query string.
     // We add an extra CTE "filtered_posts" that discards rows where like_count is <= 1.
     let query_str = format!(
-        "WITH recent_posts AS (
-            SELECT p.*
-            FROM post p
-            {media_join}
-            WHERE p.\"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '1 days')
-              AND COALESCE(array_length(p.labels, 1), 0) = 0
-        ), recent_likes AS (
-            SELECT \"subjectUri\", COUNT(*) AS like_count
-            FROM public.like
-            WHERE \"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '12 hours')
-            GROUP BY \"subjectUri\"
-            HAVING COUNT(*) > 1
-        ), posts_with_likes AS (
-            SELECT p.*, COALESCE(l.like_count, 0) AS like_count
-            FROM recent_posts p
-            JOIN recent_likes l ON l.\"subjectUri\" = p.uri
-        ), ranked_posts AS (
-            SELECT *,
-                   PERCENT_RANK() OVER (ORDER BY like_count) AS percentile_rank
-            FROM posts_with_likes
-        )
-        SELECT
-            uri,
-            cid,
-            \"replyParent\",
-            \"replyRoot\",
-            \"indexedAt\",
-            prev,
-            \"sequence\",
-            text,
-            lang,
-            author,
-            \"externalUri\",
-            \"externalTitle\",
-            \"externalDescription\",
-            \"externalThumb\",
-            \"quoteCid\",
-            \"quoteUri\",
-            \"createdAt\",
-            labels
-        FROM ranked_posts
-        WHERE percentile_rank >= {random_percentile:.4}
-          {cursor_filter}
-        ORDER BY \"indexedAt\" DESC, cid DESC
-        LIMIT {limit_val};",
+        "WITH recent_likes AS (
+        SELECT l.\"subjectUri\", COUNT(*) AS like_count
+        FROM public.like l
+        INNER JOIN public.membership m ON l.author = m.did
+        WHERE l.\"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '12 hours')
+          AND m.list = 'blacksky' 
+          AND m.included = true
+        GROUP BY l.\"subjectUri\"
+        HAVING COUNT(*) > 1
+    ), recent_quotes AS (
+        SELECT \"quoteUri\" as \"subjectUri\", COUNT(*) * 3 AS quote_score
+        FROM post
+        WHERE \"quoteUri\" IS NOT NULL
+          AND \"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '12 hours')
+        GROUP BY \"quoteUri\"
+    ), combined_engagement AS (
+        SELECT \"subjectUri\", like_count AS engagement_score
+        FROM recent_likes
+        UNION ALL
+        SELECT \"subjectUri\", quote_score AS engagement_score  
+        FROM recent_quotes
+    ), aggregated_engagement AS (
+        SELECT \"subjectUri\", SUM(engagement_score) AS total_engagement
+        FROM combined_engagement
+        GROUP BY \"subjectUri\"
+    ), posts_with_engagement AS (
+        SELECT p.*, COALESCE(e.total_engagement, 0) AS engagement_score
+        FROM post p
+        {media_join}
+        INNER JOIN aggregated_engagement e ON e.\"subjectUri\" = p.uri
+        WHERE p.\"indexedAt\" >= ({base_time_clause}::timestamp - INTERVAL '1 day')
+          AND COALESCE(array_length(p.labels, 1), 0) = 0
+    ), ranked_posts AS (
+        SELECT *,
+               PERCENT_RANK() OVER (ORDER BY engagement_score) AS percentile_rank
+        FROM posts_with_engagement
+    )
+    SELECT uri, cid, \"replyParent\", \"replyRoot\", \"indexedAt\", prev, sequence,
+           text, lang, author, \"externalUri\", \"externalTitle\", \"externalDescription\", 
+           \"externalThumb\", \"quoteCid\", \"quoteUri\", \"createdAt\", labels
+    FROM ranked_posts
+    WHERE percentile_rank >= {random_percentile:.4}
+      {cursor_filter}
+    ORDER BY \"indexedAt\" DESC, cid DESC
+    LIMIT {limit_val};",
         media_join = media_join,
         base_time_clause = base_time_clause,
         random_percentile = random_percentile,
@@ -768,6 +768,8 @@ pub async fn queue_creation(
                     if (!member_of.is_empty() ||
                         hashtags.contains("#blacksky") ||
                         hashtags.contains("#blackhairsky") ||
+                        hashtags.contains("#afrolatinsky") ||
+                        hashtags.contains("#addtoafrolatinsky") ||
                         hashtags.contains("#locsky") ||
                         hashtags.contains("#blackbluesky") ||
                         hashtags.contains("#blacktechsky") ||
@@ -816,6 +818,16 @@ pub async fn queue_creation(
 
                         if hashtags.contains("#addtoblacksky") && !member_of.contains(&"blacksky".to_string()) {
                             println!("New Blacksky member: {:?}", &req.author);
+                            let new_member = (
+                                MembershipSchema::did.eq(req.author.clone()),
+                                MembershipSchema::included.eq(true),
+                                MembershipSchema::excluded.eq(false),
+                                MembershipSchema::list.eq("blacksky")
+                            );
+                            new_members.push(new_member);
+                        }
+                        if hashtags.contains("#addtoafrolatinsky") && !member_of.contains(&"blacksky".to_string()) {
+                            println!("New Blacksky member (AfroLatinsky): {:?}", &req.author);
                             let new_member = (
                                 MembershipSchema::did.eq(req.author.clone()),
                                 MembershipSchema::included.eq(true),
