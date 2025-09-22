@@ -9,6 +9,7 @@ use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Array, Bool, Nullable, Text};
+use diesel_full_text_search::*;
 use moka::future::Cache;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -100,14 +101,11 @@ pub async fn get_posts_by_membership(
                 // No hashtags provided, include only posts where author is in the list
                 query = query.filter(MembershipSchema::did.is_not_null());
             } else {
-                let hashtag_patterns: Vec<String> = hashtags
-                    .iter()
-                    .map(|hashtag| format!("%#{}%", hashtag))
-                    .collect();
+                let hashtag_tsquery = to_tsquery(hashtags.join(" | "));
                 query = query.filter(
                     MembershipSchema::did
                         .is_not_null()
-                        .or(PostSchema::text.ilike(any(hashtag_patterns))),
+                        .or(to_tsvector(PostSchema::text).matches(hashtag_tsquery)),
                 );
             }
 
