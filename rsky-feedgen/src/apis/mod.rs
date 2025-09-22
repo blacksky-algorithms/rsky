@@ -35,7 +35,6 @@ pub async fn get_posts_by_membership(
 ) -> Result<AlgoResponse, ValidationErrorMessageResponse> {
     use crate::schema::membership::dsl as MembershipSchema;
     use crate::schema::post::dsl as PostSchema;
-    use diesel::dsl::any;
 
     let show_sponsored_post = config.show_sponsored_post.clone();
     let sponsored_post_uri = config.sponsored_post_uri.clone();
