@@ -100,7 +100,11 @@ pub async fn get_posts_by_membership(
                 // No hashtags provided, include only posts where author is in the list
                 query = query.filter(MembershipSchema::did.is_not_null());
             } else {
-                let hashtag_tsquery = to_tsquery(hashtags.join(" | "));
+                let hashtags_formatted: Vec<String> = hashtags
+		    .iter()
+		    .map(|hashtag| format!("#{}", hashtag))
+		    .collect();
+                let hashtag_tsquery = to_tsquery(hashtags_formatted.join(" | "));
                 query = query.filter(
                     MembershipSchema::did
                         .is_not_null()
