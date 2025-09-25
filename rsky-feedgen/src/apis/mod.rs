@@ -101,9 +101,9 @@ pub async fn get_posts_by_membership(
                 query = query.filter(MembershipSchema::did.is_not_null());
             } else {
                 let hashtags_formatted: Vec<String> = hashtags
-		    .iter()
-		    .map(|hashtag| format!("#{}", hashtag))
-		    .collect();
+                    .iter()
+                    .map(|hashtag| format!("#{}", hashtag))
+                    .collect();
                 let hashtag_tsquery = to_tsquery(hashtags_formatted.join(" | "));
                 query = query.filter(
                     MembershipSchema::did
