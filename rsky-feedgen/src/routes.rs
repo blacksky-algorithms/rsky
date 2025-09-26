@@ -261,7 +261,7 @@ pub async fn index(
                 cursor,
                 true,
                 "blacksky-edu".into(),
-                vec!["#blackademics".into()],
+                vec!["blackademics".into()],
                 connection,
                 config,
             )

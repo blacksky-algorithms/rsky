@@ -20,6 +20,7 @@ RUN cargo build --release --package rsky-feedgen
 COPY rsky-feedgen/src rsky-feedgen/src
 COPY rsky-feedgen/migrations rsky-feedgen/migrations
 COPY rsky-feedgen/diesel.toml rsky-feedgen/diesel.toml
+COPY rsky-feedgen/Cargo.toml rsky-feedgen/Cargo.toml
 
 RUN cargo build --release --package rsky-feedgen
 
