@@ -502,7 +502,7 @@ pub async fn queue_deletion(
     }
 }
 
-#[rocket::get("/.well-known/did.json", format = "json")]
+#[rocket::get("/.well-known/did.json")]
 pub async fn well_known() -> Result<
     Json<crate::models::WellKnown>,
     status::Custom<Json<crate::models::PathUnknownErrorMessageResponse>>,
