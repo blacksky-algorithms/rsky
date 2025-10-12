@@ -24,7 +24,7 @@ base64-url = "2.0.2"
 base64ct = "1.6.0"
 chrono = "0.4.26"
 data-encoding = "2.5.0"
-diesel = { version = "=2.1.5", features = ["chrono", "postgres"] }
+diesel = { version = "=2.2.0", features = ["chrono", "postgres"] }
 dotenvy = "0.15"
 email_address = "0.2.4"
 event-emitter-rs = "0.1.4"
