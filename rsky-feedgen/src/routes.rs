@@ -539,3 +539,72 @@ pub async fn well_known() -> Result<
         }
     }
 }
+
+#[rocket::post("/admin/ban", format = "json", data = "<body>")]
+pub fn ban_user(
+    body: Json<crate::models::BannedFromTvRequest>,
+    _key: ApiKey<'_>,
+) -> Result<(), status::Custom<Json<crate::models::InternalErrorMessageResponse>>> {
+    match crate::apis::ban_from_tv(&body.did, body.reason.clone(), body.tags.clone()) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let internal_error = crate::models::InternalErrorMessageResponse {
+                code: Some(crate::models::InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ))
+        }
+    }
+}
+
+#[rocket::delete("/admin/ban?<did>")]
+pub fn unban_user(
+    did: &str,
+    _key: ApiKey<'_>,
+) -> Result<(), status::Custom<Json<crate::models::InternalErrorMessageResponse>>> {
+    match crate::apis::unban_from_tv(&did.to_string()) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let internal_error = crate::models::InternalErrorMessageResponse {
+                code: Some(crate::models::InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ))
+        }
+    }
+}
+
+#[rocket::get("/admin/banned?<did>&<tag>&<limit>&<offset>", format = "json")]
+pub fn list_banned_users(
+    did: Option<String>,
+    tag: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    _key: ApiKey<'_>,
+) -> Result<
+    Json<Vec<crate::models::BannedFromTv>>,
+    status::Custom<Json<crate::models::InternalErrorMessageResponse>>,
+> {
+    match crate::apis::search_banned_from_tv(did, tag, limit, offset) {
+        Ok(results) => Ok(Json(results)),
+        Err(error) => {
+            eprintln!("Internal Error: {error}");
+            let internal_error = crate::models::InternalErrorMessageResponse {
+                code: Some(crate::models::InternalErrorCode::InternalError),
+                message: Some(error.to_string()),
+            };
+            Err(status::Custom(
+                Status::InternalServerError,
+                Json(internal_error),
+            ))
+        }
+    }
+}

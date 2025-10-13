@@ -153,6 +153,9 @@ fn rocket() -> _ {
                 well_known,
                 get_cursor,
                 update_cursor,
+                ban_user,
+                unban_user,
+                list_banned_users,
                 all_options
             ],
         )
