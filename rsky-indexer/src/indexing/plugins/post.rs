@@ -55,7 +55,10 @@ impl PostPlugin {
     ) -> Result<(), IndexerError> {
         if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
             for (position, image) in images.iter().enumerate() {
-                let image_cid = image.get("image").and_then(|i| i.as_str());
+                let image_cid = image
+                    .get("image")
+                    .and_then(|i| i.get("ref"))
+                    .and_then(|r| r.as_str());
                 let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
 
                 if let Some(cid) = image_cid {
@@ -84,7 +87,10 @@ impl PostPlugin {
             let uri = external.get("uri").and_then(|u| u.as_str());
             let title = external.get("title").and_then(|t| t.as_str()).unwrap_or("");
             let description = external.get("description").and_then(|d| d.as_str()).unwrap_or("");
-            let thumb_cid = external.get("thumb").and_then(|t| t.as_str());
+            let thumb_cid = external
+                .get("thumb")
+                .and_then(|t| t.get("ref"))
+                .and_then(|r| r.as_str());
 
             if let Some(ext_uri) = uri {
                 client
@@ -107,7 +113,10 @@ impl PostPlugin {
         post_uri: &str,
         embed: &JsonValue,
     ) -> Result<(), IndexerError> {
-        let video_cid = embed.get("video").and_then(|v| v.as_str());
+        let video_cid = embed
+            .get("video")
+            .and_then(|v| v.get("ref"))
+            .and_then(|r| r.as_str());
         let alt = embed.get("alt").and_then(|a| a.as_str()).unwrap_or("");
 
         if let Some(cid) = video_cid {
