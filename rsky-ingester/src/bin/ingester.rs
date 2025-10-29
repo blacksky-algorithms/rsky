@@ -160,14 +160,14 @@ async fn run_labeler(config: IngesterConfig) -> Result<()> {
 fn load_config() -> IngesterConfig {
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let relay_hosts = env::var("RELAY_HOSTS")
+    let relay_hosts = env::var("INGESTER_RELAY_HOSTS")
         .unwrap_or_else(|_| "bsky.network".to_string())
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    let labeler_hosts = env::var("LABELER_HOSTS")
+    let labeler_hosts = env::var("INGESTER_LABELER_HOSTS")
         .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_string())
