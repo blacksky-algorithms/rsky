@@ -6,25 +6,60 @@ use serde_json::Value as JsonValue;
 
 pub struct NotifDeclarationPlugin;
 
+impl NotifDeclarationPlugin {
+    /// Extract rkey from AT URI (format: at://did:plc:xyz/collection/rkey)
+    fn extract_rkey(uri: &str) -> Option<String> {
+        uri.rsplit('/').next().map(|s| s.to_string())
+    }
+}
+
 #[async_trait]
 impl RecordPlugin for NotifDeclarationPlugin {
     fn collection(&self) -> &str {
         "app.bsky.notification.declaration"
     }
 
-    async fn insert(&self, pool: &Pool, uri: &str, cid: &str, _record: &JsonValue, _timestamp: &str) -> Result<(), IndexerError> {
-        let client = pool.get().await?;
-        client.execute("INSERT INTO notif_declaration (uri, cid) VALUES ($1, $2) ON CONFLICT (uri) DO NOTHING", &[&uri, &cid]).await.map_err(|e| IndexerError::Database(e.into()))?;
+    async fn insert(
+        &self,
+        _pool: &Pool,
+        uri: &str,
+        _cid: &str,
+        _record: &JsonValue,
+        _timestamp: &str,
+    ) -> Result<(), IndexerError> {
+        // Placeholder plugin: only validates rkey === 'self'
+        // No dedicated table - only generic record table is used
+        let rkey = Self::extract_rkey(uri);
+        if rkey.as_deref() != Some("self") {
+            return Err(IndexerError::Serialization(format!(
+                "NotifDeclaration record must have rkey 'self', got: {:?}",
+                rkey
+            )));
+        }
         Ok(())
     }
 
-    async fn update(&self, _pool: &Pool, _uri: &str, _cid: &str, _record: &JsonValue, _timestamp: &str) -> Result<(), IndexerError> {
+    async fn update(
+        &self,
+        _pool: &Pool,
+        _uri: &str,
+        _cid: &str,
+        _record: &JsonValue,
+        _timestamp: &str,
+    ) -> Result<(), IndexerError> {
+        // No-op for placeholder plugins
         Ok(())
     }
 
-    async fn delete(&self, pool: &Pool, uri: &str) -> Result<(), IndexerError> {
-        let client = pool.get().await?;
-        client.execute("DELETE FROM notif_declaration WHERE uri = $1", &[&uri]).await.map_err(|e| IndexerError::Database(e.into()))?;
+    async fn delete(&self, _pool: &Pool, uri: &str) -> Result<(), IndexerError> {
+        // Placeholder plugin: only validates rkey === 'self'
+        let rkey = Self::extract_rkey(uri);
+        if rkey.as_deref() != Some("self") {
+            return Err(IndexerError::Serialization(format!(
+                "NotifDeclaration record must have rkey 'self', got: {:?}",
+                rkey
+            )));
+        }
         Ok(())
     }
 }

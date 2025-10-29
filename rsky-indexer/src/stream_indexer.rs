@@ -30,7 +30,8 @@ impl StreamIndexer {
             stream,
             config.consumer_group.clone(),
             config.consumer_name.clone(),
-        ).await?;
+        )
+        .await?;
 
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
 
@@ -104,7 +105,10 @@ impl StreamIndexer {
                         Ok(_) => {
                             // ACK and delete the message with retry
                             if let Err(e) = Self::ack_with_retry(&consumer, &message.id, 3).await {
-                                error!("Failed to ACK message {} after retries: {:?}", message.id, e);
+                                error!(
+                                    "Failed to ACK message {} after retries: {:?}",
+                                    message.id, e
+                                );
                             }
                         }
                         Err(e) => {
@@ -266,10 +270,7 @@ impl StreamIndexer {
                 }
             }
             StreamEvent::Repo {
-                did,
-                commit,
-                rev,
-                ..
+                did, commit, rev, ..
             } => {
                 indexing_service
                     .set_commit_last_seen(&did, &commit, &rev)
@@ -282,10 +283,16 @@ impl StreamIndexer {
                 time,
                 ..
             } => {
-                indexing_service
-                    .update_actor_status(&did, active, status)
-                    .await?;
-                indexing_service.index_handle(&did, &time).await?;
+                // Handle "deleted" status specially - delete the actor entirely
+                // Case-insensitive comparison since statuses may come capitalized
+                if !active && status.as_ref().map(|s| s.to_lowercase()).as_deref() == Some("deleted") {
+                    indexing_service.delete_actor(&did).await?;
+                } else {
+                    indexing_service
+                        .update_actor_status(&did, active, status)
+                        .await?;
+                    indexing_service.index_handle(&did, &time).await?;
+                }
             }
             StreamEvent::Identity { did, time, .. } => {
                 indexing_service.index_handle(&did, &time).await?;

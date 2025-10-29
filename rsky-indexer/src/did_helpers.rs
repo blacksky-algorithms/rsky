@@ -20,8 +20,7 @@ pub fn get_pds_endpoint(doc: &DidDocument) -> Option<String> {
     if let Some(ref services) = doc.service {
         for service in services {
             // Check if the ID matches (can be "#atproto_pds" or "did:...#atproto_pds")
-            let id_matches = service.id == "#atproto_pds"
-                || service.id.ends_with("#atproto_pds");
+            let id_matches = service.id == "#atproto_pds" || service.id.ends_with("#atproto_pds");
 
             if id_matches && service.r#type == "AtprotoPersonalDataServer" {
                 // Validate URL

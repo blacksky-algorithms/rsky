@@ -24,7 +24,8 @@ impl LabelIndexer {
             "label_live".to_string(),
             config.consumer_group.clone(),
             config.consumer_name.clone(),
-        ).await?;
+        )
+        .await?;
 
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
 
@@ -95,7 +96,10 @@ impl LabelIndexer {
                         Ok(_) => {
                             // ACK and delete the message with retry
                             if let Err(e) = Self::ack_with_retry(&consumer, &message.id, 3).await {
-                                error!("Failed to ACK message {} after retries: {:?}", message.id, e);
+                                error!(
+                                    "Failed to ACK message {} after retries: {:?}",
+                                    message.id, e
+                                );
                             }
                         }
                         Err(e) => {
@@ -192,7 +196,13 @@ impl LabelIndexer {
                             cts = EXCLUDED.cts,
                             indexed_at = EXCLUDED.indexed_at
                         "#,
-                        &[&label.src, &label.uri, &label.cid.as_deref(), &label.val, &label.cts],
+                        &[
+                            &label.src,
+                            &label.uri,
+                            &label.cid.as_deref(),
+                            &label.val,
+                            &label.cts,
+                        ],
                     )
                     .await
                     .map_err(|e| IndexerError::Database(e.into()))?;

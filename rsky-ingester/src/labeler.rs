@@ -1,5 +1,5 @@
 use crate::batcher::Batcher;
-use crate::{IngesterConfig, IngesterError, LabelStreamEvent, streams};
+use crate::{streams, IngesterConfig, IngesterError, LabelStreamEvent};
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use tokio::time::{interval, Duration};
@@ -16,7 +16,10 @@ pub struct LabelerIngester {
 impl LabelerIngester {
     pub fn new(config: IngesterConfig) -> Result<Self, IngesterError> {
         let redis_client = redis::Client::open(config.redis_url.clone())?;
-        Ok(Self { config, redis_client })
+        Ok(Self {
+            config,
+            redis_client,
+        })
     }
 
     pub async fn run(&self, hostname: String) -> Result<(), IngesterError> {
@@ -55,10 +58,8 @@ impl LabelerIngester {
         let (mut write, mut read) = ws_stream.split();
 
         // Create batcher for events
-        let (batch_tx, mut batch_rx) = Batcher::new(
-            self.config.batch_size,
-            self.config.batch_timeout_ms,
-        );
+        let (batch_tx, mut batch_rx) =
+            Batcher::new(self.config.batch_size, self.config.batch_timeout_ms);
 
         // Spawn task to handle batched writes to Redis
         let redis_client = self.redis_client.clone();
@@ -101,20 +102,18 @@ impl LabelerIngester {
         // Read messages from WebSocket
         while let Some(msg_result) = read.next().await {
             match msg_result {
-                Ok(Message::Binary(data)) => {
-                    match self.process_message(&data).await {
-                        Ok(Some(event)) => {
-                            if let Err(e) = batch_tx.send(event) {
-                                error!("Failed to send event to batcher: {:?}", e);
-                                break;
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            error!("Failed to process message: {:?}", e);
+                Ok(Message::Binary(data)) => match self.process_message(&data).await {
+                    Ok(Some(event)) => {
+                        if let Err(e) = batch_tx.send(event) {
+                            error!("Failed to send event to batcher: {:?}", e);
+                            break;
                         }
                     }
-                }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Failed to process message: {:?}", e);
+                    }
+                },
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Ok(Message::Close(frame)) => {
                     info!("WebSocket closed: {:?}", frame);

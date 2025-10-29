@@ -1,16 +1,16 @@
 use crate::batcher::Batcher;
-use crate::{IngesterConfig, IngesterError, StreamEvent, streams};
+use crate::{streams, IngesterConfig, IngesterError, StreamEvent};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use ipld_core::ipld::Ipld;
+use iroh_car::CarReader;
+use lexicon_cid::Cid;
 use redis::AsyncCommands;
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use std::io::Cursor;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
-use iroh_car::CarReader;
-use lexicon_cid::Cid;
-use ipld_core::ipld::Ipld;
 
 /// FirehoseIngester subscribes to com.atproto.sync.subscribeRepos
 /// and writes events to the firehose_live Redis stream
@@ -22,7 +22,10 @@ pub struct FirehoseIngester {
 impl FirehoseIngester {
     pub fn new(config: IngesterConfig) -> Result<Self, IngesterError> {
         let redis_client = redis::Client::open(config.redis_url.clone())?;
-        Ok(Self { config, redis_client })
+        Ok(Self {
+            config,
+            redis_client,
+        })
     }
 
     pub async fn run(&self, hostname: String) -> Result<(), IngesterError> {
@@ -61,10 +64,8 @@ impl FirehoseIngester {
         let (mut write, mut read) = ws_stream.split();
 
         // Create batcher for events
-        let (batch_tx, mut batch_rx) = Batcher::new(
-            self.config.batch_size,
-            self.config.batch_timeout_ms,
-        );
+        let (batch_tx, mut batch_rx) =
+            Batcher::new(self.config.batch_size, self.config.batch_timeout_ms);
 
         // Spawn task to handle batched writes to Redis
         let redis_client = self.redis_client.clone();
@@ -107,21 +108,19 @@ impl FirehoseIngester {
         // Read messages from WebSocket
         while let Some(msg_result) = read.next().await {
             match msg_result {
-                Ok(Message::Binary(data)) => {
-                    match self.process_message(&data).await {
-                        Ok(events) => {
-                            for event in events {
-                                if let Err(e) = batch_tx.send(event) {
-                                    error!("Failed to send event to batcher: {:?}", e);
-                                    break;
-                                }
+                Ok(Message::Binary(data)) => match self.process_message(&data).await {
+                    Ok(events) => {
+                        for event in events {
+                            if let Err(e) = batch_tx.send(event) {
+                                error!("Failed to send event to batcher: {:?}", e);
+                                break;
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to process message: {:?}", e);
-                        }
                     }
-                }
+                    Err(e) => {
+                        error!("Failed to process message: {:?}", e);
+                    }
+                },
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Ok(Message::Close(frame)) => {
                     info!("WebSocket closed: {:?}", frame);
@@ -172,7 +171,9 @@ impl FirehoseIngester {
                         "create" => {
                             if let Some(cid) = op.cid {
                                 // Try to find the record in the blocks
-                                let record = self.extract_record_from_blocks(&commit.blocks, &cid).await?;
+                                let record = self
+                                    .extract_record_from_blocks(&commit.blocks, &cid)
+                                    .await?;
 
                                 events.push(StreamEvent::Create {
                                     seq,
@@ -189,7 +190,9 @@ impl FirehoseIngester {
                         }
                         "update" => {
                             if let Some(cid) = op.cid {
-                                let record = self.extract_record_from_blocks(&commit.blocks, &cid).await?;
+                                let record = self
+                                    .extract_record_from_blocks(&commit.blocks, &cid)
+                                    .await?;
 
                                 events.push(StreamEvent::Update {
                                     seq,
@@ -276,15 +279,17 @@ impl FirehoseIngester {
 
         // Iterate through blocks to find the one matching target_cid
         loop {
-            let block_option = car_reader.next_block().await
-                .map_err(|e| IngesterError::Serialization(format!("Failed to read CAR block: {:?}", e)))?;
+            let block_option = car_reader.next_block().await.map_err(|e| {
+                IngesterError::Serialization(format!("Failed to read CAR block: {:?}", e))
+            })?;
 
             match block_option {
                 Some((cid, data)) => {
                     if cid == *target_cid {
                         // Decode as IPLD CBOR first (handles CIDs properly)
-                        let ipld: Ipld = serde_ipld_dagcbor::from_slice(&data)
-                            .map_err(|e| IngesterError::Serialization(format!("Failed to decode CBOR: {:?}", e)))?;
+                        let ipld: Ipld = serde_ipld_dagcbor::from_slice(&data).map_err(|e| {
+                            IngesterError::Serialization(format!("Failed to decode CBOR: {:?}", e))
+                        })?;
 
                         // Convert IPLD to JSON (CIDs become strings)
                         let json = Self::ipld_to_json(&ipld)?;
@@ -357,11 +362,7 @@ impl FirehoseIngester {
             let event_json = serde_json::to_string(event)
                 .map_err(|e| IngesterError::Serialization(e.to_string()))?;
 
-            pipe.xadd(
-                streams::FIREHOSE_LIVE,
-                "*",
-                &[("event", event_json)],
-            );
+            pipe.xadd(streams::FIREHOSE_LIVE, "*", &[("event", event_json)]);
         }
 
         // Update cursor

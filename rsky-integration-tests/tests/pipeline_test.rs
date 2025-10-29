@@ -60,7 +60,11 @@ async fn test_full_pipeline() -> Result<()> {
     );
 
     // Verify we got a reasonable number of events from backfill
-    assert!(backfill_count > 1000, "Expected at least 1000 events from backfilled repo, got {}", backfill_count);
+    assert!(
+        backfill_count > 1000,
+        "Expected at least 1000 events from backfilled repo, got {}",
+        backfill_count
+    );
 
     // Step 4: Start indexer (Redis streams -> PostgreSQL)
     tracing::info!("Step 4: Starting indexer");
@@ -125,7 +129,9 @@ async fn test_full_pipeline() -> Result<()> {
         }
     } else {
         tracing::warn!("No records indexed in this test run (only commit events). This is normal for short test runs.");
-        tracing::info!("The pipeline is working correctly - commits are being tracked in actor_sync table.");
+        tracing::info!(
+            "The pipeline is working correctly - commits are being tracked in actor_sync table."
+        );
     }
 
     // Cleanup
@@ -171,8 +177,9 @@ impl TestContext {
         // Use environment variables or defaults for test infrastructure
         let redis_url = std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://localhost:6379".to_string());
-        let database_url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/bsky_test".to_string());
+        let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:postgres@localhost:5432/bsky_test".to_string()
+        });
 
         tracing::info!("Connecting to Redis: {}", redis_url);
         tracing::info!("Connecting to PostgreSQL: {}", database_url);
@@ -182,11 +189,14 @@ impl TestContext {
         let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
         // Clear test streams and cursors
-        for stream in &["firehose_live", "firehose_backfill", "repo_backfill", "label_live"] {
-            let _: Result<(), redis::RedisError> = redis::cmd("DEL")
-                .arg(stream)
-                .query_async(&mut conn)
-                .await;
+        for stream in &[
+            "firehose_live",
+            "firehose_backfill",
+            "repo_backfill",
+            "label_live",
+        ] {
+            let _: Result<(), redis::RedisError> =
+                redis::cmd("DEL").arg(stream).query_async(&mut conn).await;
         }
 
         // Clear cursor keys to start from the beginning (cursor 0)
@@ -198,8 +208,10 @@ impl TestContext {
         // Connect to PostgreSQL
         let mut pg_config = deadpool_postgres::Config::new();
         pg_config.url = Some(database_url.clone());
-        let pg_pool = pg_config
-            .create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)?;
+        let pg_pool = pg_config.create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )?;
 
         // Setup database schema (simplified for test)
         let client = pg_pool.get().await?;
@@ -225,17 +237,31 @@ impl TestContext {
 
                 CREATE TABLE IF NOT EXISTS "like" (
                     uri TEXT PRIMARY KEY,
-                    cid TEXT NOT NULL
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    subject_uri TEXT,
+                    subject_cid TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS repost (
                     uri TEXT PRIMARY KEY,
-                    cid TEXT NOT NULL
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    subject_uri TEXT,
+                    subject_cid TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS follow (
                     uri TEXT PRIMARY KEY,
-                    cid TEXT NOT NULL
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    subject_did TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS thread_gate (
@@ -270,7 +296,15 @@ impl TestContext {
                 );
 
                 CREATE TABLE IF NOT EXISTS profile (
-                    uri TEXT PRIMARY KEY
+                    uri TEXT PRIMARY KEY,
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    display_name TEXT,
+                    description TEXT,
+                    avatar_cid TEXT,
+                    banner_cid TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS feed_generator (
@@ -407,10 +441,16 @@ impl TestContext {
             redis_url: self.redis_url.clone(),
             stream_in: "repo_backfill".to_string(),
             stream_out: "firehose_backfill".to_string(),
+            stream_dead_letter: "repo_backfill_dlq".to_string(),
             consumer_group: "test_backfill_group".to_string(),
             consumer_name: "test_backfiller_1".to_string(),
             concurrency: 1,
             high_water_mark: 100_000,
+            http_timeout_secs: 60,
+            max_retries: 3,
+            retry_initial_backoff_ms: 1000,
+            retry_max_backoff_ms: 30000,
+            metrics_port: 9090,
         };
 
         let handle = tokio::spawn(async move {
@@ -446,21 +486,19 @@ impl TestContext {
                 ..Default::default()
             };
             let pool = pg_config
-                .create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)
+                .create_pool(
+                    Some(deadpool_postgres::Runtime::Tokio1),
+                    tokio_postgres::NoTls,
+                )
                 .expect("Failed to create pool");
 
             // Create IdResolver for handle resolution
-            use tokio::sync::Mutex;
-            let resolver_opts = rsky_identity::types::IdentityResolverOpts {
-                timeout: None,
-                plc_url: None,
-                did_cache: None,
-                backup_nameservers: None,
-            };
-            let id_resolver = Arc::new(Mutex::new(rsky_identity::IdResolver::new(resolver_opts)));
+            // Disabled in tests to avoid "runtime within runtime" panic from hickory-resolver
+            // In production, this would be enabled to resolve DIDs and handles
+            let id_resolver = None;
 
             let indexing_service = Arc::new(
-                rsky_indexer::indexing::IndexingService::new_with_resolver(pool, Some(id_resolver))
+                rsky_indexer::indexing::IndexingService::new_with_resolver(pool, id_resolver),
             );
 
             // Start stream indexers
@@ -507,9 +545,7 @@ impl TestContext {
         let mut stats = HashMap::new();
 
         // Count records
-        let row = client
-            .query_one("SELECT COUNT(*) FROM record", &[])
-            .await?;
+        let row = client.query_one("SELECT COUNT(*) FROM record", &[]).await?;
         stats.insert("record".to_string(), row.get(0));
 
         // Count posts
@@ -517,7 +553,9 @@ impl TestContext {
         stats.insert("post".to_string(), row.get(0));
 
         // Count likes
-        let row = client.query_one(r#"SELECT COUNT(*) FROM "like""#, &[]).await?;
+        let row = client
+            .query_one(r#"SELECT COUNT(*) FROM "like""#, &[])
+            .await?;
         stats.insert("like".to_string(), row.get(0));
 
         // Count reposts
@@ -555,7 +593,10 @@ impl TestContext {
 
         // Count posts
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM post WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM post WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -563,7 +604,10 @@ impl TestContext {
 
         // Count likes
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM \"like\" WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM \"like\" WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -571,7 +615,10 @@ impl TestContext {
 
         // Count follows
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM follow WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM follow WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -579,7 +626,10 @@ impl TestContext {
 
         // Count reposts
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM repost WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM repost WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -587,7 +637,10 @@ impl TestContext {
 
         // Also count in the generic record table
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM record WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM record WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -595,7 +648,10 @@ impl TestContext {
 
         // Count starter packs
         if let Ok(row) = client
-            .query_one("SELECT COUNT(*) FROM starter_pack WHERE uri LIKE $1", &[&uri_pattern])
+            .query_one(
+                "SELECT COUNT(*) FROM starter_pack WHERE uri LIKE $1",
+                &[&uri_pattern],
+            )
             .await
         {
             total += row.get::<_, i64>(0);
@@ -646,11 +702,14 @@ impl TestContext {
 
         // Clear Redis streams
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
-        for stream in &["firehose_live", "firehose_backfill", "repo_backfill", "label_live"] {
-            let _: Result<(), redis::RedisError> = redis::cmd("DEL")
-                .arg(stream)
-                .query_async(&mut conn)
-                .await;
+        for stream in &[
+            "firehose_live",
+            "firehose_backfill",
+            "repo_backfill",
+            "label_live",
+        ] {
+            let _: Result<(), redis::RedisError> =
+                redis::cmd("DEL").arg(stream).query_async(&mut conn).await;
         }
 
         Ok(())

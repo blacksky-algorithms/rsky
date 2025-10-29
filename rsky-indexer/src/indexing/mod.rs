@@ -14,7 +14,9 @@ use tracing::debug;
 fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
     DateTime::parse_from_rfc3339(timestamp)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+        .map_err(|e| {
+            IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+        })
 }
 
 /// Action type for record operations
@@ -58,11 +60,7 @@ pub trait RecordPlugin: Send + Sync {
     ) -> Result<(), IndexerError>;
 
     /// Delete a record
-    async fn delete(
-        &self,
-        pool: &Pool,
-        uri: &str,
-    ) -> Result<(), IndexerError>;
+    async fn delete(&self, pool: &Pool, uri: &str) -> Result<(), IndexerError>;
 }
 
 /// Main indexing service that coordinates plugins
@@ -109,34 +107,55 @@ impl IndexingService {
         plugins.insert(list_item_plugin.collection().to_string(), list_item_plugin);
 
         let list_block_plugin = Arc::new(plugins::ListBlockPlugin);
-        plugins.insert(list_block_plugin.collection().to_string(), list_block_plugin);
+        plugins.insert(
+            list_block_plugin.collection().to_string(),
+            list_block_plugin,
+        );
 
         let feed_generator_plugin = Arc::new(plugins::FeedGeneratorPlugin);
-        plugins.insert(feed_generator_plugin.collection().to_string(), feed_generator_plugin);
+        plugins.insert(
+            feed_generator_plugin.collection().to_string(),
+            feed_generator_plugin,
+        );
 
         let labeler_plugin = Arc::new(plugins::LabelerPlugin);
         plugins.insert(labeler_plugin.collection().to_string(), labeler_plugin);
 
         let starter_pack_plugin = Arc::new(plugins::StarterPackPlugin);
-        plugins.insert(starter_pack_plugin.collection().to_string(), starter_pack_plugin);
+        plugins.insert(
+            starter_pack_plugin.collection().to_string(),
+            starter_pack_plugin,
+        );
 
         let thread_gate_plugin = Arc::new(plugins::ThreadGatePlugin);
-        plugins.insert(thread_gate_plugin.collection().to_string(), thread_gate_plugin);
+        plugins.insert(
+            thread_gate_plugin.collection().to_string(),
+            thread_gate_plugin,
+        );
 
         let post_gate_plugin = Arc::new(plugins::PostGatePlugin);
         plugins.insert(post_gate_plugin.collection().to_string(), post_gate_plugin);
 
         let verification_plugin = Arc::new(plugins::VerificationPlugin);
-        plugins.insert(verification_plugin.collection().to_string(), verification_plugin);
+        plugins.insert(
+            verification_plugin.collection().to_string(),
+            verification_plugin,
+        );
 
         let status_plugin = Arc::new(plugins::StatusPlugin);
         plugins.insert(status_plugin.collection().to_string(), status_plugin);
 
         let chat_declaration_plugin = Arc::new(plugins::ChatDeclarationPlugin);
-        plugins.insert(chat_declaration_plugin.collection().to_string(), chat_declaration_plugin);
+        plugins.insert(
+            chat_declaration_plugin.collection().to_string(),
+            chat_declaration_plugin,
+        );
 
         let notif_declaration_plugin = Arc::new(plugins::NotifDeclarationPlugin);
-        plugins.insert(notif_declaration_plugin.collection().to_string(), notif_declaration_plugin);
+        plugins.insert(
+            notif_declaration_plugin.collection().to_string(),
+            notif_declaration_plugin,
+        );
 
         Self {
             pool,
@@ -163,7 +182,9 @@ impl IndexingService {
         }
 
         let collection = parts[parts.len() - 2];
-        let did = parts.first().ok_or_else(|| IndexerError::InvalidUri(uri.to_string()))?;
+        let did = parts
+            .first()
+            .ok_or_else(|| IndexerError::InvalidUri(uri.to_string()))?;
 
         // First, update the generic record table
         match action {
@@ -179,10 +200,14 @@ impl IndexingService {
         if let Some(plugin) = self.plugins.get(collection) {
             match action {
                 WriteOpAction::Create => {
-                    plugin.insert(&self.pool, uri, cid, record, timestamp).await?;
+                    plugin
+                        .insert(&self.pool, uri, cid, record, timestamp)
+                        .await?;
                 }
                 WriteOpAction::Update => {
-                    plugin.update(&self.pool, uri, cid, record, timestamp).await?;
+                    plugin
+                        .update(&self.pool, uri, cid, record, timestamp)
+                        .await?;
                 }
                 WriteOpAction::Delete => {
                     plugin.delete(&self.pool, uri).await?;
@@ -276,7 +301,10 @@ impl IndexingService {
         // Check if we need to reindex
         let client = self.pool.get().await?;
         let actor = client
-            .query_opt("SELECT handle, indexed_at FROM actor WHERE did = $1", &[&did])
+            .query_opt(
+                "SELECT handle, indexed_at FROM actor WHERE did = $1",
+                &[&did],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -299,9 +327,7 @@ impl IndexingService {
         // Verify handle resolves back to same DID
         let verified_handle: Option<String> = if let Some(ref handle) = handle_from_doc {
             match resolver_guard.handle.resolve(&handle.clone()).await {
-                Ok(Some(handle_to_did)) if handle_to_did == did => {
-                    Some(handle.to_lowercase())
-                }
+                Ok(Some(handle_to_did)) if handle_to_did == did => Some(handle.to_lowercase()),
                 _ => None,
             }
         } else {
@@ -311,10 +337,7 @@ impl IndexingService {
         // Handle contention: if another actor has this handle, clear it
         if let Some(ref handle) = verified_handle {
             let actor_with_handle = client
-                .query_opt(
-                    "SELECT did FROM actor WHERE handle = $1",
-                    &[&handle],
-                )
+                .query_opt("SELECT did FROM actor WHERE handle = $1", &[&handle])
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -401,11 +424,14 @@ impl IndexingService {
     ) -> Result<(), IndexerError> {
         let client = self.pool.get().await?;
 
-        let upstream_status: Option<&str> = if active {
+        let upstream_status: Option<String> = if active {
             None
         } else {
-            match status.as_deref() {
-                Some("deactivated") | Some("suspended") | Some("takendown") => status.as_deref(),
+            match status.as_ref().map(|s| s.to_lowercase()).as_deref() {
+                Some("deactivated") | Some("suspended") | Some("takendown") | Some("deleted") => {
+                    // Normalize to lowercase for storage
+                    status.as_ref().map(|s| s.to_lowercase())
+                }
                 Some(s) => {
                     return Err(IndexerError::Serialization(format!(
                         "Unrecognized account status: {}",
@@ -424,6 +450,70 @@ impl IndexingService {
                 WHERE did = $1
                 "#,
                 &[&did, &upstream_status],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Delete an actor and all their associated records
+    /// Per TypeScript implementation: only deletes non-hosted (remote) actors
+    pub async fn delete_actor(&self, did: &str) -> Result<(), IndexerError> {
+        let client = self.pool.get().await?;
+
+        // In production, you'd check if actor is hosted before deleting
+        // For now, we'll delete all records for the actor
+
+        // Delete from actor table
+        client
+            .execute("DELETE FROM actor WHERE did = $1", &[&did])
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        // Delete all records created by this actor
+        client
+            .execute("DELETE FROM record WHERE did = $1", &[&did])
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        // Delete from collection-specific tables
+        client
+            .execute(
+                r#"DELETE FROM post WHERE uri LIKE $1"#,
+                &[&format!("at://{}/", did)],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        client
+            .execute(
+                r#"DELETE FROM "like" WHERE creator = $1"#,
+                &[&did],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        client
+            .execute(
+                r#"DELETE FROM repost WHERE creator = $1"#,
+                &[&did],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        client
+            .execute(
+                r#"DELETE FROM follow WHERE creator = $1"#,
+                &[&did],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        client
+            .execute(
+                r#"DELETE FROM profile WHERE creator = $1"#,
+                &[&did],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -476,6 +566,56 @@ impl IndexingService {
                 WHERE uri = $1
                 "#,
                 &[&uri],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Create a notification
+    /// Per TypeScript implementation: notifications inform users of interactions with their content
+    pub async fn create_notification(
+        &self,
+        did: &str,           // who receives the notification
+        author: &str,        // who created the record
+        record_uri: &str,    // URI of the record that triggered the notification
+        record_cid: &str,    // CID of the record
+        reason: &str,        // 'like', 'repost', 'follow', 'mention', 'reply', 'quote', 'starterpack-joined', 'verified', 'unverified'
+        reason_subject: Option<&str>, // optional subject (e.g., the post that was liked)
+        sort_at: &str,       // timestamp for sorting
+    ) -> Result<(), IndexerError> {
+        let client = self.pool.get().await?;
+
+        client
+            .execute(
+                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                &[
+                    &did,
+                    &author,
+                    &record_uri,
+                    &record_cid,
+                    &reason,
+                    &reason_subject,
+                    &sort_at,
+                ],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        Ok(())
+    }
+
+    /// Delete notifications for a specific record URI
+    /// Per TypeScript implementation: used when records are deleted or updated
+    pub async fn delete_notifications_for_record(&self, record_uri: &str) -> Result<(), IndexerError> {
+        let client = self.pool.get().await?;
+
+        client
+            .execute(
+                "DELETE FROM notification WHERE record_uri = $1",
+                &[&record_uri],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

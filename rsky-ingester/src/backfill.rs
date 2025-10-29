@@ -1,5 +1,5 @@
 use crate::batcher::Batcher;
-use crate::{BackfillEvent, IngesterConfig, IngesterError, streams};
+use crate::{streams, BackfillEvent, IngesterConfig, IngesterError};
 use redis::AsyncCommands;
 use serde::Deserialize;
 use tokio::time::Duration;
@@ -80,10 +80,8 @@ impl BackfillIngester {
         info!("Starting backfill from cursor {:?}", cursor);
 
         // Create batcher for events
-        let (batch_tx, mut batch_rx) = Batcher::new(
-            self.config.batch_size,
-            self.config.batch_timeout_ms,
-        );
+        let (batch_tx, mut batch_rx) =
+            Batcher::new(self.config.batch_size, self.config.batch_timeout_ms);
 
         // Spawn task to handle batched writes to Redis
         let redis_client = self.redis_client.clone();
@@ -115,7 +113,9 @@ impl BackfillIngester {
 
         // Paginate through listRepos
         loop {
-            let repos = self.fetch_repos(hostname, current_cursor.as_deref()).await?;
+            let repos = self
+                .fetch_repos(hostname, current_cursor.as_deref())
+                .await?;
 
             for repo in &repos.repos {
                 let event = BackfillEvent {
@@ -144,7 +144,8 @@ impl BackfillIngester {
                 }
             } else {
                 // No more repos, mark as done
-                conn.set::<_, _, ()>(&cursor_key, INGESTER_DONE_CURSOR).await?;
+                conn.set::<_, _, ()>(&cursor_key, INGESTER_DONE_CURSOR)
+                    .await?;
                 info!("Backfill complete! Total repos: {}", total_repos);
                 break;
             }
@@ -152,7 +153,9 @@ impl BackfillIngester {
 
         // Cleanup
         drop(batch_tx);
-        write_task.await.map_err(|e| IngesterError::Other(e.into()))??;
+        write_task
+            .await
+            .map_err(|e| IngesterError::Other(e.into()))??;
 
         Ok(())
     }

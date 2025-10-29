@@ -66,7 +66,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_firehose(config: IngesterConfig) -> Result<()> {
-    info!("Starting firehose ingesters for {} hosts", config.relay_hosts.len());
+    info!(
+        "Starting firehose ingesters for {} hosts",
+        config.relay_hosts.len()
+    );
 
     let mut tasks = Vec::new();
 
@@ -92,7 +95,10 @@ async fn run_firehose(config: IngesterConfig) -> Result<()> {
 }
 
 async fn run_backfill(config: IngesterConfig) -> Result<()> {
-    info!("Starting backfill ingesters for {} hosts", config.relay_hosts.len());
+    info!(
+        "Starting backfill ingesters for {} hosts",
+        config.relay_hosts.len()
+    );
 
     let mut tasks = Vec::new();
 
@@ -123,7 +129,10 @@ async fn run_labeler(config: IngesterConfig) -> Result<()> {
         return Ok(());
     }
 
-    info!("Starting labeler ingesters for {} hosts", config.labeler_hosts.len());
+    info!(
+        "Starting labeler ingesters for {} hosts",
+        config.labeler_hosts.len()
+    );
 
     let mut tasks = Vec::new();
 

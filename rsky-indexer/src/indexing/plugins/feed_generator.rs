@@ -1,18 +1,22 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
-/// Parse RFC3339 timestamp string into DateTime<Utc>
-fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
-}
-
 pub struct FeedGeneratorPlugin;
+
+impl FeedGeneratorPlugin {
+    /// Extract creator DID from AT URI (format: at://did:plc:xyz/collection/rkey)
+    fn extract_creator(uri: &str) -> Option<String> {
+        if let Some(stripped) = uri.strip_prefix("at://") {
+            if let Some(did_end) = stripped.find('/') {
+                return Some(stripped[..did_end].to_string());
+            }
+        }
+        None
+    }
+}
 
 #[async_trait]
 impl RecordPlugin for FeedGeneratorPlugin {
@@ -20,32 +24,79 @@ impl RecordPlugin for FeedGeneratorPlugin {
         "app.bsky.feed.generator"
     }
 
-    async fn insert(&self, pool: &Pool, uri: &str, cid: &str, record: &JsonValue, timestamp: &str) -> Result<(), IndexerError> {
+    async fn insert(
+        &self,
+        pool: &Pool,
+        uri: &str,
+        cid: &str,
+        record: &JsonValue,
+        timestamp: &str,
+    ) -> Result<(), IndexerError> {
         let client = pool.get().await?;
-        let parts: Vec<&str> = uri.split('/').collect();
-        let creator = parts.get(2).ok_or_else(|| IndexerError::InvalidUri(uri.to_string()))?;
 
+        // Extract creator from URI
+        let creator = Self::extract_creator(uri);
+
+        // Extract fields from record
         let feed_did = record.get("did").and_then(|v| v.as_str());
         let display_name = record.get("displayName").and_then(|v| v.as_str());
         let description = record.get("description").and_then(|v| v.as_str());
-        let created_at_str = record.get("createdAt").and_then(|v| v.as_str()).unwrap_or(timestamp);
-        let created_at = parse_timestamp(created_at_str)?;
-        let indexed_at = parse_timestamp(timestamp)?;
 
-        client.execute(
-            "INSERT INTO feed_generator (uri, cid, creator, feed_did, display_name, description, created_at, indexed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (uri) DO NOTHING",
-            &[&uri, &cid, creator, &feed_did, &display_name, &description, &created_at, &indexed_at],
-        ).await.map_err(|e| IndexerError::Database(e.into()))?;
+        // Extract descriptionFacets as JSON string if present
+        let description_facets = record
+            .get("descriptionFacets")
+            .map(|v| v.to_string());
+
+        // Extract avatarCid from avatar.ref if present
+        let avatar_cid = record
+            .get("avatar")
+            .and_then(|a| a.get("ref"))
+            .and_then(|r| r.as_str());
+
+        // Extract createdAt from record
+        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+
+        client
+            .execute(
+                r#"INSERT INTO feed_generator (uri, cid, creator, feedDid, displayName, description, descriptionFacets, avatarCid, createdAt, indexedAt)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   ON CONFLICT (uri) DO NOTHING"#,
+                &[
+                    &uri,
+                    &cid,
+                    &creator,
+                    &feed_did,
+                    &display_name,
+                    &description,
+                    &description_facets,
+                    &avatar_cid,
+                    &created_at,
+                    &timestamp,
+                ],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
         Ok(())
     }
 
-    async fn update(&self, pool: &Pool, uri: &str, cid: &str, record: &JsonValue, timestamp: &str) -> Result<(), IndexerError> {
+    async fn update(
+        &self,
+        pool: &Pool,
+        uri: &str,
+        cid: &str,
+        record: &JsonValue,
+        timestamp: &str,
+    ) -> Result<(), IndexerError> {
+        // Feed generator can be updated, treat as upsert
         self.insert(pool, uri, cid, record, timestamp).await
     }
 
     async fn delete(&self, pool: &Pool, uri: &str) -> Result<(), IndexerError> {
         let client = pool.get().await?;
-        client.execute("DELETE FROM feed_generator WHERE uri = $1", &[&uri]).await.map_err(|e| IndexerError::Database(e.into()))?;
+        client
+            .execute("DELETE FROM feed_generator WHERE uri = $1", &[&uri])
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
         Ok(())
     }
 }

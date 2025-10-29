@@ -1,3 +1,4 @@
+pub mod metrics;
 pub mod repo_backfiller;
 
 use serde::{Deserialize, Serialize};
@@ -46,10 +47,16 @@ pub struct BackfillerConfig {
     pub redis_url: String,
     pub stream_in: String,
     pub stream_out: String,
+    pub stream_dead_letter: String,
     pub consumer_group: String,
     pub consumer_name: String,
     pub concurrency: usize,
     pub high_water_mark: usize,
+    pub http_timeout_secs: u64,
+    pub max_retries: u32,
+    pub retry_initial_backoff_ms: u64,
+    pub retry_max_backoff_ms: u64,
+    pub metrics_port: u16,
 }
 
 impl Default for BackfillerConfig {
@@ -58,10 +65,16 @@ impl Default for BackfillerConfig {
             redis_url: "redis://localhost:6379".to_string(),
             stream_in: "repo_backfill".to_string(),
             stream_out: "firehose_backfill".to_string(),
+            stream_dead_letter: "repo_backfill_dlq".to_string(),
             consumer_group: "repo_backfill_group".to_string(),
             consumer_name: "backfiller_1".to_string(),
             concurrency: 2,
             high_water_mark: 100_000,
+            http_timeout_secs: 60,
+            max_retries: 3,
+            retry_initial_backoff_ms: 1000,
+            retry_max_backoff_ms: 30000,
+            metrics_port: 9090,
         }
     }
 }

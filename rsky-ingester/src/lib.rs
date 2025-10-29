@@ -1,5 +1,5 @@
-pub mod batcher;
 pub mod backfill;
+pub mod batcher;
 pub mod firehose;
 pub mod labeler;
 

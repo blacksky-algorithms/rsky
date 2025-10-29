@@ -79,8 +79,9 @@ CREATE TABLE actor_sync (
 -- Actor table
 CREATE TABLE actor (
     did TEXT PRIMARY KEY,
-    active BOOLEAN NOT NULL DEFAULT true,
-    status TEXT
+    handle TEXT UNIQUE,
+    indexed_at TIMESTAMPTZ,
+    upstream_status TEXT
 );
 
 -- Collection-specific tables (examples)
@@ -122,6 +123,19 @@ CREATE TABLE label (
     indexed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (src, uri, val)
 );
+
+-- Notification table
+CREATE TABLE notification (
+    id SERIAL PRIMARY KEY,
+    did TEXT NOT NULL,
+    record_uri TEXT NOT NULL,
+    record_cid TEXT NOT NULL,
+    author TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    reason_subject TEXT,
+    sort_at TEXT NOT NULL
+);
+CREATE INDEX notification_did_sort_at ON notification (did, sort_at DESC);
 ```
 
 ## Configuration

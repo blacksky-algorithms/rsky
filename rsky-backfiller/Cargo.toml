@@ -41,3 +41,10 @@ rsky-identity = { workspace = true }
 # For repo verification and parsing
 lexicon_cid = { workspace = true }
 iroh-car = "0.5.1"
+
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.5"
+
+# HTTP server for metrics
+warp = "0.3"

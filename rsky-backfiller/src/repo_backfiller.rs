@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::{BackfillEvent, BackfillerConfig, BackfillerError, StreamEvent, SEQ_BACKFILL};
 use redis::AsyncCommands;
 use rsky_repo::block_map::BlockMap;
@@ -8,7 +9,7 @@ use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_repo::util::verify_commit_sig;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Semaphore, RwLock};
+use tokio::sync::{RwLock, Semaphore};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -17,6 +18,8 @@ use tracing::{debug, error, info, warn};
 struct StreamMessage {
     id: String,
     data: BackfillEvent,
+    /// Number of times this message has been attempted (from delivery count)
+    attempt: u32,
 }
 
 /// Main repo backfiller
@@ -32,7 +35,7 @@ impl RepoBackfiller {
         let redis_client = redis::Client::open(config.redis_url.as_str())?;
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()?;
 
         Ok(Self {
@@ -124,7 +127,10 @@ impl RepoBackfiller {
 
             // Update cursor
             if cursor != ">" {
-                cursor = messages.last().map(|m| m.id.clone()).unwrap_or(">".to_string());
+                cursor = messages
+                    .last()
+                    .map(|m| m.id.clone())
+                    .unwrap_or(">".to_string());
             }
         }
     }
@@ -155,27 +161,37 @@ impl RepoBackfiller {
             if let Some(redis::Value::Array(stream_data)) = streams.get(1) {
                 for entry in stream_data {
                     if let redis::Value::Array(entry_data) = entry {
-                        if let (Some(redis::Value::BulkString(id)), Some(redis::Value::Array(fields))) =
-                            (entry_data.first(), entry_data.get(1))
+                        if let (
+                            Some(redis::Value::BulkString(id)),
+                            Some(redis::Value::Array(fields)),
+                        ) = (entry_data.first(), entry_data.get(1))
                         {
                             let id = String::from_utf8_lossy(id).to_string();
 
                             // Parse fields
                             let mut repo_json = None;
                             for i in (0..fields.len()).step_by(2) {
-                                if let (Some(redis::Value::BulkString(key)), Some(redis::Value::BulkString(value))) =
-                                    (fields.get(i), fields.get(i + 1))
+                                if let (
+                                    Some(redis::Value::BulkString(key)),
+                                    Some(redis::Value::BulkString(value)),
+                                ) = (fields.get(i), fields.get(i + 1))
                                 {
                                     let key_str = String::from_utf8_lossy(key);
                                     if key_str == "repo" {
-                                        repo_json = Some(String::from_utf8_lossy(value).to_string());
+                                        repo_json =
+                                            Some(String::from_utf8_lossy(value).to_string());
                                     }
                                 }
                             }
 
                             if let Some(json) = repo_json {
                                 match serde_json::from_str::<BackfillEvent>(&json) {
-                                    Ok(data) => messages.push(StreamMessage { id, data }),
+                                    Ok(data) => {
+                                        // Get delivery count (how many times attempted)
+                                        let attempt =
+                                            self.get_delivery_count(&id).await.unwrap_or(1);
+                                        messages.push(StreamMessage { id, data, attempt });
+                                    }
                                     Err(e) => {
                                         error!("Failed to parse backfill event: {:?}", e);
                                         // ACK and delete bad message
@@ -189,7 +205,35 @@ impl RepoBackfiller {
             }
         }
 
+        // Update waiting gauge
+        metrics::REPOS_WAITING.set(messages.len() as i64);
+
         Ok(messages)
+    }
+
+    /// Get delivery count for a message (how many times it's been delivered)
+    async fn get_delivery_count(&self, message_id: &str) -> Result<u32, BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        let results: Vec<redis::Value> = redis::cmd("XPENDING")
+            .arg(&self.config.stream_in)
+            .arg(&self.config.consumer_group)
+            .arg(message_id)
+            .arg(message_id)
+            .arg(1)
+            .query_async(&mut conn)
+            .await?;
+
+        if let Some(redis::Value::Array(entries)) = results.first() {
+            if let Some(redis::Value::Array(entry)) = entries.first() {
+                // XPENDING returns [message_id, consumer, idle_time, delivery_count]
+                if let Some(redis::Value::Int(count)) = entry.get(3) {
+                    return Ok(*count as u32);
+                }
+            }
+        }
+
+        Ok(1)
     }
 
     /// Check backpressure on output stream
@@ -198,6 +242,7 @@ impl RepoBackfiller {
 
         loop {
             let len: usize = conn.xlen(&self.config.stream_out).await?;
+            metrics::OUTPUT_STREAM_LENGTH.set(len as i64);
 
             if len < self.config.high_water_mark {
                 break;
@@ -213,28 +258,124 @@ impl RepoBackfiller {
         Ok(())
     }
 
-    /// Handle a single backfill message
+    /// Handle a single backfill message with retry logic
     async fn handle_message(&self, msg: &StreamMessage) -> Result<(), BackfillerError> {
-        info!("Processing repo backfill for DID: {}", msg.data.did);
+        info!(
+            "Processing repo backfill for DID: {} (attempt {}/{})",
+            msg.data.did, msg.attempt, self.config.max_retries
+        );
 
+        metrics::REPOS_RUNNING.inc();
+
+        let result = self.process_message_with_retry(msg).await;
+
+        metrics::REPOS_RUNNING.dec();
+
+        match result {
+            Ok(_) => {
+                metrics::REPOS_PROCESSED.inc();
+                // ACK and delete message on success
+                self.ack_message(&msg.id, true).await?;
+                info!("Successfully processed repo for DID: {}", msg.data.did);
+                Ok(())
+            }
+            Err(e) => {
+                metrics::REPOS_FAILED.inc();
+
+                // Check if we've exceeded max retries
+                if msg.attempt >= self.config.max_retries {
+                    error!(
+                        "Repo {} failed after {} attempts, sending to DLQ: {:?}",
+                        msg.data.did, msg.attempt, e
+                    );
+                    metrics::REPOS_DEAD_LETTERED.inc();
+
+                    // Send to dead letter queue
+                    self.send_to_dlq(msg).await?;
+
+                    // ACK and delete from main stream
+                    self.ack_message(&msg.id, true).await?;
+
+                    Ok(())
+                } else {
+                    // Calculate exponential backoff
+                    let backoff_ms = std::cmp::min(
+                        self.config.retry_initial_backoff_ms * 2_u64.pow(msg.attempt - 1),
+                        self.config.retry_max_backoff_ms,
+                    );
+
+                    error!(
+                        "Repo {} failed (attempt {}/{}), will retry after {}ms: {:?}",
+                        msg.data.did, msg.attempt, self.config.max_retries, backoff_ms, e
+                    );
+                    metrics::RETRIES_ATTEMPTED.inc();
+
+                    // Sleep for backoff period
+                    sleep(Duration::from_millis(backoff_ms)).await;
+
+                    // Leave message pending (don't ACK) so it will be retried
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Process message with specific error tracking
+    async fn process_message_with_retry(&self, msg: &StreamMessage) -> Result<(), BackfillerError> {
         // Fetch repo CAR
-        let car_bytes = self.fetch_repo(&msg.data.host, &msg.data.did).await?;
+        let car_bytes = match self.fetch_repo(&msg.data.host, &msg.data.did).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                metrics::CAR_FETCH_ERRORS.inc();
+                return Err(e);
+            }
+        };
 
         // Parse CAR
-        let car = read_car_with_root(car_bytes)
-            .await
-            .map_err(|e| BackfillerError::Car(e.to_string()))?;
+        let car = match read_car_with_root(car_bytes).await {
+            Ok(c) => c,
+            Err(e) => {
+                metrics::CAR_PARSE_ERRORS.inc();
+                return Err(BackfillerError::Car(e.to_string()));
+            }
+        };
 
         // Verify repo
-        let repo = self.verify_repo(car.blocks.clone(), car.root, &msg.data.did).await?;
+        let repo = match self
+            .verify_repo(car.blocks.clone(), car.root, &msg.data.did)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                metrics::VERIFICATION_ERRORS.inc();
+                return Err(e);
+            }
+        };
 
         // Extract and write records
         self.process_repo(repo, &msg.data.did).await?;
 
-        // ACK and delete message
-        self.ack_message(&msg.id, true).await?;
+        Ok(())
+    }
 
-        info!("Successfully processed repo for DID: {}", msg.data.did);
+    /// Send failed message to dead letter queue
+    async fn send_to_dlq(&self, msg: &StreamMessage) -> Result<(), BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        let json = serde_json::to_string(&msg.data)?;
+
+        let _: String = redis::cmd("XADD")
+            .arg(&self.config.stream_dead_letter)
+            .arg("*")
+            .arg("repo")
+            .arg(&json)
+            .arg("reason")
+            .arg("max_retries_exceeded")
+            .arg("attempts")
+            .arg(msg.attempt)
+            .query_async(&mut conn)
+            .await?;
+
         Ok(())
     }
 
@@ -339,13 +480,17 @@ impl RepoBackfiller {
         let rev = repo.commit.rev.clone();
 
         // Get all records from repo
-        let leaves = repo.data.list(None, None, None)
+        let leaves = repo
+            .data
+            .list(None, None, None)
             .await
             .map_err(|e| BackfillerError::Other(e))?;
 
         // Get block map from storage
         let storage_guard = repo.storage.read().await;
-        let blocks_result = storage_guard.get_blocks(leaves.iter().map(|e| e.value).collect()).await
+        let blocks_result = storage_guard
+            .get_blocks(leaves.iter().map(|e| e.value).collect())
+            .await
             .map_err(|e| BackfillerError::Other(e.into()))?;
 
         // Process in chunks of 500
@@ -379,6 +524,9 @@ impl RepoBackfiller {
                             cid: entry.value.to_string(),
                             record: record_json,
                         });
+
+                        // Track record extraction
+                        metrics::RECORDS_EXTRACTED.inc();
                     }
                     Err(e) => {
                         warn!("Failed to parse record {}: {:?}", entry.value, e);

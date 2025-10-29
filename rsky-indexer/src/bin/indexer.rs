@@ -1,8 +1,8 @@
 use anyhow::Result;
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
 use rsky_indexer::{
-    indexing::IndexingService, label_indexer::LabelIndexer, stream_indexer::StreamIndexer,
-    streams, IndexerConfig,
+    indexing::IndexingService, label_indexer::LabelIndexer, stream_indexer::StreamIndexer, streams,
+    IndexerConfig,
 };
 use std::env;
 use std::sync::Arc;
@@ -34,16 +34,19 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(config.concurrency * 2);
 
-    let pool_min_idle = env::var("DB_POOL_MIN_IDLE")
+    let _pool_min_idle = env::var("DB_POOL_MIN_IDLE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(config.concurrency / 2);
 
     let mut pg_config = Config::new();
     pg_config.url = Some(config.database_url.clone());
-    pg_config.max_size = pool_max_size;
     pg_config.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
+    });
+    pg_config.pool = Some(PoolConfig {
+        max_size: pool_max_size,
+        ..Default::default()
     });
 
     let pool = pg_config.create_pool(Some(Runtime::Tokio1), NoTls)?;
@@ -56,23 +59,29 @@ async fn main() -> Result<()> {
     info!("Connected to PostgreSQL");
 
     // Create IdResolver for DID/handle resolution (optional)
-    let id_resolver = if env::var("ENABLE_DID_RESOLUTION").unwrap_or_else(|_| "true".to_string()) == "true" {
-        info!("DID resolution enabled");
-        use tokio::sync::Mutex;
-        let resolver_opts = rsky_identity::types::IdentityResolverOpts {
-            timeout: None,
-            plc_url: env::var("PLC_URL").ok(),
-            did_cache: None,
-            backup_nameservers: None,
+    let id_resolver =
+        if env::var("ENABLE_DID_RESOLUTION").unwrap_or_else(|_| "true".to_string()) == "true" {
+            info!("DID resolution enabled");
+            use tokio::sync::Mutex;
+            let resolver_opts = rsky_identity::types::IdentityResolverOpts {
+                timeout: None,
+                plc_url: env::var("PLC_URL").ok(),
+                did_cache: None,
+                backup_nameservers: None,
+            };
+            Some(Arc::new(Mutex::new(rsky_identity::IdResolver::new(
+                resolver_opts,
+            ))))
+        } else {
+            info!("DID resolution disabled");
+            None
         };
-        Some(Arc::new(Mutex::new(rsky_identity::IdResolver::new(resolver_opts))))
-    } else {
-        info!("DID resolution disabled");
-        None
-    };
 
     // Create indexing service
-    let indexing_service = Arc::new(IndexingService::new_with_resolver(pool.clone(), id_resolver));
+    let indexing_service = Arc::new(IndexingService::new_with_resolver(
+        pool.clone(),
+        id_resolver,
+    ));
 
     // Determine which indexers to run
     let mode = env::var("INDEXER_MODE").unwrap_or_else(|_| "all".to_string());
@@ -117,7 +126,10 @@ async fn run_stream_indexers(
     config: IndexerConfig,
     indexing_service: Arc<IndexingService>,
 ) -> Result<()> {
-    info!("Starting stream indexers for {} streams", config.streams.len());
+    info!(
+        "Starting stream indexers for {} streams",
+        config.streams.len()
+    );
 
     // Create indexers for each stream
     let mut handles = Vec::new();
@@ -164,9 +176,8 @@ fn load_config() -> IndexerConfig {
     let database_url =
         env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/bsky".to_string());
 
-    let streams_str = env::var("INDEXER_STREAMS").unwrap_or_else(|_| {
-        format!("{},{}", streams::FIREHOSE_LIVE, streams::FIREHOSE_BACKFILL)
-    });
+    let streams_str = env::var("INDEXER_STREAMS")
+        .unwrap_or_else(|_| format!("{},{}", streams::FIREHOSE_LIVE, streams::FIREHOSE_BACKFILL));
 
     let streams: Vec<String> = streams_str
         .split(',')
@@ -174,11 +185,9 @@ fn load_config() -> IndexerConfig {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let consumer_group =
-        env::var("INDEXER_GROUP").unwrap_or_else(|_| "firehose_group".to_string());
+    let consumer_group = env::var("INDEXER_GROUP").unwrap_or_else(|_| "firehose_group".to_string());
 
-    let consumer_name =
-        env::var("INDEXER_CONSUMER").unwrap_or_else(|_| "indexer_1".to_string());
+    let consumer_name = env::var("INDEXER_CONSUMER").unwrap_or_else(|_| "indexer_1".to_string());
 
     let concurrency = env::var("INDEXER_CONCURRENCY")
         .ok()
