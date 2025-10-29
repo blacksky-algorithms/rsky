@@ -11,12 +11,23 @@ WORKDIR /app
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-COPY rsky-indexer ./rsky-indexer
-COPY rsky-lexicon ./rsky-lexicon
-COPY rsky-syntax ./rsky-syntax
-COPY rsky-identity ./rsky-identity
-COPY rsky-crypto ./rsky-crypto
 COPY rsky-common ./rsky-common
+COPY rsky-crypto ./rsky-crypto
+COPY rsky-feedgen ./rsky-feedgen
+COPY rsky-firehose ./rsky-firehose
+COPY rsky-identity ./rsky-identity
+COPY rsky-jetstream-subscriber ./rsky-jetstream-subscriber
+COPY rsky-labeler ./rsky-labeler
+COPY rsky-lexicon ./rsky-lexicon
+COPY rsky-pds ./rsky-pds
+COPY rsky-relay ./rsky-relay
+COPY rsky-repo ./rsky-repo
+COPY rsky-satnav ./rsky-satnav
+COPY rsky-syntax ./rsky-syntax
+COPY rsky-ingester ./rsky-ingester
+COPY rsky-indexer ./rsky-indexer
+COPY rsky-backfiller ./rsky-backfiller
+COPY rsky-integration-tests ./rsky-integration-tests
 
 # Build release binary
 RUN cargo build --release -p rsky-indexer
