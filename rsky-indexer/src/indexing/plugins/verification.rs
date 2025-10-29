@@ -34,7 +34,7 @@ impl VerificationPlugin {
 #[async_trait]
 impl RecordPlugin for VerificationPlugin {
     fn collection(&self) -> &str {
-        "app.bsky.actor.verification"
+        "app.bsky.graph.verification"
     }
 
     async fn insert(
