@@ -59,7 +59,10 @@ impl FirehoseIngester {
         ))
         .map_err(|e| IngesterError::Other(e.into()))?;
 
-        // Always add cursor parameter - use 0 if no saved cursor to start from beginning
+        // Cursor semantics:
+        // - cursor=0: Default for new subscribers, get everything from beginning
+        // - cursor=N: Resume from last seen sequence (N is large monotonic number)
+        // - No cursor: Live events only (can be enabled via env var if needed)
         let cursor_value = cursor.unwrap_or(0);
         url.query_pairs_mut()
             .append_pair("cursor", &cursor_value.to_string());

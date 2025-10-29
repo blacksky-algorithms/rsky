@@ -53,12 +53,12 @@ impl LabelerIngester {
         ))
         .map_err(|e| IngesterError::Other(e.into()))?;
 
-        // Start from cursor 0 if none exists
-        let cursor = cursor.unwrap_or(0);
+        // Cursor semantics: cursor=0 for initial backfill, cursor=N to resume
+        let cursor_value = cursor.unwrap_or(0);
         url.query_pairs_mut()
-            .append_pair("cursor", &cursor.to_string());
+            .append_pair("cursor", &cursor_value.to_string());
 
-        info!("Connecting to {} with cursor {}", url, cursor);
+        info!("Connecting to {} with cursor {}", url, cursor_value);
 
         let (ws_stream, _) = connect_async(url.as_str()).await?;
         let (mut write, mut read) = ws_stream.split();
