@@ -44,15 +44,35 @@ async fn main() -> Result<()> {
             let backfill_config = config.clone();
             let labeler_config = config.clone();
 
-            tokio::select! {
-                result = tokio::spawn(async move { run_firehose(firehose_config).await }) => {
-                    error!("Firehose ingester exited: {:?}", result);
+            // Spawn all tasks and wait for any to error
+            let firehose_handle = tokio::spawn(async move { run_firehose(firehose_config).await });
+            let backfill_handle = tokio::spawn(async move { run_backfill(backfill_config).await });
+
+            // Only spawn labeler if we have labeler hosts configured
+            if !config.labeler_hosts.is_empty() {
+                let labeler_handle = tokio::spawn(async move { run_labeler(labeler_config).await });
+
+                // Use select! to exit if any task exits
+                tokio::select! {
+                    result = firehose_handle => {
+                        error!("Firehose ingester exited: {:?}", result);
+                    }
+                    result = backfill_handle => {
+                        error!("Backfill ingester exited: {:?}", result);
+                    }
+                    result = labeler_handle => {
+                        error!("Labeler ingester exited: {:?}", result);
+                    }
                 }
-                result = tokio::spawn(async move { run_backfill(backfill_config).await }) => {
-                    error!("Backfill ingester exited: {:?}", result);
-                }
-                result = tokio::spawn(async move { run_labeler(labeler_config).await }) => {
-                    error!("Labeler ingester exited: {:?}", result);
+            } else {
+                // No labeler, just wait for firehose or backfill
+                tokio::select! {
+                    result = firehose_handle => {
+                        error!("Firehose ingester exited: {:?}", result);
+                    }
+                    result = backfill_handle => {
+                        error!("Backfill ingester exited: {:?}", result);
+                    }
                 }
             }
         }

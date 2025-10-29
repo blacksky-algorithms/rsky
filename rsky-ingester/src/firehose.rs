@@ -167,7 +167,7 @@ impl FirehoseIngester {
 
         match body {
             SubscribeRepos::Commit(commit) => {
-                let seq = header.operation as i64;
+                let seq = commit.seq;  // Use the commit's sequence number, not header.operation
                 let did = commit.repo.clone();
                 let commit_cid = commit.commit.to_string();
                 let rev = commit.rev.clone();
@@ -247,7 +247,7 @@ impl FirehoseIngester {
             }
             SubscribeRepos::Handle(handle_evt) => {
                 events.push(StreamEvent::Identity {
-                    seq: header.operation as i64,
+                    seq: handle_evt.seq,  // Use message's seq field
                     time,
                     did: handle_evt.did,
                     handle: handle_evt.handle,
@@ -255,7 +255,7 @@ impl FirehoseIngester {
             }
             SubscribeRepos::Account(account_evt) => {
                 events.push(StreamEvent::Account {
-                    seq: header.operation as i64,
+                    seq: account_evt.seq,  // Use message's seq field
                     time,
                     did: account_evt.did,
                     active: account_evt.active,
@@ -265,7 +265,7 @@ impl FirehoseIngester {
             SubscribeRepos::Identity(identity_evt) => {
                 if let Some(handle) = identity_evt.handle {
                     events.push(StreamEvent::Identity {
-                        seq: header.operation as i64,
+                        seq: identity_evt.seq,  // Use message's seq field
                         time,
                         did: identity_evt.did,
                         handle,
