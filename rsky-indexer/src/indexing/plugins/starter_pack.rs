@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -15,6 +16,13 @@ impl StarterPackPlugin {
             }
         }
         None
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -40,15 +48,19 @@ impl RecordPlugin for StarterPackPlugin {
         // Extract name from record
         let name = record.get("name").and_then(|v| v.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         client
             .execute(
-                r#"INSERT INTO starter_pack (uri, cid, creator, name, createdAt, indexedAt)
+                r#"INSERT INTO starter_pack (uri, cid, creator, name, created_at, indexed_at)
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &name, &created_at, &timestamp],
+                &[&uri, &cid, &creator, &name, &created_at, &indexed_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

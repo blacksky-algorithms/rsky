@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -20,6 +21,13 @@ impl ProfilePlugin {
     /// Extract rkey from AT URI
     fn extract_rkey(uri: &str) -> Option<String> {
         uri.rsplit('/').next().map(|s| s.to_string())
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -67,12 +75,16 @@ impl RecordPlugin for ProfilePlugin {
             .and_then(|j| j.get("uri"))
             .and_then(|u| u.as_str());
 
-        // Extract createdAt from record (or use current timestamp if not present)
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         client
             .execute(
-                r#"INSERT INTO profile (uri, cid, creator, displayName, description, avatarCid, bannerCid, joinedViaStarterPackUri, createdAt, indexedAt)
+                r#"INSERT INTO profile (uri, cid, creator, display_name, description, avatar_cid, banner_cid, joined_via_starter_pack_uri, created_at, indexed_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -85,7 +97,7 @@ impl RecordPlugin for ProfilePlugin {
                     &banner_cid,
                     &joined_via_starter_pack_uri,
                     &created_at,
-                    &timestamp,
+                    &indexed_at,
                 ],
             )
             .await
@@ -111,7 +123,7 @@ impl RecordPlugin for ProfilePlugin {
                             &cid,
                             &"starterpack-joined",
                             &Some(starter_pack_uri),
-                            &timestamp,
+                            &indexed_at,
                         ],
                     )
                     .await

@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -15,6 +16,13 @@ impl FollowPlugin {
             }
         }
         None
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -40,14 +48,18 @@ impl RecordPlugin for FollowPlugin {
         // Extract subjectDid from record
         let subject_did = record.get("subject").and_then(|s| s.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         // Check for duplicate (creator + subjectDid)
         if let (Some(follow_creator), Some(follow_subject)) = (&creator, subject_did) {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM follow WHERE creator = $1 AND subjectDid = $2",
+                    r#"SELECT uri FROM follow WHERE creator = $1 AND subject_did = $2"#,
                     &[&follow_creator, &follow_subject],
                 )
                 .await
@@ -59,13 +71,20 @@ impl RecordPlugin for FollowPlugin {
             }
         }
 
+        // Calculate sort_at for tables without auto-generated columns
+        let sort_at = if created_at < indexed_at {
+            created_at.clone()
+        } else {
+            indexed_at.clone()
+        };
+
         // Insert follow
         client
             .execute(
-                r#"INSERT INTO follow (uri, cid, creator, subjectDid, createdAt, indexedAt, sortAt)
+                r#"INSERT INTO follow (uri, cid, creator, subject_did, created_at, indexed_at, sort_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &created_at, &timestamp, &timestamp],
+                &[&uri, &cid, &creator, &subject_did, &created_at, &indexed_at, &sort_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -83,7 +102,7 @@ impl RecordPlugin for FollowPlugin {
                         &cid,
                         &"follow",
                         &Option::<&str>::None,
-                        &timestamp,
+                        &indexed_at,
                     ],
                 )
                 .await
@@ -94,9 +113,9 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_subject) = subject_did {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followersCount)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subjectDid = $1))
-                       ON CONFLICT (did) DO UPDATE SET followersCount = EXCLUDED.followersCount"#,
+                    r#"INSERT INTO profile_agg (did, followers_count)
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subject_did = $1))
+                       ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
                     &[&follow_subject],
                 )
                 .await
@@ -109,9 +128,9 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_creator) = &creator {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followsCount)
+                    r#"INSERT INTO profile_agg (did, follows_count)
                        VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET followsCount = EXCLUDED.followsCount"#,
+                       ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#,
                     &[&follow_creator],
                 )
                 .await
@@ -139,7 +158,7 @@ impl RecordPlugin for FollowPlugin {
         // Get the follow data before deleting for aggregate updates
         let row = client
             .query_opt(
-                "SELECT creator, subjectDid FROM follow WHERE uri = $1",
+                r#"SELECT creator, subject_did FROM follow WHERE uri = $1"#,
                 &[&uri],
             )
             .await
@@ -165,9 +184,9 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_subject) = subject_did {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followersCount)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subjectDid = $1))
-                       ON CONFLICT (did) DO UPDATE SET followersCount = EXCLUDED.followersCount"#,
+                    r#"INSERT INTO profile_agg (did, followers_count)
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subject_did = $1))
+                       ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
                     &[&follow_subject],
                 )
                 .await
@@ -178,9 +197,9 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_creator) = creator {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followsCount)
+                    r#"INSERT INTO profile_agg (did, follows_count)
                        VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET followsCount = EXCLUDED.followsCount"#,
+                       ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#,
                     &[&follow_creator],
                 )
                 .await

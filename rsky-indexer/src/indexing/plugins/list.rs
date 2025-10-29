@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -15,6 +16,13 @@ impl ListPlugin {
             }
         }
         None
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -42,10 +50,8 @@ impl RecordPlugin for ListPlugin {
         let purpose = record.get("purpose").and_then(|v| v.as_str());
         let description = record.get("description").and_then(|v| v.as_str());
 
-        // Extract descriptionFacets as JSON string if present
-        let description_facets = record
-            .get("descriptionFacets")
-            .map(|v| v.to_string());
+        // Extract descriptionFacets as JSON value if present
+        let description_facets = record.get("descriptionFacets").cloned();
 
         // Extract avatarCid from avatar.ref if present
         let avatar_cid = record
@@ -53,12 +59,16 @@ impl RecordPlugin for ListPlugin {
             .and_then(|a| a.get("ref"))
             .and_then(|r| r.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         client
             .execute(
-                r#"INSERT INTO list (uri, cid, creator, name, purpose, description, descriptionFacets, avatarCid, createdAt, indexedAt)
+                r#"INSERT INTO list (uri, cid, creator, name, purpose, description, description_facets, avatar_cid, created_at, indexed_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -71,7 +81,7 @@ impl RecordPlugin for ListPlugin {
                     &description_facets,
                     &avatar_cid,
                     &created_at,
-                    &timestamp,
+                    &indexed_at,
                 ],
             )
             .await

@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -15,6 +16,13 @@ impl BlockPlugin {
             }
         }
         None
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -40,14 +48,18 @@ impl RecordPlugin for BlockPlugin {
         // Extract subjectDid from record
         let subject_did = record.get("subject").and_then(|s| s.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         // Check for duplicate (creator + subjectDid)
         if let (Some(creator_did), Some(subject)) = (&creator, subject_did) {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM actor_block WHERE creator = $1 AND subjectDid = $2",
+                    r#"SELECT uri FROM actor_block WHERE creator = $1 AND subject_did = $2"#,
                     &[&creator_did, &subject],
                 )
                 .await
@@ -59,12 +71,19 @@ impl RecordPlugin for BlockPlugin {
             }
         }
 
+        // Calculate sort_at for tables without auto-generated columns
+        let sort_at = if created_at < indexed_at {
+            created_at.clone()
+        } else {
+            indexed_at.clone()
+        };
+
         client
             .execute(
-                r#"INSERT INTO actor_block (uri, cid, creator, subjectDid, createdAt, indexedAt)
-                   VALUES ($1, $2, $3, $4, $5, $6)
+                r#"INSERT INTO actor_block (uri, cid, creator, subject_did, created_at, indexed_at, sort_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &created_at, &timestamp],
+                &[&uri, &cid, &creator, &subject_did, &created_at, &indexed_at, &sort_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

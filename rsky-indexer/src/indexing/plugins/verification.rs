@@ -1,7 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -21,6 +21,13 @@ impl VerificationPlugin {
     /// Extract rkey from AT URI
     fn extract_rkey(uri: &str) -> Option<String> {
         uri.rsplit('/').next().map(|s| s.to_string())
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -51,8 +58,12 @@ impl RecordPlugin for VerificationPlugin {
         let handle = record.get("handle").and_then(|h| h.as_str());
         let display_name = record.get("displayName").and_then(|d| d.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         // Check for duplicate (subject + creator)
         if let (Some(verification_subject), Some(verification_creator)) = (subject, &creator) {
@@ -70,10 +81,17 @@ impl RecordPlugin for VerificationPlugin {
             }
         }
 
+        // Calculate sorted_at for tables without auto-generated columns
+        let sorted_at = if created_at < indexed_at {
+            created_at.clone()
+        } else {
+            indexed_at.clone()
+        };
+
         // Insert verification
         client
             .execute(
-                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, displayName, createdAt, indexedAt, sortedAt)
+                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, display_name, created_at, indexed_at, sorted_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -85,8 +103,8 @@ impl RecordPlugin for VerificationPlugin {
                     &handle,
                     &display_name,
                     &created_at,
-                    &timestamp,
-                    &timestamp, // sortedAt is same as indexedAt
+                    &indexed_at,
+                    &sorted_at,
                 ],
             )
             .await
@@ -105,7 +123,7 @@ impl RecordPlugin for VerificationPlugin {
                         &cid,
                         &"verified",
                         &Option::<&str>::None,
-                        &timestamp,
+                        &indexed_at,
                     ],
                 )
                 .await
@@ -153,7 +171,7 @@ impl RecordPlugin for VerificationPlugin {
         if let (Some(verification_subject), Some(verification_creator), Some(cid_value)) =
             (subject, creator, record_cid)
         {
-            let current_timestamp = Utc::now().to_rfc3339();
+            let current_timestamp = Utc::now();
             client
                 .execute(
                     r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)

@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -20,6 +21,13 @@ impl ThreadGatePlugin {
     /// Extract rkey from AT URI (last part after final /)
     fn extract_rkey(uri: &str) -> Option<String> {
         uri.rsplit('/').next().map(|s| s.to_string())
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -58,11 +66,11 @@ impl RecordPlugin for ThreadGatePlugin {
             }
         }
 
-        // Check for duplicate (postUri)
+        // Check for duplicate (post_uri)
         if let Some(post) = post_uri {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM thread_gate WHERE postUri = $1",
+                    "SELECT uri FROM thread_gate WHERE post_uri = $1",
                     &[&post],
                 )
                 .await
@@ -74,25 +82,29 @@ impl RecordPlugin for ThreadGatePlugin {
             }
         }
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         // Insert thread gate
         client
             .execute(
-                r#"INSERT INTO thread_gate (uri, cid, creator, postUri, createdAt, indexedAt)
+                r#"INSERT INTO thread_gate (uri, cid, creator, post_uri, created_at, indexed_at)
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &post_uri, &created_at, &timestamp],
+                &[&uri, &cid, &creator, &post_uri, &created_at, &indexed_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
-        // Update post to set hasThreadGate = true
+        // Update post to set has_thread_gate = true
         if let Some(post) = post_uri {
             client
                 .execute(
-                    "UPDATE post SET hasThreadGate = true WHERE uri = $1",
+                    "UPDATE post SET has_thread_gate = true WHERE uri = $1",
                     &[&post],
                 )
                 .await
@@ -117,9 +129,9 @@ impl RecordPlugin for ThreadGatePlugin {
     async fn delete(&self, pool: &Pool, uri: &str) -> Result<(), IndexerError> {
         let client = pool.get().await?;
 
-        // Get postUri before deleting so we can update the post table
+        // Get post_uri before deleting so we can update the post table
         let row = client
-            .query_opt("SELECT postUri FROM thread_gate WHERE uri = $1", &[&uri])
+            .query_opt("SELECT post_uri FROM thread_gate WHERE uri = $1", &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -131,11 +143,11 @@ impl RecordPlugin for ThreadGatePlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
-        // Update post to set hasThreadGate = false
+        // Update post to set has_thread_gate = false
         if let Some(post) = post_uri {
             client
                 .execute(
-                    "UPDATE post SET hasThreadGate = false WHERE uri = $1",
+                    "UPDATE post SET has_thread_gate = false WHERE uri = $1",
                     &[&post],
                 )
                 .await

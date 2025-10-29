@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -15,6 +16,13 @@ impl LikePlugin {
             }
         }
         None
+    }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 }
 
@@ -45,8 +53,12 @@ impl RecordPlugin for LikePlugin {
         let via = record.get("via").and_then(|v| v.get("uri")).and_then(|u| u.as_str());
         let via_cid = record.get("via").and_then(|v| v.get("cid")).and_then(|c| c.as_str());
 
-        // Extract createdAt from record
-        let created_at = record.get("createdAt").and_then(|c| c.as_str());
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
 
         // Check for duplicate (creator + subject)
         if let (Some(like_creator), Some(like_subject)) = (&creator, subject) {
@@ -64,13 +76,20 @@ impl RecordPlugin for LikePlugin {
             }
         }
 
+        // Calculate sort_at for tables without auto-generated columns
+        let sort_at = if created_at < indexed_at {
+            created_at.clone()
+        } else {
+            indexed_at.clone()
+        };
+
         // Insert like
         client
             .execute(
-                r#"INSERT INTO "like" (uri, cid, creator, subject, subjectCid, via, viaCid, createdAt, indexedAt, sortAt)
+                r#"INSERT INTO "like" (uri, cid, creator, subject, subject_cid, via, via_cid, created_at, indexed_at, sort_at)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at, &timestamp, &timestamp],
+                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at, &sort_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -93,7 +112,7 @@ impl RecordPlugin for LikePlugin {
                                 &cid,
                                 &"like",
                                 &Some(like_subject),
-                                &timestamp,
+                                &indexed_at,
                             ],
                         )
                         .await
@@ -117,7 +136,7 @@ impl RecordPlugin for LikePlugin {
                                     &cid,
                                     &"like-via-repost",
                                     &Some(via_uri),
-                                    &timestamp,
+                                    &indexed_at,
                                 ],
                             )
                             .await
@@ -131,9 +150,9 @@ impl RecordPlugin for LikePlugin {
         if let Some(like_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, likeCount)
+                    r#"INSERT INTO post_agg (uri, like_count)
                        VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET likeCount = EXCLUDED.likeCount"#,
+                       ON CONFLICT (uri) DO UPDATE SET like_count = EXCLUDED.like_count"#,
                     &[&like_subject],
                 )
                 .await
@@ -182,9 +201,9 @@ impl RecordPlugin for LikePlugin {
         if let Some(like_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, likeCount)
+                    r#"INSERT INTO post_agg (uri, like_count)
                        VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET likeCount = EXCLUDED.likeCount"#,
+                       ON CONFLICT (uri) DO UPDATE SET like_count = EXCLUDED.like_count"#,
                     &[&like_subject],
                 )
                 .await

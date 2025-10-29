@@ -1,6 +1,7 @@
 use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
 
@@ -21,6 +22,13 @@ impl LabelerPlugin {
     fn extract_rkey(uri: &str) -> Option<String> {
         uri.rsplit('/').next().map(|s| s.to_string())
     }
+
+    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
+    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+    }
 }
 
 #[async_trait]
@@ -34,7 +42,7 @@ impl RecordPlugin for LabelerPlugin {
         pool: &Pool,
         uri: &str,
         cid: &str,
-        _record: &JsonValue,
+        record: &JsonValue,
         timestamp: &str,
     ) -> Result<(), IndexerError> {
         // Validate rkey === 'self'
@@ -49,13 +57,19 @@ impl RecordPlugin for LabelerPlugin {
         let client = pool.get().await?;
         let creator = Self::extract_creator(uri);
 
-        // Note: createdAt is not in the lexicon schema for labeler, so we use indexedAt for both
+        // Parse timestamps
+        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
+            Some(ts) => Self::parse_timestamp(ts)?,
+            None => indexed_at.clone(),
+        };
+
         client
             .execute(
                 r#"INSERT INTO labeler (uri, cid, creator, created_at, indexed_at)
                    VALUES ($1, $2, $3, $4, $5)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &timestamp, &timestamp],
+                &[&uri, &cid, &creator, &created_at, &indexed_at],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

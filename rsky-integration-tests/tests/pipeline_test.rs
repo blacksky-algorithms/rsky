@@ -231,28 +231,46 @@ impl TestContext {
                     cid TEXT NOT NULL,
                     creator TEXT NOT NULL,
                     text TEXT NOT NULL,
+                    reply_root TEXT,
+                    reply_root_cid TEXT,
+                    reply_parent TEXT,
+                    reply_parent_cid TEXT,
+                    langs TEXT[],
+                    tags TEXT[],
+                    invalid_reply_root BOOLEAN,
+                    violates_thread_gate BOOLEAN,
+                    violates_embedding_rules BOOLEAN,
+                    has_thread_gate BOOLEAN,
+                    has_post_gate BOOLEAN,
                     created_at TIMESTAMPTZ NOT NULL,
-                    indexed_at TIMESTAMPTZ NOT NULL
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sort_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS "like" (
                     uri TEXT PRIMARY KEY,
                     cid TEXT NOT NULL,
                     creator TEXT NOT NULL,
-                    subject_uri TEXT,
+                    subject TEXT,
                     subject_cid TEXT,
+                    via TEXT,
+                    via_cid TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
-                    indexed_at TIMESTAMPTZ NOT NULL
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sort_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS repost (
                     uri TEXT PRIMARY KEY,
                     cid TEXT NOT NULL,
                     creator TEXT NOT NULL,
-                    subject_uri TEXT,
+                    subject TEXT,
                     subject_cid TEXT,
+                    via TEXT,
+                    via_cid TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
-                    indexed_at TIMESTAMPTZ NOT NULL
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sort_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS follow (
@@ -261,12 +279,14 @@ impl TestContext {
                     creator TEXT NOT NULL,
                     subject_did TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
-                    indexed_at TIMESTAMPTZ NOT NULL
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sort_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS thread_gate (
                     uri TEXT PRIMARY KEY,
                     cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
                     post_uri TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     indexed_at TIMESTAMPTZ NOT NULL
@@ -275,14 +295,20 @@ impl TestContext {
                 CREATE TABLE IF NOT EXISTS post_gate (
                     uri TEXT PRIMARY KEY,
                     cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
                     post_uri TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     indexed_at TIMESTAMPTZ NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS block (
+                CREATE TABLE IF NOT EXISTS actor_block (
                     uri TEXT PRIMARY KEY,
-                    cid TEXT NOT NULL
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    subject_did TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sort_at TIMESTAMPTZ NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS list_item (
@@ -303,6 +329,7 @@ impl TestContext {
                     description TEXT,
                     avatar_cid TEXT,
                     banner_cid TEXT,
+                    joined_via_starter_pack_uri TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     indexed_at TIMESTAMPTZ NOT NULL
                 );
@@ -314,6 +341,8 @@ impl TestContext {
                     feed_did TEXT,
                     display_name TEXT,
                     description TEXT,
+                    description_facets JSONB,
+                    avatar_cid TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     indexed_at TIMESTAMPTZ NOT NULL
                 );
@@ -325,6 +354,8 @@ impl TestContext {
                     name TEXT NOT NULL,
                     purpose TEXT,
                     description TEXT,
+                    description_facets JSONB,
+                    avatar_cid TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     indexed_at TIMESTAMPTZ NOT NULL
                 );
@@ -368,7 +399,103 @@ impl TestContext {
                     upstream_status TEXT
                 );
 
-                TRUNCATE TABLE record, post, "like", repost, follow, thread_gate, post_gate, block, list_item, profile, feed_generator, list, list_block, chat_declaration, starter_pack, actor_sync, actor;
+                CREATE TABLE IF NOT EXISTS notification (
+                    did TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    record_uri TEXT NOT NULL,
+                    record_cid TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    reason_subject TEXT,
+                    sort_at TIMESTAMPTZ NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS quote (
+                    uri TEXT PRIMARY KEY,
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    subject_cid TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS post_agg (
+                    uri TEXT PRIMARY KEY,
+                    like_count INTEGER DEFAULT 0,
+                    reply_count INTEGER DEFAULT 0,
+                    repost_count INTEGER DEFAULT 0,
+                    quote_count INTEGER DEFAULT 0,
+                    bookmark_count INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS profile_agg (
+                    did TEXT PRIMARY KEY,
+                    followers_count INTEGER DEFAULT 0,
+                    follows_count INTEGER DEFAULT 0,
+                    posts_count INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS verification (
+                    uri TEXT PRIMARY KEY,
+                    cid TEXT NOT NULL,
+                    rkey TEXT,
+                    creator TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    handle TEXT,
+                    display_name TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL,
+                    sorted_at TIMESTAMPTZ NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS labeler (
+                    uri TEXT PRIMARY KEY,
+                    cid TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    indexed_at TIMESTAMPTZ NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS post_embed_image (
+                    post_uri TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    image_cid TEXT,
+                    alt TEXT,
+                    PRIMARY KEY (post_uri, position)
+                );
+
+                CREATE TABLE IF NOT EXISTS post_embed_external (
+                    post_uri TEXT PRIMARY KEY,
+                    uri TEXT NOT NULL,
+                    title TEXT,
+                    description TEXT,
+                    thumb_cid TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS post_embed_record (
+                    post_uri TEXT PRIMARY KEY,
+                    embed_uri TEXT NOT NULL,
+                    embed_cid TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS post_embed_video (
+                    post_uri TEXT PRIMARY KEY,
+                    video_cid TEXT NOT NULL,
+                    alt TEXT,
+                    thumbnail_cid TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS feed_item (
+                    uri TEXT NOT NULL,
+                    cid TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    post_uri TEXT NOT NULL,
+                    originator_did TEXT,
+                    sort_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (uri, cid)
+                );
+
+                TRUNCATE TABLE record, post, "like", repost, follow, thread_gate, post_gate, actor_block, list_item, profile, feed_generator, list, list_block, chat_declaration, starter_pack, actor_sync, actor, notification, quote, post_agg, profile_agg, verification, labeler, post_embed_image, post_embed_external, post_embed_record, post_embed_video, feed_item;
                 "#,
             )
             .await?;
@@ -697,7 +824,7 @@ impl TestContext {
         // Drop test tables
         let client = self.pg_pool.get().await?;
         client
-            .batch_execute(r#"DROP TABLE IF EXISTS record, post, "like", repost, follow, thread_gate, post_gate, block, list_item, profile, feed_generator, list, list_block, chat_declaration, actor_sync, actor CASCADE;"#)
+            .batch_execute(r#"DROP TABLE IF EXISTS record, post, "like", repost, follow, thread_gate, post_gate, actor_block, list_item, profile, feed_generator, list, list_block, chat_declaration, starter_pack, actor_sync, actor, notification, quote, post_agg, profile_agg, verification, labeler, post_embed_image, post_embed_external, post_embed_record, post_embed_video, feed_item CASCADE;"#)
             .await?;
 
         // Clear Redis streams
