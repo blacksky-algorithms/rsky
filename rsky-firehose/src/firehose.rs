@@ -30,7 +30,7 @@ impl From<serde_ipld_dagcbor::DecodeError<std::io::Error>> for Error {
     }
 }
 
-pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
+pub fn read(data: &[u8]) -> Result<Option<(Header, SubscribeRepos)>> {
     let mut reader = Cursor::new(data);
 
     let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
@@ -40,16 +40,25 @@ pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
         "#tombstone" => SubscribeRepos::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#account" => SubscribeRepos::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
         "#identity" => SubscribeRepos::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        "#sync" => {
+            // Sync messages declare current repo state (AT Protocol Sync v1.1)
+            // For now we ignore these - a full implementation would check if
+            // resynchronization is needed and fetch via com.atproto.sync.getRepo
+            // See: https://github.com/bluesky-social/atproto/blob/main/specs/0006-sync.md
+            return Ok(None);
+        }
+        "#info" => {
+            // Info messages are informational and can be safely ignored
+            return Ok(None);
+        }
         _ => {
             eprintln!("Received unknown header {:?}", header.type_.as_str());
-            bail!(format!(
-                "Received unknown header {:?}",
-                header.type_.as_str()
-            ))
+            // Skip unknown message types instead of failing
+            return Ok(None);
         }
     };
 
-    Ok((header, body))
+    Ok(Some((header, body)))
 }
 
 pub fn read_labels(data: &[u8]) -> Result<(Header, SubscribeLabels)> {
