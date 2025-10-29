@@ -150,7 +150,7 @@ impl LabelerIngester {
         let (header, body) = rsky_firehose::firehose::read_labels(data)
             .map_err(|e| IngesterError::Serialization(format!("{:?}", e)))?;
 
-        let seq = header.operation as i64;
+        let seq = body.seq;  // Use the message's sequence number, not header.operation
 
         // Convert SubscribeLabels to LabelStreamEvent
         let labels = body

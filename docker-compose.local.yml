@@ -1,0 +1,160 @@
+version: '3.8'
+
+networks:
+  rsky-local:
+    driver: bridge
+
+services:
+  # =================================================================
+  # REDIS - Local Redis for testing (lighter than prod)
+  # =================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: rsky-redis-local
+    restart: unless-stopped
+    networks:
+      - rsky-local
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 2gb --maxmemory-policy noeviction
+    ports:
+      - "6380:6379"
+    volumes:
+      - rsky-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =================================================================
+  # POSTGRES - Local database for indexer/backfiller testing
+  # =================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: rsky-postgres-local
+    restart: unless-stopped
+    networks:
+      - rsky-local
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: bsky
+      POSTGRES_PASSWORD: bsky
+      POSTGRES_DB: bsky
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - rsky-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bsky"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =================================================================
+  # RUST INGESTER - Local testing
+  # Scaled down: single relay, smaller batches, lower water mark
+  # =================================================================
+  ingester:
+    image: rsky-ingester:latest
+    container_name: rsky-ingester-local
+    restart: unless-stopped
+    networks:
+      - rsky-local
+    ports:
+      - "4100:4100"
+    environment:
+      # Ingester configuration - using public Bluesky relay for testing
+      INGESTER_RELAY_HOSTS: "bsky.network"
+      INGESTER_LABELER_HOSTS: ""
+      INGESTER_HIGH_WATER_MARK: "10000"
+      INGESTER_BATCH_SIZE: "100"
+      INGESTER_BATCH_TIMEOUT_MS: "1000"
+      INGESTER_MODE: "firehose"  # Just firehose mode for testing
+      # Redis configuration
+      REDIS_URL: "redis://redis:6379"
+      # Logging - more verbose for debugging
+      RUST_LOG: "debug,rsky_ingester=debug,rsky_firehose=debug"
+      RUST_BACKTRACE: "full"
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 1g
+
+  # =================================================================
+  # RUST BACKFILLER - Local testing (optional)
+  # Scaled down: lower concurrency
+  # =================================================================
+  backfiller:
+    image: rsky-backfiller:latest
+    container_name: rsky-backfiller-local
+    restart: unless-stopped
+    networks:
+      - rsky-local
+    ports:
+      - "9091:9090"  # Metrics port
+    environment:
+      # Backfiller configuration - lower concurrency for local
+      BACKFILLER_CONSUMER: "local-backfiller"
+      BACKFILLER_CONCURRENCY: "5"
+      BACKFILLER_BATCH_SIZE: "100"
+      # Redis configuration
+      REDIS_URL: "redis://redis:6379"
+      # Database configuration (direct connection, no PGBouncer)
+      DATABASE_URL: "postgresql://bsky:bsky@postgres:5432/bsky"
+      # Retry and timeout configuration
+      BACKFILLER_HTTP_TIMEOUT_SECS: "60"
+      BACKFILLER_MAX_RETRIES: "3"
+      BACKFILLER_RETRY_INITIAL_BACKOFF_MS: "1000"
+      BACKFILLER_RETRY_MAX_BACKOFF_MS: "30000"
+      # Metrics
+      BACKFILLER_METRICS_PORT: "9090"
+      # Logging
+      RUST_LOG: "debug,rsky_backfiller=debug"
+      RUST_BACKTRACE: "full"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    mem_limit: 1g
+    profiles:
+      - full  # Only start with --profile full
+
+  # =================================================================
+  # RUST INDEXER - Local testing (optional)
+  # Scaled down: lower concurrency, smaller pool
+  # =================================================================
+  indexer:
+    image: rsky-indexer:latest
+    container_name: rsky-indexer-local
+    restart: unless-stopped
+    networks:
+      - rsky-local
+    environment:
+      # Indexer configuration - lower concurrency for local
+      INDEXER_CONSUMER: "local-indexer"
+      INDEXER_CONCURRENCY: "10"
+      INDEXER_BATCH_SIZE: "100"
+      # Redis configuration
+      REDIS_URL: "redis://redis:6379"
+      # Database configuration (direct connection, no PGBouncer)
+      DATABASE_URL: "postgresql://bsky:bsky@postgres:5432/bsky"
+      # Pool configuration - much smaller for local
+      DB_POOL_MAX_SIZE: "20"
+      DB_POOL_MIN_IDLE: "5"
+      # DID resolution
+      ENABLE_DID_RESOLUTION: "true"
+      # Logging
+      RUST_LOG: "debug,rsky_indexer=debug"
+      RUST_BACKTRACE: "full"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    mem_limit: 1g
+    profiles:
+      - full  # Only start with --profile full
+
+volumes:
+  rsky-redis-data:
+  rsky-postgres-data:
