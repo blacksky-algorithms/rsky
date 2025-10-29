@@ -46,10 +46,16 @@ impl FirehoseIngester {
         let cursor_key = format!("{}:cursor:{}", streams::FIREHOSE_LIVE, hostname);
         let cursor: Option<i64> = conn.get(&cursor_key).await.unwrap_or(None);
 
+        // Strip protocol from hostname if present (e.g., "https://example.com" -> "example.com")
+        let clean_hostname = hostname
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+
         // Build WebSocket URL
         let mut url = url::Url::parse(&format!(
             "wss://{}/xrpc/com.atproto.sync.subscribeRepos",
-            hostname
+            clean_hostname
         ))
         .map_err(|e| IngesterError::Other(e.into()))?;
 
@@ -145,8 +151,13 @@ impl FirehoseIngester {
     }
 
     async fn process_message(&self, data: &[u8]) -> Result<Vec<StreamEvent>, IngesterError> {
-        let (header, body) = rsky_firehose::firehose::read(data)
+        let result = rsky_firehose::firehose::read(data)
             .map_err(|e| IngesterError::Serialization(format!("{:?}", e)))?;
+
+        // Skip if message was filtered (e.g., #sync, #info messages)
+        let Some((header, body)) = result else {
+            return Ok(Vec::new());
+        };
 
         let mut events = Vec::new();
         let time = Utc::now().to_rfc3339();

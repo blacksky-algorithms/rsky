@@ -67,6 +67,12 @@ impl BackfillIngester {
     async fn run_backfill(&self, hostname: &str) -> Result<(), IngesterError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
+        // Strip protocol from hostname if present (e.g., "https://example.com" -> "example.com")
+        let clean_hostname = hostname
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+
         // Get cursor from Redis
         let cursor_key = format!("{}:cursor:{}", streams::REPO_BACKFILL, hostname);
         let cursor: Option<String> = conn.get(&cursor_key).await.unwrap_or(None);
@@ -114,13 +120,13 @@ impl BackfillIngester {
         // Paginate through listRepos
         loop {
             let repos = self
-                .fetch_repos(hostname, current_cursor.as_deref())
+                .fetch_repos(clean_hostname, current_cursor.as_deref())
                 .await?;
 
             for repo in &repos.repos {
                 let event = BackfillEvent {
                     did: repo.did.clone(),
-                    host: format!("https://{}", hostname),
+                    host: format!("https://{}", clean_hostname),
                     rev: repo.rev.clone(),
                     status: repo.status.clone(),
                     active: repo.active.unwrap_or(true),
@@ -165,9 +171,15 @@ impl BackfillIngester {
         hostname: &str,
         cursor: Option<&str>,
     ) -> Result<ListReposResponse, IngesterError> {
+        // Strip protocol from hostname if present (already cleaned in caller, but be safe)
+        let clean_hostname = hostname
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+
         let mut url = url::Url::parse(&format!(
             "https://{}/xrpc/com.atproto.sync.listRepos",
-            hostname
+            clean_hostname
         ))
         .map_err(|e| IngesterError::Other(e.into()))?;
 

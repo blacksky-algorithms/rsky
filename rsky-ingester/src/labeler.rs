@@ -40,10 +40,16 @@ impl LabelerIngester {
         let cursor_key = format!("{}:cursor:{}", streams::LABEL_LIVE, hostname);
         let cursor: Option<i64> = conn.get(&cursor_key).await.unwrap_or(None);
 
+        // Strip protocol from hostname if present (e.g., "https://example.com" -> "example.com")
+        let clean_hostname = hostname
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+
         // Build WebSocket URL
         let mut url = url::Url::parse(&format!(
             "wss://{}/xrpc/com.atproto.label.subscribeLabels",
-            hostname
+            clean_hostname
         ))
         .map_err(|e| IngesterError::Other(e.into()))?;
 
