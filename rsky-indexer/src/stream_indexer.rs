@@ -1,9 +1,9 @@
 use crate::consumer::{RedisConsumer, StreamMessage};
 use crate::indexing::{IndexingOptions, IndexingService, WriteOpAction};
 use crate::{IndexerConfig, IndexerError, IndexerMetrics, StreamEvent, SEQ_BACKFILL};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 /// StreamIndexer reads from Redis streams and indexes events into PostgreSQL
@@ -13,7 +13,7 @@ pub struct StreamIndexer {
     config: IndexerConfig,
     #[allow(dead_code)]
     metrics: Arc<IndexerMetrics>,
-    shutdown: Arc<AtomicBool>,
+    cancellation_token: CancellationToken,
     semaphore: Arc<Semaphore>,
 }
 
@@ -40,9 +40,20 @@ impl StreamIndexer {
             indexing_service,
             config,
             metrics: Arc::new(IndexerMetrics::default()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            cancellation_token: CancellationToken::new(),
             semaphore,
         })
+    }
+
+    /// Initiate graceful shutdown of the stream indexer
+    pub fn shutdown(&self) {
+        info!("Graceful shutdown requested for StreamIndexer");
+        self.cancellation_token.cancel();
+    }
+
+    /// Get a clone of the cancellation token for use in external shutdown coordination
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
     }
 
     /// Run the stream indexer
@@ -57,80 +68,114 @@ impl StreamIndexer {
 
         let mut cursor = "0".to_string(); // Start with pending messages
 
-        while !self.shutdown.load(Ordering::Relaxed) {
-            // Read messages from Redis
-            let messages = match self
-                .consumer
-                .read_messages(&cursor, self.config.batch_size)
-                .await
-            {
-                Ok(messages) => messages,
-                Err(IndexerError::Redis(e)) if e.to_string().contains("NOGROUP") => {
-                    // Stream or consumer group was deleted - clean shutdown
-                    info!("Stream deleted, shutting down");
+        loop {
+            // Check for shutdown signal
+            tokio::select! {
+                _ = self.cancellation_token.cancelled() => {
+                    info!("Shutdown signal received, draining in-flight messages...");
                     break;
                 }
-                Err(e) => return Err(e),
-            };
-
-            if messages.is_empty() {
-                // Switch to live stream after processing pending
-                if cursor == "0" {
-                    cursor = ">".to_string();
-                    info!("Switched to live stream");
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Update cursor for next iteration
-            if cursor != ">" {
-                if let Some(last_msg) = messages.last() {
-                    cursor = last_msg.id.clone();
-                }
-            }
-
-            // Process messages concurrently
-            let mut handles = Vec::new();
-
-            for message in messages {
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-                let indexing_service = self.indexing_service.clone();
-                let consumer = self.consumer.clone();
-
-                let handle = tokio::spawn(async move {
-                    let result = Self::handle_message(message.clone(), &indexing_service).await;
-
+                result = self.read_and_process_batch(&mut cursor) => {
                     match result {
-                        Ok(_) => {
-                            // ACK and delete the message with retry
-                            if let Err(e) = Self::ack_with_retry(&consumer, &message.id, 3).await {
-                                error!(
-                                    "Failed to ACK message {} after retries: {:?}",
-                                    message.id, e
-                                );
+                        Ok(should_continue) => {
+                            if !should_continue {
+                                // Stream deleted or error occurred
+                                break;
                             }
                         }
                         Err(e) => {
-                            error!("Failed to process message {}: {:?}", message.id, e);
+                            error!("Error processing batch: {:?}", e);
+                            return Err(e);
                         }
                     }
-
-                    drop(permit);
-                });
-
-                handles.push(handle);
-            }
-
-            // Wait for all messages to be processed before continuing
-            // This ensures messages are ACKed before shutdown
-            for handle in handles {
-                let _ = handle.await;
+                }
             }
         }
 
-        info!("StreamIndexer stopped");
+        // Wait for all in-flight tasks to complete before shutdown
+        info!("Waiting for all in-flight tasks to complete...");
+        // Acquire all permits to ensure all tasks are done
+        let semaphore = self.semaphore.clone();
+        let _all_permits = semaphore.acquire_many(self.config.concurrency as u32).await;
+
+        info!("StreamIndexer stopped gracefully");
         Ok(())
+    }
+
+    /// Read and process a batch of messages
+    /// Returns Ok(true) to continue, Ok(false) to stop
+    async fn read_and_process_batch(&self, cursor: &mut String) -> Result<bool, IndexerError> {
+        // Read messages from Redis
+        let messages = match self
+            .consumer
+            .read_messages(cursor, self.config.batch_size)
+            .await
+        {
+            Ok(messages) => messages,
+            Err(IndexerError::Redis(e)) if e.to_string().contains("NOGROUP") => {
+                // Stream or consumer group was deleted - clean shutdown
+                info!("Stream deleted, shutting down");
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+
+        if messages.is_empty() {
+            // Switch to live stream after processing pending
+            if *cursor == "0" {
+                *cursor = ">".to_string();
+                info!("Switched to live stream");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            return Ok(true);
+        }
+
+        // Update cursor for next iteration
+        if *cursor != ">" {
+            if let Some(last_msg) = messages.last() {
+                *cursor = last_msg.id.clone();
+            }
+        }
+
+        // Process messages concurrently
+        let mut handles = Vec::new();
+
+        for message in messages {
+            let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+            let indexing_service = self.indexing_service.clone();
+            let consumer = self.consumer.clone();
+
+            let handle = tokio::spawn(async move {
+                let result = Self::handle_message(message.clone(), &indexing_service).await;
+
+                match result {
+                    Ok(_) => {
+                        // ACK and delete the message with retry
+                        if let Err(e) = Self::ack_with_retry(&consumer, &message.id, 3).await {
+                            error!(
+                                "Failed to ACK message {} after retries: {:?}",
+                                message.id, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to process message {}: {:?}", message.id, e);
+                    }
+                }
+
+                drop(permit);
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all messages in this batch to be processed before continuing
+        // This ensures messages are ACKed before moving to next batch or shutdown
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        Ok(true)
     }
 
     /// ACK a message with retry logic for transient failures
@@ -300,10 +345,5 @@ impl StreamIndexer {
         }
 
         Ok(())
-    }
-
-    /// Shutdown the indexer
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
     }
 }

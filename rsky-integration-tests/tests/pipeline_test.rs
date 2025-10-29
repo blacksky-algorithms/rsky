@@ -68,7 +68,7 @@ async fn test_full_pipeline() -> Result<()> {
 
     // Step 4: Start indexer (Redis streams -> PostgreSQL)
     tracing::info!("Step 4: Starting indexer");
-    let indexer_handle = test_ctx.start_indexer().await?;
+    let indexers = test_ctx.start_indexer().await?;
 
     // Wait longer for indexing to happen (20 seconds to capture more events)
     tracing::info!("Waiting 20 seconds for events to be indexed...");
@@ -145,20 +145,20 @@ async fn test_full_pipeline() -> Result<()> {
     backfiller_handle.abort();
     sleep(Duration::from_millis(500)).await;
 
-    // Give indexer significant time to drain and ACK all pending events
-    // With retry logic, each message can take up to 70ms (10+20+40) to ACK
-    tracing::info!("Allowing indexer to drain and ACK all pending events...");
-    sleep(Duration::from_secs(5)).await;
+    // Gracefully shutdown indexers
+    tracing::info!("Gracefully shutting down indexers...");
+    for indexer in &indexers {
+        indexer.shutdown();
+    }
 
-    // Stop indexer - by now all events should be ACKed
-    indexer_handle.abort();
+    // Wait for indexers to complete graceful shutdown (drain in-flight messages and ACK)
+    tracing::info!("Waiting for indexers to complete graceful shutdown...");
+    sleep(Duration::from_secs(3)).await;
 
-    // Brief wait for final cleanup
-    sleep(Duration::from_secs(1)).await;
-
-    // Attempt cleanup - ignore errors from port exhaustion during shutdown
+    // Now safe to cleanup database - all messages have been ACKed
+    tracing::info!("All indexers shut down gracefully, cleaning up database...");
     if let Err(e) = test_ctx.cleanup().await {
-        tracing::warn!("Cleanup error (expected during rapid shutdown): {:?}", e);
+        tracing::warn!("Cleanup error: {:?}", e);
     }
 
     Ok(())
@@ -594,8 +594,8 @@ impl TestContext {
         Ok(handle)
     }
 
-    /// Start the indexer
-    async fn start_indexer(&self) -> Result<tokio::task::JoinHandle<()>> {
+    /// Start the indexer and return handles for graceful shutdown
+    async fn start_indexer(&self) -> Result<Vec<Arc<rsky_indexer::stream_indexer::StreamIndexer>>> {
         let config = rsky_indexer::IndexerConfig {
             redis_url: self.redis_url.clone(),
             database_url: self.database_url.clone(),
@@ -606,56 +606,53 @@ impl TestContext {
             batch_size: 100,
         };
 
-        let handle = tokio::spawn(async move {
-            // Create indexing service
-            let pg_config = deadpool_postgres::Config {
-                url: Some(config.database_url.clone()),
-                ..Default::default()
-            };
-            let pool = pg_config
-                .create_pool(
-                    Some(deadpool_postgres::Runtime::Tokio1),
-                    tokio_postgres::NoTls,
-                )
-                .expect("Failed to create pool");
+        // Create indexing service
+        let pg_config = deadpool_postgres::Config {
+            url: Some(config.database_url.clone()),
+            ..Default::default()
+        };
+        let pool = pg_config
+            .create_pool(
+                Some(deadpool_postgres::Runtime::Tokio1),
+                tokio_postgres::NoTls,
+            )?;
 
-            // Create IdResolver for handle resolution
-            // Disabled in tests to avoid "runtime within runtime" panic from hickory-resolver
-            // In production, this would be enabled to resolve DIDs and handles
-            let id_resolver = None;
+        // Create IdResolver for handle resolution
+        // Disabled in tests to avoid "runtime within runtime" panic from hickory-resolver
+        // In production, this would be enabled to resolve DIDs and handles
+        let id_resolver = None;
 
-            let indexing_service = Arc::new(
-                rsky_indexer::indexing::IndexingService::new_with_resolver(pool, id_resolver),
-            );
+        let indexing_service = Arc::new(
+            rsky_indexer::indexing::IndexingService::new_with_resolver(pool, id_resolver),
+        );
 
-            // Start stream indexers
-            for stream in &config.streams {
-                let mut stream_config = config.clone();
-                stream_config.streams = vec![stream.clone()];
+        // Start stream indexers
+        let mut indexers = Vec::new();
+        for stream in &config.streams {
+            let mut stream_config = config.clone();
+            stream_config.streams = vec![stream.clone()];
 
-                let indexer = rsky_indexer::stream_indexer::StreamIndexer::new(
+            let indexer = Arc::new(
+                rsky_indexer::stream_indexer::StreamIndexer::new(
                     stream_config,
                     indexing_service.clone(),
                 )
-                .await
-                .expect("Failed to create stream indexer");
+                .await?,
+            );
 
-                tokio::spawn(async move {
-                    if let Err(e) = indexer.run().await {
-                        tracing::error!("Stream indexer error: {:?}", e);
-                    }
-                });
-            }
+            let indexer_clone = indexer.clone();
+            tokio::spawn(async move {
+                if let Err(e) = indexer_clone.run().await {
+                    tracing::error!("Stream indexer error: {:?}", e);
+                }
+            });
 
-            // Keep running
-            loop {
-                sleep(Duration::from_secs(1)).await;
-            }
-        });
+            indexers.push(indexer);
+        }
 
         sleep(Duration::from_secs(2)).await;
 
-        Ok(handle)
+        Ok(indexers)
     }
 
     /// Check stream length

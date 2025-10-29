@@ -39,6 +39,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 # Async utilities
 async-trait = "0.1"
 futures = "0.3"
+tokio-util = { workspace = true }
 
 # Metrics (optional for now, can add prometheus later)
 # prometheus = { version = "0.13", optional = true }
