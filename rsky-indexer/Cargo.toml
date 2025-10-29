@@ -1,0 +1,52 @@
+[package]
+name = "rsky-indexer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "indexer"
+path = "src/bin/indexer.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "streams", "connection-manager"] }
+
+# PostgreSQL - use tokio-postgres to avoid sqlite dependency conflict with rsky-relay
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+deadpool-postgres = "0.13"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+
+# Metrics (optional for now, can add prometheus later)
+# prometheus = { version = "0.13", optional = true }
+
+# Workspace dependencies
+rsky-lexicon = { workspace = true }
+rsky-syntax = { workspace = true }
+rsky-identity = { workspace = true }
+
+# Utilities
+url = "2.5"

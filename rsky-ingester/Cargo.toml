@@ -1,0 +1,54 @@
+[package]
+name = "rsky-ingester"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ingester"
+path = "src/bin/ingester.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "streams", "connection-manager"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tungstenite = "0.24"
+futures-util = "0.3"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+ipld-core = { workspace = true }
+ciborium = "0.2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+url = "2.5"
+uuid = { version = "1.10", features = ["v4"] }
+
+# Workspace dependencies
+rsky-lexicon = { workspace = true }
+rsky-firehose = { workspace = true }
+rsky-repo = { workspace = true }
+
+# CAR file parsing
+iroh-car = "0.5.1"
+lexicon_cid = { workspace = true }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
