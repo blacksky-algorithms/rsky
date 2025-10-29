@@ -24,6 +24,63 @@ impl FollowPlugin {
             .map(|dt| dt.with_timezone(&Utc))
             .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
+
+    /// Hash a string to i64 for PostgreSQL advisory lock
+    /// Uses a simple hash function similar to Java's hashCode
+    fn hash_lock_key(key: &str) -> i64 {
+        let mut hash: i64 = 0;
+        for byte in key.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as i64);
+        }
+        hash
+    }
+
+    /// Execute aggregate update with coalescing lock to avoid thrashing during backfills
+    /// Matches TypeScript's coalesceWithLock pattern
+    /// If lock cannot be acquired, skip the update (another transaction is handling it)
+    async fn update_with_coalesce_lock(
+        pool: &Pool,
+        lock_key: &str,
+        did: &str,
+        query: &str,
+    ) -> Result<(), IndexerError> {
+        // Get a connection from the pool
+        let mut client = pool.get().await?;
+
+        // Begin transaction
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        // Try to acquire advisory lock (auto-released at transaction end)
+        let lock_id = Self::hash_lock_key(lock_key);
+        let lock_acquired: bool = txn
+            .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&lock_id])
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?
+            .get(0);
+
+        if lock_acquired {
+            // Lock acquired, perform the update
+            txn.execute(query, &[&did])
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+
+            // Commit transaction (releases lock)
+            txn.commit()
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+        } else {
+            // Lock not acquired, another transaction is handling it
+            // Rollback and skip (coalescing behavior)
+            txn.rollback()
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -123,18 +180,14 @@ impl RecordPlugin for FollowPlugin {
         }
 
         // Update aggregates: profile_agg.followsCount for creator
-        // Note: TypeScript uses explicit locking (coalesceWithLock) to avoid thrash during backfills
-        // For now, we implement without locking - this may cause contention during high-volume backfills
+        // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(follow_creator) = &creator {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, follows_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#,
-                    &[&follow_creator],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
+            let lock_key = format!("followsCount:{}", follow_creator);
+            let query = r#"INSERT INTO profile_agg (did, follows_count)
+                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
+                          ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#;
+
+            Self::update_with_coalesce_lock(pool, &lock_key, follow_creator, query).await?;
         }
 
         Ok(())
@@ -194,16 +247,14 @@ impl RecordPlugin for FollowPlugin {
         }
 
         // Update aggregates: profile_agg.followsCount for creator
+        // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(follow_creator) = creator {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, follows_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#,
-                    &[&follow_creator],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
+            let lock_key = format!("followsCount:{}", follow_creator);
+            let query = r#"INSERT INTO profile_agg (did, follows_count)
+                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
+                          ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#;
+
+            Self::update_with_coalesce_lock(pool, &lock_key, &follow_creator, query).await?;
         }
 
         Ok(())

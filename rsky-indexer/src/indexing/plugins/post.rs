@@ -173,17 +173,75 @@ impl PostPlugin {
             .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
     }
 
+    /// Hash a string to i64 for PostgreSQL advisory lock
+    /// Uses a simple hash function similar to Java's hashCode
+    fn hash_lock_key(key: &str) -> i64 {
+        let mut hash: i64 = 0;
+        for byte in key.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as i64);
+        }
+        hash
+    }
+
+    /// Execute aggregate update with coalescing lock to avoid thrashing during backfills
+    /// Matches TypeScript's coalesceWithLock pattern
+    /// If lock cannot be acquired, skip the update (another transaction is handling it)
+    async fn update_with_coalesce_lock(
+        pool: &Pool,
+        lock_key: &str,
+        did: &str,
+        query: &str,
+    ) -> Result<(), IndexerError> {
+        // Get a connection from the pool
+        let mut client = pool.get().await?;
+
+        // Begin transaction
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        // Try to acquire advisory lock (auto-released at transaction end)
+        let lock_id = Self::hash_lock_key(lock_key);
+        let lock_acquired: bool = txn
+            .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&lock_id])
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?
+            .get(0);
+
+        if lock_acquired {
+            // Lock acquired, perform the update
+            txn.execute(query, &[&did])
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+
+            // Commit transaction (releases lock)
+            txn.commit()
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+        } else {
+            // Lock not acquired, another transaction is handling it
+            // Rollback and skip (coalescing behavior)
+            txn.rollback()
+                .await
+                .map_err(|e| IndexerError::Database(e.into()))?;
+        }
+
+        Ok(())
+    }
+
     /// Get reply ancestors up to depth 5
+    /// Returns Vec<(uri, creator, height)> where height is distance from current post
     async fn get_reply_ancestors(
         client: &deadpool_postgres::Object,
         parent_uri: &str,
         max_depth: i32,
-    ) -> Result<Vec<(String, String)>, IndexerError> {
+    ) -> Result<Vec<(String, String, i32)>, IndexerError> {
         let mut ancestors = Vec::new();
         let mut current_uri = parent_uri.to_string();
-        let mut depth = 0;
+        let mut height = 0;
 
-        while depth < max_depth {
+        while height < max_depth {
             // Get the post and its creator
             let row = client
                 .query_opt(
@@ -199,14 +257,14 @@ impl PostPlugin {
                     let reply_parent: Option<String> = r.get(1);
 
                     if let Some(ancestor_creator) = creator {
-                        ancestors.push((current_uri.clone(), ancestor_creator));
+                        ancestors.push((current_uri.clone(), ancestor_creator, height));
                     }
 
                     // Move to the next parent
                     match reply_parent {
                         Some(parent) => {
                             current_uri = parent;
-                            depth += 1;
+                            height += 1;
                         }
                         None => break,
                     }
@@ -216,6 +274,287 @@ impl PostPlugin {
         }
 
         Ok(ancestors)
+    }
+
+    /// Get descendants of a post (replies that already exist)
+    /// Used for out-of-order indexing - when a parent is indexed after its children
+    /// Returns Vec<(uri, creator, cid, sort_at, depth)> where depth is distance from current post
+    async fn get_descendants(
+        client: &deadpool_postgres::Object,
+        post_uri: &str,
+        max_depth: i32,
+    ) -> Result<Vec<(String, String, String, DateTime<Utc>, i32)>, IndexerError> {
+        // Recursive CTE to find all descendants up to max_depth
+        let rows = client
+            .query(
+                r#"
+                WITH RECURSIVE descendent(uri, creator, cid, sort_at, depth) AS (
+                    -- Base case: direct replies to this post
+                    SELECT uri, creator, cid, sort_at, 1 as depth
+                    FROM post
+                    WHERE reply_parent = $1
+                    AND $2 >= 1
+
+                    UNION ALL
+
+                    -- Recursive case: replies to descendants
+                    SELECT p.uri, p.creator, p.cid, p.sort_at, d.depth + 1
+                    FROM post p
+                    INNER JOIN descendent d ON d.uri = p.reply_parent
+                    WHERE d.depth < $2
+                )
+                SELECT uri, creator, cid, sort_at, depth
+                FROM descendent
+                ORDER BY depth, sort_at
+                "#,
+                &[&post_uri, &max_depth],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        let mut descendants = Vec::new();
+        for row in rows {
+            let uri: String = row.get(0);
+            let creator: String = row.get(1);
+            let cid: String = row.get(2);
+            let sort_at: DateTime<Utc> = row.get(3);
+            let depth: i32 = row.get(4);
+            descendants.push((uri, creator, cid, sort_at, depth));
+        }
+
+        Ok(descendants)
+    }
+
+    /// Check if reply root is invalid
+    /// Matches TypeScript invalidReplyRoot logic:
+    /// - If parent has invalidReplyRoot set, transitively this is invalid too
+    /// - If replying to root post directly, ensure the root doesn't have a reply field
+    /// - If replying to a reply, ensure parent's reply.root matches this reply's root
+    async fn check_invalid_reply_root(
+        client: &deadpool_postgres::Object,
+        reply_root_uri: &str,
+        reply_parent_uri: &str,
+    ) -> Result<bool, IndexerError> {
+        // Get parent post and its reply info
+        let parent_row = client
+            .query_opt(
+                "SELECT invalid_reply_root, reply_root FROM post WHERE uri = $1",
+                &[&reply_parent_uri],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        let Some(parent) = parent_row else {
+            // Parent doesn't exist, invalid reply
+            return Ok(true);
+        };
+
+        let parent_invalid: Option<bool> = parent.get(0);
+        let parent_reply_root: Option<String> = parent.get(1);
+
+        // If parent is invalid, transitively this is invalid
+        if parent_invalid == Some(true) {
+            return Ok(true);
+        }
+
+        // If replying directly to root (parent == root)
+        if reply_parent_uri == reply_root_uri {
+            // Root post should not itself be a reply
+            return Ok(parent_reply_root.is_some());
+        }
+
+        // If replying to a reply, ensure parent's root matches our root
+        Ok(parent_reply_root.as_deref() != Some(reply_root_uri))
+    }
+
+    /// Check if reply violates threadgate rules
+    /// Matches TypeScript violatesThreadGate logic:
+    /// Checks if replier is allowed based on threadgate rules (mention, following, followers, lists)
+    async fn check_violates_threadgate(
+        client: &deadpool_postgres::Object,
+        replier_did: &str,
+        root_post_uri: &str,
+    ) -> Result<bool, IndexerError> {
+        // Get root post creator
+        let root_creator = Self::extract_creator(root_post_uri);
+        let Some(owner_did) = root_creator else {
+            return Ok(false); // Can't validate without owner
+        };
+
+        // Owner can always reply to their own threads
+        if replier_did == owner_did {
+            return Ok(false);
+        }
+
+        // Get threadgate record for root post
+        // ThreadGate URI format: at://did/app.bsky.feed.threadgate/rkey
+        let root_rkey = root_post_uri.rsplit('/').next();
+        let Some(rkey) = root_rkey else {
+            return Ok(false);
+        };
+
+        let threadgate_uri = format!("at://{}/app.bsky.feed.threadgate/{}", owner_did, rkey);
+
+        // Query threadgate record from record table
+        let threadgate_row = client
+            .query_opt(
+                "SELECT json FROM record WHERE uri = $1 AND json != '{}'",
+                &[&threadgate_uri],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        let Some(row) = threadgate_row else {
+            // No threadgate, anyone can reply
+            return Ok(false);
+        };
+
+        let json: JsonValue = row.get(0);
+
+        // Parse threadgate allow rules
+        let allow_array = json
+            .get("allow")
+            .and_then(|a| a.as_array());
+
+        let Some(rules) = allow_array else {
+            // No allow rules means anyone can reply
+            return Ok(false);
+        };
+
+        if rules.is_empty() {
+            // Empty allow list means only owner can reply
+            return Ok(true);
+        }
+
+        // Check each rule
+        for rule in rules {
+            if let Some(rule_type) = rule.get("$type").and_then(|t| t.as_str()) {
+                match rule_type {
+                    "app.bsky.feed.threadgate#mentionRule" => {
+                        // Check if root post mentions the replier
+                        let root_post = client
+                            .query_opt(
+                                "SELECT json FROM record WHERE uri = $1",
+                                &[&root_post_uri],
+                            )
+                            .await
+                            .map_err(|e| IndexerError::Database(e.into()))?;
+
+                        if let Some(post_row) = root_post {
+                            let post_json: JsonValue = post_row.get(0);
+                            let (mentions, _) = Self::extract_facets(&post_json);
+                            if mentions.contains(&replier_did.to_string()) {
+                                return Ok(false); // Mentioned in root post, allowed
+                            }
+                        }
+                    }
+                    "app.bsky.feed.threadgate#followingRule" => {
+                        // Check if owner follows replier
+                        let follows = client
+                            .query_opt(
+                                "SELECT uri FROM follow WHERE creator = $1 AND subject_did = $2",
+                                &[&owner_did, &replier_did],
+                            )
+                            .await
+                            .map_err(|e| IndexerError::Database(e.into()))?;
+
+                        if follows.is_some() {
+                            return Ok(false); // Owner follows replier, allowed
+                        }
+                    }
+                    "app.bsky.feed.threadgate#listRule" => {
+                        // Check if replier is in the specified list
+                        if let Some(list_uri) = rule.get("list").and_then(|l| l.as_str()) {
+                            let in_list = client
+                                .query_opt(
+                                    "SELECT uri FROM list_item WHERE list_uri = $1 AND subject_did = $2",
+                                    &[&list_uri, &replier_did],
+                                )
+                                .await
+                                .map_err(|e| IndexerError::Database(e.into()))?;
+
+                            if in_list.is_some() {
+                                return Ok(false); // In allowed list, allowed
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // No rules matched, violates threadgate
+        Ok(true)
+    }
+
+    /// Check if quote embed violates postgate embedding rules
+    /// Matches TypeScript validatePostEmbed logic:
+    /// Checks if quoted post has postgate that disallows embedding
+    async fn check_violates_embedding_rules(
+        client: &deadpool_postgres::Object,
+        embed_uri: &str,
+        quoter_did: &str,
+    ) -> Result<bool, IndexerError> {
+        // Get quoted post creator
+        let embed_creator = Self::extract_creator(embed_uri);
+        let Some(quoted_author) = embed_creator else {
+            return Ok(false); // Can't validate without author
+        };
+
+        // Author can always quote their own posts
+        if quoter_did == quoted_author {
+            return Ok(false);
+        }
+
+        // Get postgate record for quoted post
+        // PostGate URI format: at://did/app.bsky.feed.postgate/rkey
+        let embed_rkey = embed_uri.rsplit('/').next();
+        let Some(rkey) = embed_rkey else {
+            return Ok(false);
+        };
+
+        let postgate_uri = format!("at://{}/app.bsky.feed.postgate/{}", quoted_author, rkey);
+
+        // Query postgate record from record table
+        let postgate_row = client
+            .query_opt(
+                "SELECT json FROM record WHERE uri = $1 AND json != '{}'",
+                &[&postgate_uri],
+            )
+            .await
+            .map_err(|e| IndexerError::Database(e.into()))?;
+
+        let Some(row) = postgate_row else {
+            // No postgate, embedding is allowed
+            return Ok(false);
+        };
+
+        let json: JsonValue = row.get(0);
+
+        // Check embeddingRules
+        let embedding_rules = json.get("embeddingRules");
+
+        // If embeddingRules is not present or is an empty array, embedding is allowed
+        let Some(rules_array) = embedding_rules.and_then(|r| r.as_array()) else {
+            return Ok(false);
+        };
+
+        if rules_array.is_empty() {
+            return Ok(false);
+        }
+
+        // Check each rule
+        for rule in rules_array {
+            if let Some(rule_type) = rule.get("$type").and_then(|t| t.as_str()) {
+                if rule_type == "app.bsky.feed.postgate#disableRule" {
+                    // Embedding is explicitly disabled
+                    return Ok(true);
+                }
+            }
+        }
+
+        // No disable rule found, embedding is allowed
+        Ok(false)
     }
 }
 
@@ -348,6 +687,34 @@ impl RecordPlugin for PostPlugin {
             }
         }
 
+        // Validate reply if this is a reply
+        let (_invalid_reply_root, violates_threadgate) = if let (Some(root_uri), Some(parent_uri), Some(post_creator)) = (reply_root, reply_parent, &creator) {
+            // Check if reply root is invalid
+            let invalid = Self::check_invalid_reply_root(&client, root_uri, parent_uri).await?;
+
+            // Check if reply violates threadgate rules
+            let violates = if !invalid {
+                Self::check_violates_threadgate(&client, post_creator, root_uri).await?
+            } else {
+                false
+            };
+
+            // Update post with validation flags if any violations
+            if invalid || violates {
+                client
+                    .execute(
+                        "UPDATE post SET invalid_reply_root = $1, violates_thread_gate = $2 WHERE uri = $3",
+                        &[&invalid, &violates, &uri],
+                    )
+                    .await
+                    .map_err(|e| IndexerError::Database(e.into()))?;
+            }
+
+            (invalid, violates)
+        } else {
+            (false, false)
+        };
+
         // Handle embeds
         let mut quote_uri: Option<String> = None;
         if let Some(embed) = record.get("embed") {
@@ -392,19 +759,40 @@ impl RecordPlugin for PostPlugin {
             }
         }
 
-        // Create notification for quote (prevent self-notifications)
+        // Validate quote embed if this post quotes another post
+        let mut violates_embedding_rules = false;
         if let (Some(quoted_uri), Some(post_creator)) = (quote_uri.as_ref(), &creator) {
-            let quoted_creator = Self::extract_creator(quoted_uri);
-            if quoted_creator.as_ref() != Some(post_creator) {
-                if let Some(notif_recipient) = quoted_creator {
-                    client
-                        .execute(
-                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
-                               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                            &[&notif_recipient, &post_creator, &uri, &cid, &"quote", &Some(quoted_uri.as_str()), &sort_at],
-                        )
-                        .await
-                        .map_err(|e| IndexerError::Database(e.into()))?;
+            // Check if quote violates postgate embedding rules
+            violates_embedding_rules = Self::check_violates_embedding_rules(&client, quoted_uri, post_creator).await?;
+
+            // Update post with validation flag if violation
+            if violates_embedding_rules {
+                client
+                    .execute(
+                        "UPDATE post SET violates_embedding_rules = $1 WHERE uri = $2",
+                        &[&violates_embedding_rules, &uri],
+                    )
+                    .await
+                    .map_err(|e| IndexerError::Database(e.into()))?;
+            }
+        }
+
+        // Create notification for quote (prevent self-notifications)
+        // Don't notify if quote violates embedding rules
+        if !violates_embedding_rules {
+            if let (Some(quoted_uri), Some(post_creator)) = (quote_uri.as_ref(), &creator) {
+                let quoted_creator = Self::extract_creator(quoted_uri);
+                if quoted_creator.as_ref() != Some(post_creator) {
+                    if let Some(notif_recipient) = quoted_creator {
+                        client
+                            .execute(
+                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                                &[&notif_recipient, &post_creator, &uri, &cid, &"quote", &Some(quoted_uri.as_str()), &sort_at],
+                            )
+                            .await
+                            .map_err(|e| IndexerError::Database(e.into()))?;
+                    }
                 }
             }
         }
@@ -423,44 +811,117 @@ impl RecordPlugin for PostPlugin {
         }
 
         // Create reply notifications
-        if let (Some(parent_uri), Some(post_creator)) = (reply_parent, &creator) {
-            // Get ancestors up to depth 5 (parent + 4 more levels)
-            let ancestors = Self::get_reply_ancestors(&client, parent_uri, 5).await?;
+        // Don't generate reply notifications if post violates threadgate
+        if !violates_threadgate {
+            if let (Some(parent_uri), Some(post_creator)) = (reply_parent, &creator) {
+                // Get ancestors up to depth 5 (parent + 4 more levels)
+                let ancestors = Self::get_reply_ancestors(&client, parent_uri, 5).await?;
+
+                // Track which authors we've already notified to avoid duplicates
+                let mut notified_authors = std::collections::HashSet::new();
+
+                for (ancestor_uri, ancestor_creator, _height) in ancestors {
+                    // Skip if this is the post creator (no self-notifications)
+                    if &ancestor_creator == post_creator {
+                        continue;
+                    }
+
+                    // Skip if we've already notified this author
+                    if notified_authors.contains(&ancestor_creator) {
+                        continue;
+                    }
+
+                    // Create notification
+                    client
+                        .execute(
+                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                            &[&ancestor_creator, &post_creator, &uri, &cid, &"reply", &Some(ancestor_uri.as_str()), &sort_at],
+                        )
+                        .await
+                        .map_err(|e| IndexerError::Database(e.into()))?;
+
+                    notified_authors.insert(ancestor_creator);
+                }
+            }
+        }
+
+        // Handle out-of-order indexing: notify about descendants that already exist
+        // This happens when a parent post is indexed after its children
+        // We need to create notifications for descendants to this post and its ancestors
+        const REPLY_NOTIF_DEPTH: i32 = 5;
+
+        // Get descendants of this post (replies that already exist in DB)
+        let descendants = Self::get_descendants(&client, uri, REPLY_NOTIF_DEPTH).await?;
+
+        if !descendants.is_empty() {
+            // Get ancestors of this post (including self at height 0)
+            let mut ancestors_with_self = vec![(uri.to_string(), creator.clone().unwrap_or_default(), 0)];
+
+            // Add ancestors if this is a reply
+            if let Some(parent_uri) = reply_parent {
+                let parent_ancestors = Self::get_reply_ancestors(&client, parent_uri, REPLY_NOTIF_DEPTH).await?;
+                for (ancestor_uri, ancestor_creator, height) in parent_ancestors {
+                    // Increment height by 1 since we're going up one more level
+                    ancestors_with_self.push((ancestor_uri, ancestor_creator, height + 1));
+                }
+            }
 
             // Track which authors we've already notified to avoid duplicates
             let mut notified_authors = std::collections::HashSet::new();
 
-            for (ancestor_uri, ancestor_creator) in ancestors {
-                // Skip if this is the post creator (no self-notifications)
-                if &ancestor_creator == post_creator {
-                    continue;
+            // For each descendant, check if we should notify ancestors
+            for (desc_uri, desc_creator, desc_cid, desc_sort_at, desc_depth) in descendants {
+                // For each ancestor of the newly inserted post
+                for (ancestor_uri, ancestor_creator, ancestor_height) in &ancestors_with_self {
+                    let total_height = desc_depth + ancestor_height;
+
+                    // Only notify if within depth limit
+                    if total_height < REPLY_NOTIF_DEPTH {
+                        // Skip self-notifications
+                        if &desc_creator == ancestor_creator {
+                            continue;
+                        }
+
+                        // Create a unique key for this notification (recipient + author)
+                        let notif_key = format!("{}:{}", ancestor_creator, desc_creator);
+                        if notified_authors.contains(&notif_key) {
+                            continue;
+                        }
+
+                        // Create notification from descendant to ancestor
+                        client
+                            .execute(
+                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                                &[
+                                    ancestor_creator,
+                                    &desc_creator,
+                                    &desc_uri,
+                                    &desc_cid,
+                                    &"reply",
+                                    &Some(ancestor_uri.as_str()),
+                                    &desc_sort_at
+                                ],
+                            )
+                            .await
+                            .map_err(|e| IndexerError::Database(e.into()))?;
+
+                        notified_authors.insert(notif_key);
+                    }
                 }
-
-                // Skip if we've already notified this author
-                if notified_authors.contains(&ancestor_creator) {
-                    continue;
-                }
-
-                // Create notification
-                client
-                    .execute(
-                        r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                        &[&ancestor_creator, &post_creator, &uri, &cid, &"reply", &Some(ancestor_uri.as_str()), &sort_at],
-                    )
-                    .await
-                    .map_err(|e| IndexerError::Database(e.into()))?;
-
-                notified_authors.insert(ancestor_creator);
             }
         }
 
         // Update aggregates: post_agg.replyCount for parent
+        // Only count replies that don't violate threadgate
         if let Some(parent_uri) = reply_parent {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, reply_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM post WHERE reply_parent = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM post
+                                    WHERE reply_parent = $1
+                                    AND (violates_thread_gate IS NULL OR violates_thread_gate = false)))
                        ON CONFLICT (uri) DO UPDATE SET reply_count = EXCLUDED.reply_count"#,
                     &[&parent_uri],
                 )
@@ -469,20 +930,15 @@ impl RecordPlugin for PostPlugin {
         }
 
         // Update aggregates: profile_agg.postsCount for creator
+        // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(post_creator) = &creator {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, posts_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#,
-                    &[&post_creator],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
-        }
+            let lock_key = format!("postCount:{}", post_creator);
+            let query = r#"INSERT INTO profile_agg (did, posts_count)
+                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
+                          ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#;
 
-        // TODO: Validate reply (check invalidReplyRoot, violatesThreadGate)
-        // TODO: Validate quote embeds (violatesEmbeddingRules)
+            Self::update_with_coalesce_lock(pool, &lock_key, post_creator, query).await?;
+        }
 
         debug!("Indexed post: {}", uri);
         Ok(())
@@ -573,11 +1029,14 @@ impl RecordPlugin for PostPlugin {
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Update aggregates: post_agg.replyCount for parent
+        // Only count replies that don't violate threadgate
         if let Some(parent_uri) = reply_parent {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, reply_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM post WHERE reply_parent = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM post
+                                    WHERE reply_parent = $1
+                                    AND (violates_thread_gate IS NULL OR violates_thread_gate = false)))
                        ON CONFLICT (uri) DO UPDATE SET reply_count = EXCLUDED.reply_count"#,
                     &[&parent_uri],
                 )
@@ -586,16 +1045,14 @@ impl RecordPlugin for PostPlugin {
         }
 
         // Update aggregates: profile_agg.postsCount for creator
+        // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(post_creator) = creator {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, posts_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
-                       ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#,
-                    &[&post_creator],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
+            let lock_key = format!("postCount:{}", post_creator);
+            let query = r#"INSERT INTO profile_agg (did, posts_count)
+                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
+                          ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#;
+
+            Self::update_with_coalesce_lock(pool, &lock_key, &post_creator, query).await?;
         }
 
         // Update aggregates: post_agg.quoteCount for quoted posts
