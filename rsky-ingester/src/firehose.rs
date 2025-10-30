@@ -191,7 +191,24 @@ impl FirehoseIngester {
 
         // Cleanup
         drop(batch_tx);
-        write_task.abort();
+
+        // Check if write task finished with error before aborting
+        if write_task.is_finished() {
+            match write_task.await {
+                Ok(Ok(())) => {
+                    info!("Write task completed successfully");
+                }
+                Ok(Err(e)) => {
+                    error!("Write task failed with error: {:?}", e);
+                }
+                Err(e) => {
+                    error!("Write task panicked: {:?}", e);
+                }
+            }
+        } else {
+            write_task.abort();
+        }
+
         ping_task.abort();
         metrics_task.abort();
 

@@ -1,5 +1,5 @@
-use crate::indexing::RecordPlugin;
 use crate::indexing::parse_timestamp;
+use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -23,8 +23,6 @@ impl ProfilePlugin {
     fn extract_rkey(uri: &str) -> Option<String> {
         uri.rsplit('/').next().map(|s| s.to_string())
     }
-
-
 }
 
 #[async_trait]

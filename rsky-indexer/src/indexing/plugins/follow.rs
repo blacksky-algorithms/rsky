@@ -1,5 +1,5 @@
-use crate::indexing::RecordPlugin;
 use crate::indexing::parse_timestamp;
+use crate::indexing::RecordPlugin;
 use crate::IndexerError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -18,8 +18,6 @@ impl FollowPlugin {
         }
         None
     }
-
-
 
     /// Hash a string to i64 for PostgreSQL advisory lock
     /// Uses a simple hash function similar to Java's hashCode
