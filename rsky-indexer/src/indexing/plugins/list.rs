@@ -66,6 +66,9 @@ impl RecordPlugin for ListPlugin {
             None => indexed_at.clone(),
         };
 
+        // Serialize descriptionFacets to JSON string for VARCHAR column
+        let description_facets_str = description_facets.as_ref().map(|v| v.to_string());
+
         client
             .execute(
                 r#"INSERT INTO list (uri, cid, creator, name, purpose, description, "descriptionFacets", "avatarCid", "createdAt", "indexedAt")
@@ -78,7 +81,7 @@ impl RecordPlugin for ListPlugin {
                     &name,
                     &purpose,
                     &description,
-                    &description_facets,
+                    &description_facets_str,
                     &avatar_cid,
                     &created_at.to_rfc3339(),
                     &indexed_at.to_rfc3339(),

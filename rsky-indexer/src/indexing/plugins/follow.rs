@@ -63,7 +63,7 @@ impl FollowPlugin {
 
         if lock_acquired {
             // Lock acquired, perform the update
-            txn.execute(query, &[&did])
+            txn.execute(query, &[&did, &did])
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -132,7 +132,7 @@ impl RecordPlugin for FollowPlugin {
         client
             .execute(
                 r#"INSERT INTO follow (uri, cid, creator, "subjectDid", "createdAt", "indexedAt")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[&uri, &cid, &creator, &subject_did, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
@@ -143,15 +143,16 @@ impl RecordPlugin for FollowPlugin {
         if let (Some(follow_creator), Some(follow_subject)) = (&creator, subject_did) {
             client
                 .execute(
-                    r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject")
-                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                     &[
                         &follow_subject,
                         &follow_creator,
                         &uri,
                         &cid,
                         &"follow",
-                        &Option::<&str>::None
+                        &Option::<&str>::None,
+                        &indexed_at.to_rfc3339(),
                     ],
                 )
                 .await
@@ -162,10 +163,10 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_subject) = subject_did {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followers_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $1))
-                       ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
-                    &[&follow_subject],
+                    r#"INSERT INTO profile_agg (did, "followersCount")
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
+                       ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
+                    &[&follow_subject, &follow_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -175,9 +176,9 @@ impl RecordPlugin for FollowPlugin {
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(follow_creator) = &creator {
             let lock_key = format!("followsCount:{}", follow_creator);
-            let query = r#"INSERT INTO profile_agg (did, follows_count)
-                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                          ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#;
+            let query = r#"INSERT INTO profile_agg (did, "followsCount")
+                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $2))
+                          ON CONFLICT (did) DO UPDATE SET "followsCount" = EXCLUDED."followsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, follow_creator, query).await?;
         }
@@ -229,10 +230,10 @@ impl RecordPlugin for FollowPlugin {
         if let Some(follow_subject) = subject_did {
             client
                 .execute(
-                    r#"INSERT INTO profile_agg (did, followers_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $1))
-                       ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
-                    &[&follow_subject],
+                    r#"INSERT INTO profile_agg (did, "followersCount")
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
+                       ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
+                    &[&follow_subject, &follow_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -242,9 +243,9 @@ impl RecordPlugin for FollowPlugin {
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(follow_creator) = creator {
             let lock_key = format!("followsCount:{}", follow_creator);
-            let query = r#"INSERT INTO profile_agg (did, follows_count)
-                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $1))
-                          ON CONFLICT (did) DO UPDATE SET follows_count = EXCLUDED.follows_count"#;
+            let query = r#"INSERT INTO profile_agg (did, "followsCount")
+                          VALUES ($1, (SELECT COUNT(*) FROM follow WHERE creator = $2))
+                          ON CONFLICT (did) DO UPDATE SET "followsCount" = EXCLUDED."followsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, &follow_creator, query).await?;
         }

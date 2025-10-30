@@ -96,7 +96,7 @@ impl RecordPlugin for LikePlugin {
                 if let Some(notif_recipient) = subject_creator {
                     client
                         .execute(
-                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, reason_subject, sort_at)
+                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                             &[
                                 &notif_recipient,
@@ -120,7 +120,7 @@ impl RecordPlugin for LikePlugin {
                     if let Some(notif_recipient) = via_creator {
                         client
                             .execute(
-                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, reason_subject, sort_at)
+                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                                 &[
                                     &notif_recipient,
@@ -143,10 +143,10 @@ impl RecordPlugin for LikePlugin {
         if let Some(like_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, like_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET like_count = EXCLUDED.like_count"#,
-                    &[&like_subject],
+                    r#"INSERT INTO post_agg (uri, "likeCount")
+                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
+                       ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
+                    &[&like_subject, &like_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -194,10 +194,10 @@ impl RecordPlugin for LikePlugin {
         if let Some(like_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, like_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET like_count = EXCLUDED.like_count"#,
-                    &[&like_subject],
+                    r#"INSERT INTO post_agg (uri, "likeCount")
+                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
+                       ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
+                    &[&like_subject, &like_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;

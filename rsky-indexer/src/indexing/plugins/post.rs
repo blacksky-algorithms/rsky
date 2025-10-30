@@ -97,7 +97,7 @@ impl PostPlugin {
                     .execute(
                         r#"INSERT INTO post_embed_external ("postUri", uri, title, description, "thumbCid")
                            VALUES ($1, $2, $3, $4, $5)
-                           ON CONFLICT (post_uri) DO NOTHING"#,
+                           ON CONFLICT ("postUri") DO NOTHING"#,
                         &[&post_uri, &ext_uri, &title, &description, &thumb_cid],
                     )
                     .await
@@ -124,7 +124,7 @@ impl PostPlugin {
                 .execute(
                     r#"INSERT INTO post_embed_video ("postUri", "videoCid", alt)
                        VALUES ($1, $2, $3)
-                       ON CONFLICT (post_uri) DO NOTHING"#,
+                       ON CONFLICT ("postUri") DO NOTHING"#,
                     &[&post_uri, &cid, &alt],
                 )
                 .await
@@ -152,7 +152,7 @@ impl PostPlugin {
                     .execute(
                         r#"INSERT INTO post_embed_record ("postUri", "embedUri", "embedCid")
                            VALUES ($1, $2, $3)
-                           ON CONFLICT (post_uri) DO NOTHING"#,
+                           ON CONFLICT ("postUri") DO NOTHING"#,
                         &[&post_uri, &subject_uri, &subject_cid],
                     )
                     .await
@@ -220,7 +220,7 @@ impl PostPlugin {
 
         if lock_acquired {
             // Lock acquired, perform the update
-            txn.execute(query, &[&did])
+            txn.execute(query, &[&did, &did])
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -314,7 +314,7 @@ impl PostPlugin {
                 )
                 SELECT uri, creator, cid, "sortAt", depth
                 FROM descendent
-                ORDER BY depth, sort_at
+                ORDER BY depth, "sortAt"
                 "#,
                 &[&post_uri, &max_depth],
             )
@@ -476,7 +476,7 @@ impl PostPlugin {
                         if let Some(list_uri) = rule.get("list").and_then(|l| l.as_str()) {
                             let in_list = client
                                 .query_opt(
-                                    r#"SELECT uri FROM list_item WHERE "listUri" = $1 AND subject_did = $2"#,
+                                    r#"SELECT uri FROM list_item WHERE "listUri" = $1 AND "subjectDid" = $2"#,
                                     &[&list_uri, &replier_did],
                                 )
                                 .await
@@ -618,7 +618,7 @@ impl RecordPlugin for PostPlugin {
             .and_then(|p| p.get("cid"))
             .and_then(|c| c.as_str());
 
-        // Extract langs and tags as Vec<String> for TEXT[] columns
+        // Extract langs and tags as Vec<String>, then serialize to JSONB
         let langs: Option<Vec<String>> = record
             .get("langs")
             .and_then(|l| l.as_array())
@@ -627,6 +627,18 @@ impl RecordPlugin for PostPlugin {
             .get("tags")
             .and_then(|t| t.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+        // Serialize to JSON for JSONB columns
+        let langs_json: Option<serde_json::Value> = langs
+            .as_ref()
+            .map(|v| serde_json::to_value(v))
+            .transpose()
+            .map_err(|e| IndexerError::Serialization(format!("Failed to serialize langs: {}", e)))?;
+        let tags_json: Option<serde_json::Value> = tags
+            .as_ref()
+            .map(|v| serde_json::to_value(v))
+            .transpose()
+            .map_err(|e| IndexerError::Serialization(format!("Failed to serialize tags: {}", e)))?;
 
         // Calculate sortAt (MIN(indexedAt, createdAt)) for feed_item and notifications
         let sort_at = if created_at < indexed_at {
@@ -651,8 +663,8 @@ impl RecordPlugin for PostPlugin {
                     &reply_root_cid,
                     &reply_parent,
                     &reply_parent_cid,
-                    &langs,
-                    &tags,
+                    &langs_json,
+                    &tags_json,
                     &created_at.to_rfc3339(),
                     &indexed_at.to_rfc3339(),
                 ],
@@ -670,7 +682,7 @@ impl RecordPlugin for PostPlugin {
             .execute(
                 r#"INSERT INTO feed_item (type, uri, cid, "postUri", "originatorDid", "sortAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (uri, cid) DO NOTHING"#,
+                   ON CONFLICT (uri) DO NOTHING"#,
                 &[&"post", &uri, &cid, &uri, &creator, &sort_at.to_rfc3339()],
             )
             .await
@@ -810,9 +822,9 @@ impl RecordPlugin for PostPlugin {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, "quoteCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $2))
                        ON CONFLICT (uri) DO UPDATE SET "quoteCount" = EXCLUDED."quoteCount""#,
-                    &[&quoted_uri],
+                    &[&quoted_uri, &quoted_uri],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -928,10 +940,10 @@ impl RecordPlugin for PostPlugin {
                 .execute(
                     r#"INSERT INTO post_agg (uri, "replyCount")
                        VALUES ($1, (SELECT COUNT(*) FROM post
-                                    WHERE "replyParent" = $1
+                                    WHERE "replyParent" = $2
                                     AND ("violatesThreadGate" IS NULL OR "violatesThreadGate" = false)))
                        ON CONFLICT (uri) DO UPDATE SET "replyCount" = EXCLUDED."replyCount""#,
-                    &[&parent_uri],
+                    &[&parent_uri, &parent_uri],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -942,7 +954,7 @@ impl RecordPlugin for PostPlugin {
         if let Some(post_creator) = &creator {
             let lock_key = format!("postCount:{}", post_creator);
             let query = r#"INSERT INTO profile_agg (did, "postsCount")
-                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
+                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $2))
                           ON CONFLICT (did) DO UPDATE SET "postsCount" = EXCLUDED."postsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, post_creator, query).await?;
@@ -1043,10 +1055,10 @@ impl RecordPlugin for PostPlugin {
                 .execute(
                     r#"INSERT INTO post_agg (uri, "replyCount")
                        VALUES ($1, (SELECT COUNT(*) FROM post
-                                    WHERE "replyParent" = $1
+                                    WHERE "replyParent" = $2
                                     AND ("violatesThreadGate" IS NULL OR "violatesThreadGate" = false)))
                        ON CONFLICT (uri) DO UPDATE SET "replyCount" = EXCLUDED."replyCount""#,
-                    &[&parent_uri],
+                    &[&parent_uri, &parent_uri],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -1057,7 +1069,7 @@ impl RecordPlugin for PostPlugin {
         if let Some(post_creator) = creator {
             let lock_key = format!("postCount:{}", post_creator);
             let query = r#"INSERT INTO profile_agg (did, "postsCount")
-                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
+                          VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $2))
                           ON CONFLICT (did) DO UPDATE SET "postsCount" = EXCLUDED."postsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, &post_creator, query).await?;
@@ -1068,9 +1080,9 @@ impl RecordPlugin for PostPlugin {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, "quoteCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $2))
                        ON CONFLICT (uri) DO UPDATE SET "quoteCount" = EXCLUDED."quoteCount""#,
-                    &[&quoted_uri],
+                    &[&quoted_uri, &quoted_uri],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;

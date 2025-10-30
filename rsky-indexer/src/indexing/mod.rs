@@ -287,7 +287,7 @@ impl IndexingService {
                     SET "indexedAt" = EXCLUDED."indexedAt"
                     WHERE actor."indexedAt" IS NULL OR actor."indexedAt" < EXCLUDED."indexedAt"
                     "#,
-                    &[&did, &indexed_at],
+                    &[&did, &indexed_at.to_rfc3339()],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -442,7 +442,7 @@ impl IndexingService {
             .execute(
                 r#"
                 UPDATE actor
-                SET upstream_status = $2
+                SET "upstreamStatus" = $2
                 WHERE did = $1
                 "#,
                 &[&did, &upstream_status],

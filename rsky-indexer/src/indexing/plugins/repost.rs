@@ -99,7 +99,7 @@ impl RecordPlugin for RepostPlugin {
             .execute(
                 r#"INSERT INTO feed_item (type, uri, cid, "postUri", "originatorDid", "sortAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (uri, cid) DO NOTHING"#,
+                   ON CONFLICT (uri) DO NOTHING"#,
                 &[&"repost", &uri, &cid, &subject, &creator, &sort_at.to_rfc3339()],
             )
             .await
@@ -162,9 +162,9 @@ impl RecordPlugin for RepostPlugin {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, "repostCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $2))
                        ON CONFLICT (uri) DO UPDATE SET "repostCount" = EXCLUDED."repostCount""#,
-                    &[&repost_subject],
+                    &[&repost_subject, &repost_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;
@@ -219,9 +219,9 @@ impl RecordPlugin for RepostPlugin {
             client
                 .execute(
                     r#"INSERT INTO post_agg (uri, "repostCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $2))
                        ON CONFLICT (uri) DO UPDATE SET "repostCount" = EXCLUDED."repostCount""#,
-                    &[&repost_subject],
+                    &[&repost_subject, &repost_subject],
                 )
                 .await
                 .map_err(|e| IndexerError::Database(e.into()))?;

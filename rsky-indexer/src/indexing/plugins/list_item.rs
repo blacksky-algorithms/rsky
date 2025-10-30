@@ -63,7 +63,7 @@ impl RecordPlugin for ListItemPlugin {
         if let (Some(list), Some(subject)) = (list_uri, subject_did) {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM list_item WHERE list_uri = $1 AND subject_did = $2",
+                    r#"SELECT uri FROM list_item WHERE "listUri" = $1 AND "subjectDid" = $2"#,
                     &[&list, &subject],
                 )
                 .await

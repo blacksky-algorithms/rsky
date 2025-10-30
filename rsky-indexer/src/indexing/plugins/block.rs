@@ -59,7 +59,7 @@ impl RecordPlugin for BlockPlugin {
         if let (Some(creator_did), Some(subject)) = (&creator, subject_did) {
             let existing = client
                 .query_opt(
-                    r#"SELECT uri FROM actor_block WHERE creator = $1 AND subject_did = $2"#,
+                    r#"SELECT uri FROM actor_block WHERE creator = $1 AND "subjectDid" = $2"#,
                     &[&creator_did, &subject],
                 )
                 .await

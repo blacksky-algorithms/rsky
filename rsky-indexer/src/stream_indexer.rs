@@ -153,6 +153,17 @@ impl StreamIndexer {
             let consumer = self.consumer.clone();
 
             let handle = tokio::spawn(async move {
+                // Extract event info for better error logging
+                let event_info = message.contents.get("event")
+                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                    .and_then(|v| {
+                        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                        let collection = v.get("collection").and_then(|c| c.as_str()).unwrap_or("unknown");
+                        let did = v.get("did").and_then(|d| d.as_str()).unwrap_or("unknown");
+                        Some(format!("type={}, collection={}, did={}", event_type, collection, did))
+                    })
+                    .unwrap_or_else(|| "unknown event".to_string());
+
                 let result = Self::handle_message(message.clone(), &indexing_service).await;
 
                 match result {
@@ -166,7 +177,7 @@ impl StreamIndexer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to process message {}: {:?}", message.id, e);
+                        error!("Failed to process message {} [{}]: {:?}", message.id, event_info, e);
                     }
                 }
 
