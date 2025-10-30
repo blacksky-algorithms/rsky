@@ -554,7 +554,10 @@ impl PostPlugin {
             return Ok(false);
         };
 
-        let json: JsonValue = row.get(0);
+        // Parse JSON from TEXT column (not native JSON type)
+        let json_text: String = row.get(0);
+        let json: JsonValue = serde_json::from_str(&json_text)
+            .map_err(|e| IndexerError::Serialization(e.to_string()))?;
 
         // Check embeddingRules
         let embedding_rules = json.get("embeddingRules");
