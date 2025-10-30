@@ -35,51 +35,41 @@ pub fn read(data: &[u8]) -> Result<Option<(Header, SubscribeRepos)>> {
 
     let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
     let body = match header.type_.as_str() {
-        "#commit" => {
-            match serde_ipld_dagcbor::from_reader(&mut reader) {
-                Ok(commit) => SubscribeRepos::Commit(commit),
-                Err(e) => {
-                    eprintln!("Failed to decode #commit message: {:?}", e);
-                    return Ok(None);
-                }
+        "#commit" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(commit) => SubscribeRepos::Commit(commit),
+            Err(e) => {
+                eprintln!("Failed to decode #commit message: {:?}", e);
+                return Ok(None);
             }
-        }
-        "#handle" => {
-            match serde_ipld_dagcbor::from_reader(&mut reader) {
-                Ok(handle) => SubscribeRepos::Handle(handle),
-                Err(e) => {
-                    eprintln!("Failed to decode #handle message: {:?}", e);
-                    return Ok(None);
-                }
+        },
+        "#handle" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(handle) => SubscribeRepos::Handle(handle),
+            Err(e) => {
+                eprintln!("Failed to decode #handle message: {:?}", e);
+                return Ok(None);
             }
-        }
-        "#tombstone" => {
-            match serde_ipld_dagcbor::from_reader(&mut reader) {
-                Ok(tombstone) => SubscribeRepos::Tombstone(tombstone),
-                Err(e) => {
-                    eprintln!("Failed to decode #tombstone message: {:?}", e);
-                    return Ok(None);
-                }
+        },
+        "#tombstone" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(tombstone) => SubscribeRepos::Tombstone(tombstone),
+            Err(e) => {
+                eprintln!("Failed to decode #tombstone message: {:?}", e);
+                return Ok(None);
             }
-        }
-        "#account" => {
-            match serde_ipld_dagcbor::from_reader(&mut reader) {
-                Ok(account) => SubscribeRepos::Account(account),
-                Err(e) => {
-                    eprintln!("Failed to decode #account message: {:?}", e);
-                    return Ok(None);
-                }
+        },
+        "#account" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(account) => SubscribeRepos::Account(account),
+            Err(e) => {
+                eprintln!("Failed to decode #account message: {:?}", e);
+                return Ok(None);
             }
-        }
-        "#identity" => {
-            match serde_ipld_dagcbor::from_reader(&mut reader) {
-                Ok(identity) => SubscribeRepos::Identity(identity),
-                Err(e) => {
-                    eprintln!("Failed to decode #identity message: {:?}", e);
-                    return Ok(None);
-                }
+        },
+        "#identity" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(identity) => SubscribeRepos::Identity(identity),
+            Err(e) => {
+                eprintln!("Failed to decode #identity message: {:?}", e);
+                return Ok(None);
             }
-        }
+        },
         "#sync" => {
             // Sync messages declare current repo state (AT Protocol Sync v1.1)
             // For now we ignore these - a full implementation would check if

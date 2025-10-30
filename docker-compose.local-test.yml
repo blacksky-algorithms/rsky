@@ -1,0 +1,138 @@
+version: '3.8'
+
+# Local test environment for rsky-indexer
+# Uses existing test containers and builds TypeScript dataplane from atproto repo
+
+networks:
+  tests_default:
+    external: true
+
+services:
+  # =================================================================
+  # DATAPLANE - Builds from atproto repo, creates DB schema on startup
+  # =================================================================
+  dataplane:
+    build:
+      context: /Users/rudyfraser/Projects/atproto
+      dockerfile: services/bsky/Dockerfile
+    container_name: rsky-test-dataplane
+    restart: unless-stopped
+    networks:
+      - tests_default
+    ports:
+      - "3300:3300"
+    environment:
+      # Dataplane config
+      DATAPLANE_PORT: "3300"
+
+      # Redis - connect to existing test container via Docker network
+      REDIS_HOST: "rsky-test-redis"
+      REDIS_PORT: "6379"
+
+      # PostgreSQL - connect to existing test container via Docker network
+      DB_POSTGRES_URL: "postgresql://postgres:postgres@rsky-test-postgres:5432/bsky_local"
+
+      # Logging
+      LOG_ENABLED: "true"
+      LOG_LEVEL: "info"
+
+      # Node
+      NODE_ENV: "development"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["node", "dataplane.js"]
+    mem_limit: 4g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3300/xrpc/_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =================================================================
+  # API SERVER - Optional, for testing queries
+  # =================================================================
+  api:
+    build:
+      context: /Users/rudyfraser/Projects/atproto
+      dockerfile: services/bsky/Dockerfile
+    container_name: rsky-test-api
+    restart: unless-stopped
+    networks:
+      - tests_default
+    ports:
+      - "3000:3000"
+    environment:
+      # API config
+      BSKY_VERSION: "test"
+      BSKY_PORT: "3000"
+      BSKY_DATAPLANE_URLS: "http://dataplane:3300"
+      BSKY_PUBLIC_URL: "http://localhost:3000"
+      BSKY_SERVER_DID: "did:web:localhost"
+      BSKY_SERVICE_SIGNING_KEY: "e9993faa14a046b88c28fb28d2802f92c2e19adf018a68fe402a651cdf57205c"
+      BSKY_DATAPLANE_HTTP_VERSION: "1.1"
+      BSKY_DATAPLANE_IGNORE_BAD_TLS: "true"
+      BSKY_CDN_URL: "https://cdn.bsky.app/img"
+      BSKY_LABELS_FROM_ISSUER_DIDS: "did:plc:ar7c4by46qjdydhdevvrndac"
+      BSKY_INDEXED_AT_EPOCH: "2022-11-17T00:00:00.000Z"
+      BSKY_BSYNC_URL: "http://bsync.invalid"
+
+      # Logging
+      LOG_ENABLED: "true"
+      LOG_LEVEL: "info"
+
+      # Node
+      NODE_ENV: "development"
+    command: ["node", "api-basic.js"]
+    depends_on:
+      dataplane:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/xrpc/_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =================================================================
+  # INGESTER - Generates test events from firehose
+  # =================================================================
+  ingester:
+    build:
+      context: /Users/rudyfraser/Projects/atproto
+      dockerfile: services/bsky/Dockerfile
+    container_name: rsky-test-ingester
+    restart: unless-stopped
+    networks:
+      - tests_default
+    ports:
+      - "4100:4100"
+    environment:
+      # Ingester config - connect to main Bluesky relay for test data
+      INGESTER_HOSTS: "https://relay1.us-east.bsky.network"
+      INGESTER_LABELER_HOSTS: "https://atproto.africa"
+      INGESTER_HIGH_WATER_MARK: "10000"
+      METRICS_PORT: "4100"
+
+      # Redis
+      REDIS_HOST: "rsky-test-redis"
+      REDIS_PORT: "6379"
+
+      # Database
+      DB_POSTGRES_URL: "postgresql://postgres:postgres@rsky-test-postgres:5432/bsky_local"
+
+      # Logging
+      LOG_ENABLED: "true"
+      LOG_LEVEL: "info"
+
+      # Node
+      NODE_ENV: "development"
+    command: ["node", "ingester.js"]
+    depends_on:
+      dataplane:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 2
+    profiles:
+      - with-ingester  # Optional - start with: --profile with-ingester

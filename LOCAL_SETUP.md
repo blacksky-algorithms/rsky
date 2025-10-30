@@ -84,7 +84,7 @@ XLEN label_live
 
 # Check cursors
 KEYS *cursor*
-GET firehose_live:cursor:bsky.network
+GET firehose_live:cursor:relay1.us-east.bsky.network
 
 # Monitor stream in real-time
 XREAD COUNT 10 STREAMS firehose_live 0
@@ -140,7 +140,7 @@ docker compose -f docker-compose.local.yml restart ingester
 All configuration is in `docker-compose.local.yml`. Key differences from prod:
 
 ### Ingester
-- `INGESTER_RELAY_HOSTS`: `bsky.network` (1 relay vs 3 in prod)
+- `INGESTER_RELAY_HOSTS`: `relay1.us-east.bsky.networkk` (1 relay vs 3 in prod)
 - `INGESTER_HIGH_WATER_MARK`: `10000` (vs 100M in prod)
 - `INGESTER_BATCH_SIZE`: `100` (vs 500 in prod)
 - `RUST_LOG`: `debug` for verbose logging
@@ -161,8 +161,8 @@ You should see logs like:
 ```
 INFO Starting rsky-ingester
 INFO Configuration: IngesterConfig { ... }
-INFO Starting FirehoseIngester for bsky.network
-INFO Connecting to wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos with cursor 0
+INFO Starting FirehoseIngester for relay1.us-east.bsky.network
+INFO Connecting to wss://relay1.us-east.bsky.network/xrpc/com.atproto.sync.subscribeRepos with cursor 0
 ```
 
 ### Events Being Processed

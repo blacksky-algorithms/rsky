@@ -5,7 +5,7 @@ This is a simplified guide to get you testing the Rust ingester locally in 5 min
 ## What You'll Get Running
 
 1. **Redis** - Local Redis instance (2GB max memory)
-2. **Rust Ingester** - Connects to `bsky.network` and streams events to Redis
+2. **Rust Ingester** - Connects to `relay1.us-east.bsky.network` and streams events to Redis
 
 Optional (with `--profile full`):
 3. **Postgres** - Local database
@@ -44,8 +44,8 @@ This starts:
 ✅ **Good signs:**
 ```
 INFO Starting rsky-ingester
-INFO Starting FirehoseIngester for bsky.network
-INFO Connecting to wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos with cursor 0
+INFO Starting FirehoseIngester for relay1.us-east.bsky.network
+INFO Connecting to wss://relay1.us-east.bsky.network/xrpc/com.atproto.sync.subscribeRepos with cursor 0
 DEBUG Received #commit message
 DEBUG Batching event
 ```
@@ -78,7 +78,7 @@ Label Live Stream:
 (integer) 0
 
 Cursors:
-1) "firehose_live:cursor:bsky.network"
+1) "firehose_live:cursor:relay1.us-east.bsky.network"
 ```
 
 Check the cursor value:

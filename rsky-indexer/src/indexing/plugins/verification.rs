@@ -1,4 +1,5 @@
 use crate::indexing::RecordPlugin;
+use crate::indexing::parse_timestamp;
 use crate::IndexerError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -23,14 +24,7 @@ impl VerificationPlugin {
         uri.rsplit('/').next().map(|s| s.to_string())
     }
 
-    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
-    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
-        DateTime::parse_from_rfc3339(timestamp)
-            .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| {
-                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
-            })
-    }
+
 }
 
 #[async_trait]
@@ -61,9 +55,9 @@ impl RecordPlugin for VerificationPlugin {
         let display_name = record.get("displayName").and_then(|d| d.as_str());
 
         // Parse timestamps
-        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let indexed_at = parse_timestamp(timestamp)?;
         let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
-            Some(ts) => Self::parse_timestamp(ts)?,
+            Some(ts) => parse_timestamp(ts)?,
             None => indexed_at.clone(),
         };
 

@@ -1,4 +1,5 @@
 use crate::indexing::RecordPlugin;
+use crate::indexing::parse_timestamp;
 use crate::IndexerError;
 use async_trait::async_trait;
 use deadpool_postgres::Pool;

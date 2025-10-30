@@ -1,4 +1,5 @@
 use crate::indexing::{sanitize_text_required, RecordPlugin};
+use crate::indexing::parse_timestamp;
 use crate::IndexerError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -183,14 +184,7 @@ impl PostPlugin {
         Ok(None)
     }
 
-    /// Parse ISO8601/RFC3339 timestamp string to DateTime<Utc>
-    fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
-        DateTime::parse_from_rfc3339(timestamp)
-            .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| {
-                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
-            })
-    }
+
 
     /// Hash a string to i64 for PostgreSQL advisory lock
     /// Uses a simple hash function similar to Java's hashCode
@@ -337,7 +331,7 @@ impl PostPlugin {
             let creator: String = row.get(1);
             let cid: String = row.get(2);
             let sort_at_str: String = row.get(3);
-            let sort_at = Self::parse_timestamp(&sort_at_str)?;
+            let sort_at = parse_timestamp(&sort_at_str)?;
             let depth: i32 = row.get(4);
             descendants.push((uri, creator, cid, sort_at, depth));
         }
@@ -610,9 +604,9 @@ impl RecordPlugin for PostPlugin {
             sanitize_text_required(record.get("text").and_then(|v| v.as_str()).unwrap_or(""));
 
         // Parse timestamps
-        let indexed_at = Self::parse_timestamp(timestamp)?;
+        let indexed_at = parse_timestamp(timestamp)?;
         let created_at = match record.get("createdAt").and_then(|c| c.as_str()) {
-            Some(ts) => Self::parse_timestamp(ts)?,
+            Some(ts) => parse_timestamp(ts)?,
             None => indexed_at.clone(),
         };
 

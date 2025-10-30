@@ -62,13 +62,13 @@ services:
     ports:
       - "4100:4100"
     environment:
-      # Ingester configuration - using public Bluesky relay for testing
-      INGESTER_RELAY_HOSTS: "bsky.network"
-      INGESTER_LABELER_HOSTS: ""
-      INGESTER_HIGH_WATER_MARK: "10000"
+      # Ingester configuration - testing with all 3 relays like production
+      INGESTER_RELAY_HOSTS: "relay1.us-east.bsky.network,relay1.us-west.bsky.network,atproto.africa"
+      INGESTER_LABELER_HOSTS: "atproto.africa"
+      INGESTER_HIGH_WATER_MARK: "50000"
       INGESTER_BATCH_SIZE: "100"
       INGESTER_BATCH_TIMEOUT_MS: "1000"
-      INGESTER_MODE: "firehose"  # Just firehose mode for testing
+      INGESTER_MODE: "all"  # Test all modes (firehose, backfill, labeler)
       # Redis configuration
       REDIS_URL: "redis://redis:6379"
       # Logging - more verbose for debugging
