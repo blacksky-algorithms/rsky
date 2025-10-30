@@ -386,10 +386,12 @@ impl IndexingService {
             return Ok(true);
         };
 
-        let indexed_at: Option<DateTime<Utc>> = row.get(1);
-        let Some(indexed_at) = indexed_at else {
+        // Read indexedAt as String, then parse to DateTime
+        let indexed_at_str: Option<String> = row.get(1);
+        let Some(indexed_at_str) = indexed_at_str else {
             return Ok(true);
         };
+        let indexed_at = parse_timestamp(&indexed_at_str)?;
 
         let timestamp_dt = parse_timestamp(timestamp)?;
         let time_diff = (timestamp_dt.timestamp_millis() - indexed_at.timestamp_millis()).abs();
