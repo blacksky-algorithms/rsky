@@ -61,55 +61,85 @@ async fn main() -> Result<()> {
 
     match mode.as_str() {
         "firehose" => {
+            eprintln!("[EXIT-TRACE] About to run firehose mode");
             run_firehose(config).await?;
+            eprintln!("[EXIT-TRACE] Firehose mode exited - EXIT PATH A");
+            error!("[EXIT-TRACE] Firehose mode exited - EXIT PATH A");
             return Err(anyhow::anyhow!("CRITICAL: Firehose mode exited unexpectedly"));
         }
         "backfill" => {
+            eprintln!("[EXIT-TRACE] About to run backfill mode");
             run_backfill(config).await?;
+            eprintln!("[EXIT-TRACE] Backfill mode exited - EXIT PATH B");
+            error!("[EXIT-TRACE] Backfill mode exited - EXIT PATH B");
             return Err(anyhow::anyhow!("CRITICAL: Backfill mode exited unexpectedly"));
         }
         "labeler" => {
+            eprintln!("[EXIT-TRACE] About to run labeler mode");
             run_labeler(config).await?;
+            eprintln!("[EXIT-TRACE] Labeler mode exited - EXIT PATH C");
+            error!("[EXIT-TRACE] Labeler mode exited - EXIT PATH C");
             return Err(anyhow::anyhow!("CRITICAL: Labeler mode exited unexpectedly"));
         }
         "all" => {
+            eprintln!("[EXIT-TRACE] Running in 'all' mode");
             // Run all ingesters concurrently
             let firehose_config = config.clone();
             let backfill_config = config.clone();
             let labeler_config = config.clone();
 
+            eprintln!("[EXIT-TRACE] Spawning firehose and backfill tasks");
             // Spawn all tasks and wait for any to error
             let firehose_handle = tokio::spawn(async move { run_firehose(firehose_config).await });
             let backfill_handle = tokio::spawn(async move { run_backfill(backfill_config).await });
 
             // Only spawn labeler if we have labeler hosts configured
             if !config.labeler_hosts.is_empty() {
+                eprintln!("[EXIT-TRACE] Spawning labeler task (hosts configured)");
                 let labeler_handle = tokio::spawn(async move { run_labeler(labeler_config).await });
 
+                eprintln!("[EXIT-TRACE] Entering tokio::select! with all three tasks");
                 // Use select! to exit if any task exits
                 tokio::select! {
                     result = firehose_handle => {
+                        eprintln!("[EXIT-TRACE] tokio::select! triggered on firehose_handle - EXIT PATH D");
+                        eprintln!("[EXIT-TRACE] Firehose result: {:?}", result);
+                        error!("[EXIT-TRACE] tokio::select! triggered on firehose_handle - EXIT PATH D");
                         error!("Firehose ingester exited: {:?}", result);
                         return Err(anyhow::anyhow!("CRITICAL: Firehose ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = backfill_handle => {
+                        eprintln!("[EXIT-TRACE] tokio::select! triggered on backfill_handle - EXIT PATH E");
+                        eprintln!("[EXIT-TRACE] Backfill result: {:?}", result);
+                        error!("[EXIT-TRACE] tokio::select! triggered on backfill_handle - EXIT PATH E");
                         error!("Backfill ingester exited: {:?}", result);
                         return Err(anyhow::anyhow!("CRITICAL: Backfill ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = labeler_handle => {
+                        eprintln!("[EXIT-TRACE] tokio::select! triggered on labeler_handle - EXIT PATH F");
+                        eprintln!("[EXIT-TRACE] Labeler result: {:?}", result);
+                        error!("[EXIT-TRACE] tokio::select! triggered on labeler_handle - EXIT PATH F");
                         error!("Labeler ingester exited: {:?}", result);
                         return Err(anyhow::anyhow!("CRITICAL: Labeler ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                 }
             } else {
                 // No labeler, just wait for firehose or backfill
+                eprintln!("[EXIT-TRACE] No labeler hosts configured");
                 info!("No labeler hosts configured, skipping labeler ingester");
+                eprintln!("[EXIT-TRACE] Entering tokio::select! with firehose and backfill only");
                 tokio::select! {
                     result = firehose_handle => {
+                        eprintln!("[EXIT-TRACE] tokio::select! triggered on firehose_handle (no labeler) - EXIT PATH G");
+                        eprintln!("[EXIT-TRACE] Firehose result: {:?}", result);
+                        error!("[EXIT-TRACE] tokio::select! triggered on firehose_handle (no labeler) - EXIT PATH G");
                         error!("Firehose ingester exited: {:?}", result);
                         return Err(anyhow::anyhow!("CRITICAL: Firehose ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = backfill_handle => {
+                        eprintln!("[EXIT-TRACE] tokio::select! triggered on backfill_handle (no labeler) - EXIT PATH H");
+                        eprintln!("[EXIT-TRACE] Backfill result: {:?}", result);
+                        error!("[EXIT-TRACE] tokio::select! triggered on backfill_handle (no labeler) - EXIT PATH H");
                         error!("Backfill ingester exited: {:?}", result);
                         return Err(anyhow::anyhow!("CRITICAL: Backfill ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
@@ -117,10 +147,16 @@ async fn main() -> Result<()> {
             }
         }
         _ => {
+            eprintln!("[EXIT-TRACE] Unknown INGESTER_MODE: {} - EXIT PATH I", mode);
             error!("Unknown INGESTER_MODE: {}", mode);
             std::process::exit(1);
         }
     }
+
+    // This line should NEVER be reached
+    eprintln!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
+    error!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
+    Err(anyhow::anyhow!("CRITICAL: main() reached impossible code path after match statement"))
 }
 
 async fn run_firehose(config: IngesterConfig) -> Result<()> {
