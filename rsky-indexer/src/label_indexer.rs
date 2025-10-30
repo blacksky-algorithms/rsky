@@ -196,15 +196,16 @@ impl LabelIndexer {
                 debug!("Deleted label: {} on {}", label.val, label.uri);
             } else {
                 // Insert or update the label
+                // Note: Using exp column (not indexedAt) to match existing schema
                 client
                     .execute(
                         r#"
-                        INSERT INTO label (src, uri, cid, val, cts, "indexedAt")
-                        VALUES ($1, $2, $3, $4, $5, NOW())
+                        INSERT INTO label (src, uri, cid, val, cts, exp)
+                        VALUES ($1, $2, $3, $4, $5, NULL)
                         ON CONFLICT (src, uri, val) DO UPDATE
                         SET cid = EXCLUDED.cid,
                             cts = EXCLUDED.cts,
-                            "indexedAt" = EXCLUDED."indexedAt"
+                            exp = EXCLUDED.exp
                         "#,
                         &[
                             &label.src,
