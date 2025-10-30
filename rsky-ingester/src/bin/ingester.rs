@@ -5,7 +5,7 @@ use rsky_ingester::{
 };
 use std::env;
 use tokio::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -62,12 +62,15 @@ async fn main() -> Result<()> {
     match mode.as_str() {
         "firehose" => {
             run_firehose(config).await?;
+            return Err(anyhow::anyhow!("CRITICAL: Firehose mode exited unexpectedly"));
         }
         "backfill" => {
             run_backfill(config).await?;
+            return Err(anyhow::anyhow!("CRITICAL: Backfill mode exited unexpectedly"));
         }
         "labeler" => {
             run_labeler(config).await?;
+            return Err(anyhow::anyhow!("CRITICAL: Labeler mode exited unexpectedly"));
         }
         "all" => {
             // Run all ingesters concurrently
@@ -87,22 +90,28 @@ async fn main() -> Result<()> {
                 tokio::select! {
                     result = firehose_handle => {
                         error!("Firehose ingester exited: {:?}", result);
+                        return Err(anyhow::anyhow!("CRITICAL: Firehose ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = backfill_handle => {
                         error!("Backfill ingester exited: {:?}", result);
+                        return Err(anyhow::anyhow!("CRITICAL: Backfill ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = labeler_handle => {
                         error!("Labeler ingester exited: {:?}", result);
+                        return Err(anyhow::anyhow!("CRITICAL: Labeler ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                 }
             } else {
                 // No labeler, just wait for firehose or backfill
+                info!("No labeler hosts configured, skipping labeler ingester");
                 tokio::select! {
                     result = firehose_handle => {
                         error!("Firehose ingester exited: {:?}", result);
+                        return Err(anyhow::anyhow!("CRITICAL: Firehose ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                     result = backfill_handle => {
                         error!("Backfill ingester exited: {:?}", result);
+                        return Err(anyhow::anyhow!("CRITICAL: Backfill ingester exited unexpectedly. This should never happen. Check logs for details."));
                     }
                 }
             }
@@ -112,8 +121,6 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     }
-
-    Ok(())
 }
 
 async fn run_firehose(config: IngesterConfig) -> Result<()> {
