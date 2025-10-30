@@ -85,7 +85,14 @@ impl LabelIndexer {
             let mut handles = Vec::new();
 
             for message in messages {
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                // Acquire semaphore permit - if this fails, the semaphore was closed
+                let permit = match self.semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("Failed to acquire semaphore permit: {:?}, skipping message", e);
+                        continue;
+                    }
+                };
                 let pool = self.pool.clone();
                 let consumer = self.consumer.clone();
 

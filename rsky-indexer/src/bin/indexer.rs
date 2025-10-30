@@ -1,11 +1,12 @@
 use anyhow::Result;
-use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
+use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts};
 use rsky_indexer::{
     indexing::IndexingService, label_indexer::LabelIndexer, stream_indexer::StreamIndexer, streams,
     IndexerConfig,
 };
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_postgres::NoTls;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -29,15 +30,17 @@ async fn main() -> Result<()> {
     info!("Configuration: {:?}", config);
 
     // Create PostgreSQL connection pool
+    // Per CLAUDE.md: Conservative pool sizing to avoid connection exhaustion
+    // Default: 20 connections max (not concurrency * 2 which can be 200!)
     let pool_max_size = env::var("DB_POOL_MAX_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(config.concurrency * 2);
+        .unwrap_or(20);
 
     let _pool_min_idle = env::var("DB_POOL_MIN_IDLE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(config.concurrency / 2);
+        .unwrap_or(5);
 
     let mut pg_config = Config::new();
     pg_config.url = Some(config.database_url.clone());
@@ -46,6 +49,11 @@ async fn main() -> Result<()> {
     });
     pg_config.pool = Some(PoolConfig {
         max_size: pool_max_size,
+        timeouts: Timeouts {
+            wait: Some(Duration::from_secs(30)),        // Wait max 30s for a connection
+            create: Some(Duration::from_secs(30)),      // Create connection max 30s
+            recycle: Some(Duration::from_secs(30)),     // Recycle connection max 30s
+        },
         ..Default::default()
     });
 

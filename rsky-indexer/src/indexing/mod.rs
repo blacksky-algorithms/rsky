@@ -253,13 +253,12 @@ impl IndexingService {
         client
             .execute(
                 r#"
-                INSERT INTO actor_sync (did, commit_cid, repo_rev, last_seen)
-                VALUES ($1, $2, $3, NOW())
+                INSERT INTO actor_sync (did, "commitCid", "repoRev")
+                VALUES ($1, $2, $3)
                 ON CONFLICT (did) DO UPDATE
-                SET commit_cid = EXCLUDED.commit_cid,
-                    repo_rev = EXCLUDED.repo_rev,
-                    last_seen = NOW()
-                WHERE actor_sync.repo_rev < EXCLUDED.repo_rev
+                SET "commitCid" = EXCLUDED."commitCid",
+                    "repoRev" = EXCLUDED."repoRev"
+                WHERE actor_sync."repoRev" < EXCLUDED."repoRev"
                 "#,
                 &[&did, &commit_cid, &rev],
             )
@@ -285,11 +284,11 @@ impl IndexingService {
             client
                 .execute(
                     r#"
-                    INSERT INTO actor (did, indexed_at)
+                    INSERT INTO actor (did, "indexedAt")
                     VALUES ($1, $2)
                     ON CONFLICT (did) DO UPDATE
-                    SET indexed_at = EXCLUDED.indexed_at
-                    WHERE actor.indexed_at IS NULL OR actor.indexed_at < EXCLUDED.indexed_at
+                    SET "indexedAt" = EXCLUDED."indexedAt"
+                    WHERE actor."indexedAt" IS NULL OR actor."indexedAt" < EXCLUDED."indexedAt"
                     "#,
                     &[&did, &indexed_at],
                 )
@@ -302,7 +301,7 @@ impl IndexingService {
         let client = self.pool.get().await?;
         let actor = client
             .query_opt(
-                "SELECT handle, indexed_at FROM actor WHERE did = $1",
+                r#"SELECT handle, "indexedAt" FROM actor WHERE did = $1"#,
                 &[&did],
             )
             .await
@@ -360,11 +359,11 @@ impl IndexingService {
         client
             .execute(
                 r#"
-                INSERT INTO actor (did, handle, indexed_at)
+                INSERT INTO actor (did, handle, "indexedAt")
                 VALUES ($1, $2, $3)
                 ON CONFLICT (did) DO UPDATE
                 SET handle = EXCLUDED.handle,
-                    indexed_at = EXCLUDED.indexed_at
+                    "indexedAt" = EXCLUDED."indexedAt"
                 "#,
                 &[&did, &verified_handle, &indexed_at],
             )
@@ -536,12 +535,12 @@ impl IndexingService {
         client
             .execute(
                 r#"
-                INSERT INTO record (uri, cid, did, json, indexed_at)
+                INSERT INTO record (uri, cid, did, json, "indexedAt")
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (uri) DO UPDATE
                 SET cid = EXCLUDED.cid,
                     json = EXCLUDED.json,
-                    indexed_at = EXCLUDED.indexed_at
+                    "indexedAt" = EXCLUDED."indexedAt"
                 "#,
                 &[&uri, &cid, &did, record, &indexed_at],
             )
@@ -562,7 +561,7 @@ impl IndexingService {
                 UPDATE record
                 SET json = '{}',
                     cid = '',
-                    indexed_at = NOW()
+                    "indexedAt" = NOW()
                 WHERE uri = $1
                 "#,
                 &[&uri],
