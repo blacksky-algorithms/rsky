@@ -362,7 +362,7 @@ impl IndexingService {
                 SET handle = EXCLUDED.handle,
                     "indexedAt" = EXCLUDED."indexedAt"
                 "#,
-                &[&did, &verified_handle, &indexed_at],
+                &[&did, &verified_handle, &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
