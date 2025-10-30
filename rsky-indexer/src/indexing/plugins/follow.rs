@@ -116,7 +116,7 @@ impl RecordPlugin for FollowPlugin {
         if let (Some(follow_creator), Some(follow_subject)) = (&creator, subject_did) {
             let existing = client
                 .query_opt(
-                    r#"SELECT uri FROM follow WHERE creator = $1 AND subject_did = $2"#,
+                    r#"SELECT uri FROM follow WHERE creator = $1 AND "subjectDid" = $2"#,
                     &[&follow_creator, &follow_subject],
                 )
                 .await
@@ -128,20 +128,13 @@ impl RecordPlugin for FollowPlugin {
             }
         }
 
-        // Calculate sort_at for tables without auto-generated columns
-        let sort_at = if created_at < indexed_at {
-            created_at.clone()
-        } else {
-            indexed_at.clone()
-        };
-
         // Insert follow
         client
             .execute(
-                r#"INSERT INTO follow (uri, cid, creator, subject_did, created_at, indexed_at, sort_at)
+                r#"INSERT INTO follow (uri, cid, creator, "subjectDid", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &created_at, &indexed_at, &sort_at],
+                &[&uri, &cid, &creator, &subject_did, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -150,16 +143,15 @@ impl RecordPlugin for FollowPlugin {
         if let (Some(follow_creator), Some(follow_subject)) = (&creator, subject_did) {
             client
                 .execute(
-                    r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                    r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject")
+                       VALUES ($1, $2, $3, $4, $5, $6)"#,
                     &[
                         &follow_subject,
                         &follow_creator,
                         &uri,
                         &cid,
                         &"follow",
-                        &Option::<&str>::None,
-                        &indexed_at,
+                        &Option::<&str>::None
                     ],
                 )
                 .await
@@ -171,7 +163,7 @@ impl RecordPlugin for FollowPlugin {
             client
                 .execute(
                     r#"INSERT INTO profile_agg (did, followers_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subject_did = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $1))
                        ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
                     &[&follow_subject],
                 )
@@ -211,7 +203,7 @@ impl RecordPlugin for FollowPlugin {
         // Get the follow data before deleting for aggregate updates
         let row = client
             .query_opt(
-                r#"SELECT creator, subject_did FROM follow WHERE uri = $1"#,
+                r#"SELECT creator, "subjectDid" FROM follow WHERE uri = $1"#,
                 &[&uri],
             )
             .await
@@ -229,7 +221,7 @@ impl RecordPlugin for FollowPlugin {
 
         // Delete notifications for this follow
         client
-            .execute("DELETE FROM notification WHERE record_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -238,7 +230,7 @@ impl RecordPlugin for FollowPlugin {
             client
                 .execute(
                     r#"INSERT INTO profile_agg (did, followers_count)
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE subject_did = $1))
+                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $1))
                        ON CONFLICT (did) DO UPDATE SET followers_count = EXCLUDED.followers_count"#,
                     &[&follow_subject],
                 )

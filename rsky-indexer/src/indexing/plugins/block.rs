@@ -71,19 +71,12 @@ impl RecordPlugin for BlockPlugin {
             }
         }
 
-        // Calculate sort_at for tables without auto-generated columns
-        let sort_at = if created_at < indexed_at {
-            created_at.clone()
-        } else {
-            indexed_at.clone()
-        };
-
         client
             .execute(
-                r#"INSERT INTO actor_block (uri, cid, creator, subject_did, created_at, indexed_at, sort_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                r#"INSERT INTO actor_block (uri, cid, creator, "subjectDid", "createdAt", "indexedAt")
+                   VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &created_at, &indexed_at, &sort_at],
+                &[&uri, &cid, &creator, &subject_did, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

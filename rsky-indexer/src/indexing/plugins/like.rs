@@ -76,20 +76,13 @@ impl RecordPlugin for LikePlugin {
             }
         }
 
-        // Calculate sort_at for tables without auto-generated columns
-        let sort_at = if created_at < indexed_at {
-            created_at.clone()
-        } else {
-            indexed_at.clone()
-        };
-
         // Insert like
         client
             .execute(
-                r#"INSERT INTO "like" (uri, cid, creator, subject, subject_cid, via, via_cid, created_at, indexed_at, sort_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                r#"INSERT INTO "like" (uri, cid, creator, subject, "subjectCid", via, "viaCid", "createdAt", "indexedAt")
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at, &sort_at],
+                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -103,7 +96,7 @@ impl RecordPlugin for LikePlugin {
                 if let Some(notif_recipient) = subject_creator {
                     client
                         .execute(
-                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, reason_subject, sort_at)
                                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                             &[
                                 &notif_recipient,
@@ -112,7 +105,7 @@ impl RecordPlugin for LikePlugin {
                                 &cid,
                                 &"like",
                                 &Some(like_subject),
-                                &indexed_at,
+                                &indexed_at.to_rfc3339(),
                             ],
                         )
                         .await
@@ -127,7 +120,7 @@ impl RecordPlugin for LikePlugin {
                     if let Some(notif_recipient) = via_creator {
                         client
                             .execute(
-                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, reason_subject, sort_at)
                                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                                 &[
                                     &notif_recipient,
@@ -136,7 +129,7 @@ impl RecordPlugin for LikePlugin {
                                     &cid,
                                     &"like-via-repost",
                                     &Some(via_uri),
-                                    &indexed_at,
+                                    &indexed_at.to_rfc3339(),
                                 ],
                             )
                             .await
@@ -193,7 +186,7 @@ impl RecordPlugin for LikePlugin {
 
         // Delete notifications for this like
         client
-            .execute("DELETE FROM notification WHERE record_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 

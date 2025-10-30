@@ -84,7 +84,7 @@ impl RecordPlugin for ProfilePlugin {
 
         client
             .execute(
-                r#"INSERT INTO profile (uri, cid, creator, display_name, description, avatar_cid, banner_cid, joined_via_starter_pack_uri, created_at, indexed_at)
+                r#"INSERT INTO profile (uri, cid, creator, "displayName", description, "avatarCid", "bannerCid", "joinedViaStarterPackUri", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -96,8 +96,8 @@ impl RecordPlugin for ProfilePlugin {
                     &avatar_cid,
                     &banner_cid,
                     &joined_via_starter_pack_uri,
-                    &created_at,
-                    &indexed_at,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
                 ],
             )
             .await
@@ -114,7 +114,7 @@ impl RecordPlugin for ProfilePlugin {
             if let Some(notif_recipient) = starter_pack_creator {
                 client
                     .execute(
-                        r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                        r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                            VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                         &[
                             &notif_recipient,
@@ -123,7 +123,7 @@ impl RecordPlugin for ProfilePlugin {
                             &cid,
                             &"starterpack-joined",
                             &Some(starter_pack_uri),
-                            &indexed_at,
+                            &indexed_at.to_rfc3339(),
                         ],
                     )
                     .await

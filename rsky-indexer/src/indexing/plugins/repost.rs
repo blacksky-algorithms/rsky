@@ -86,10 +86,10 @@ impl RecordPlugin for RepostPlugin {
         // Insert repost
         client
             .execute(
-                r#"INSERT INTO repost (uri, cid, creator, subject, subject_cid, via, via_cid, created_at, indexed_at, sort_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                r#"INSERT INTO repost (uri, cid, creator, subject, "subjectCid", via, "viaCid", "createdAt", "indexedAt")
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at, &sort_at],
+                &[&uri, &cid, &creator, &subject, &subject_cid, &via, &via_cid, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -97,10 +97,10 @@ impl RecordPlugin for RepostPlugin {
         // Insert into feed_item table
         client
             .execute(
-                r#"INSERT INTO feed_item (type, uri, cid, post_uri, originator_did, sort_at)
+                r#"INSERT INTO feed_item (type, uri, cid, "postUri", "originatorDid", "sortAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri, cid) DO NOTHING"#,
-                &[&"repost", &uri, &cid, &subject, &creator, &sort_at],
+                &[&"repost", &uri, &cid, &subject, &creator, &sort_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -114,7 +114,7 @@ impl RecordPlugin for RepostPlugin {
                 if let Some(notif_recipient) = subject_creator {
                     client
                         .execute(
-                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                             &[
                                 &notif_recipient,
@@ -123,7 +123,7 @@ impl RecordPlugin for RepostPlugin {
                                 &cid,
                                 &"repost",
                                 &Some(repost_subject),
-                                &sort_at,
+                                &sort_at.to_rfc3339(),
                             ],
                         )
                         .await
@@ -138,7 +138,7 @@ impl RecordPlugin for RepostPlugin {
                     if let Some(notif_recipient) = via_creator {
                         client
                             .execute(
-                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                                 &[
                                     &notif_recipient,
@@ -147,7 +147,7 @@ impl RecordPlugin for RepostPlugin {
                                     &cid,
                                     &"repost-via-repost",
                                     &Some(via_uri),
-                                    &sort_at,
+                                    &sort_at.to_rfc3339(),
                                 ],
                             )
                             .await
@@ -161,9 +161,9 @@ impl RecordPlugin for RepostPlugin {
         if let Some(repost_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, repost_count)
+                    r#"INSERT INTO post_agg (uri, "repostCount")
                        VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET repost_count = EXCLUDED.repost_count"#,
+                       ON CONFLICT (uri) DO UPDATE SET "repostCount" = EXCLUDED."repostCount""#,
                     &[&repost_subject],
                 )
                 .await
@@ -210,7 +210,7 @@ impl RecordPlugin for RepostPlugin {
 
         // Delete notifications for this repost
         client
-            .execute("DELETE FROM notification WHERE record_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -218,9 +218,9 @@ impl RecordPlugin for RepostPlugin {
         if let Some(repost_subject) = subject {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, repost_count)
+                    r#"INSERT INTO post_agg (uri, "repostCount")
                        VALUES ($1, (SELECT COUNT(*) FROM repost WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET repost_count = EXCLUDED.repost_count"#,
+                       ON CONFLICT (uri) DO UPDATE SET "repostCount" = EXCLUDED."repostCount""#,
                     &[&repost_subject],
                 )
                 .await

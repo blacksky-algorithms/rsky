@@ -64,9 +64,9 @@ impl PostPlugin {
                 if let Some(cid) = image_cid {
                     client
                         .execute(
-                            r#"INSERT INTO post_embed_image (post_uri, position, image_cid, alt)
+                            r#"INSERT INTO post_embed_image ("postUri", position, "imageCid", alt)
                                VALUES ($1, $2, $3, $4)
-                               ON CONFLICT (post_uri, position) DO NOTHING"#,
+                               ON CONFLICT ("postUri", position) DO NOTHING"#,
                             &[&post_uri, &(position as i32), &cid, &alt],
                         )
                         .await
@@ -95,7 +95,7 @@ impl PostPlugin {
             if let Some(ext_uri) = uri {
                 client
                     .execute(
-                        r#"INSERT INTO post_embed_external (post_uri, uri, title, description, thumb_cid)
+                        r#"INSERT INTO post_embed_external ("postUri", uri, title, description, "thumbCid")
                            VALUES ($1, $2, $3, $4, $5)
                            ON CONFLICT (post_uri) DO NOTHING"#,
                         &[&post_uri, &ext_uri, &title, &description, &thumb_cid],
@@ -122,7 +122,7 @@ impl PostPlugin {
         if let Some(cid) = video_cid {
             client
                 .execute(
-                    r#"INSERT INTO post_embed_video (post_uri, video_cid, alt)
+                    r#"INSERT INTO post_embed_video ("postUri", "videoCid", alt)
                        VALUES ($1, $2, $3)
                        ON CONFLICT (post_uri) DO NOTHING"#,
                     &[&post_uri, &cid, &alt],
@@ -150,7 +150,7 @@ impl PostPlugin {
                 // Insert into post_embed_record
                 client
                     .execute(
-                        r#"INSERT INTO post_embed_record (post_uri, embed_uri, embed_cid)
+                        r#"INSERT INTO post_embed_record ("postUri", "embedUri", "embedCid")
                            VALUES ($1, $2, $3)
                            ON CONFLICT (post_uri) DO NOTHING"#,
                         &[&post_uri, &subject_uri, &subject_cid],
@@ -161,10 +161,10 @@ impl PostPlugin {
                 // Insert into quote table
                 client
                     .execute(
-                        r#"INSERT INTO quote (uri, cid, creator, subject, subject_cid, created_at, indexed_at)
+                        r#"INSERT INTO quote (uri, cid, creator, subject, "subjectCid", "createdAt", "indexedAt")
                            VALUES ($1, $2, $3, $4, $5, $6, $7)
                            ON CONFLICT (uri) DO NOTHING"#,
-                        &[&post_uri, &post_cid, &creator, &subject_uri, &subject_cid, &indexed_at, &indexed_at],
+                        &[&post_uri, &post_cid, &creator, &subject_uri, &subject_cid, &indexed_at.to_rfc3339(), &indexed_at.to_rfc3339()],
                     )
                     .await
                     .map_err(|e| IndexerError::Database(e.into()))?;
@@ -254,7 +254,7 @@ impl PostPlugin {
             // Get the post and its creator
             let row = client
                 .query_opt(
-                    "SELECT creator, reply_parent FROM post WHERE uri = $1",
+                    r#"SELECT creator, "replyParent" FROM post WHERE uri = $1"#,
                     &[&current_uri],
                 )
                 .await
@@ -299,20 +299,20 @@ impl PostPlugin {
                 r#"
                 WITH RECURSIVE descendent(uri, creator, cid, sort_at, depth) AS (
                     -- Base case: direct replies to this post
-                    SELECT uri, creator, cid, sort_at, 1 as depth
+                    SELECT uri, creator, cid, "sortAt", 1 as depth
                     FROM post
-                    WHERE reply_parent = $1
+                    WHERE "replyParent" = $1
                     AND $2 >= 1
 
                     UNION ALL
 
                     -- Recursive case: replies to descendants
-                    SELECT p.uri, p.creator, p.cid, p.sort_at, d.depth + 1
+                    SELECT p.uri, p.creator, p.cid, p."sortAt", d.depth + 1
                     FROM post p
-                    INNER JOIN descendent d ON d.uri = p.reply_parent
+                    INNER JOIN descendent d ON d.uri = p."replyParent"
                     WHERE d.depth < $2
                 )
-                SELECT uri, creator, cid, sort_at, depth
+                SELECT uri, creator, cid, "sortAt", depth
                 FROM descendent
                 ORDER BY depth, sort_at
                 "#,
@@ -347,7 +347,7 @@ impl PostPlugin {
         // Get parent post and its reply info
         let parent_row = client
             .query_opt(
-                "SELECT invalid_reply_root, reply_root FROM post WHERE uri = $1",
+                r#"SELECT "invalidReplyRoot", "replyRoot" FROM post WHERE uri = $1"#,
                 &[&reply_parent_uri],
             )
             .await
@@ -461,7 +461,7 @@ impl PostPlugin {
                         // Check if owner follows replier
                         let follows = client
                             .query_opt(
-                                "SELECT uri FROM follow WHERE creator = $1 AND subject_did = $2",
+                                r#"SELECT uri FROM follow WHERE creator = $1 AND "subjectDid" = $2"#,
                                 &[&owner_did, &replier_did],
                             )
                             .await
@@ -476,7 +476,7 @@ impl PostPlugin {
                         if let Some(list_uri) = rule.get("list").and_then(|l| l.as_str()) {
                             let in_list = client
                                 .query_opt(
-                                    "SELECT uri FROM list_item WHERE list_uri = $1 AND subject_did = $2",
+                                    r#"SELECT uri FROM list_item WHERE "listUri" = $1 AND subject_did = $2"#,
                                     &[&list_uri, &replier_did],
                                 )
                                 .await
@@ -635,12 +635,12 @@ impl RecordPlugin for PostPlugin {
             indexed_at.clone()
         };
 
-        // Insert post with explicit sort_at
+        // Insert post
         let rows_inserted = client
             .execute(
-                r#"INSERT INTO post (uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid,
-                                     langs, tags, created_at, indexed_at, sort_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                r#"INSERT INTO post (uri, cid, creator, text, "replyRoot", "replyRootCid", "replyParent", "replyParentCid",
+                                     langs, tags, "createdAt", "indexedAt")
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
                     &uri,
@@ -653,9 +653,8 @@ impl RecordPlugin for PostPlugin {
                     &reply_parent_cid,
                     &langs,
                     &tags,
-                    &created_at,
-                    &indexed_at,
-                    &sort_at,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
                 ],
             )
             .await
@@ -669,10 +668,10 @@ impl RecordPlugin for PostPlugin {
         // Insert into feed_item
         client
             .execute(
-                r#"INSERT INTO feed_item (type, uri, cid, post_uri, originator_did, sort_at)
+                r#"INSERT INTO feed_item (type, uri, cid, "postUri", "originatorDid", "sortAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri, cid) DO NOTHING"#,
-                &[&"post", &uri, &cid, &uri, &creator, &sort_at],
+                &[&"post", &uri, &cid, &uri, &creator, &sort_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -686,9 +685,9 @@ impl RecordPlugin for PostPlugin {
                 if &mentioned_did != post_creator {
                     client
                         .execute(
-                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                            &[&mentioned_did, &post_creator, &uri, &cid, &"mention", &Some(uri), &sort_at],
+                            &[&mentioned_did, &post_creator, &uri, &cid, &"mention", &Some(uri), &sort_at.to_rfc3339()],
                         )
                         .await
                         .map_err(|e| IndexerError::Database(e.into()))?;
@@ -712,7 +711,7 @@ impl RecordPlugin for PostPlugin {
             if invalid || violates {
                 client
                     .execute(
-                        "UPDATE post SET invalid_reply_root = $1, violates_thread_gate = $2 WHERE uri = $3",
+                        r#"UPDATE post SET "invalidReplyRoot" = $1, "violatesThreadGate" = $2 WHERE uri = $3"#,
                         &[&invalid, &violates, &uri],
                     )
                     .await
@@ -778,7 +777,7 @@ impl RecordPlugin for PostPlugin {
             if violates_embedding_rules {
                 client
                     .execute(
-                        "UPDATE post SET violates_embedding_rules = $1 WHERE uri = $2",
+                        r#"UPDATE post SET "violatesEmbeddingRules" = $1 WHERE uri = $2"#,
                         &[&violates_embedding_rules, &uri],
                     )
                     .await
@@ -795,9 +794,9 @@ impl RecordPlugin for PostPlugin {
                     if let Some(notif_recipient) = quoted_creator {
                         client
                             .execute(
-                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                                &[&notif_recipient, &post_creator, &uri, &cid, &"quote", &Some(quoted_uri.as_str()), &sort_at],
+                                &[&notif_recipient, &post_creator, &uri, &cid, &"quote", &Some(quoted_uri.as_str()), &sort_at.to_rfc3339()],
                             )
                             .await
                             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -810,9 +809,9 @@ impl RecordPlugin for PostPlugin {
         if let Some(quoted_uri) = quote_uri {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, quote_count)
+                    r#"INSERT INTO post_agg (uri, "quoteCount")
                        VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET quote_count = EXCLUDED.quote_count"#,
+                       ON CONFLICT (uri) DO UPDATE SET "quoteCount" = EXCLUDED."quoteCount""#,
                     &[&quoted_uri],
                 )
                 .await
@@ -843,9 +842,9 @@ impl RecordPlugin for PostPlugin {
                     // Create notification
                     client
                         .execute(
-                            r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                            r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                            &[&ancestor_creator, &post_creator, &uri, &cid, &"reply", &Some(ancestor_uri.as_str()), &sort_at],
+                            &[&ancestor_creator, &post_creator, &uri, &cid, &"reply", &Some(ancestor_uri.as_str()), &sort_at.to_rfc3339()],
                         )
                         .await
                         .map_err(|e| IndexerError::Database(e.into()))?;
@@ -901,7 +900,7 @@ impl RecordPlugin for PostPlugin {
                         // Create notification from descendant to ancestor
                         client
                             .execute(
-                                r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                                r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                                 &[
                                     ancestor_creator,
@@ -910,7 +909,7 @@ impl RecordPlugin for PostPlugin {
                                     &desc_cid,
                                     &"reply",
                                     &Some(ancestor_uri.as_str()),
-                                    &desc_sort_at
+                                    &desc_sort_at.to_rfc3339()
                                 ],
                             )
                             .await
@@ -927,11 +926,11 @@ impl RecordPlugin for PostPlugin {
         if let Some(parent_uri) = reply_parent {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, reply_count)
+                    r#"INSERT INTO post_agg (uri, "replyCount")
                        VALUES ($1, (SELECT COUNT(*) FROM post
-                                    WHERE reply_parent = $1
-                                    AND (violates_thread_gate IS NULL OR violates_thread_gate = false)))
-                       ON CONFLICT (uri) DO UPDATE SET reply_count = EXCLUDED.reply_count"#,
+                                    WHERE "replyParent" = $1
+                                    AND ("violatesThreadGate" IS NULL OR "violatesThreadGate" = false)))
+                       ON CONFLICT (uri) DO UPDATE SET "replyCount" = EXCLUDED."replyCount""#,
                     &[&parent_uri],
                 )
                 .await
@@ -942,9 +941,9 @@ impl RecordPlugin for PostPlugin {
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(post_creator) = &creator {
             let lock_key = format!("postCount:{}", post_creator);
-            let query = r#"INSERT INTO profile_agg (did, posts_count)
+            let query = r#"INSERT INTO profile_agg (did, "postsCount")
                           VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
-                          ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#;
+                          ON CONFLICT (did) DO UPDATE SET "postsCount" = EXCLUDED."postsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, post_creator, query).await?;
         }
@@ -971,7 +970,7 @@ impl RecordPlugin for PostPlugin {
         // Get post data before deleting for aggregate updates
         let row = client
             .query_opt(
-                "SELECT creator, reply_parent FROM post WHERE uri = $1",
+                r#"SELECT creator, "replyParent" FROM post WHERE uri = $1"#,
                 &[&uri],
             )
             .await
@@ -1000,40 +999,40 @@ impl RecordPlugin for PostPlugin {
 
         // Delete from feed_item
         client
-            .execute("DELETE FROM feed_item WHERE post_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM feed_item WHERE "postUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Delete from embed tables
         client
-            .execute("DELETE FROM post_embed_image WHERE post_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM post_embed_image WHERE "postUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute("DELETE FROM post_embed_external WHERE post_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM post_embed_external WHERE "postUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute("DELETE FROM post_embed_record WHERE post_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM post_embed_record WHERE "postUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute("DELETE FROM post_embed_video WHERE post_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM post_embed_video WHERE "postUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Delete from quote table (both as subject and as quoter)
         client
-            .execute("DELETE FROM quote WHERE uri = $1 OR subject = $1", &[&uri])
+            .execute(r#"DELETE FROM quote WHERE uri = $1 OR subject = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Delete notifications
         client
-            .execute("DELETE FROM notification WHERE record_uri = $1", &[&uri])
+            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -1042,11 +1041,11 @@ impl RecordPlugin for PostPlugin {
         if let Some(parent_uri) = reply_parent {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, reply_count)
+                    r#"INSERT INTO post_agg (uri, "replyCount")
                        VALUES ($1, (SELECT COUNT(*) FROM post
-                                    WHERE reply_parent = $1
-                                    AND (violates_thread_gate IS NULL OR violates_thread_gate = false)))
-                       ON CONFLICT (uri) DO UPDATE SET reply_count = EXCLUDED.reply_count"#,
+                                    WHERE "replyParent" = $1
+                                    AND ("violatesThreadGate" IS NULL OR "violatesThreadGate" = false)))
+                       ON CONFLICT (uri) DO UPDATE SET "replyCount" = EXCLUDED."replyCount""#,
                     &[&parent_uri],
                 )
                 .await
@@ -1057,9 +1056,9 @@ impl RecordPlugin for PostPlugin {
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
         if let Some(post_creator) = creator {
             let lock_key = format!("postCount:{}", post_creator);
-            let query = r#"INSERT INTO profile_agg (did, posts_count)
+            let query = r#"INSERT INTO profile_agg (did, "postsCount")
                           VALUES ($1, (SELECT COUNT(*) FROM post WHERE creator = $1))
-                          ON CONFLICT (did) DO UPDATE SET posts_count = EXCLUDED.posts_count"#;
+                          ON CONFLICT (did) DO UPDATE SET "postsCount" = EXCLUDED."postsCount""#;
 
             Self::update_with_coalesce_lock(pool, &lock_key, &post_creator, query).await?;
         }
@@ -1068,9 +1067,9 @@ impl RecordPlugin for PostPlugin {
         for quoted_uri in quoted_uris {
             client
                 .execute(
-                    r#"INSERT INTO post_agg (uri, quote_count)
+                    r#"INSERT INTO post_agg (uri, "quoteCount")
                        VALUES ($1, (SELECT COUNT(*) FROM quote WHERE subject = $1))
-                       ON CONFLICT (uri) DO UPDATE SET quote_count = EXCLUDED.quote_count"#,
+                       ON CONFLICT (uri) DO UPDATE SET "quoteCount" = EXCLUDED."quoteCount""#,
                     &[&quoted_uri],
                 )
                 .await

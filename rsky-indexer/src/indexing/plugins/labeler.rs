@@ -66,10 +66,10 @@ impl RecordPlugin for LabelerPlugin {
 
         client
             .execute(
-                r#"INSERT INTO labeler (uri, cid, creator, created_at, indexed_at)
+                r#"INSERT INTO labeler (uri, cid, creator, "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &created_at, &indexed_at],
+                &[&uri, &cid, &creator, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

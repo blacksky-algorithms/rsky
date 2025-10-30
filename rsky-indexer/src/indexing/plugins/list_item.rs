@@ -84,10 +84,10 @@ impl RecordPlugin for ListItemPlugin {
 
         client
             .execute(
-                r#"INSERT INTO list_item (uri, cid, creator, subject_did, list_uri, created_at, indexed_at)
+                r#"INSERT INTO list_item (uri, cid, creator, "subjectDid", "listUri", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &list_uri, &created_at, &indexed_at],
+                &[&uri, &cid, &creator, &subject_did, &list_uri, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

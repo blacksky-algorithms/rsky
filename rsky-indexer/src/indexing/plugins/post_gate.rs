@@ -70,7 +70,7 @@ impl RecordPlugin for PostGatePlugin {
         if let Some(post) = post_uri {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM post_gate WHERE post_uri = $1",
+                    r#"SELECT uri FROM post_gate WHERE "postUri" = $1"#,
                     &[&post],
                 )
                 .await
@@ -92,10 +92,10 @@ impl RecordPlugin for PostGatePlugin {
         // Insert post gate
         client
             .execute(
-                r#"INSERT INTO post_gate (uri, cid, creator, post_uri, created_at, indexed_at)
+                r#"INSERT INTO post_gate (uri, cid, creator, "postUri", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &post_uri, &created_at, &indexed_at],
+                &[&uri, &cid, &creator, &post_uri, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -104,7 +104,7 @@ impl RecordPlugin for PostGatePlugin {
         if let Some(post) = post_uri {
             client
                 .execute(
-                    "UPDATE post SET has_post_gate = true WHERE uri = $1",
+                    r#"UPDATE post SET "hasPostGate" = true WHERE uri = $1"#,
                     &[&post],
                 )
                 .await
@@ -131,7 +131,7 @@ impl RecordPlugin for PostGatePlugin {
 
         // Get post_uri before deleting so we can update the post table
         let row = client
-            .query_opt("SELECT post_uri FROM post_gate WHERE uri = $1", &[&uri])
+            .query_opt(r#"SELECT "postUri" FROM post_gate WHERE uri = $1"#, &[&uri])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -147,7 +147,7 @@ impl RecordPlugin for PostGatePlugin {
         if let Some(post) = post_uri {
             client
                 .execute(
-                    "UPDATE post SET has_post_gate = false WHERE uri = $1",
+                    r#"UPDATE post SET "hasPostGate" = false WHERE uri = $1"#,
                     &[&post],
                 )
                 .await

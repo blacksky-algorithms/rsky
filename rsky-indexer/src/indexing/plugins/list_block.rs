@@ -73,10 +73,10 @@ impl RecordPlugin for ListBlockPlugin {
 
         client
             .execute(
-                r#"INSERT INTO list_block (uri, cid, creator, subject_uri, created_at, indexed_at)
+                r#"INSERT INTO list_block (uri, cid, creator, "subjectUri", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_uri, &created_at, &indexed_at],
+                &[&uri, &cid, &creator, &subject_uri, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

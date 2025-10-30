@@ -68,7 +68,7 @@ impl RecordPlugin for ListPlugin {
 
         client
             .execute(
-                r#"INSERT INTO list (uri, cid, creator, name, purpose, description, description_facets, avatar_cid, created_at, indexed_at)
+                r#"INSERT INTO list (uri, cid, creator, name, purpose, description, "descriptionFacets", "avatarCid", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -80,8 +80,8 @@ impl RecordPlugin for ListPlugin {
                     &description,
                     &description_facets,
                     &avatar_cid,
-                    &created_at,
-                    &indexed_at,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
                 ],
             )
             .await

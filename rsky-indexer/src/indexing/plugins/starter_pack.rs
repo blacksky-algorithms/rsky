@@ -57,10 +57,10 @@ impl RecordPlugin for StarterPackPlugin {
 
         client
             .execute(
-                r#"INSERT INTO starter_pack (uri, cid, creator, name, created_at, indexed_at)
+                r#"INSERT INTO starter_pack (uri, cid, creator, name, "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &name, &created_at, &indexed_at],
+                &[&uri, &cid, &creator, &name, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

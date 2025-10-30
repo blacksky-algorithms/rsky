@@ -91,7 +91,7 @@ impl RecordPlugin for VerificationPlugin {
         // Insert verification
         client
             .execute(
-                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, display_name, created_at, indexed_at, sorted_at)
+                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, "displayName", "createdAt", "indexedAt", "sortedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
@@ -102,9 +102,9 @@ impl RecordPlugin for VerificationPlugin {
                     &subject,
                     &handle,
                     &display_name,
-                    &created_at,
-                    &indexed_at,
-                    &sorted_at,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
+                    &sorted_at.to_rfc3339(),
                 ],
             )
             .await
@@ -114,7 +114,7 @@ impl RecordPlugin for VerificationPlugin {
         if let (Some(verification_subject), Some(verification_creator)) = (subject, &creator) {
             client
                 .execute(
-                    r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                    r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                        VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                     &[
                         &verification_subject,
@@ -123,7 +123,7 @@ impl RecordPlugin for VerificationPlugin {
                         &cid,
                         &"verified",
                         &Option::<&str>::None,
-                        &indexed_at,
+                        &indexed_at.to_rfc3339(),
                     ],
                 )
                 .await
@@ -171,10 +171,10 @@ impl RecordPlugin for VerificationPlugin {
         if let (Some(verification_subject), Some(verification_creator), Some(cid_value)) =
             (subject, creator, record_cid)
         {
-            let current_timestamp = Utc::now();
+            let current_timestamp = Utc::now().to_rfc3339();
             client
                 .execute(
-                    r#"INSERT INTO notification (did, author, record_uri, record_cid, reason, reason_subject, sort_at)
+                    r#"INSERT INTO notification (did, author, "recordUri", "recordCid", reason, "reasonSubject", "sortAt")
                        VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                     &[
                         &verification_subject,

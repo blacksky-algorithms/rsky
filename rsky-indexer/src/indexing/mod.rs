@@ -172,7 +172,7 @@ impl IndexingService {
         record: &JsonValue,
         action: WriteOpAction,
         timestamp: &str,
-        _rev: &str,
+        rev: &str,
         _opts: IndexingOptions,
     ) -> Result<(), IndexerError> {
         // Parse the URI to get collection, did, and rkey
@@ -186,7 +186,7 @@ impl IndexingService {
         // First, update the generic record table
         match action {
             WriteOpAction::Create | WriteOpAction::Update => {
-                self.upsert_record(uri, cid, did, record, timestamp).await?;
+                self.upsert_record(uri, cid, did, record, timestamp, rev).await?;
             }
             WriteOpAction::Delete => {
                 self.delete_record_generic(uri).await?;
@@ -525,6 +525,7 @@ impl IndexingService {
         did: &str,
         record: &JsonValue,
         timestamp: &str,
+        rev: &str,
     ) -> Result<(), IndexerError> {
         let client = self.pool.get().await?;
         let indexed_at = parse_timestamp(timestamp)?;
@@ -536,14 +537,15 @@ impl IndexingService {
         client
             .execute(
                 r#"
-                INSERT INTO record (uri, cid, did, json, "indexedAt")
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO record (uri, cid, did, json, "indexedAt", rev)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (uri) DO UPDATE
                 SET cid = EXCLUDED.cid,
                     json = EXCLUDED.json,
-                    "indexedAt" = EXCLUDED."indexedAt"
+                    "indexedAt" = EXCLUDED."indexedAt",
+                    rev = EXCLUDED.rev
                 "#,
-                &[&uri, &cid, &did, &json_str, &indexed_at_str],
+                &[&uri, &cid, &did, &json_str, &indexed_at_str, &rev],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
