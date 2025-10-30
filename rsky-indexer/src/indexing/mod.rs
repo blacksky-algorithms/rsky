@@ -19,6 +19,17 @@ fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         })
 }
 
+/// Sanitize text by removing null bytes which PostgreSQL TEXT fields don't accept
+/// Returns None if input is None, Some(sanitized) otherwise
+pub fn sanitize_text(text: Option<String>) -> Option<String> {
+    text.map(|s| s.replace('\0', ""))
+}
+
+/// Sanitize required text by removing null bytes
+pub fn sanitize_text_required(text: &str) -> String {
+    text.replace('\0', "")
+}
+
 /// Action type for record operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOpAction {
@@ -414,7 +425,7 @@ impl IndexingService {
     /// Update actor status (active/inactive/suspended)
     /// Maps active boolean and status to upstream_status field per TypeScript implementation:
     /// - active=true -> upstream_status=null
-    /// - active=false with status in [deactivated, suspended, takendown] -> upstream_status=status
+    /// - active=false with status in [deactivated, suspended, takendown, throttled, desynchronized] -> upstream_status=status
     pub async fn update_actor_status(
         &self,
         did: &str,
@@ -427,8 +438,14 @@ impl IndexingService {
             None
         } else {
             match status.as_ref().map(|s| s.to_lowercase()).as_deref() {
-                Some("deactivated") | Some("suspended") | Some("takendown") | Some("deleted") => {
+                Some("deactivated")
+                | Some("suspended")
+                | Some("takendown")
+                | Some("deleted")
+                | Some("throttled")
+                | Some("desynchronized") => {
                     // Normalize to lowercase for storage
+                    // Sync v1.1: throttled = rate-limited, desynchronized = lost sync
                     status.as_ref().map(|s| s.to_lowercase())
                 }
                 Some(s) => {

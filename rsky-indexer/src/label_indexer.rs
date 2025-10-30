@@ -196,21 +196,23 @@ impl LabelIndexer {
                 debug!("Deleted label: {} on {}", label.val, label.uri);
             } else {
                 // Insert or update the label
+                // Matching migration schema: (src, uri, cid, val, neg, cts)
+                // Primary key: (src, uri, cid, val)
                 client
                     .execute(
                         r#"
-                        INSERT INTO label (src, uri, cid, val, cts, exp)
-                        VALUES ($1, $2, $3, $4, $5, NULL)
+                        INSERT INTO label (src, uri, cid, val, neg, cts)
+                        VALUES ($1, $2, $3, $4, $5, $6)
                         ON CONFLICT (src, uri, cid, val) DO UPDATE
-                        SET cid = EXCLUDED.cid,
-                            cts = EXCLUDED.cts,
-                            exp = EXCLUDED.exp
+                        SET neg = EXCLUDED.neg,
+                            cts = EXCLUDED.cts
                         "#,
                         &[
                             &label.src,
                             &label.uri,
-                            &label.cid.as_deref(),
+                            &label.cid.as_deref().unwrap_or(""),
                             &label.val,
+                            &label.neg.unwrap_or(false),
                             &label.cts,
                         ],
                     )

@@ -1,4 +1,4 @@
-use crate::indexing::RecordPlugin;
+use crate::indexing::{sanitize_text_required, RecordPlugin};
 use crate::IndexerError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -59,7 +59,8 @@ impl PostPlugin {
                     .get("image")
                     .and_then(|i| i.get("ref"))
                     .and_then(|r| r.as_str());
-                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+                let alt =
+                    sanitize_text_required(image.get("alt").and_then(|a| a.as_str()).unwrap_or(""));
 
                 if let Some(cid) = image_cid {
                     client
@@ -85,11 +86,15 @@ impl PostPlugin {
     ) -> Result<(), IndexerError> {
         if let Some(external) = embed.get("external") {
             let uri = external.get("uri").and_then(|u| u.as_str());
-            let title = external.get("title").and_then(|t| t.as_str()).unwrap_or("");
-            let description = external
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
+            let title = sanitize_text_required(
+                external.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+            );
+            let description = sanitize_text_required(
+                external
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or(""),
+            );
             let thumb_cid = external
                 .get("thumb")
                 .and_then(|t| t.get("ref"))
@@ -120,7 +125,7 @@ impl PostPlugin {
             .get("video")
             .and_then(|v| v.get("ref"))
             .and_then(|r| r.as_str());
-        let alt = embed.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+        let alt = sanitize_text_required(embed.get("alt").and_then(|a| a.as_str()).unwrap_or(""));
 
         if let Some(cid) = video_cid {
             client
@@ -597,8 +602,9 @@ impl RecordPlugin for PostPlugin {
         // Extract creator from URI
         let creator = Self::extract_creator(uri);
 
-        // Extract core fields
-        let text = record.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        // Extract core fields (sanitize text to remove null bytes)
+        let text =
+            sanitize_text_required(record.get("text").and_then(|v| v.as_str()).unwrap_or(""));
 
         // Parse timestamps
         let indexed_at = Self::parse_timestamp(timestamp)?;
