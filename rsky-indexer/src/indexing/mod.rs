@@ -11,8 +11,21 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 /// Parse RFC3339 timestamp string into DateTime<Utc>
+/// Handles timestamps with or without timezone suffixes
+/// Also handles both millisecond (.123) and microsecond (.123456) precision
 fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
-    DateTime::parse_from_rfc3339(timestamp)
+    let normalized = if timestamp.ends_with('Z')
+        || timestamp.contains("+")
+        || timestamp.rfind('-').map_or(false, |i| i > 10)
+    {
+        // Already has timezone
+        timestamp.to_string()
+    } else {
+        // Missing timezone, append Z for UTC
+        format!("{}Z", timestamp)
+    };
+
+    DateTime::parse_from_rfc3339(&normalized)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
             IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
