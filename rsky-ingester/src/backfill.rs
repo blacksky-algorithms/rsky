@@ -52,12 +52,15 @@ impl BackfillIngester {
         loop {
             match self.run_backfill(&hostname).await {
                 Ok(()) => {
-                    info!("Backfill complete for {}", hostname);
+                    info!("Backfill complete for {}. Checking again in 5 minutes...", hostname);
                     // Wait before checking again
                     tokio::time::sleep(Duration::from_secs(300)).await;
                 }
                 Err(e) => {
-                    error!("BackfillIngester error for {}: {:?}", hostname, e);
+                    error!(
+                        "BackfillIngester error for {}: {:?}\nRetrying in 30 seconds...",
+                        hostname, e
+                    );
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             }

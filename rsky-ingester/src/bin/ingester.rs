@@ -4,7 +4,8 @@ use rsky_ingester::{
     IngesterConfig,
 };
 use std::env;
-use tracing::{error, info};
+use tokio::time::Duration;
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -17,6 +18,36 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // Set up panic hook for better debugging
+    // Use eprintln! instead of error! to ensure output even if logging is broken
+    std::panic::set_hook(Box::new(|panic_info| {
+        let payload = panic_info.payload();
+        let message = if let Some(s) = payload.downcast_ref::<&str>() {
+            s
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "Unknown panic payload"
+        };
+
+        let location = if let Some(location) = panic_info.location() {
+            format!("{}:{}:{}", location.file(), location.line(), location.column())
+        } else {
+            "unknown location".to_string()
+        };
+
+        eprintln!("\n================================================================================");
+        eprintln!("FATAL PANIC OCCURRED");
+        eprintln!("================================================================================");
+        eprintln!("Location: {}", location);
+        eprintln!("Message: {}", message);
+        eprintln!("\nThis is a critical error that should never occur in production.");
+        eprintln!("Please report this issue with the complete log output.");
+        eprintln!("================================================================================\n");
+        eprintln!("Backtrace:\n{:?}", std::backtrace::Backtrace::force_capture());
+        eprintln!("================================================================================\n");
+    }));
 
     info!("Starting rsky-ingester");
 
@@ -99,19 +130,44 @@ async fn run_firehose(config: IngesterConfig) -> Result<()> {
 
         let task = tokio::spawn(async move {
             if let Err(e) = ingester_clone.run(hostname_clone.clone()).await {
-                error!("Firehose ingester error for {}: {:?}", hostname_clone, e);
+                error!(
+                    "CRITICAL: Firehose ingester for {} exited with error: {:?}\nThis task should never exit. Investigate immediately.",
+                    hostname_clone, e
+                );
+            } else {
+                error!(
+                    "CRITICAL: Firehose ingester for {} exited successfully but should never exit!\nThis indicates a logic error in the code.",
+                    hostname_clone
+                );
             }
         });
 
         tasks.push(task);
     }
 
-    // Wait for all tasks
-    for task in tasks {
-        let _ = task.await;
+    // Wait for all tasks (they should never exit)
+    // If any task exits, log it and wait for others
+    for (i, task) in tasks.into_iter().enumerate() {
+        match task.await {
+            Ok(()) => {
+                error!(
+                    "CRITICAL: Firehose task {} completed unexpectedly. Tasks should run forever.",
+                    i
+                );
+            }
+            Err(e) => {
+                error!(
+                    "CRITICAL: Firehose task {} panicked or was cancelled: {:?}\nThis indicates a serious error.",
+                    i, e
+                );
+            }
+        }
     }
 
-    Ok(())
+    // If we get here, ALL tasks have exited, which is a critical failure
+    Err(anyhow::anyhow!(
+        "CRITICAL: All firehose tasks exited. This should never happen."
+    ))
 }
 
 async fn run_backfill(config: IngesterConfig) -> Result<()> {
@@ -128,25 +184,53 @@ async fn run_backfill(config: IngesterConfig) -> Result<()> {
 
         let task = tokio::spawn(async move {
             if let Err(e) = ingester_clone.run(hostname_clone.clone()).await {
-                error!("Backfill ingester error for {}: {:?}", hostname_clone, e);
+                error!(
+                    "CRITICAL: Backfill ingester for {} exited with error: {:?}\nThis task should never exit. Investigate immediately.",
+                    hostname_clone, e
+                );
+            } else {
+                error!(
+                    "CRITICAL: Backfill ingester for {} exited successfully but should never exit!\nThis indicates a logic error in the code.",
+                    hostname_clone
+                );
             }
         });
 
         tasks.push(task);
     }
 
-    // Wait for all tasks
-    for task in tasks {
-        let _ = task.await;
+    // Wait for all tasks (they should never exit)
+    // If any task exits, log it and wait for others
+    for (i, task) in tasks.into_iter().enumerate() {
+        match task.await {
+            Ok(()) => {
+                error!(
+                    "CRITICAL: Backfill task {} completed unexpectedly. Tasks should run forever.",
+                    i
+                );
+            }
+            Err(e) => {
+                error!(
+                    "CRITICAL: Backfill task {} panicked or was cancelled: {:?}\nThis indicates a serious error.",
+                    i, e
+                );
+            }
+        }
     }
 
-    Ok(())
+    // If we get here, ALL tasks have exited, which is a critical failure
+    Err(anyhow::anyhow!(
+        "CRITICAL: All backfill tasks exited. This should never happen."
+    ))
 }
 
 async fn run_labeler(config: IngesterConfig) -> Result<()> {
     if config.labeler_hosts.is_empty() {
-        info!("No labeler hosts configured, skipping labeler ingester");
-        return Ok(());
+        info!("No labeler hosts configured, sleeping forever to keep task alive");
+        // Sleep forever to keep this task alive
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
     }
 
     info!(
@@ -162,19 +246,44 @@ async fn run_labeler(config: IngesterConfig) -> Result<()> {
 
         let task = tokio::spawn(async move {
             if let Err(e) = ingester_clone.run(hostname_clone.clone()).await {
-                error!("Labeler ingester error for {}: {:?}", hostname_clone, e);
+                error!(
+                    "CRITICAL: Labeler ingester for {} exited with error: {:?}\nThis task should never exit. Investigate immediately.",
+                    hostname_clone, e
+                );
+            } else {
+                error!(
+                    "CRITICAL: Labeler ingester for {} exited successfully but should never exit!\nThis indicates a logic error in the code.",
+                    hostname_clone
+                );
             }
         });
 
         tasks.push(task);
     }
 
-    // Wait for all tasks
-    for task in tasks {
-        let _ = task.await;
+    // Wait for all tasks (they should never exit)
+    // If any task exits, log it and wait for others
+    for (i, task) in tasks.into_iter().enumerate() {
+        match task.await {
+            Ok(()) => {
+                error!(
+                    "CRITICAL: Labeler task {} completed unexpectedly. Tasks should run forever.",
+                    i
+                );
+            }
+            Err(e) => {
+                error!(
+                    "CRITICAL: Labeler task {} panicked or was cancelled: {:?}\nThis indicates a serious error.",
+                    i, e
+                );
+            }
+        }
     }
 
-    Ok(())
+    // If we get here, ALL tasks have exited, which is a critical failure
+    Err(anyhow::anyhow!(
+        "CRITICAL: All labeler tasks exited. This should never happen."
+    ))
 }
 
 fn load_config() -> IngesterConfig {

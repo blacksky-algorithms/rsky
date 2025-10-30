@@ -32,9 +32,21 @@ impl FirehoseIngester {
         info!("Starting FirehoseIngester for {}", hostname);
 
         loop {
-            if let Err(e) = self.run_connection(&hostname).await {
-                error!("FirehoseIngester error for {}: {:?}", hostname, e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
+            match self.run_connection(&hostname).await {
+                Ok(()) => {
+                    warn!(
+                        "FirehoseIngester connection for {} closed gracefully. Reconnecting in 5 seconds...",
+                        hostname
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    error!(
+                        "FirehoseIngester connection error for {}: {:?}\nRetrying in 5 seconds...",
+                        hostname, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     }

@@ -26,9 +26,21 @@ impl LabelerIngester {
         info!("Starting LabelerIngester for {}", hostname);
 
         loop {
-            if let Err(e) = self.run_connection(&hostname).await {
-                error!("LabelerIngester error for {}: {:?}", hostname, e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
+            match self.run_connection(&hostname).await {
+                Ok(()) => {
+                    warn!(
+                        "LabelerIngester connection for {} closed gracefully. Reconnecting in 5 seconds...",
+                        hostname
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    error!(
+                        "LabelerIngester connection error for {}: {:?}\nRetrying in 5 seconds...",
+                        hostname, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     }
