@@ -88,7 +88,7 @@ pub enum StreamEvent {
         seq: i64,
         time: String,
         did: String,
-        handle: String,
+        handle: Option<String>,
     },
 }
 

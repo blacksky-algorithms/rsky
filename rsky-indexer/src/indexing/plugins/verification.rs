@@ -84,7 +84,7 @@ impl RecordPlugin for VerificationPlugin {
         // Insert verification
         client
             .execute(
-                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, "displayName", "createdAt", "indexedAt"")
+                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, "displayName", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
