@@ -99,9 +99,12 @@ impl BackfillIngester {
         let redis_client = self.redis_client.clone();
         let high_water_mark = self.config.high_water_mark;
         let write_task = tokio::spawn(async move {
+            info!("Write task started");
             let mut conn = redis_client.get_multiplexed_async_connection().await?;
+            info!("Write task connected to Redis");
 
             while let Some(batch) = batch_rx.recv().await {
+                info!("Write task received batch of {} repos", batch.len());
                 // Check backpressure
                 let stream_len: usize = conn.xlen(streams::REPO_BACKFILL).await?;
                 if stream_len >= high_water_mark {
@@ -115,6 +118,7 @@ impl BackfillIngester {
 
                 // Write batch to Redis stream
                 Self::write_batch(&mut conn, &batch).await?;
+                info!("Write task wrote batch of {} repos to Redis", batch.len());
             }
 
             Ok::<_, IngesterError>(())
@@ -122,54 +126,103 @@ impl BackfillIngester {
 
         let mut current_cursor = cursor;
         let mut total_repos = 0;
+        let mut consecutive_errors = 0;
+        const MAX_CONSECUTIVE_ERRORS: u32 = 3;
 
         // Paginate through listRepos
         loop {
-            let repos = self
+            match self
                 .fetch_repos(clean_hostname, current_cursor.as_deref())
-                .await?;
+                .await
+            {
+                Ok(repos) => {
+                    consecutive_errors = 0; // Reset error counter on success
 
-            for repo in &repos.repos {
-                let event = BackfillEvent {
-                    did: repo.did.clone(),
-                    host: format!("https://{}", clean_hostname),
-                    rev: repo.rev.clone(),
-                    status: repo.status.clone(),
-                    active: repo.active.unwrap_or(true),
-                };
+                    for repo in &repos.repos {
+                        let event = BackfillEvent {
+                            did: repo.did.clone(),
+                            host: format!("https://{}", clean_hostname),
+                            rev: repo.rev.clone(),
+                            status: repo.status.clone(),
+                            active: repo.active.unwrap_or(true),
+                        };
 
-                // Bounded channel send is async and will block when full
-                // This propagates backpressure to the HTTP pagination loop
-                if let Err(e) = batch_tx.send(event).await {
-                    error!("Failed to send event to batcher: {:?}", e);
-                    break;
+                        // Bounded channel send is async and will block when full
+                        // This propagates backpressure to the HTTP pagination loop
+                        if let Err(e) = batch_tx.send(event).await {
+                            error!("Failed to send event to batcher: {:?}", e);
+                            break;
+                        }
+
+                        total_repos += 1;
+                    }
+
+                    // Update cursor in Redis
+                    if let Some(ref next_cursor) = repos.cursor {
+                        conn.set::<_, _, ()>(&cursor_key, next_cursor).await?;
+                        current_cursor = Some(next_cursor.clone());
+
+                        if total_repos % 10000 == 0 {
+                            info!("Processed {} repos, cursor: {}", total_repos, next_cursor);
+                        }
+                    } else {
+                        // No more repos, mark as done
+                        conn.set::<_, _, ()>(&cursor_key, INGESTER_DONE_CURSOR)
+                            .await?;
+                        info!("Backfill complete! Total repos: {}", total_repos);
+                        break;
+                    }
                 }
+                Err(e) => {
+                    consecutive_errors += 1;
 
-                total_repos += 1;
-            }
+                    // Exponential backoff: 5s, 10s, 20s
+                    let backoff_secs = 5 * (1 << (consecutive_errors - 1).min(2));
 
-            // Update cursor in Redis
-            if let Some(ref next_cursor) = repos.cursor {
-                conn.set::<_, _, ()>(&cursor_key, next_cursor).await?;
-                current_cursor = Some(next_cursor.clone());
+                    error!(
+                        "Failed to fetch repos (attempt {}/{}): {:?}. Retrying in {}s...",
+                        consecutive_errors, MAX_CONSECUTIVE_ERRORS, e, backoff_secs
+                    );
 
-                if total_repos % 10000 == 0 {
-                    info!("Processed {} repos, cursor: {}", total_repos, next_cursor);
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        error!(
+                            "Max consecutive errors reached for cursor {:?}. \
+                            This is likely a relay-side issue with a specific repo. \
+                            Returning error to trigger outer 30s retry loop.",
+                            current_cursor
+                        );
+                        // Return error to trigger the outer retry loop (line 62-67)
+                        // This gives the relay time to recover and doesn't skip any repos
+                        return Err(e);
+                    } else {
+                        // Exponential backoff before retrying
+                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    }
                 }
-            } else {
-                // No more repos, mark as done
-                conn.set::<_, _, ()>(&cursor_key, INGESTER_DONE_CURSOR)
-                    .await?;
-                info!("Backfill complete! Total repos: {}", total_repos);
-                break;
             }
         }
 
         // Cleanup
         drop(batch_tx);
-        write_task
-            .await
-            .map_err(|e| IngesterError::Other(e.into()))??;
+
+        // Check if write task finished with error before awaiting
+        if write_task.is_finished() {
+            match write_task.await {
+                Ok(Ok(())) => {
+                    info!("Write task completed successfully");
+                }
+                Ok(Err(e)) => {
+                    error!("Write task failed with error: {:?}", e);
+                    return Err(e);
+                }
+                Err(e) => {
+                    error!("Write task panicked: {:?}", e);
+                    return Err(IngesterError::Other(e.into()));
+                }
+            }
+        } else {
+            write_task.abort();
+        }
 
         Ok(())
     }
