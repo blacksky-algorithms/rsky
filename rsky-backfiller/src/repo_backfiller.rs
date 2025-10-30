@@ -99,7 +99,15 @@ impl RepoBackfiller {
             // Process messages concurrently
             let mut tasks = Vec::new();
             for msg in &messages {
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                // Acquire semaphore permit (should never fail unless semaphore is closed)
+                let permit = match self.semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("Failed to acquire semaphore permit: {:?}. Backfiller may be shutting down.", e);
+                        break;
+                    }
+                };
+
                 let msg_clone = msg.clone();
                 let self_clone = self.clone_for_task();
 
@@ -114,13 +122,19 @@ impl RepoBackfiller {
 
             // Wait for all tasks to complete
             for task in tasks {
-                let (msg_id, result) = task.await.unwrap();
-                match result {
-                    Ok(_) => {
-                        debug!("Successfully processed message {}", msg_id);
-                    }
+                // Handle task panics gracefully instead of crashing the entire backfiller
+                match task.await {
+                    Ok((msg_id, result)) => match result {
+                        Ok(_) => {
+                            debug!("Successfully processed message {}", msg_id);
+                        }
+                        Err(e) => {
+                            error!("Failed to process message {}: {:?}", msg_id, e);
+                        }
+                    },
                     Err(e) => {
-                        error!("Failed to process message {}: {:?}", msg_id, e);
+                        error!("Task panicked while processing message: {:?}. Continuing with next message.", e);
+                        // Continue processing other messages instead of crashing
                     }
                 }
             }
