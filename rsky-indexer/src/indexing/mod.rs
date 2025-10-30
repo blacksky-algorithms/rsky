@@ -175,16 +175,13 @@ impl IndexingService {
         _rev: &str,
         _opts: IndexingOptions,
     ) -> Result<(), IndexerError> {
-        // Parse the URI to get collection
-        let parts: Vec<&str> = uri.split('/').collect();
-        if parts.len() < 3 {
-            return Err(IndexerError::InvalidUri(uri.to_string()));
-        }
+        // Parse the URI to get collection, did, and rkey
+        let at_uri = rsky_syntax::aturi::AtUri::new(uri.to_string(), None)
+            .map_err(|_| IndexerError::InvalidUri(uri.to_string()))?;
 
-        let collection = parts[parts.len() - 2];
-        let did = parts
-            .first()
-            .ok_or_else(|| IndexerError::InvalidUri(uri.to_string()))?;
+        let did = at_uri.host.as_str();
+        let collection = at_uri.get_collection();
+        let rkey = at_uri.get_rkey();
 
         // First, update the generic record table
         match action {
@@ -197,7 +194,7 @@ impl IndexingService {
         }
 
         // Then, handle collection-specific indexing via plugins
-        if let Some(plugin) = self.plugins.get(collection) {
+        if let Some(plugin) = self.plugins.get(collection.as_str()) {
             match action {
                 WriteOpAction::Create => {
                     plugin
@@ -531,6 +528,10 @@ impl IndexingService {
     ) -> Result<(), IndexerError> {
         let client = self.pool.get().await?;
         let indexed_at = parse_timestamp(timestamp)?;
+        let indexed_at_str = indexed_at.to_rfc3339();
+
+        let json_str = serde_json::to_string(record)
+            .map_err(|e| IndexerError::Serialization(e.to_string()))?;
 
         client
             .execute(
@@ -542,7 +543,7 @@ impl IndexingService {
                     json = EXCLUDED.json,
                     "indexedAt" = EXCLUDED."indexedAt"
                 "#,
-                &[&uri, &cid, &did, record, &indexed_at],
+                &[&uri, &cid, &did, &json_str, &indexed_at_str],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
