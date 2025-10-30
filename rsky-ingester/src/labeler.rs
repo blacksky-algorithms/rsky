@@ -122,7 +122,9 @@ impl LabelerIngester {
             match msg_result {
                 Ok(Message::Binary(data)) => match self.process_message(&data).await {
                     Ok(Some(event)) => {
-                        if let Err(e) = batch_tx.send(event) {
+                        // Bounded channel send is async and will block when full
+                        // This propagates backpressure to the WebSocket reader
+                        if let Err(e) = batch_tx.send(event).await {
                             error!("Failed to send event to batcher: {:?}", e);
                             break;
                         }
@@ -162,7 +164,7 @@ impl LabelerIngester {
         let (header, body) = rsky_firehose::firehose::read_labels(data)
             .map_err(|e| IngesterError::Serialization(format!("{:?}", e)))?;
 
-        let seq = body.seq;  // Use the message's sequence number, not header.operation
+        let seq = body.seq; // Use the message's sequence number, not header.operation
 
         // Convert SubscribeLabels to LabelStreamEvent
         let labels = body

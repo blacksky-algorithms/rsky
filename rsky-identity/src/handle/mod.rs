@@ -39,7 +39,8 @@ impl HandleResolver {
     }
 
     pub async fn resolve_dns(&self, handle: &String) -> Result<Option<String>> {
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
         let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")).await {
             Ok(res) => res,
             Err(_) => return Ok(None),
@@ -130,8 +131,10 @@ impl HandleResolver {
             None => return Ok(None),
             Some(backup_nameservers) => {
                 if self.backup_nameserver_ips.is_none() {
-                    let resolver =
-                        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+                    let resolver = TokioAsyncResolver::tokio(
+                        ResolverConfig::default(),
+                        ResolverOpts::default(),
+                    );
 
                     // Look up all backup nameservers
                     for h in backup_nameservers {

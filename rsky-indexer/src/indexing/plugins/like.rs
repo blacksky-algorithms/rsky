@@ -22,7 +22,9 @@ impl LikePlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 }
 
@@ -46,12 +48,24 @@ impl RecordPlugin for LikePlugin {
         let creator = Self::extract_creator(uri);
 
         // Extract subject from record
-        let subject = record.get("subject").and_then(|s| s.get("uri")).and_then(|u| u.as_str());
-        let subject_cid = record.get("subject").and_then(|s| s.get("cid")).and_then(|c| c.as_str());
+        let subject = record
+            .get("subject")
+            .and_then(|s| s.get("uri"))
+            .and_then(|u| u.as_str());
+        let subject_cid = record
+            .get("subject")
+            .and_then(|s| s.get("cid"))
+            .and_then(|c| c.as_str());
 
         // Extract via from record (repost that led to this like)
-        let via = record.get("via").and_then(|v| v.get("uri")).and_then(|u| u.as_str());
-        let via_cid = record.get("via").and_then(|v| v.get("cid")).and_then(|c| c.as_str());
+        let via = record
+            .get("via")
+            .and_then(|v| v.get("uri"))
+            .and_then(|u| u.as_str());
+        let via_cid = record
+            .get("via")
+            .and_then(|v| v.get("cid"))
+            .and_then(|c| c.as_str());
 
         // Parse timestamps
         let indexed_at = Self::parse_timestamp(timestamp)?;
@@ -186,7 +200,10 @@ impl RecordPlugin for LikePlugin {
 
         // Delete notifications for this like
         client
-            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM notification WHERE "recordUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 

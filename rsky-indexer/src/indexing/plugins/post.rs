@@ -86,7 +86,10 @@ impl PostPlugin {
         if let Some(external) = embed.get("external") {
             let uri = external.get("uri").and_then(|u| u.as_str());
             let title = external.get("title").and_then(|t| t.as_str()).unwrap_or("");
-            let description = external.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let description = external
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
             let thumb_cid = external
                 .get("thumb")
                 .and_then(|t| t.get("ref"))
@@ -179,7 +182,9 @@ impl PostPlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 
     /// Hash a string to i64 for PostgreSQL advisory lock
@@ -420,13 +425,12 @@ impl PostPlugin {
         };
 
         let json_str: String = row.get(0);
-        let json: JsonValue = serde_json::from_str(&json_str)
-            .map_err(|e| IndexerError::Serialization(format!("Failed to parse threadgate JSON: {}", e)))?;
+        let json: JsonValue = serde_json::from_str(&json_str).map_err(|e| {
+            IndexerError::Serialization(format!("Failed to parse threadgate JSON: {}", e))
+        })?;
 
         // Parse threadgate allow rules
-        let allow_array = json
-            .get("allow")
-            .and_then(|a| a.as_array());
+        let allow_array = json.get("allow").and_then(|a| a.as_array());
 
         let Some(rules) = allow_array else {
             // No allow rules means anyone can reply
@@ -445,17 +449,19 @@ impl PostPlugin {
                     "app.bsky.feed.threadgate#mentionRule" => {
                         // Check if root post mentions the replier
                         let root_post = client
-                            .query_opt(
-                                "SELECT json FROM record WHERE uri = $1",
-                                &[&root_post_uri],
-                            )
+                            .query_opt("SELECT json FROM record WHERE uri = $1", &[&root_post_uri])
                             .await
                             .map_err(|e| IndexerError::Database(e.into()))?;
 
                         if let Some(post_row) = root_post {
                             let json_str: String = post_row.get(0);
-                            let post_json: JsonValue = serde_json::from_str(&json_str)
-                                .map_err(|e| IndexerError::Serialization(format!("Failed to parse post JSON: {}", e)))?;
+                            let post_json: JsonValue =
+                                serde_json::from_str(&json_str).map_err(|e| {
+                                    IndexerError::Serialization(format!(
+                                        "Failed to parse post JSON: {}",
+                                        e
+                                    ))
+                                })?;
                             let (mentions, _) = Self::extract_facets(&post_json);
                             if mentions.contains(&replier_did.to_string()) {
                                 return Ok(false); // Mentioned in root post, allowed
@@ -624,21 +630,26 @@ impl RecordPlugin for PostPlugin {
             .and_then(|c| c.as_str());
 
         // Extract langs and tags as Vec<String>, then serialize to JSONB
-        let langs: Option<Vec<String>> = record
-            .get("langs")
-            .and_then(|l| l.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
-        let tags: Option<Vec<String>> = record
-            .get("tags")
-            .and_then(|t| t.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let langs: Option<Vec<String>> =
+            record.get("langs").and_then(|l| l.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+        let tags: Option<Vec<String>> = record.get("tags").and_then(|t| t.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
 
         // Serialize to JSON for JSONB columns
         let langs_json: Option<serde_json::Value> = langs
             .as_ref()
             .map(|v| serde_json::to_value(v))
             .transpose()
-            .map_err(|e| IndexerError::Serialization(format!("Failed to serialize langs: {}", e)))?;
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Failed to serialize langs: {}", e))
+            })?;
         let tags_json: Option<serde_json::Value> = tags
             .as_ref()
             .map(|v| serde_json::to_value(v))
@@ -713,7 +724,12 @@ impl RecordPlugin for PostPlugin {
         }
 
         // Validate reply if this is a reply
-        let (_invalid_reply_root, violates_threadgate) = if let (Some(root_uri), Some(parent_uri), Some(post_creator)) = (reply_root, reply_parent, &creator) {
+        let (_invalid_reply_root, violates_threadgate) = if let (
+            Some(root_uri),
+            Some(parent_uri),
+            Some(post_creator),
+        ) = (reply_root, reply_parent, &creator)
+        {
             // Check if reply root is invalid
             let invalid = Self::check_invalid_reply_root(&client, root_uri, parent_uri).await?;
 
@@ -755,11 +771,27 @@ impl RecordPlugin for PostPlugin {
                         Self::process_video_embed(&client, uri, embed).await?;
                     }
                     "app.bsky.embed.record" => {
-                        quote_uri = Self::process_record_embed(&client, uri, cid, creator.as_deref().unwrap_or(""), embed, &indexed_at).await?;
+                        quote_uri = Self::process_record_embed(
+                            &client,
+                            uri,
+                            cid,
+                            creator.as_deref().unwrap_or(""),
+                            embed,
+                            &indexed_at,
+                        )
+                        .await?;
                     }
                     "app.bsky.embed.recordWithMedia" => {
                         // Process the record (quote) part
-                        quote_uri = Self::process_record_embed(&client, uri, cid, creator.as_deref().unwrap_or(""), embed, &indexed_at).await?;
+                        quote_uri = Self::process_record_embed(
+                            &client,
+                            uri,
+                            cid,
+                            creator.as_deref().unwrap_or(""),
+                            embed,
+                            &indexed_at,
+                        )
+                        .await?;
 
                         // Process the media part
                         if let Some(media) = embed.get("media") {
@@ -788,7 +820,8 @@ impl RecordPlugin for PostPlugin {
         let mut violates_embedding_rules = false;
         if let (Some(quoted_uri), Some(post_creator)) = (quote_uri.as_ref(), &creator) {
             // Check if quote violates postgate embedding rules
-            violates_embedding_rules = Self::check_violates_embedding_rules(&client, quoted_uri, post_creator).await?;
+            violates_embedding_rules =
+                Self::check_violates_embedding_rules(&client, quoted_uri, post_creator).await?;
 
             // Update post with validation flag if violation
             if violates_embedding_rules {
@@ -881,11 +914,13 @@ impl RecordPlugin for PostPlugin {
 
         if !descendants.is_empty() {
             // Get ancestors of this post (including self at height 0)
-            let mut ancestors_with_self = vec![(uri.to_string(), creator.clone().unwrap_or_default(), 0)];
+            let mut ancestors_with_self =
+                vec![(uri.to_string(), creator.clone().unwrap_or_default(), 0)];
 
             // Add ancestors if this is a reply
             if let Some(parent_uri) = reply_parent {
-                let parent_ancestors = Self::get_reply_ancestors(&client, parent_uri, REPLY_NOTIF_DEPTH).await?;
+                let parent_ancestors =
+                    Self::get_reply_ancestors(&client, parent_uri, REPLY_NOTIF_DEPTH).await?;
                 for (ancestor_uri, ancestor_creator, height) in parent_ancestors {
                     // Increment height by 1 since we're going up one more level
                     ancestors_with_self.push((ancestor_uri, ancestor_creator, height + 1));
@@ -993,9 +1028,8 @@ impl RecordPlugin for PostPlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
-        let (creator, reply_parent): (Option<String>, Option<String>) = row
-            .map(|r| (r.get(0), r.get(1)))
-            .unwrap_or((None, None));
+        let (creator, reply_parent): (Option<String>, Option<String>) =
+            row.map(|r| (r.get(0), r.get(1))).unwrap_or((None, None));
 
         // Get quoted posts before deleting quote records
         let quote_rows = client
@@ -1003,10 +1037,7 @@ impl RecordPlugin for PostPlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
-        let quoted_uris: Vec<String> = quote_rows
-            .iter()
-            .filter_map(|r| r.get(0))
-            .collect();
+        let quoted_uris: Vec<String> = quote_rows.iter().filter_map(|r| r.get(0)).collect();
 
         // Delete post
         client
@@ -1022,34 +1053,52 @@ impl RecordPlugin for PostPlugin {
 
         // Delete from embed tables
         client
-            .execute(r#"DELETE FROM post_embed_image WHERE "postUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM post_embed_image WHERE "postUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(r#"DELETE FROM post_embed_external WHERE "postUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM post_embed_external WHERE "postUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(r#"DELETE FROM post_embed_record WHERE "postUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM post_embed_record WHERE "postUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(r#"DELETE FROM post_embed_video WHERE "postUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM post_embed_video WHERE "postUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Delete from quote table (both as subject and as quoter)
         client
-            .execute(r#"DELETE FROM quote WHERE uri = $1 OR subject = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM quote WHERE uri = $1 OR subject = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         // Delete notifications
         client
-            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM notification WHERE "recordUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 

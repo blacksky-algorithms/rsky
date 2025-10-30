@@ -22,7 +22,9 @@ impl StarterPackPlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 }
 
@@ -60,7 +62,14 @@ impl RecordPlugin for StarterPackPlugin {
                 r#"INSERT INTO starter_pack (uri, cid, creator, name, "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &name, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
+                &[
+                    &uri,
+                    &cid,
+                    &creator,
+                    &name,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
+                ],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;

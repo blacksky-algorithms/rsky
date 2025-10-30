@@ -32,21 +32,37 @@ async fn main() -> Result<()> {
         };
 
         let location = if let Some(location) = panic_info.location() {
-            format!("{}:{}:{}", location.file(), location.line(), location.column())
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
         } else {
             "unknown location".to_string()
         };
 
-        eprintln!("\n================================================================================");
+        eprintln!(
+            "\n================================================================================"
+        );
         eprintln!("FATAL PANIC OCCURRED");
-        eprintln!("================================================================================");
+        eprintln!(
+            "================================================================================"
+        );
         eprintln!("Location: {}", location);
         eprintln!("Message: {}", message);
         eprintln!("\nThis is a critical error that should never occur in production.");
         eprintln!("Please report this issue with the complete log output.");
-        eprintln!("================================================================================\n");
-        eprintln!("Backtrace:\n{:?}", std::backtrace::Backtrace::force_capture());
-        eprintln!("================================================================================\n");
+        eprintln!(
+            "================================================================================\n"
+        );
+        eprintln!(
+            "Backtrace:\n{:?}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        eprintln!(
+            "================================================================================\n"
+        );
     }));
 
     info!("Starting rsky-ingester");
@@ -65,21 +81,27 @@ async fn main() -> Result<()> {
             run_firehose(config).await?;
             eprintln!("[EXIT-TRACE] Firehose mode exited - EXIT PATH A");
             error!("[EXIT-TRACE] Firehose mode exited - EXIT PATH A");
-            return Err(anyhow::anyhow!("CRITICAL: Firehose mode exited unexpectedly"));
+            return Err(anyhow::anyhow!(
+                "CRITICAL: Firehose mode exited unexpectedly"
+            ));
         }
         "backfill" => {
             eprintln!("[EXIT-TRACE] About to run backfill mode");
             run_backfill(config).await?;
             eprintln!("[EXIT-TRACE] Backfill mode exited - EXIT PATH B");
             error!("[EXIT-TRACE] Backfill mode exited - EXIT PATH B");
-            return Err(anyhow::anyhow!("CRITICAL: Backfill mode exited unexpectedly"));
+            return Err(anyhow::anyhow!(
+                "CRITICAL: Backfill mode exited unexpectedly"
+            ));
         }
         "labeler" => {
             eprintln!("[EXIT-TRACE] About to run labeler mode");
             run_labeler(config).await?;
             eprintln!("[EXIT-TRACE] Labeler mode exited - EXIT PATH C");
             error!("[EXIT-TRACE] Labeler mode exited - EXIT PATH C");
-            return Err(anyhow::anyhow!("CRITICAL: Labeler mode exited unexpectedly"));
+            return Err(anyhow::anyhow!(
+                "CRITICAL: Labeler mode exited unexpectedly"
+            ));
         }
         "all" => {
             eprintln!("[EXIT-TRACE] Running in 'all' mode");
@@ -156,7 +178,9 @@ async fn main() -> Result<()> {
     // This line should NEVER be reached
     eprintln!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
     error!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
-    Err(anyhow::anyhow!("CRITICAL: main() reached impossible code path after match statement"))
+    Err(anyhow::anyhow!(
+        "CRITICAL: main() reached impossible code path after match statement"
+    ))
 }
 
 async fn run_firehose(config: IngesterConfig) -> Result<()> {

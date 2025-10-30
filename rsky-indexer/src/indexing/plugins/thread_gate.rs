@@ -27,7 +27,9 @@ impl ThreadGatePlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 }
 
@@ -55,11 +57,14 @@ impl RecordPlugin for ThreadGatePlugin {
 
         // Validate that postUri creator and rkey match thread gate creator and rkey
         if let (Some(gate_creator), Some(gate_rkey), Some(post)) =
-            (creator.as_ref(), Self::extract_rkey(uri), post_uri) {
+            (creator.as_ref(), Self::extract_rkey(uri), post_uri)
+        {
             let post_creator = Self::extract_creator(post);
             let post_rkey = Self::extract_rkey(post);
 
-            if post_creator.as_ref() != Some(gate_creator) || post_rkey.as_deref() != Some(gate_rkey.as_str()) {
+            if post_creator.as_ref() != Some(gate_creator)
+                || post_rkey.as_deref() != Some(gate_rkey.as_str())
+            {
                 return Err(IndexerError::Serialization(
                     "Creator and rkey of thread gate does not match its post".to_string(),
                 ));
@@ -95,7 +100,14 @@ impl RecordPlugin for ThreadGatePlugin {
                 r#"INSERT INTO thread_gate (uri, cid, creator, "postUri", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &post_uri, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
+                &[
+                    &uri,
+                    &cid,
+                    &creator,
+                    &post_uri,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
+                ],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -131,7 +143,10 @@ impl RecordPlugin for ThreadGatePlugin {
 
         // Get post_uri before deleting so we can update the post table
         let row = client
-            .query_opt(r#"SELECT "postUri" FROM thread_gate WHERE uri = $1"#, &[&uri])
+            .query_opt(
+                r#"SELECT "postUri" FROM thread_gate WHERE uri = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 

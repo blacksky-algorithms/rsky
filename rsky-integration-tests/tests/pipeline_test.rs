@@ -611,11 +611,10 @@ impl TestContext {
             url: Some(config.database_url.clone()),
             ..Default::default()
         };
-        let pool = pg_config
-            .create_pool(
-                Some(deadpool_postgres::Runtime::Tokio1),
-                tokio_postgres::NoTls,
-            )?;
+        let pool = pg_config.create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )?;
 
         // Create IdResolver for handle resolution
         // Disabled in tests to avoid "runtime within runtime" panic from hickory-resolver

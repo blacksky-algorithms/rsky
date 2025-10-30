@@ -186,7 +186,8 @@ impl IndexingService {
         // First, update the generic record table
         match action {
             WriteOpAction::Create | WriteOpAction::Update => {
-                self.upsert_record(uri, cid, did, record, timestamp, rev).await?;
+                self.upsert_record(uri, cid, did, record, timestamp, rev)
+                    .await?;
             }
             WriteOpAction::Delete => {
                 self.delete_record_generic(uri).await?;
@@ -485,34 +486,22 @@ impl IndexingService {
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(
-                r#"DELETE FROM "like" WHERE creator = $1"#,
-                &[&did],
-            )
+            .execute(r#"DELETE FROM "like" WHERE creator = $1"#, &[&did])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(
-                r#"DELETE FROM repost WHERE creator = $1"#,
-                &[&did],
-            )
+            .execute(r#"DELETE FROM repost WHERE creator = $1"#, &[&did])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(
-                r#"DELETE FROM follow WHERE creator = $1"#,
-                &[&did],
-            )
+            .execute(r#"DELETE FROM follow WHERE creator = $1"#, &[&did])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
         client
-            .execute(
-                r#"DELETE FROM profile WHERE creator = $1"#,
-                &[&did],
-            )
+            .execute(r#"DELETE FROM profile WHERE creator = $1"#, &[&did])
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
@@ -581,13 +570,13 @@ impl IndexingService {
     /// Per TypeScript implementation: notifications inform users of interactions with their content
     pub async fn create_notification(
         &self,
-        did: &str,           // who receives the notification
-        author: &str,        // who created the record
-        record_uri: &str,    // URI of the record that triggered the notification
-        record_cid: &str,    // CID of the record
-        reason: &str,        // 'like', 'repost', 'follow', 'mention', 'reply', 'quote', 'starterpack-joined', 'verified', 'unverified'
+        did: &str,                    // who receives the notification
+        author: &str,                 // who created the record
+        record_uri: &str,             // URI of the record that triggered the notification
+        record_cid: &str,             // CID of the record
+        reason: &str, // 'like', 'repost', 'follow', 'mention', 'reply', 'quote', 'starterpack-joined', 'verified', 'unverified'
         reason_subject: Option<&str>, // optional subject (e.g., the post that was liked)
-        sort_at: &str,       // timestamp for sorting
+        sort_at: &str, // timestamp for sorting
     ) -> Result<(), IndexerError> {
         let client = self.pool.get().await?;
 
@@ -613,7 +602,10 @@ impl IndexingService {
 
     /// Delete notifications for a specific record URI
     /// Per TypeScript implementation: used when records are deleted or updated
-    pub async fn delete_notifications_for_record(&self, record_uri: &str) -> Result<(), IndexerError> {
+    pub async fn delete_notifications_for_record(
+        &self,
+        record_uri: &str,
+    ) -> Result<(), IndexerError> {
         let client = self.pool.get().await?;
 
         client

@@ -52,7 +52,10 @@ impl BackfillIngester {
         loop {
             match self.run_backfill(&hostname).await {
                 Ok(()) => {
-                    info!("Backfill complete for {}. Checking again in 5 minutes...", hostname);
+                    info!(
+                        "Backfill complete for {}. Checking again in 5 minutes...",
+                        hostname
+                    );
                     // Wait before checking again
                     tokio::time::sleep(Duration::from_secs(300)).await;
                 }
@@ -135,7 +138,9 @@ impl BackfillIngester {
                     active: repo.active.unwrap_or(true),
                 };
 
-                if let Err(e) = batch_tx.send(event) {
+                // Bounded channel send is async and will block when full
+                // This propagates backpressure to the HTTP pagination loop
+                if let Err(e) = batch_tx.send(event).await {
                     error!("Failed to send event to batcher: {:?}", e);
                     break;
                 }

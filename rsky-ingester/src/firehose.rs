@@ -8,6 +8,8 @@ use lexicon_cid::Cid;
 use redis::AsyncCommands;
 use rsky_lexicon::com::atproto::sync::SubscribeRepos;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
@@ -88,27 +90,39 @@ impl FirehoseIngester {
         let (batch_tx, mut batch_rx) =
             Batcher::new(self.config.batch_size, self.config.batch_timeout_ms);
 
+        // Track events in memory for monitoring
+        let events_in_memory = Arc::new(AtomicUsize::new(0));
+        let events_in_memory_clone = events_in_memory.clone();
+
         // Spawn task to handle batched writes to Redis
         let redis_client = self.redis_client.clone();
         let hostname_clone = hostname.to_string();
         let high_water_mark = self.config.high_water_mark;
         let write_task = tokio::spawn(async move {
+            info!("Write task started");
             let mut conn = redis_client.get_multiplexed_async_connection().await?;
+            info!("Write task connected to Redis");
 
             while let Some(batch) = batch_rx.recv().await {
+                info!("Write task received batch of {} events", batch.len());
                 // Check backpressure
                 let stream_len: usize = conn.xlen(streams::FIREHOSE_LIVE).await?;
                 if stream_len >= high_water_mark {
+                    let in_memory = events_in_memory_clone.load(Ordering::Relaxed);
                     warn!(
-                        "Backpressure: stream length {} >= {}",
-                        stream_len, high_water_mark
+                        "Backpressure active: stream_len={}, high_water={}, events_in_memory={}",
+                        stream_len, high_water_mark, in_memory
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
 
                 // Write batch to Redis stream
+                let batch_size = batch.len();
                 Self::write_batch(&mut conn, &batch, &hostname_clone).await?;
+
+                // Decrement counter after successful write
+                events_in_memory_clone.fetch_sub(batch_size, Ordering::Relaxed);
             }
 
             Ok::<_, IngesterError>(())
@@ -126,17 +140,35 @@ impl FirehoseIngester {
             }
         });
 
+        // Spawn task to log memory metrics periodically
+        let events_in_memory_logger = events_in_memory.clone();
+        let metrics_task = tokio::spawn(async move {
+            let mut metrics_interval = interval(Duration::from_secs(10));
+            loop {
+                metrics_interval.tick().await;
+                let in_memory = events_in_memory_logger.load(Ordering::Relaxed);
+                if in_memory > 0 {
+                    info!("Memory metrics: {} events in-flight", in_memory);
+                }
+            }
+        });
+
         // Read messages from WebSocket
         while let Some(msg_result) = read.next().await {
             match msg_result {
                 Ok(Message::Binary(data)) => match self.process_message(&data).await {
                     Ok(events) => {
+                        let event_count = events.len();
                         for event in events {
-                            if let Err(e) = batch_tx.send(event) {
+                            // Bounded channel send is async and will block when full
+                            // This propagates backpressure to the WebSocket reader
+                            if let Err(e) = batch_tx.send(event).await {
                                 error!("Failed to send event to batcher: {:?}", e);
                                 break;
                             }
                         }
+                        // Increment counter after successfully sending all events
+                        events_in_memory.fetch_add(event_count, Ordering::Relaxed);
                     }
                     Err(e) => {
                         error!("Failed to process message: {:?}", e);
@@ -161,6 +193,7 @@ impl FirehoseIngester {
         drop(batch_tx);
         write_task.abort();
         ping_task.abort();
+        metrics_task.abort();
 
         Ok(())
     }
@@ -179,7 +212,7 @@ impl FirehoseIngester {
 
         match body {
             SubscribeRepos::Commit(commit) => {
-                let seq = commit.seq;  // Use the commit's sequence number, not header.operation
+                let seq = commit.seq; // Use the commit's sequence number, not header.operation
                 let did = commit.repo.clone();
                 let commit_cid = commit.commit.to_string();
                 let rev = commit.rev.clone();
@@ -259,7 +292,7 @@ impl FirehoseIngester {
             }
             SubscribeRepos::Handle(handle_evt) => {
                 events.push(StreamEvent::Identity {
-                    seq: handle_evt.seq,  // Use message's seq field
+                    seq: handle_evt.seq, // Use message's seq field
                     time,
                     did: handle_evt.did,
                     handle: handle_evt.handle,
@@ -267,7 +300,7 @@ impl FirehoseIngester {
             }
             SubscribeRepos::Account(account_evt) => {
                 events.push(StreamEvent::Account {
-                    seq: account_evt.seq,  // Use message's seq field
+                    seq: account_evt.seq, // Use message's seq field
                     time,
                     did: account_evt.did,
                     active: account_evt.active,
@@ -277,7 +310,7 @@ impl FirehoseIngester {
             SubscribeRepos::Identity(identity_evt) => {
                 if let Some(handle) = identity_evt.handle {
                     events.push(StreamEvent::Identity {
-                        seq: identity_evt.seq,  // Use message's seq field
+                        seq: identity_evt.seq, // Use message's seq field
                         time,
                         did: identity_evt.did,
                         handle,

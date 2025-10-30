@@ -145,7 +145,10 @@ impl StreamIndexer {
             let permit = match self.semaphore.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(e) => {
-                    error!("Failed to acquire semaphore permit: {:?}, skipping message", e);
+                    error!(
+                        "Failed to acquire semaphore permit: {:?}, skipping message",
+                        e
+                    );
                     continue;
                 }
             };
@@ -154,13 +157,22 @@ impl StreamIndexer {
 
             let handle = tokio::spawn(async move {
                 // Extract event info for better error logging
-                let event_info = message.contents.get("event")
+                let event_info = message
+                    .contents
+                    .get("event")
                     .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
                     .and_then(|v| {
-                        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
-                        let collection = v.get("collection").and_then(|c| c.as_str()).unwrap_or("unknown");
+                        let event_type =
+                            v.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                        let collection = v
+                            .get("collection")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("unknown");
                         let did = v.get("did").and_then(|d| d.as_str()).unwrap_or("unknown");
-                        Some(format!("type={}, collection={}, did={}", event_type, collection, did))
+                        Some(format!(
+                            "type={}, collection={}, did={}",
+                            event_type, collection, did
+                        ))
                     })
                     .unwrap_or_else(|| "unknown event".to_string());
 
@@ -182,7 +194,10 @@ impl StreamIndexer {
                         if e.is_expected_error() {
                             warn!("Skipping message {} [{}]: {}", message.id, event_info, e);
                         } else {
-                            error!("Failed to process message {} [{}]: {:?}", message.id, event_info, e);
+                            error!(
+                                "Failed to process message {} [{}]: {:?}",
+                                message.id, event_info, e
+                            );
                         }
                     }
                 }
@@ -354,7 +369,9 @@ impl StreamIndexer {
             } => {
                 // Handle "deleted" status specially - delete the actor entirely
                 // Case-insensitive comparison since statuses may come capitalized
-                if !active && status.as_ref().map(|s| s.to_lowercase()).as_deref() == Some("deleted") {
+                if !active
+                    && status.as_ref().map(|s| s.to_lowercase()).as_deref() == Some("deleted")
+                {
                     indexing_service.delete_actor(&did).await?;
                 } else {
                     indexing_service

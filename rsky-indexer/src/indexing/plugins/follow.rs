@@ -22,7 +22,9 @@ impl FollowPlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 
     /// Hash a string to i64 for PostgreSQL advisory lock
@@ -134,7 +136,14 @@ impl RecordPlugin for FollowPlugin {
                 r#"INSERT INTO follow (uri, cid, creator, "subjectDid", "createdAt", "indexedAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&uri, &cid, &creator, &subject_did, &created_at.to_rfc3339(), &indexed_at.to_rfc3339()],
+                &[
+                    &uri,
+                    &cid,
+                    &creator,
+                    &subject_did,
+                    &created_at.to_rfc3339(),
+                    &indexed_at.to_rfc3339(),
+                ],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -210,9 +219,8 @@ impl RecordPlugin for FollowPlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
-        let (creator, subject_did): (Option<String>, Option<String>) = row
-            .map(|r| (r.get(0), r.get(1)))
-            .unwrap_or((None, None));
+        let (creator, subject_did): (Option<String>, Option<String>) =
+            row.map(|r| (r.get(0), r.get(1))).unwrap_or((None, None));
 
         // Delete follow
         client
@@ -222,7 +230,10 @@ impl RecordPlugin for FollowPlugin {
 
         // Delete notifications for this follow
         client
-            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM notification WHERE "recordUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 

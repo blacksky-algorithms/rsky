@@ -89,7 +89,10 @@ impl LabelIndexer {
                 let permit = match self.semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(e) => {
-                        error!("Failed to acquire semaphore permit: {:?}, skipping message", e);
+                        error!(
+                            "Failed to acquire semaphore permit: {:?}, skipping message",
+                            e
+                        );
                         continue;
                     }
                 };
@@ -196,12 +199,12 @@ impl LabelIndexer {
                 client
                     .execute(
                         r#"
-                        INSERT INTO label (src, uri, cid, val, cts, indexed_at)
+                        INSERT INTO label (src, uri, cid, val, cts, "indexedAt")
                         VALUES ($1, $2, $3, $4, $5, NOW())
                         ON CONFLICT (src, uri, val) DO UPDATE
                         SET cid = EXCLUDED.cid,
                             cts = EXCLUDED.cts,
-                            indexed_at = EXCLUDED.indexed_at
+                            "indexedAt" = EXCLUDED."indexedAt"
                         "#,
                         &[
                             &label.src,

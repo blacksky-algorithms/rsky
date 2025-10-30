@@ -1,5 +1,7 @@
 use anyhow::Result;
-use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts};
+use deadpool_postgres::{
+    Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts,
+};
 use rsky_indexer::{
     indexing::IndexingService, label_indexer::LabelIndexer, stream_indexer::StreamIndexer, streams,
     IndexerConfig,
@@ -50,9 +52,9 @@ async fn main() -> Result<()> {
     pg_config.pool = Some(PoolConfig {
         max_size: pool_max_size,
         timeouts: Timeouts {
-            wait: Some(Duration::from_secs(30)),        // Wait max 30s for a connection
-            create: Some(Duration::from_secs(30)),      // Create connection max 30s
-            recycle: Some(Duration::from_secs(30)),     // Recycle connection max 30s
+            wait: Some(Duration::from_secs(30)), // Wait max 30s for a connection
+            create: Some(Duration::from_secs(30)), // Create connection max 30s
+            recycle: Some(Duration::from_secs(30)), // Recycle connection max 30s
         },
         ..Default::default()
     });

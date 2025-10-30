@@ -9,17 +9,18 @@ pub struct Batcher<T> {
     max_size: usize,
     timeout: Duration,
     last_flush: Instant,
-    rx: mpsc::UnboundedReceiver<T>,
-    flush_tx: mpsc::UnboundedSender<Vec<T>>,
+    rx: mpsc::Receiver<T>,
+    flush_tx: mpsc::Sender<Vec<T>>,
 }
 
 impl<T: Send + 'static> Batcher<T> {
-    pub fn new(
-        max_size: usize,
-        timeout_ms: u64,
-    ) -> (mpsc::UnboundedSender<T>, mpsc::UnboundedReceiver<Vec<T>>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (flush_tx, flush_rx) = mpsc::unbounded_channel();
+    pub fn new(max_size: usize, timeout_ms: u64) -> (mpsc::Sender<T>, mpsc::Receiver<Vec<T>>) {
+        // Use bounded channel with capacity = 2x batch size
+        // This limits in-memory events and propagates backpressure to the sender
+        let (tx, rx) = mpsc::channel(max_size * 2);
+        // Use bounded channel for batches too (capacity = 4 batches)
+        // This ensures backpressure propagates when write task is paused
+        let (flush_tx, flush_rx) = mpsc::channel(4);
 
         let mut batcher = Self {
             batch: Vec::with_capacity(max_size),
@@ -54,13 +55,13 @@ impl<T: Send + 'static> Batcher<T> {
                         Some(event) => {
                             self.batch.push(event);
                             if self.batch.len() >= self.max_size {
-                                self.flush();
+                                self.flush().await;
                             }
                         }
                         None => {
                             // Channel closed, flush remaining and exit
                             if !self.batch.is_empty() {
-                                self.flush();
+                                self.flush().await;
                             }
                             break;
                         }
@@ -69,16 +70,20 @@ impl<T: Send + 'static> Batcher<T> {
                 // Timeout reached
                 _ = sleep(time_until_flush) => {
                     if !self.batch.is_empty() {
-                        self.flush();
+                        self.flush().await;
                     }
                 }
             }
         }
     }
 
-    fn flush(&mut self) {
+    async fn flush(&mut self) {
         let batch = std::mem::replace(&mut self.batch, Vec::with_capacity(self.max_size));
-        let _ = self.flush_tx.send(batch);
+        tracing::debug!("Batcher flushing {} events", batch.len());
+        // Bounded send - will block when write task is paused, propagating backpressure
+        if let Err(e) = self.flush_tx.send(batch).await {
+            tracing::error!("Failed to send batch to write task: {:?}", e);
+        }
         self.last_flush = Instant::now();
     }
 }

@@ -22,7 +22,9 @@ impl RepostPlugin {
     fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, IndexerError> {
         DateTime::parse_from_rfc3339(timestamp)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e)))
+            .map_err(|e| {
+                IndexerError::Serialization(format!("Invalid timestamp '{}': {}", timestamp, e))
+            })
     }
 }
 
@@ -46,12 +48,24 @@ impl RecordPlugin for RepostPlugin {
         let creator = Self::extract_creator(uri);
 
         // Extract subject from record
-        let subject = record.get("subject").and_then(|s| s.get("uri")).and_then(|u| u.as_str());
-        let subject_cid = record.get("subject").and_then(|s| s.get("cid")).and_then(|c| c.as_str());
+        let subject = record
+            .get("subject")
+            .and_then(|s| s.get("uri"))
+            .and_then(|u| u.as_str());
+        let subject_cid = record
+            .get("subject")
+            .and_then(|s| s.get("cid"))
+            .and_then(|c| c.as_str());
 
         // Extract via from record (repost that led to this repost)
-        let via = record.get("via").and_then(|v| v.get("uri")).and_then(|u| u.as_str());
-        let via_cid = record.get("via").and_then(|v| v.get("cid")).and_then(|c| c.as_str());
+        let via = record
+            .get("via")
+            .and_then(|v| v.get("uri"))
+            .and_then(|u| u.as_str());
+        let via_cid = record
+            .get("via")
+            .and_then(|v| v.get("cid"))
+            .and_then(|c| c.as_str());
 
         // Parse timestamps
         let indexed_at = Self::parse_timestamp(timestamp)?;
@@ -100,7 +114,14 @@ impl RecordPlugin for RepostPlugin {
                 r#"INSERT INTO feed_item (type, uri, cid, "postUri", "originatorDid", "sortAt")
                    VALUES ($1, $2, $3, $4, $5, $6)
                    ON CONFLICT (uri) DO NOTHING"#,
-                &[&"repost", &uri, &cid, &subject, &creator, &sort_at.to_rfc3339()],
+                &[
+                    &"repost",
+                    &uri,
+                    &cid,
+                    &subject,
+                    &creator,
+                    &sort_at.to_rfc3339(),
+                ],
             )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
@@ -210,7 +231,10 @@ impl RecordPlugin for RepostPlugin {
 
         // Delete notifications for this repost
         client
-            .execute(r#"DELETE FROM notification WHERE "recordUri" = $1"#, &[&uri])
+            .execute(
+                r#"DELETE FROM notification WHERE "recordUri" = $1"#,
+                &[&uri],
+            )
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
