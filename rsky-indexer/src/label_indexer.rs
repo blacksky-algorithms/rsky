@@ -201,7 +201,7 @@ impl LabelIndexer {
                         r#"
                         INSERT INTO label (src, uri, cid, val, cts, exp)
                         VALUES ($1, $2, $3, $4, $5, NULL)
-                        ON CONFLICT (uri) DO UPDATE
+                        ON CONFLICT (src, uri, cid, val) DO UPDATE
                         SET cid = EXCLUDED.cid,
                             cts = EXCLUDED.cts,
                             exp = EXCLUDED.exp
