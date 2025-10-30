@@ -69,6 +69,7 @@ pub enum StreamEvent {
     },
     #[serde(rename = "repo")]
     Repo {
+        #[serde(default = "default_seq")]
         seq: i64,
         time: String,
         did: String,
@@ -77,6 +78,7 @@ pub enum StreamEvent {
     },
     #[serde(rename = "account")]
     Account {
+        #[serde(default = "default_seq")]
         seq: i64,
         time: String,
         did: String,
@@ -85,6 +87,7 @@ pub enum StreamEvent {
     },
     #[serde(rename = "identity")]
     Identity {
+        #[serde(default = "default_seq")]
         seq: i64,
         time: String,
         did: String,
@@ -111,6 +114,11 @@ pub struct Label {
 
 /// Special sequence number for backfill events
 pub const SEQ_BACKFILL: i64 = -1;
+
+/// Default seq value for events that don't specify one
+fn default_seq() -> i64 {
+    SEQ_BACKFILL
+}
 
 /// Redis stream names
 pub mod streams {
