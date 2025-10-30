@@ -4,7 +4,7 @@ use crate::{IndexerConfig, IndexerError, IndexerMetrics, StreamEvent, SEQ_BACKFI
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// StreamIndexer reads from Redis streams and indexes events into PostgreSQL
 pub struct StreamIndexer {
@@ -177,7 +177,13 @@ impl StreamIndexer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to process message {} [{}]: {:?}", message.id, event_info, e);
+                        // Log expected errors (duplicates, invalid UTF-8) at WARN level
+                        // to reduce noise in production logs
+                        if e.is_expected_error() {
+                            warn!("Skipping message {} [{}]: {}", message.id, event_info, e);
+                        } else {
+                            error!("Failed to process message {} [{}]: {:?}", message.id, event_info, e);
+                        }
                     }
                 }
 

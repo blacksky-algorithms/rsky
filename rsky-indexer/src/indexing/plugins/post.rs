@@ -152,7 +152,7 @@ impl PostPlugin {
                     .execute(
                         r#"INSERT INTO post_embed_record ("postUri", "embedUri", "embedCid")
                            VALUES ($1, $2, $3)
-                           ON CONFLICT ("postUri") DO NOTHING"#,
+                           ON CONFLICT ("postUri", "embedUri") DO NOTHING"#,
                         &[&post_uri, &subject_uri, &subject_cid],
                     )
                     .await
@@ -161,10 +161,10 @@ impl PostPlugin {
                 // Insert into quote table
                 client
                     .execute(
-                        r#"INSERT INTO quote (uri, cid, creator, subject, "subjectCid", "createdAt", "indexedAt")
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        r#"INSERT INTO quote (uri, cid, subject, "subjectCid", "createdAt", "indexedAt")
+                           VALUES ($1, $2, $3, $4, $5, $6)
                            ON CONFLICT (uri) DO NOTHING"#,
-                        &[&post_uri, &post_cid, &creator, &subject_uri, &subject_cid, &indexed_at.to_rfc3339(), &indexed_at.to_rfc3339()],
+                        &[&post_uri, &post_cid, &subject_uri, &subject_cid, &indexed_at.to_rfc3339(), &indexed_at.to_rfc3339()],
                     )
                     .await
                     .map_err(|e| IndexerError::Database(e.into()))?;
@@ -312,9 +312,9 @@ impl PostPlugin {
                     INNER JOIN descendent d ON d.uri = p."replyParent"
                     WHERE d.depth < $2
                 )
-                SELECT uri, creator, cid, "sortAt", depth
+                SELECT uri, creator, cid, sort_at, depth
                 FROM descendent
-                ORDER BY depth, "sortAt"
+                ORDER BY depth, sort_at
                 "#,
                 &[&post_uri, &max_depth],
             )
@@ -326,7 +326,8 @@ impl PostPlugin {
             let uri: String = row.get(0);
             let creator: String = row.get(1);
             let cid: String = row.get(2);
-            let sort_at: DateTime<Utc> = row.get(3);
+            let sort_at_str: String = row.get(3);
+            let sort_at = Self::parse_timestamp(&sort_at_str)?;
             let depth: i32 = row.get(4);
             descendants.push((uri, creator, cid, sort_at, depth));
         }
@@ -418,7 +419,9 @@ impl PostPlugin {
             return Ok(false);
         };
 
-        let json: JsonValue = row.get(0);
+        let json_str: String = row.get(0);
+        let json: JsonValue = serde_json::from_str(&json_str)
+            .map_err(|e| IndexerError::Serialization(format!("Failed to parse threadgate JSON: {}", e)))?;
 
         // Parse threadgate allow rules
         let allow_array = json
@@ -450,7 +453,9 @@ impl PostPlugin {
                             .map_err(|e| IndexerError::Database(e.into()))?;
 
                         if let Some(post_row) = root_post {
-                            let post_json: JsonValue = post_row.get(0);
+                            let json_str: String = post_row.get(0);
+                            let post_json: JsonValue = serde_json::from_str(&json_str)
+                                .map_err(|e| IndexerError::Serialization(format!("Failed to parse post JSON: {}", e)))?;
                             let (mentions, _) = Self::extract_facets(&post_json);
                             if mentions.contains(&replier_did.to_string()) {
                                 return Ok(false); // Mentioned in root post, allowed

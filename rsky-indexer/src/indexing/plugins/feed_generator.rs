@@ -52,6 +52,7 @@ impl RecordPlugin for FeedGeneratorPlugin {
 
         // Extract descriptionFacets as JSON value if present
         let description_facets = record.get("descriptionFacets").cloned();
+        let description_facets_str = description_facets.as_ref().map(|v| v.to_string());
 
         // Extract avatarCid from avatar.ref if present
         let avatar_cid = record
@@ -78,7 +79,7 @@ impl RecordPlugin for FeedGeneratorPlugin {
                     &feed_did,
                     &display_name,
                     &description,
-                    &description_facets,
+                    &description_facets_str,
                     &avatar_cid,
                     &created_at.to_rfc3339(),
                     &indexed_at.to_rfc3339(),

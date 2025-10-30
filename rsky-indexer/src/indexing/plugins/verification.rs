@@ -81,18 +81,11 @@ impl RecordPlugin for VerificationPlugin {
             }
         }
 
-        // Calculate sorted_at for tables without auto-generated columns
-        let sorted_at = if created_at < indexed_at {
-            created_at.clone()
-        } else {
-            indexed_at.clone()
-        };
-
         // Insert verification
         client
             .execute(
-                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, "displayName", "createdAt", "indexedAt", "sortedAt")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                r#"INSERT INTO verification (uri, cid, rkey, creator, subject, handle, "displayName", "createdAt", "indexedAt"")
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    ON CONFLICT (uri) DO NOTHING"#,
                 &[
                     &uri,
@@ -104,7 +97,6 @@ impl RecordPlugin for VerificationPlugin {
                     &display_name,
                     &created_at.to_rfc3339(),
                     &indexed_at.to_rfc3339(),
-                    &sorted_at.to_rfc3339(),
                 ],
             )
             .await

@@ -156,3 +156,30 @@ pub struct IndexerMetrics {
     pub waiting: i64,
     pub running: i64,
 }
+
+impl IndexerError {
+    /// Check if this error should be logged at WARN instead of ERROR
+    /// Returns true for:
+    /// - Duplicate key violations (expected during concurrent/backfill processing)
+    /// - Invalid UTF-8 byte sequences (bad data from firehose)
+    pub fn is_expected_error(&self) -> bool {
+        match self {
+            IndexerError::Database(err) => {
+                let err_msg = err.to_string().to_lowercase();
+
+                // Duplicate key violations - these are expected and handled by ON CONFLICT
+                if err_msg.contains("duplicate key") {
+                    return true;
+                }
+
+                // Invalid UTF-8 sequences (null bytes, etc.) - bad data we should skip
+                if err_msg.contains("invalid byte sequence for encoding") {
+                    return true;
+                }
+
+                false
+            }
+            _ => false,
+        }
+    }
+}

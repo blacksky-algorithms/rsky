@@ -52,7 +52,7 @@ impl RecordPlugin for ListBlockPlugin {
         if let (Some(creator_did), Some(subject)) = (&creator, subject_uri) {
             let existing = client
                 .query_opt(
-                    "SELECT uri FROM list_block WHERE creator = $1 AND subject_uri = $2",
+                    r#"SELECT uri FROM list_block WHERE creator = $1 AND "subjectUri" = $2"#,
                     &[&creator_did, &subject],
                 )
                 .await
