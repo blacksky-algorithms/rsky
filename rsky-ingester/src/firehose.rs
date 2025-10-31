@@ -170,6 +170,12 @@ impl FirehoseIngester {
                     .get_multiplexed_async_connection()
                     .await
                 {
+                    if let Ok(live_len) = conn.xlen::<_, usize>(streams::FIREHOSE_LIVE).await {
+                        metrics::FIREHOSE_LIVE_LENGTH.set(live_len as i64);
+                    }
+                    if let Ok(backfill_len) = conn.xlen::<_, usize>(streams::FIREHOSE_BACKFILL).await {
+                        metrics::FIREHOSE_BACKFILL_LENGTH.set(backfill_len as i64);
+                    }
                     if let Ok(repo_len) = conn.xlen::<_, usize>(streams::REPO_BACKFILL).await {
                         metrics::REPO_BACKFILL_LENGTH.set(repo_len as i64);
                     }

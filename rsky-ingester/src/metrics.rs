@@ -61,6 +61,13 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Current firehose_backfill stream length
+    pub static ref FIREHOSE_BACKFILL_LENGTH: IntGauge = register_int_gauge!(
+        "ingester_firehose_backfill_length",
+        "Current length of firehose_backfill stream"
+    )
+    .unwrap();
+
     /// Current label_live stream length
     pub static ref LABEL_LIVE_LENGTH: IntGauge = register_int_gauge!(
         "ingester_label_live_length",
