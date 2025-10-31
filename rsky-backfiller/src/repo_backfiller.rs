@@ -174,6 +174,19 @@ impl RepoBackfiller {
                     .map(|m| m.id.clone())
                     .unwrap_or(">".to_string());
             }
+
+            // Periodically trim the stream to free Redis memory
+            // Only trim when processing pending messages (cursor != ">")
+            // This ensures we don't trim messages that haven't been processed yet
+            if cursor != ">" {
+                // Get the consumer group's last-delivered-id as the safe trim point
+                if let Ok(Some(group_cursor)) = self.get_group_cursor().await {
+                    // Trim the stream to remove all messages before the group cursor
+                    if let Err(e) = self.trim_stream(&group_cursor).await {
+                        warn!("Failed to trim stream: {:?}", e);
+                    }
+                }
+            }
         }
     }
 
@@ -754,6 +767,78 @@ impl RepoBackfiller {
         }
 
         Ok(())
+    }
+
+    /// Trim the stream to remove all messages before the given cursor
+    /// This frees Redis memory by deleting processed messages
+    /// Uses XTRIM with MINID strategy to keep only messages >= cursor
+    async fn trim_stream(&self, cursor: &str) -> Result<u64, BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // XTRIM stream MINID cursor
+        let trimmed: u64 = redis::cmd("XTRIM")
+            .arg(&self.config.stream_in)
+            .arg("MINID")
+            .arg(cursor)
+            .query_async(&mut conn)
+            .await?;
+
+        if trimmed > 0 {
+            info!(
+                "Trimmed {} messages from stream {} (cursor: {})",
+                trimmed, self.config.stream_in, cursor
+            );
+        }
+
+        Ok(trimmed)
+    }
+
+    /// Get the consumer group's last-delivered-id
+    /// This is the safest cursor to use for trimming
+    async fn get_group_cursor(&self) -> Result<Option<String>, BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // XINFO GROUPS stream
+        let result: redis::Value = redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(&self.config.stream_in)
+            .query_async(&mut conn)
+            .await?;
+
+        // Parse the result to find our group's last-delivered-id
+        if let redis::Value::Array(groups) = result {
+            for group_info in groups {
+                if let redis::Value::Array(fields) = group_info {
+                    let mut group_name: Option<String> = None;
+                    let mut last_delivered: Option<String> = None;
+
+                    // Fields come in pairs: [key, value, key, value, ...]
+                    for i in (0..fields.len()).step_by(2) {
+                        if let (Some(redis::Value::BulkString(k)), Some(v)) =
+                            (fields.get(i), fields.get(i + 1))
+                        {
+                            let key = String::from_utf8_lossy(k);
+                            if key == "name" {
+                                if let redis::Value::BulkString(name) = v {
+                                    group_name = Some(String::from_utf8_lossy(name).to_string());
+                                }
+                            } else if key == "last-delivered-id" {
+                                if let redis::Value::BulkString(id) = v {
+                                    last_delivered = Some(String::from_utf8_lossy(id).to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    // If this is our group, return its last-delivered-id
+                    if group_name.as_deref() == Some(&self.config.consumer_group) {
+                        return Ok(last_delivered);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Claim pending messages from crashed/idle consumers (Phase 5 optimization)
