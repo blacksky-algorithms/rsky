@@ -123,6 +123,15 @@ impl StreamIndexer {
                 *cursor = ">".to_string();
                 info!("Switched to live stream");
             }
+
+            // Still trim even when no messages, to clean up already-processed messages
+            // This handles the case where messages were processed and ACKed, but trim didn't run yet
+            if let Ok(Some(group_cursor)) = self.consumer.get_group_cursor().await {
+                if let Err(e) = self.consumer.trim_stream(&group_cursor).await {
+                    warn!("Failed to trim stream (empty batch): {:?}", e);
+                }
+            }
+
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             return Ok(true);
         }
@@ -214,15 +223,13 @@ impl StreamIndexer {
         }
 
         // Periodically trim the stream to free Redis memory
-        // Only trim when processing pending messages (cursor != ">")
-        // This ensures we don't trim messages that haven't been processed yet
-        if *cursor != ">" {
-            // Get the consumer group's last-delivered-id as the safe trim point
-            if let Ok(Some(group_cursor)) = self.consumer.get_group_cursor().await {
-                // Trim the stream to remove all messages before the group cursor
-                if let Err(e) = self.consumer.trim_stream(&group_cursor).await {
-                    warn!("Failed to trim stream: {:?}", e);
-                }
+        // Get the consumer group's last-delivered-id as the safe trim point
+        // This is safe for both pending (cursor="0") and live (cursor=">") modes
+        // because we only trim messages that the group has already delivered
+        if let Ok(Some(group_cursor)) = self.consumer.get_group_cursor().await {
+            // Trim the stream to remove all messages before the group cursor
+            if let Err(e) = self.consumer.trim_stream(&group_cursor).await {
+                warn!("Failed to trim stream: {:?}", e);
             }
         }
 
