@@ -41,8 +41,10 @@ async-trait = "0.1"
 futures = "0.3"
 tokio-util = { workspace = true }
 
-# Metrics (optional for now, can add prometheus later)
-# prometheus = { version = "0.13", optional = true }
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.5"
+warp = "0.3"
 
 # Workspace dependencies
 rsky-lexicon = { workspace = true }

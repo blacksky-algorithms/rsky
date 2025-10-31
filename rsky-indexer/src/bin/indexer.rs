@@ -3,8 +3,8 @@ use deadpool_postgres::{
     Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts,
 };
 use rsky_indexer::{
-    indexing::IndexingService, label_indexer::LabelIndexer, stream_indexer::StreamIndexer, streams,
-    IndexerConfig,
+    indexing::IndexingService, label_indexer::LabelIndexer, metrics, stream_indexer::StreamIndexer,
+    streams, IndexerConfig,
 };
 use std::env;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio_postgres::NoTls;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use warp::Filter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,6 +26,30 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting rsky-indexer");
+
+    // Start metrics server
+    let metrics_port = env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "9090".to_string())
+        .parse::<u16>()
+        .expect("METRICS_PORT must be a valid port number");
+
+    tokio::spawn(async move {
+        let metrics_route = warp::path!("metrics").map(|| match metrics::encode_metrics() {
+            Ok(metrics) => warp::reply::with_status(metrics, warp::http::StatusCode::OK),
+            Err(e) => {
+                error!("Failed to encode metrics: {:?}", e);
+                warp::reply::with_status(
+                    format!("Error: {}", e),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            }
+        });
+
+        info!("Metrics server starting on port {}", metrics_port);
+        warp::serve(metrics_route)
+            .run(([0, 0, 0, 0], metrics_port))
+            .await;
+    });
 
     // Load configuration from environment
     let config = load_config();

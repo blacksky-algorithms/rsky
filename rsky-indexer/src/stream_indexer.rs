@@ -1,6 +1,6 @@
 use crate::consumer::{RedisConsumer, StreamMessage};
 use crate::indexing::{IndexingOptions, IndexingService, WriteOpAction};
-use crate::{IndexerConfig, IndexerError, IndexerMetrics, StreamEvent, SEQ_BACKFILL};
+use crate::{metrics, IndexerConfig, IndexerError, StreamEvent, SEQ_BACKFILL};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -11,8 +11,6 @@ pub struct StreamIndexer {
     consumer: RedisConsumer,
     indexing_service: Arc<IndexingService>,
     config: IndexerConfig,
-    #[allow(dead_code)]
-    metrics: Arc<IndexerMetrics>,
     cancellation_token: CancellationToken,
     semaphore: Arc<Semaphore>,
 }
@@ -39,7 +37,6 @@ impl StreamIndexer {
             consumer,
             indexing_service,
             config,
-            metrics: Arc::new(IndexerMetrics::default()),
             cancellation_token: CancellationToken::new(),
             semaphore,
         })

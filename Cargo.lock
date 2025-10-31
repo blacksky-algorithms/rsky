@@ -7910,6 +7910,8 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures",
+ "lazy_static",
+ "prometheus",
  "redis",
  "rsky-identity",
  "rsky-lexicon",
@@ -7924,6 +7926,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid 1.18.0",
+ "warp",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ pub mod consumer;
 pub mod did_helpers;
 pub mod indexing;
 pub mod label_indexer;
+pub mod metrics;
 pub mod stream_indexer;
 
 use serde::{Deserialize, Serialize};
@@ -154,15 +155,6 @@ impl Default for IndexerConfig {
             batch_size: 500,
         }
     }
-}
-
-/// Metrics tracking for the indexer
-#[derive(Debug, Clone, Default)]
-pub struct IndexerMetrics {
-    pub processed: u64,
-    pub failed: u64,
-    pub waiting: i64,
-    pub running: i64,
 }
 
 impl IndexerError {

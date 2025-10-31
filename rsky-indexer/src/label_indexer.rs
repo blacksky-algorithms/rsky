@@ -1,5 +1,5 @@
 use crate::consumer::{RedisConsumer, StreamMessage};
-use crate::{IndexerConfig, IndexerError, IndexerMetrics, Label, LabelStreamEvent};
+use crate::{metrics, IndexerConfig, IndexerError, Label, LabelStreamEvent};
 use deadpool_postgres::Pool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,8 +11,6 @@ pub struct LabelIndexer {
     consumer: RedisConsumer,
     pool: Pool,
     config: IndexerConfig,
-    #[allow(dead_code)]
-    metrics: Arc<IndexerMetrics>,
     shutdown: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
 }
@@ -33,7 +31,6 @@ impl LabelIndexer {
             consumer,
             pool,
             config,
-            metrics: Arc::new(IndexerMetrics::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             semaphore,
         })
