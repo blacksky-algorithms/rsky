@@ -1,18 +1,70 @@
 # CLAUDE.MD - rsky Production Deployment Phase
 
-## CURRENT PRIORITY: Production Deployment
+## CURRENT MISSION: Queue Position Analysis & Data Integrity Investigation
 
-All monitoring is now in place. Next steps:
+**Date Started**: 2025-10-31
+**Status**: Active Investigation
 
-1. **Deploy updated components to production**:
-   - Updated ingester binary (with firehose_backfill_length metric)
-   - Updated Grafana dashboard (17 new panels added)
-   - Updated indexer binaries (XTRIM fixes)
+### Mission Objective
 
-2. **Restart indexers** to complete XTRIM deployment:
-   - See `XTRIM_FIX_REPORT.md` for detailed steps
+Build tooling to understand where specific repos and records are positioned in Redis queues, verify data integrity, and identify missing records that should have been indexed.
 
-3. **Verify all metrics are showing data** in Grafana
+### Specific Investigation Task
+
+**Target Repo**: `did:plc:w4xbfzo7kqfes5zb7r6qv3rw` (user's personal repo)
+**Date Range**: October 14, 2025 - October 31, 2025
+**Record Types**: Posts, Likes, Reposts
+
+**Questions to Answer**:
+1. Which records from this repo are already in PostgreSQL?
+2. Which records are missing from PostgreSQL?
+3. Where are the missing records in the Redis queues (firehose_live, firehose_backfill, repo_backfill)?
+4. How long until missing records will be processed?
+5. Are there records completely missing from all queues (data loss)?
+
+### Approach
+
+1. **Fetch repo from PDS**:
+   - Download CAR file: `blacksky.app/xrpc/com.atproto.sync.getRepo?did=did:plc:w4xbfzo7kqfes5zb7r6qv3rw`
+   - Parse all records with timestamps
+   - Filter to October 14-31 date range
+
+2. **Query PostgreSQL** (via SSH tunnel to production):
+   - Check which records from this repo already exist
+   - Identify missing records by comparing with CAR file
+
+3. **Search Redis streams**:
+   - Query `firehose_live`, `firehose_backfill`, `repo_backfill` for DID
+   - Find position of missing records in queues
+   - Calculate approximate processing time based on consumer rates
+
+4. **Analyze gaps**:
+   - Identify records completely missing from queues
+   - Determine if missing due to TypeScript bugs or other issues
+
+### Long-term Goals
+
+- Create general-purpose tool to query queue position for any repo/record
+- Ability to prioritize certain repos/PDSs for backfill
+- Queue reordering capability
+- Data integrity verification across all queues
+
+### Tools to Build
+
+1. `queue_inspector.py` - Find repo/record position in Redis streams
+2. `data_integrity_checker.py` - Compare PDS repo state vs indexed state
+3. `backfill_prioritizer.py` - Reorder queue entries (future)
+
+---
+
+## PREVIOUS PRIORITY: Production Deployment ✅
+
+**Status**: COMPLETE - Ingester deployed, dashboard updated
+
+All monitoring is now in place:
+- ✅ Updated ingester binary deployed (with firehose_backfill_length metric)
+- ✅ Updated Grafana dashboard (17 new panels added)
+- ⏳ Indexer XTRIM fixes ready for deployment
 
 ---
 
