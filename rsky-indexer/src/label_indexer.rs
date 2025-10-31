@@ -191,6 +191,10 @@ impl LabelIndexer {
                     .map_err(|e| IndexerError::Database(e.into()))?;
 
                 debug!("Deleted label: {} on {}", label.val, label.uri);
+
+                // Increment metrics
+                metrics::LABELS_REMOVED_TOTAL.inc();
+                metrics::DB_WRITES_TOTAL.inc();
             } else {
                 // Insert or update the label
                 // Matching migration schema: (src, uri, cid, val, neg, cts)
@@ -217,7 +221,14 @@ impl LabelIndexer {
                     .map_err(|e| IndexerError::Database(e.into()))?;
 
                 debug!("Indexed label: {} on {}", label.val, label.uri);
+
+                // Increment metrics
+                metrics::LABELS_ADDED_TOTAL.inc();
+                metrics::DB_WRITES_TOTAL.inc();
             }
+
+            // Increment total labels processed
+            metrics::LABELS_PROCESSED_TOTAL.inc();
         }
 
         Ok(())

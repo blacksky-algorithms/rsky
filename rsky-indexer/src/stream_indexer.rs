@@ -190,11 +190,13 @@ impl StreamIndexer {
                         // to reduce noise in production logs
                         if e.is_expected_error() {
                             warn!("Skipping message {} [{}]: {}", message.id, event_info, e);
+                            metrics::EXPECTED_ERRORS_TOTAL.inc();
                         } else {
                             error!(
                                 "Failed to process message {} [{}]: {:?}",
                                 message.id, event_info, e
                             );
+                            metrics::UNEXPECTED_ERRORS_TOTAL.inc();
                         }
                     }
                 }
@@ -298,6 +300,27 @@ impl StreamIndexer {
                     indexing_service
                         .set_commit_last_seen(&did, &commit, &rev)
                         .await?;
+                    metrics::DB_WRITES_TOTAL.inc(); // commit tracking write
+                }
+
+                // Increment metrics
+                metrics::EVENTS_PROCESSED_TOTAL.inc();
+                metrics::CREATE_EVENTS_TOTAL.inc();
+                metrics::DB_WRITES_TOTAL.inc(); // index_record writes
+
+                // Track collection-specific metrics
+                if collection == "app.bsky.feed.post" {
+                    metrics::POST_EVENTS_TOTAL.inc();
+                } else if collection == "app.bsky.feed.like" {
+                    metrics::LIKE_EVENTS_TOTAL.inc();
+                } else if collection == "app.bsky.feed.repost" {
+                    metrics::REPOST_EVENTS_TOTAL.inc();
+                } else if collection == "app.bsky.graph.follow" {
+                    metrics::FOLLOW_EVENTS_TOTAL.inc();
+                } else if collection == "app.bsky.graph.block" {
+                    metrics::BLOCK_EVENTS_TOTAL.inc();
+                } else if collection == "app.bsky.actor.profile" {
+                    metrics::PROFILE_EVENTS_TOTAL.inc();
                 }
             }
             StreamEvent::Update {
@@ -330,7 +353,13 @@ impl StreamIndexer {
                     indexing_service
                         .set_commit_last_seen(&did, &commit, &rev)
                         .await?;
+                    metrics::DB_WRITES_TOTAL.inc(); // commit tracking write
                 }
+
+                // Increment metrics
+                metrics::EVENTS_PROCESSED_TOTAL.inc();
+                metrics::UPDATE_EVENTS_TOTAL.inc();
+                metrics::DB_WRITES_TOTAL.inc(); // index_record writes
             }
             StreamEvent::Delete {
                 did,
@@ -348,7 +377,13 @@ impl StreamIndexer {
                     indexing_service
                         .set_commit_last_seen(&did, &commit, &rev)
                         .await?;
+                    metrics::DB_WRITES_TOTAL.inc(); // commit tracking write
                 }
+
+                // Increment metrics
+                metrics::EVENTS_PROCESSED_TOTAL.inc();
+                metrics::DELETE_EVENTS_TOTAL.inc();
+                metrics::DB_WRITES_TOTAL.inc(); // delete_record writes
             }
             StreamEvent::Repo {
                 did, commit, rev, ..
@@ -356,6 +391,7 @@ impl StreamIndexer {
                 indexing_service
                     .set_commit_last_seen(&did, &commit, &rev)
                     .await?;
+                metrics::DB_WRITES_TOTAL.inc(); // commit tracking write
             }
             StreamEvent::Account {
                 did,
@@ -376,9 +412,11 @@ impl StreamIndexer {
                         .await?;
                     indexing_service.index_handle(&did, &time).await?;
                 }
+                metrics::DB_WRITES_TOTAL.inc(); // actor status/handle writes
             }
             StreamEvent::Identity { did, time, .. } => {
                 indexing_service.index_handle(&did, &time).await?;
+                metrics::DB_WRITES_TOTAL.inc(); // handle index write
             }
         }
 
