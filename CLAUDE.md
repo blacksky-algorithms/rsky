@@ -1,6 +1,104 @@
 # CLAUDE.MD - rsky Production Deployment Phase
 
-## CURRENT PRODUCTION ISSUES (2025-10-31 18:30 UTC) - MISSION CRITICAL
+## NEW MISSION: Metrics Audit and Grafana Dashboard Completion (2025-10-31 20:00 UTC)
+
+**Status**: All metrics have working logic and HTTP endpoints. 25 metrics missing from Grafana dashboard.
+
+**Task**: Ensure comprehensive monitoring by adding all missing metrics to Grafana dashboard.
+
+### Background
+Completed comprehensive audit of all Prometheus metrics across three crates:
+- ✅ rsky-ingester: 20 metrics defined, all have update logic, HTTP endpoint working
+- ✅ rsky-indexer: 22 metrics defined, 15 actively used, HTTP endpoint working
+- ✅ rsky-backfiller: 12 metrics defined, all have update logic, HTTP endpoint working
+
+**Full Audit**: See `METRICS_AUDIT.md` for complete analysis
+
+### Issue: 25 Metrics Missing from Grafana Dashboard
+
+**Ingester (10 missing)**:
+- `ingester_firehose_filtered_operations_total` - Operations filtered (non-app.bsky)
+- `ingester_errors_total` - Total ingester errors
+- ⚠️ **HIGH PRIORITY**: `ingester_firehose_backfill_length` - Just added to code, not in dashboard yet
+- `ingester_labeler_events_total` - Events from labeler
+- `ingester_labels_written_total` - Labels written to label_live stream
+- `ingester_backfill_repos_fetched_total` - Repos fetched from listRepos
+- `ingester_backfill_repos_written_total` - Repos written to repo_backfill stream
+- `ingester_backfill_fetch_errors_total` - Errors fetching from listRepos
+- `ingester_backfill_cursor_skips_total` - Cursor skips due to persistent errors
+- `ingester_backfill_complete` - Backfill completion status (1=done, 0=in progress)
+
+**Backfiller (7 missing)**:
+- `backfiller_repos_dead_lettered_total` - Repos sent to DLQ after max retries
+- `backfiller_records_filtered_total` - Records filtered (non-app.bsky/chat.bsky)
+- `backfiller_retries_attempted_total` - Total retry attempts
+- `backfiller_repos_waiting` - Repos waiting in input stream (backpressure indicator)
+- `backfiller_repos_running` - Repos currently being processed
+- `backfiller_car_fetch_errors_total` - CAR fetch errors
+- `backfiller_car_parse_errors_total` - CAR parse errors
+- `backfiller_verification_errors_total` - Repo signature verification errors
+
+**Indexer (8 not implemented)**:
+- 3 unused event type counters (Account, Identity, Repo) - should implement or remove
+- 5 unused operational metrics (errors_total, pending_messages, active_tasks, ack_failures_total)
+
+### Mission Objectives
+
+**Phase 1: Update Grafana Dashboard (CURRENT PRIORITY)**
+Add panels to `grafana-rsky-dashboard.json` for all 17 actively-used missing metrics:
+
+1. **Ingester Panels**:
+   - Stream length panel for `ingester_firehose_backfill_length` (matches firehose_live, repo_backfill, label_live)
+   - Error rate panel for `ingester_errors_total`, `ingester_backfill_fetch_errors_total`
+   - BackfillIngester progress: repos_fetched, repos_written, backfill_complete gauge
+   - LabelIngester activity: labeler_events_total, labels_written_total
+   - Filter metrics: firehose_filtered_operations_total, backfill_cursor_skips_total
+
+2. **Backfiller Panels**:
+   - Backpressure monitoring: repos_waiting, repos_running gauges
+   - Error tracking: car_fetch_errors, car_parse_errors, verification_errors
+   - Quality metrics: records_filtered_total, repos_dead_lettered_total, retries_attempted_total
+
+3. **Indexer Panels** (optional):
+   - Decide whether to implement or remove unused metrics
+   - If implementing: add Account/Identity/Repo event counters
+
+**Phase 2: Code Cleanup (OPTIONAL)**
+- Remove unused indexer metrics OR implement their update logic
+- Add missing event type tracking for Account, Identity, Repo events
+
+### References
+- **Full Audit**: `/Users/rudyfraser/Projects/rsky/METRICS_AUDIT.md`
+- **Dashboard JSON**: `/Users/rudyfraser/Projects/rsky/grafana-rsky-dashboard.json` (2717 lines)
+- **Metrics Files**:
+  - `/Users/rudyfraser/Projects/rsky/rsky-ingester/src/metrics.rs`
+  - `/Users/rudyfraser/Projects/rsky/rsky-indexer/src/metrics.rs`
+  - `/Users/rudyfraser/Projects/rsky/rsky-backfiller/src/metrics.rs`
+
+---
+
+## PREVIOUS MISSION: XTRIM Fix (COMPLETED ✅)
+
+**Status**: XTRIM code fixed and deployed. Awaiting production verification.
+
+**What Was Fixed**:
+1. ✅ Fixed unreachable code paths in stream_indexer.rs (XTRIM now executes)
+2. ✅ Deleted stuck consumers with phantom pending messages (indexer1-5)
+3. ✅ Added firehose_backfill_length metric to ingester
+4. ✅ Updated XTRIM_FIX_REPORT.md with deployment guide
+
+**Remaining Production Steps**:
+1. Deploy updated ingester binary (with new metrics)
+2. Restart indexer1, 2, 3 (to rejoin consumer groups with fresh cursors)
+3. Verify all 5 indexers consuming (inactive < 10 sec)
+4. Monitor streams decreasing
+5. Verify backfillers resume once firehose_backfill < 40M
+
+See `XTRIM_FIX_REPORT.md` for detailed deployment guide.
+
+---
+
+## ARCHIVED: PRODUCTION ISSUES (2025-10-31 18:30 UTC) - RESOLVED
 
 **Status**: XTRIM deployed but NOT working. Multiple critical issues identified.
 
