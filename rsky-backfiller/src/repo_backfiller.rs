@@ -293,6 +293,14 @@ impl RepoBackfiller {
                 info!("Successfully processed repo for DID: {}", msg.data.did);
                 Ok(())
             }
+            Err(BackfillerError::RepoSkipped(reason)) => {
+                // Permanent error (deactivated, not found, takendown) - skip without retrying
+                warn!("Skipping repo {}: {}", msg.data.did, reason);
+                metrics::REPOS_PROCESSED.inc(); // Count as processed (not failed)
+                                                // ACK and delete message - don't retry
+                self.ack_message(&msg.id, true).await?;
+                Ok(())
+            }
             Err(e) => {
                 metrics::REPOS_FAILED.inc();
 
@@ -401,6 +409,28 @@ impl RepoBackfiller {
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
+
+            // Check for permanent errors that should be skipped, not retried
+            // Parse error JSON to detect specific error codes
+            if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(error_code) = error_json.get("error").and_then(|e| e.as_str()) {
+                    // Permanent errors - don't retry
+                    if matches!(
+                        error_code,
+                        "RepoDeactivated" | "RepoNotFound" | "RepoTakendown"
+                    ) {
+                        return Err(BackfillerError::RepoSkipped(format!(
+                            "{}: {}",
+                            error_code,
+                            error_json
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("No message")
+                        )));
+                    }
+                }
+            }
+
             return Err(BackfillerError::Other(anyhow::anyhow!(
                 "Failed to fetch repo: {}",
                 text

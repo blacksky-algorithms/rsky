@@ -103,6 +103,9 @@ pub enum BackfillerError {
     #[error("Identity resolution error: {0}")]
     Identity(String),
 
+    #[error("Repo skipped (permanent error): {0}")]
+    RepoSkipped(String),
+
     #[error("Other error: {0}")]
     Other(#[from] anyhow::Error),
 }
