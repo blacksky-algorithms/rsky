@@ -171,6 +171,78 @@ impl RedisConsumer {
 
         Ok(0)
     }
+
+    /// Trim the stream to remove all messages before the given cursor
+    /// This frees Redis memory by deleting processed messages
+    /// Uses XTRIM with MINID strategy to keep only messages >= cursor
+    pub async fn trim_stream(&self, cursor: &str) -> Result<u64, IndexerError> {
+        let mut conn = self.manager.clone();
+
+        // XTRIM stream MINID cursor
+        let trimmed: u64 = redis::cmd("XTRIM")
+            .arg(&self.stream)
+            .arg("MINID")
+            .arg(cursor)
+            .query_async(&mut conn)
+            .await?;
+
+        if trimmed > 0 {
+            info!(
+                "Trimmed {} messages from stream {} (cursor: {})",
+                trimmed, self.stream, cursor
+            );
+        }
+
+        Ok(trimmed)
+    }
+
+    /// Get the consumer group's last-delivered-id
+    /// This is the safest cursor to use for trimming
+    pub async fn get_group_cursor(&self) -> Result<Option<String>, IndexerError> {
+        let mut conn = self.manager.clone();
+
+        // XINFO GROUPS stream
+        let result: redis::Value = redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(&self.stream)
+            .query_async(&mut conn)
+            .await?;
+
+        // Parse the result to find our group's last-delivered-id
+        if let redis::Value::Array(groups) = result {
+            for group_info in groups {
+                if let redis::Value::Array(fields) = group_info {
+                    let mut group_name: Option<String> = None;
+                    let mut last_delivered: Option<String> = None;
+
+                    // Fields come in pairs: [key, value, key, value, ...]
+                    for i in (0..fields.len()).step_by(2) {
+                        if let (Some(redis::Value::BulkString(k)), Some(v)) =
+                            (fields.get(i), fields.get(i + 1))
+                        {
+                            let key = String::from_utf8_lossy(k);
+                            if key == "name" {
+                                if let redis::Value::BulkString(name) = v {
+                                    group_name = Some(String::from_utf8_lossy(name).to_string());
+                                }
+                            } else if key == "last-delivered-id" {
+                                if let redis::Value::BulkString(id) = v {
+                                    last_delivered = Some(String::from_utf8_lossy(id).to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    // If this is our group, return its last-delivered-id
+                    if group_name.as_deref() == Some(&self.group) {
+                        return Ok(last_delivered);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

@@ -213,6 +213,19 @@ impl StreamIndexer {
             let _ = handle.await;
         }
 
+        // Periodically trim the stream to free Redis memory
+        // Only trim when processing pending messages (cursor != ">")
+        // This ensures we don't trim messages that haven't been processed yet
+        if *cursor != ">" {
+            // Get the consumer group's last-delivered-id as the safe trim point
+            if let Ok(Some(group_cursor)) = self.consumer.get_group_cursor().await {
+                // Trim the stream to remove all messages before the group cursor
+                if let Err(e) = self.consumer.trim_stream(&group_cursor).await {
+                    warn!("Failed to trim stream: {:?}", e);
+                }
+            }
+        }
+
         Ok(true)
     }
 
