@@ -153,8 +153,9 @@ impl FirehoseIngester {
             }
         });
 
-        // Spawn task to log memory metrics periodically
+        // Spawn task to log memory metrics and update stream length gauges periodically
         let events_in_memory_logger = events_in_memory.clone();
+        let redis_client_metrics = self.redis_client.clone();
         let metrics_task = tokio::spawn(async move {
             let mut metrics_interval = interval(Duration::from_secs(10));
             loop {
@@ -162,6 +163,19 @@ impl FirehoseIngester {
                 let in_memory = events_in_memory_logger.load(Ordering::Relaxed);
                 if in_memory > 0 {
                     info!("Memory metrics: {} events in-flight", in_memory);
+                }
+
+                // Update stream length gauges for dashboard visibility
+                if let Ok(mut conn) = redis_client_metrics
+                    .get_multiplexed_async_connection()
+                    .await
+                {
+                    if let Ok(repo_len) = conn.xlen::<_, usize>(streams::REPO_BACKFILL).await {
+                        metrics::REPO_BACKFILL_LENGTH.set(repo_len as i64);
+                    }
+                    if let Ok(label_len) = conn.xlen::<_, usize>(streams::LABEL_LIVE).await {
+                        metrics::LABEL_LIVE_LENGTH.set(label_len as i64);
+                    }
                 }
             }
         });
