@@ -176,10 +176,142 @@ Trim runs after EVERY batch of messages:
 
 This ensures constant memory cleanup as messages are consumed.
 
+## Issue 3: Cursor Misalignment After Restart (FIXED ✅)
+
+**Problem**: After deploying XTRIM fix and restarting indexers, only indexer4 and indexer5 were consuming. indexer1, 2, 3 getting 0 messages.
+
+**Root Cause**: Redis cached OLD cursor positions from before restart:
+```
+indexer1 cursor: 1761931345287-367
+indexer2 cursor: 1761931345287-417
+indexer3 cursor: 1761931345287-317
+Stream starts at: ~1761931470565 (way ahead!)
+```
+
+When consumer cursor is BEFORE trimmed stream start, XREADGROUP returns 0 messages forever.
+
+**Fix Applied**: Deleted indexer1, 2, 3 from consumer groups to clear cached cursors:
+```bash
+# Cleared 81 total phantom pending messages
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_backfill firehose_group rust-indexer1  # 10 pending
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_backfill firehose_group rust-indexer2  # 40 pending
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_backfill firehose_group rust-indexer3  # 7 pending
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_live firehose_group rust-indexer1     # 5 pending
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_live firehose_group rust-indexer2     # 8 pending
+redis-cli -h localhost -p 6380 XGROUP DELCONSUMER firehose_live firehose_group rust-indexer3     # 11 pending
+```
+
+**Note**: indexer6 correctly consuming from label_live (must NOT be moved to firehose streams - labels need to be indexed!)
+
+## Issue 4: Missing Dashboard Metrics (FIXED ✅)
+
+**Problem**: Grafana dashboard shows "No data" for firehose_live stream length, even though stream exists with 16.4M messages.
+
+**Root Cause**: Ingester exports `ingester_repo_backfill_length` and `ingester_label_live_length` but NOT `ingester_firehose_live_length` or `ingester_firehose_backfill_length`.
+
+**Fix Applied**:
+- Added `FIREHOSE_BACKFILL_LENGTH` metric definition to `rsky-ingester/src/metrics.rs`
+- Updated `rsky-ingester/src/firehose.rs` to query XLEN for both firehose_live and firehose_backfill
+- Metrics updated every 10 seconds alongside existing repo_backfill and label_live
+
+**Build Command**:
+```bash
+cd ~/Projects/rsky
+cargo build --release --bin ingester
+```
+
+## Production Deployment Status
+
+### Completed ✅
+1. **XTRIM code fix** - Fixed unreachable trim paths in stream_indexer.rs
+2. **Phantom pending cleanup** - Deleted stuck consumers (indexer4, indexer5, indexer1-3)
+3. **Indexer binary deployed** - New XTRIM-enabled binary deployed to production
+4. **Ingester metrics fix** - Added firehose stream length metrics (awaiting deployment)
+5. **indexer4, indexer5 restarted** - Now actively consuming (high CPU, writing to DB)
+
+### Remaining Production Steps
+
+**Step 1: Deploy Updated Ingester Binary** (with new metrics)
+```bash
+# On local machine (from ~/Projects/rsky)
+scp target/release/ingester blacksky@api.blacksky:/mnt/nvme/bsky/atproto/rust-target/release/
+
+# On production server
+docker compose -f docker-compose.prod-rust.yml restart rust-ingester
+```
+
+**Step 2: Restart indexer1, 2, 3** (to rejoin consumer groups with fresh cursors)
+```bash
+# On production server
+docker compose -f docker-compose.prod-rust.yml restart rust-indexer1 rust-indexer2 rust-indexer3
+```
+
+**Step 3: Verify All 5 Indexers Consuming**
+```bash
+# Check consumer activity (all should have inactive < 10 sec)
+redis-cli -h localhost -p 6380 XINFO CONSUMERS firehose_backfill firehose_group | grep -E "name|inactive|pending"
+redis-cli -h localhost -p 6380 XINFO CONSUMERS firehose_live firehose_group | grep -E "name|inactive|pending"
+
+# Check logs show message processing
+docker logs --tail 50 rust-indexer1 | grep -E "XREADGROUP returned|Trimmed"
+docker logs --tail 50 rust-indexer2 | grep -E "XREADGROUP returned|Trimmed"
+docker logs --tail 50 rust-indexer3 | grep -E "XREADGROUP returned|Trimmed"
+```
+
+**Step 4: Monitor Streams Decreasing**
+```bash
+# Run multiple times, 30 seconds apart - numbers should drop rapidly
+redis-cli -h localhost -p 6380 XLEN firehose_backfill  # Should decrease from 115M
+redis-cli -h localhost -p 6380 XLEN firehose_live      # Should decrease from 16.4M
+
+# Watch for trim logs
+docker logs -f rust-indexer1 | grep Trimmed
+```
+
+**Step 5: Verify Dashboard Metrics** (after ingester restart)
+```bash
+# Check metrics endpoint shows new stream lengths
+curl -s http://localhost:4100/metrics | grep ingester_firehose
+
+# Should see:
+# ingester_firehose_live_length{} 16400000
+# ingester_firehose_backfill_length{} 115000000
+```
+
+**Step 6: Monitor Backfiller Resume** (once firehose_backfill < 40M)
+```bash
+# Backfillers should automatically resume processing repo_backfill
+docker logs -f rust-backfiller1 | grep -E "Processing|High water mark"
+
+# repo_backfill should start decreasing
+redis-cli -h localhost -p 6380 XLEN repo_backfill  # Should decrease from 840K
+```
+
+## Success Criteria
+
+**Phase 1 Complete** when:
+- ✅ All 5 firehose indexers showing `inactive` < 10 seconds
+- ✅ firehose_backfill and firehose_live visibly decreasing (thousands/second)
+- ✅ "Trimmed X messages" logs appearing frequently in all indexer logs
+- ✅ No phantom pending messages (XPENDING shows 0 or small recent count)
+- ✅ Dashboard shows firehose_live and firehose_backfill metrics
+
+**Phase 2 Complete** when:
+- ✅ firehose_backfill drops below 40M high water mark
+- ✅ Backfillers resume processing repo_backfill (no backpressure errors)
+- ✅ repo_backfill starts decreasing from 840K
+
+**Phase 3 Complete** when:
+- ✅ All streams at steady state (< 1M messages each)
+- ✅ No backpressure errors for 1+ hour
+- ✅ PostgreSQL row counts increasing steadily
+- ✅ 24-hour stability test passed (no OOM, no crashes)
+
 ## Next Steps
 
-1. **Deploy fix immediately** (all 3 parts of solution)
-2. **Monitor for 1 hour** to verify streams decreasing
-3. **Move to Phase 2** (fix remaining indexer issues) from CLAUDE.md
-4. **Move to Phase 3** (resolve backfiller backpressure)
-5. **Move to Phase 4** (fix dashboard metrics)
+1. **Deploy ingester binary** with new metrics
+2. **Restart indexer1, 2, 3** to rejoin consumer groups
+3. **Monitor for 1 hour** to verify all indexers consuming and streams decreasing
+4. **Wait for firehose_backfill < 40M** to unblock backfillers
+5. **Monitor repo_backfill decreasing** as backfill completes
+6. **Move to Phase 4** (24-hour stability test)
