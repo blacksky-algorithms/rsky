@@ -1,12 +1,13 @@
 use anyhow::Result;
 use rsky_ingester::{
-    backfill::BackfillIngester, firehose::FirehoseIngester, labeler::LabelerIngester,
+    backfill::BackfillIngester, firehose::FirehoseIngester, labeler::LabelerIngester, metrics,
     IngesterConfig,
 };
 use std::env;
 use tokio::time::Duration;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use warp::Filter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,6 +67,30 @@ async fn main() -> Result<()> {
     }));
 
     info!("Starting rsky-ingester");
+
+    // Start metrics server
+    let metrics_port = env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "4100".to_string())
+        .parse::<u16>()
+        .expect("METRICS_PORT must be a valid port number");
+
+    tokio::spawn(async move {
+        let metrics_route = warp::path!("metrics").map(|| match metrics::encode_metrics() {
+            Ok(metrics) => warp::reply::with_status(metrics, warp::http::StatusCode::OK),
+            Err(e) => {
+                error!("Failed to encode metrics: {:?}", e);
+                warp::reply::with_status(
+                    format!("Error: {}", e),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            }
+        });
+
+        info!("Metrics server starting on port {}", metrics_port);
+        warp::serve(metrics_route)
+            .run(([0, 0, 0, 0], metrics_port))
+            .await;
+    });
 
     // Load configuration from environment
     let config = load_config();

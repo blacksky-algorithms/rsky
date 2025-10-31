@@ -52,3 +52,8 @@ lexicon_cid = { workspace = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.5"
+warp = "0.3"

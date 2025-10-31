@@ -2,6 +2,7 @@ pub mod backfill;
 pub mod batcher;
 pub mod firehose;
 pub mod labeler;
+pub mod metrics;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

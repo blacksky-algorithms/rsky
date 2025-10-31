@@ -7937,6 +7937,8 @@ dependencies = [
  "futures-util",
  "ipld-core",
  "iroh-car",
+ "lazy_static",
+ "prometheus",
  "redis",
  "reqwest 0.12.23",
  "rsky-firehose",
@@ -7953,6 +7955,7 @@ dependencies = [
  "tungstenite 0.24.0",
  "url",
  "uuid 1.18.0",
+ "warp",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 use crate::batcher::Batcher;
-use crate::{streams, IngesterConfig, IngesterError, StreamEvent};
+use crate::{metrics, streams, IngesterConfig, IngesterError, StreamEvent};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use ipld_core::ipld::Ipld;
@@ -54,6 +54,9 @@ impl FirehoseIngester {
     }
 
     async fn run_connection(&self, hostname: &str) -> Result<(), IngesterError> {
+        // Track WebSocket connection
+        metrics::WEBSOCKET_CONNECTIONS.inc();
+
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
         // Get cursor from Redis
@@ -107,22 +110,32 @@ impl FirehoseIngester {
                 info!("Write task received batch of {} events", batch.len());
                 // Check backpressure
                 let stream_len: usize = conn.xlen(streams::FIREHOSE_LIVE).await?;
+                metrics::FIREHOSE_LIVE_LENGTH.set(stream_len as i64);
+
                 if stream_len >= high_water_mark {
                     let in_memory = events_in_memory_clone.load(Ordering::Relaxed);
+                    metrics::BACKPRESSURE_ACTIVE.set(1);
                     warn!(
                         "Backpressure active: stream_len={}, high_water={}, events_in_memory={}",
                         stream_len, high_water_mark, in_memory
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
+                } else {
+                    metrics::BACKPRESSURE_ACTIVE.set(0);
                 }
 
                 // Write batch to Redis stream
                 let batch_size = batch.len();
                 Self::write_batch(&mut conn, &batch, &hostname_clone).await?;
 
+                // Update metrics after successful write
+                metrics::STREAM_EVENTS_TOTAL.inc_by(batch_size as u64);
+
                 // Decrement counter after successful write
                 events_in_memory_clone.fetch_sub(batch_size, Ordering::Relaxed);
+                metrics::EVENTS_IN_MEMORY
+                    .set(events_in_memory_clone.load(Ordering::Relaxed) as i64);
             }
 
             Ok::<_, IngesterError>(())
@@ -167,8 +180,11 @@ impl FirehoseIngester {
                                 break;
                             }
                         }
-                        // Increment counter after successfully sending all events
-                        events_in_memory.fetch_add(event_count, Ordering::Relaxed);
+                        // Increment counter and metrics after successfully sending all events
+                        let new_count = events_in_memory.fetch_add(event_count, Ordering::Relaxed)
+                            + event_count;
+                        metrics::EVENTS_IN_MEMORY.set(new_count as i64);
+                        metrics::FIREHOSE_EVENTS_TOTAL.inc_by(event_count as u64);
                     }
                     Err(e) => {
                         error!("Failed to process message: {:?}", e);
@@ -211,6 +227,9 @@ impl FirehoseIngester {
 
         ping_task.abort();
         metrics_task.abort();
+
+        // Decrement WebSocket connection on cleanup
+        metrics::WEBSOCKET_CONNECTIONS.dec();
 
         Ok(())
     }
@@ -262,6 +281,7 @@ impl FirehoseIngester {
                                     cid: cid.to_string(),
                                     record,
                                 });
+                                metrics::FIREHOSE_CREATE_EVENTS.inc();
                             }
                         }
                         "update" => {
@@ -281,6 +301,7 @@ impl FirehoseIngester {
                                     cid: cid.to_string(),
                                     record,
                                 });
+                                metrics::FIREHOSE_UPDATE_EVENTS.inc();
                             }
                         }
                         "delete" => {
@@ -293,6 +314,7 @@ impl FirehoseIngester {
                                 collection: collection.clone(),
                                 rkey: rkey.clone(),
                             });
+                            metrics::FIREHOSE_DELETE_EVENTS.inc();
                         }
                         _ => {}
                     }
