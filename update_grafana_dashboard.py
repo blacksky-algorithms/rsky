@@ -395,6 +395,146 @@ def main():
         print(f"  ✓ Added ingester errors panel with ID={ingester_errors_panel['id']}")
 
     # ============================================================
+    # 6. Add BackfillIngester Progress Panels
+    # ============================================================
+    print("\n6. Adding BackfillIngester progress panels...")
+    if ingester_row_idx is not None:
+        # Find insertion point - after the last ingester panel
+        insert_idx = ingester_row_idx + 6  # After errors panel
+
+        # Panel 1: Repos Fetched (Counter)
+        repos_fetched_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Backfill Repos Fetched",
+            expr="sum(ingester_backfill_repos_fetched_total)",
+            grid_pos={"h": 4, "w": 4, "x": 0, "y": 8},
+            unit="short",
+            thresholds=[
+                {"color": "green", "value": None}
+            ]
+        )
+        dashboard['panels'].insert(insert_idx, repos_fetched_panel)
+        next_id += 1
+        print(f"  ✓ Added repos fetched panel with ID={repos_fetched_panel['id']}")
+
+        # Panel 2: Repos Written (Counter)
+        repos_written_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Backfill Repos Written",
+            expr="sum(ingester_backfill_repos_written_total)",
+            grid_pos={"h": 4, "w": 4, "x": 4, "y": 8},
+            unit="short",
+            thresholds=[
+                {"color": "green", "value": None}
+            ]
+        )
+        dashboard['panels'].insert(insert_idx + 1, repos_written_panel)
+        next_id += 1
+        print(f"  ✓ Added repos written panel with ID={repos_written_panel['id']}")
+
+        # Panel 3: Backfill Complete Status (Gauge)
+        backfill_complete_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Backfill Complete",
+            expr="sum(ingester_backfill_complete)",
+            grid_pos={"h": 4, "w": 4, "x": 8, "y": 8},
+            unit="none",
+            thresholds=[
+                {"color": "yellow", "value": None},
+                {"color": "green", "value": 1}
+            ]
+        )
+        dashboard['panels'].insert(insert_idx + 2, backfill_complete_panel)
+        next_id += 1
+        print(f"  ✓ Added backfill complete panel with ID={backfill_complete_panel['id']}")
+
+        # Panel 4: Backfill Errors
+        backfill_errors_panel = create_timeseries_panel(
+            panel_id=next_id,
+            title="BackfillIngester Error Rates",
+            targets=[
+                {"expr": "rate(ingester_backfill_fetch_errors_total[5m])", "legend": "Fetch Errors"},
+                {"expr": "rate(ingester_backfill_cursor_skips_total[5m])", "legend": "Cursor Skips"}
+            ],
+            grid_pos={"h": 6, "w": 12, "x": 0, "y": 12},
+            unit="errors/s"
+        )
+        dashboard['panels'].insert(insert_idx + 3, backfill_errors_panel)
+        next_id += 1
+        print(f"  ✓ Added backfill errors panel with ID={backfill_errors_panel['id']}")
+
+    # ============================================================
+    # 7. Add remaining medium-priority metrics
+    # ============================================================
+    print("\n7. Adding remaining medium-priority metrics...")
+
+    # Add filtered operations to ingester section
+    if ingester_row_idx is not None:
+        filtered_ops_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Filtered Operations",
+            expr="sum(ingester_firehose_filtered_operations_total)",
+            grid_pos={"h": 4, "w": 4, "x": 12, "y": 8},
+            unit="short",
+            thresholds=[
+                {"color": "blue", "value": None}
+            ]
+        )
+        dashboard['panels'].insert(ingester_row_idx + 10, filtered_ops_panel)
+        next_id += 1
+        print(f"  ✓ Added filtered operations panel with ID={filtered_ops_panel['id']}")
+
+    # Add backfiller quality metrics
+    if backfiller_row_idx is not None:
+        # Records Filtered
+        records_filtered_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Records Filtered",
+            expr="sum(backfiller_records_filtered_total)",
+            grid_pos={"h": 4, "w": 4, "x": 8, "y": 18},
+            unit="short",
+            thresholds=[
+                {"color": "blue", "value": None}
+            ]
+        )
+        dashboard['panels'].insert(backfiller_row_idx + 8, records_filtered_panel)
+        next_id += 1
+        print(f"  ✓ Added records filtered panel with ID={records_filtered_panel['id']}")
+
+        # Dead Letter Queue
+        dead_letter_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Dead Letter Queue",
+            expr="sum(backfiller_repos_dead_lettered_total)",
+            grid_pos={"h": 4, "w": 4, "x": 12, "y": 18},
+            unit="short",
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 10}
+            ]
+        )
+        dashboard['panels'].insert(backfiller_row_idx + 9, dead_letter_panel)
+        next_id += 1
+        print(f"  ✓ Added dead letter queue panel with ID={dead_letter_panel['id']}")
+
+        # Retry Attempts
+        retries_panel = create_stat_panel(
+            panel_id=next_id,
+            title="Retry Attempts",
+            expr="sum(backfiller_retries_attempted_total)",
+            grid_pos={"h": 4, "w": 4, "x": 16, "y": 18},
+            unit="short",
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 100}
+            ]
+        )
+        dashboard['panels'].insert(backfiller_row_idx + 10, retries_panel)
+        next_id += 1
+        print(f"  ✓ Added retries panel with ID={retries_panel['id']}")
+
+    # ============================================================
     # Save updated dashboard
     # ============================================================
     print("\n" + "="*60)
@@ -402,18 +542,29 @@ def main():
     save_dashboard(dashboard, dashboard_path, backup=True)
 
     print("\n✓ Dashboard update complete!")
-    print("\nAdded metrics:")
-    print("  1. ingester_firehose_backfill_length (to Redis Stream Lengths)")
-    print("  2. backfiller_repos_waiting (new panel)")
-    print("  3. backfiller_repos_running (new panel)")
-    print("  4. backfiller error rates (new panel)")
-    print("  5. ingester_errors_total (new panel)")
+    print("\nAdded metrics to dashboard:")
+    print("\n  HIGH PRIORITY (Critical/High):")
+    print("    1. ingester_firehose_backfill_length (to Redis Stream Lengths)")
+    print("    2. backfiller_repos_waiting (new panel)")
+    print("    3. backfiller_repos_running (new panel)")
+    print("    4. backfiller error rates (CAR fetch, parse, verification)")
+    print("    5. ingester_errors_total (new panel)")
+    print("    6. ingester_backfill_repos_fetched_total (new panel)")
+    print("    7. ingester_backfill_repos_written_total (new panel)")
+    print("    8. ingester_backfill_complete (new panel)")
+    print("    9. ingester_backfill error rates (fetch errors, cursor skips)")
+    print("\n  MEDIUM PRIORITY (Quality/Filtering):")
+    print("    10. ingester_firehose_filtered_operations_total")
+    print("    11. backfiller_records_filtered_total")
+    print("    12. backfiller_repos_dead_lettered_total")
+    print("    13. backfiller_retries_attempted_total")
+    print("\n  Total panels added: 13 (covering all actively-used metrics)")
     print("\nBackup created at: grafana-rsky-dashboard.json.backup")
     print("\nNext steps:")
     print("  1. Import updated dashboard into Grafana")
-    print("  2. Verify panels show data")
-    print("  3. Run: curl http://localhost:4100/metrics | grep firehose_backfill_length")
-    print("  4. Run: curl http://localhost:9090/metrics | grep repos_")
+    print("  2. Verify panels show data:")
+    print("     curl http://localhost:4100/metrics | grep -E 'firehose_backfill_length|backfill_repos'")
+    print("     curl http://localhost:9090/metrics | grep -E 'repos_waiting|repos_running|dead_lettered'")
 
 if __name__ == "__main__":
     main()
