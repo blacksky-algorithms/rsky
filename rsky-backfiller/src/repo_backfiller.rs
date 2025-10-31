@@ -655,6 +655,12 @@ impl RepoBackfiller {
                 let collection = parts[0].to_string();
                 let rkey = parts[1].to_string();
 
+                // Filter to only app.bsky.* and chat.bsky.* collections
+                if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+                    metrics::RECORDS_FILTERED.inc();
+                    continue;
+                }
+
                 // Get and parse record
                 match get_and_parse_record(&blocks_result.blocks, entry.value) {
                     Ok(parsed) => {

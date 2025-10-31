@@ -276,6 +276,13 @@ impl FirehoseIngester {
                         continue;
                     }
 
+                    // Filter to only app.bsky.* and chat.bsky.* collections
+                    if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.")
+                    {
+                        metrics::FIREHOSE_FILTERED_OPERATIONS.inc();
+                        continue;
+                    }
+
                     match op.action.as_str() {
                         "create" => {
                             if let Some(cid) = op.cid {

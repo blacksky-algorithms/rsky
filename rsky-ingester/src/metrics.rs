@@ -33,6 +33,13 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Total operations filtered out (non-app.bsky collections)
+    pub static ref FIREHOSE_FILTERED_OPERATIONS: IntCounter = register_int_counter!(
+        "ingester_firehose_filtered_operations_total",
+        "Total operations filtered out (non-app.bsky collections)"
+    )
+    .unwrap();
+
     /// Total events written to Redis streams
     pub static ref STREAM_EVENTS_TOTAL: IntCounter = register_int_counter!(
         "ingester_stream_events_total",

@@ -32,6 +32,13 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Total records filtered out (non-Bluesky collections)
+    pub static ref RECORDS_FILTERED: IntCounter = register_int_counter!(
+        "backfiller_records_filtered_total",
+        "Total number of records filtered out (non-Bluesky collections)"
+    )
+    .unwrap();
+
     /// Total retry attempts
     pub static ref RETRIES_ATTEMPTED: IntCounter = register_int_counter!(
         "backfiller_retries_attempted_total",
