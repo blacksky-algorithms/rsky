@@ -69,7 +69,7 @@ impl PostPlugin {
                             r#"INSERT INTO post_embed_image ("postUri", position, "imageCid", alt)
                                VALUES ($1, $2, $3, $4)
                                ON CONFLICT ("postUri", position) DO NOTHING"#,
-                            &[&post_uri, &(position as i32), &cid, &alt],
+                            &[&post_uri, &position.to_string(), &cid, &alt],
                         )
                         .await
                         .map_err(|e| IndexerError::Database(e.into()))?;
