@@ -39,6 +39,14 @@ impl BackfillIngester {
             .timeout(Duration::from_secs(30))
             .build()?;
 
+        // Validate high_water_mark is reasonable
+        if config.high_water_mark < 1000 {
+            warn!(
+                "High water mark {} is too low for production (recommended: 100,000+)",
+                config.high_water_mark
+            );
+        }
+
         Ok(Self {
             config,
             redis_client,
@@ -103,17 +111,38 @@ impl BackfillIngester {
             let mut conn = redis_client.get_multiplexed_async_connection().await?;
             info!("Write task connected to Redis");
 
+            // Throttled backpressure check (check every 5 seconds, not every batch)
+            let mut last_backpressure_check = std::time::Instant::now();
+            let backpressure_check_interval = Duration::from_secs(5);
+
             while let Some(batch) = batch_rx.recv().await {
                 info!("Write task received batch of {} repos", batch.len());
-                // Check backpressure
-                let stream_len: usize = conn.xlen(streams::REPO_BACKFILL).await?;
-                if stream_len >= high_water_mark {
-                    warn!(
-                        "Backpressure: stream length {} >= {}",
-                        stream_len, high_water_mark
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
+
+                // Only check backpressure every 5 seconds (TypeScript behavior)
+                if last_backpressure_check.elapsed() >= backpressure_check_interval {
+                    let stream_len: usize = conn.xlen(streams::REPO_BACKFILL).await?;
+                    last_backpressure_check = std::time::Instant::now();
+
+                    if stream_len >= high_water_mark {
+                        warn!(
+                            "Backpressure: stream length {} >= {}. Waiting...",
+                            stream_len, high_water_mark
+                        );
+                        // Wait and retry backpressure check recursively
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let stream_len: usize = conn.xlen(streams::REPO_BACKFILL).await?;
+                            if stream_len < high_water_mark {
+                                info!("Backpressure resolved: stream length now {}", stream_len);
+                                break;
+                            }
+                            warn!(
+                                "Backpressure continues: stream length {} >= {}",
+                                stream_len, high_water_mark
+                            );
+                        }
+                        last_backpressure_check = std::time::Instant::now();
+                    }
                 }
 
                 // Write batch to Redis stream

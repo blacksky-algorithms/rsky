@@ -32,11 +32,11 @@ async fn main() {
         concurrency: env::var("BACKFILLER_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(20),
+            .unwrap_or(50), // Increased from 20 to 50 for better throughput
         high_water_mark: env::var("BACKFILLER_FIREHOSE_STREAM_HIGH_WATER_MARK")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(100_000),
+            .unwrap_or(500_000), // Increased from 100k to 500k for better buffering
         http_timeout_secs: env::var("BACKFILLER_HTTP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())

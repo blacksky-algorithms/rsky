@@ -78,12 +78,40 @@ impl RepoBackfiller {
     async fn process_loop(&self) -> Result<(), BackfillerError> {
         let mut cursor = "0".to_string();
 
+        // Configure batch size for reading messages
+        let batch_size = std::env::var("BACKFILLER_BATCH_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(500); // Increased from 100 to 500
+
+        info!("Starting process loop with batch size: {}", batch_size);
+
+        // Phase 5: Claim any pending messages from crashed/stale consumers
+        // This ensures work is resumed after crashes
+        info!("Checking for pending messages from previous runs...");
+        match self.claim_pending_messages().await {
+            Ok(claimed_count) => {
+                if claimed_count > 0 {
+                    info!(
+                        "Claimed {} pending messages from previous runs",
+                        claimed_count
+                    );
+                } else {
+                    info!("No pending messages to claim");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to claim pending messages: {:?}", e);
+                // Continue anyway - this is not fatal
+            }
+        }
+
         loop {
             // Check backpressure on output stream
             self.check_backpressure().await?;
 
             // Read messages from consumer group
-            let messages = self.read_messages(&cursor, 100).await?;
+            let messages = self.read_messages(&cursor, batch_size).await?;
 
             if messages.is_empty() {
                 if cursor == ">" {
@@ -344,8 +372,18 @@ impl RepoBackfiller {
 
     /// Process message with specific error tracking
     async fn process_message_with_retry(&self, msg: &StreamMessage) -> Result<(), BackfillerError> {
-        // Fetch repo CAR
-        let car_bytes = match self.fetch_repo(&msg.data.host, &msg.data.did).await {
+        // CRITICAL: Resolve DID to get actual PDS endpoint
+        // Do NOT use msg.data.host (that's the relay) - fetch directly from PDS
+        let (_signing_key, pds_endpoint) = match self.resolve_did_document(&msg.data.did).await {
+            Ok(result) => result,
+            Err(e) => {
+                metrics::CAR_FETCH_ERRORS.inc();
+                return Err(e);
+            }
+        };
+
+        // Fetch repo CAR from the user's PDS (not relay!)
+        let car_bytes = match self.fetch_repo(&pds_endpoint, &msg.data.did).await {
             Ok(bytes) => bytes,
             Err(e) => {
                 metrics::CAR_FETCH_ERRORS.inc();
@@ -362,7 +400,7 @@ impl RepoBackfiller {
             }
         };
 
-        // Verify repo
+        // Verify repo (already have DID doc cached from earlier resolution)
         let repo = match self
             .verify_repo(car.blocks.clone(), car.root, &msg.data.did)
             .await
@@ -468,25 +506,56 @@ impl RepoBackfiller {
             )));
         }
 
-        // Resolve DID to get signing key
-        let did_key = self.resolve_did_key(did).await?;
+        // Optional: Skip signature verification for backfill to improve throughput
+        // Set BACKFILLER_SKIP_SIGNATURE_VERIFICATION=true to enable
+        let skip_sig_verification = std::env::var("BACKFILLER_SKIP_SIGNATURE_VERIFICATION")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
 
-        // Verify commit signature
-        let valid = verify_commit_sig(repo.commit.clone(), &did_key)
-            .map_err(|e| BackfillerError::Verification(e.to_string()))?;
+        if !skip_sig_verification {
+            // Resolve DID to get signing key (with caching)
+            let did_key = self.resolve_did_key(did).await?;
 
-        if !valid {
-            return Err(BackfillerError::Verification(
-                "Invalid commit signature".to_string(),
-            ));
+            // Verify commit signature
+            let valid = verify_commit_sig(repo.commit.clone(), &did_key)
+                .map_err(|e| BackfillerError::Verification(e.to_string()))?;
+
+            if !valid {
+                return Err(BackfillerError::Verification(
+                    "Invalid commit signature".to_string(),
+                ));
+            }
+        } else {
+            debug!(
+                "Skipping signature verification for {} (backfill mode)",
+                did
+            );
         }
 
         Ok(repo)
     }
 
-    /// Resolve DID to get signing key
-    async fn resolve_did_key(&self, did: &str) -> Result<String, BackfillerError> {
-        // Use rsky-identity to resolve DID
+    /// Resolve DID document (with Redis caching)
+    /// Returns tuple: (signing_key, pds_endpoint)
+    async fn resolve_did_document(&self, did: &str) -> Result<(String, String), BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // Try to get both from cache
+        let key_cache_key = format!("did:key:{}", did);
+        let pds_cache_key = format!("did:pds:{}", did);
+
+        let cached_key: Option<String> = conn.get(&key_cache_key).await.ok().flatten();
+        let cached_pds: Option<String> = conn.get(&pds_cache_key).await.ok().flatten();
+
+        if let (Some(key), Some(pds)) = (cached_key, cached_pds) {
+            debug!("DID document cache hit for {}", did);
+            return Ok((key, pds));
+        }
+
+        debug!("DID document cache miss for {}, resolving...", did);
+
+        // Cache miss - resolve via rsky-identity
         let opts = rsky_identity::types::IdentityResolverOpts {
             timeout: None,
             plc_url: None,
@@ -502,19 +571,54 @@ impl RepoBackfiller {
             .ok_or_else(|| BackfillerError::Identity(format!("DID not found: {}", did)))?;
 
         // Extract signing key from verification methods
+        let mut did_key = None;
         if let Some(verification_methods) = &doc.verification_method {
             for vm in verification_methods {
                 if let Some(key) = &vm.public_key_multibase {
-                    // Return in did:key format as expected by verify_commit_sig
-                    return Ok(format!("did:key:{}", key));
+                    did_key = Some(format!("did:key:{}", key));
+                    break;
                 }
             }
         }
 
-        Err(BackfillerError::Identity(format!(
-            "No signing key found for DID: {}",
-            did
-        )))
+        let did_key = did_key.ok_or_else(|| {
+            BackfillerError::Identity(format!("No signing key found for DID: {}", did))
+        })?;
+
+        // Extract PDS endpoint from service
+        let mut pds_endpoint = None;
+        if let Some(services) = &doc.service {
+            for service in services {
+                // Look for AtprotoPersonalDataServer service
+                if service.r#type == "AtprotoPersonalDataServer" || service.id == "#atproto_pds" {
+                    pds_endpoint = Some(service.service_endpoint.clone());
+                    break;
+                }
+            }
+        }
+
+        let pds_endpoint = pds_endpoint.ok_or_else(|| {
+            BackfillerError::Identity(format!("No PDS endpoint found for DID: {}", did))
+        })?;
+
+        // Cache both values (TTL: 24 hours = 86400 seconds)
+        let _: Result<(), redis::RedisError> = conn.set_ex(&key_cache_key, &did_key, 86400).await;
+        let _: Result<(), redis::RedisError> =
+            conn.set_ex(&pds_cache_key, &pds_endpoint, 86400).await;
+
+        info!(
+            "Resolved DID {} → PDS: {}",
+            did,
+            pds_endpoint.chars().take(50).collect::<String>()
+        );
+
+        Ok((did_key, pds_endpoint))
+    }
+
+    /// Resolve DID to get signing key (backwards compatibility wrapper)
+    async fn resolve_did_key(&self, did: &str) -> Result<String, BackfillerError> {
+        let (key, _pds) = self.resolve_did_document(did).await?;
+        Ok(key)
     }
 
     /// Process repo and write records to stream
@@ -594,7 +698,7 @@ impl RepoBackfiller {
         Ok(())
     }
 
-    /// Write events to output stream
+    /// Write events to output stream (batched with pipeline)
     async fn write_events(&self, events: &[StreamEvent]) -> Result<(), BackfillerError> {
         if events.is_empty() {
             return Ok(());
@@ -602,16 +706,21 @@ impl RepoBackfiller {
 
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        for event in events {
-            let json = serde_json::to_string(event)?;
+        // Batch writes using Redis pipeline (much faster than individual commands)
+        // Process in chunks of 500 to avoid oversized pipelines
+        const PIPELINE_BATCH_SIZE: usize = 500;
 
-            let _: String = redis::cmd("XADD")
-                .arg(&self.config.stream_out)
-                .arg("*")
-                .arg("event")
-                .arg(json)
-                .query_async(&mut conn)
-                .await?;
+        for chunk in events.chunks(PIPELINE_BATCH_SIZE) {
+            let mut pipe = redis::pipe();
+            pipe.atomic(); // Use MULTI/EXEC for atomicity
+
+            for event in chunk {
+                let json = serde_json::to_string(event)?;
+                pipe.xadd(&self.config.stream_out, "*", &[("event", json.as_str())]);
+            }
+
+            // Execute entire pipeline in one round trip
+            pipe.query_async::<()>(&mut conn).await?;
         }
 
         Ok(())
@@ -639,6 +748,42 @@ impl RepoBackfiller {
         }
 
         Ok(())
+    }
+
+    /// Claim pending messages from crashed/idle consumers (Phase 5 optimization)
+    /// This ensures work is resumed after crashes and idle consumers are recovered
+    async fn claim_pending_messages(&self) -> Result<usize, BackfillerError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // Get pending messages info (messages idle > 5 minutes)
+        let idle_threshold_ms = 300_000; // 5 minutes
+
+        // Use XAUTOCLAIM to automatically claim idle messages
+        // Available in Redis 6.2+
+        let result: redis::Value = redis::cmd("XAUTOCLAIM")
+            .arg(&self.config.stream_in)
+            .arg(&self.config.consumer_group)
+            .arg(&self.config.consumer_name)
+            .arg(idle_threshold_ms)
+            .arg("0-0") // Start from beginning
+            .arg("COUNT")
+            .arg(100) // Claim up to 100 messages
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(redis::Value::Array(vec![]));
+
+        // Parse result to count claimed messages
+        if let redis::Value::Array(parts) = result {
+            if let Some(redis::Value::Array(messages)) = parts.get(1) {
+                let count = messages.len();
+                if count > 0 {
+                    info!("Autoclaimed {} pending messages from idle consumers", count);
+                }
+                return Ok(count);
+            }
+        }
+
+        Ok(0)
     }
 
     /// Clone for task (cheap clone of shared state)

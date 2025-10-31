@@ -85,6 +85,11 @@ impl RedisConsumer {
     ) -> Result<Vec<StreamMessage>, IndexerError> {
         let mut conn = self.manager.clone();
 
+        info!(
+            "XREADGROUP calling: stream={}, group={}, consumer={}, cursor={}, count={}",
+            self.stream, self.group, self.consumer, cursor, count
+        );
+
         let opts = StreamReadOptions::default()
             .group(&self.group, &self.consumer)
             .count(count)
@@ -121,6 +126,12 @@ impl RedisConsumer {
                 })
             })
             .collect();
+
+        info!(
+            "XREADGROUP returned {} messages from stream {}",
+            messages.len(),
+            self.stream
+        );
 
         Ok(messages)
     }
