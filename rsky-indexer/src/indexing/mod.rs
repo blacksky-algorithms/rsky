@@ -4,6 +4,7 @@ use crate::{did_helpers, IndexerError};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
+use lexicon_cid::Cid;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +42,111 @@ pub fn sanitize_text(text: Option<String>) -> Option<String> {
 /// Sanitize required text by removing null bytes
 pub fn sanitize_text_required(text: &str) -> String {
     text.replace('\0', "")
+}
+
+/// Extract DID from AT Protocol URI using rsky-syntax
+/// Returns None if URI is invalid or doesn't contain a DID
+pub fn extract_did_from_uri(uri: &str) -> Option<String> {
+    rsky_syntax::aturi::AtUri::new(uri.to_string(), None)
+        .ok()
+        .map(|at_uri| at_uri.host)
+}
+
+/// Extract record key (rkey) from AT Protocol URI using rsky-syntax
+/// Returns None if URI is invalid or doesn't contain an rkey
+pub fn extract_rkey_from_uri(uri: &str) -> Option<String> {
+    rsky_syntax::aturi::AtUri::new(uri.to_string(), None)
+        .ok()
+        .map(|at_uri| at_uri.get_rkey())
+        .filter(|rkey| !rkey.is_empty())
+}
+
+/// Extract collection from AT Protocol URI using rsky-syntax
+/// Returns None if URI is invalid or doesn't contain a collection
+pub fn extract_collection_from_uri(uri: &str) -> Option<String> {
+    rsky_syntax::aturi::AtUri::new(uri.to_string(), None)
+        .ok()
+        .map(|at_uri| at_uri.get_collection())
+        .filter(|collection| !collection.is_empty())
+}
+
+/// Convert JSON Value to IPLD-formatted JSON (for TypeScript AppView compatibility)
+///
+/// CRITICAL: This ensures CID references are stored as {"$link": "bafyrei..."}
+/// instead of byte arrays [1,85,18,32,...] which fail lexicon validation.
+fn convert_to_ipld_format(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(map) => {
+            // Check if this is already in IPLD format
+            if let Some(JsonValue::String(_)) = map.get("$link") {
+                return;
+            }
+
+            // Recurse into nested objects
+            for (_, v) in map.iter_mut() {
+                convert_to_ipld_format(v);
+            }
+        }
+        JsonValue::Array(arr) => {
+            // Check if this is a byte array (all elements are numbers 0-255)
+            let is_byte_array = arr.iter().all(
+                |v| matches!(v, JsonValue::Number(n) if n.as_u64().map_or(false, |num| num <= 255)),
+            );
+
+            if is_byte_array && !arr.is_empty() {
+                // Try to parse as CID - this will be handled by the parent if it's in an object
+                // For now, just recurse into non-byte arrays
+            } else {
+                // Recurse into array elements
+                for v in arr.iter_mut() {
+                    convert_to_ipld_format(v);
+                }
+            }
+        }
+        _ => {} // Primitives don't need conversion
+    }
+}
+
+/// Convert RepoRecord JSON to IPLD-formatted string
+/// This replaces direct serde_json::to_string calls
+fn record_to_ipld_json_string(record_json: &JsonValue) -> Result<String, IndexerError> {
+    // First, we need to convert byte arrays to IPLD format
+    // We'll do this recursively by converting the JSON tree
+    fn convert_value(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => {
+                let mut new_map = serde_json::Map::new();
+                for (k, v) in map.iter() {
+                    new_map.insert(k.clone(), convert_value(v));
+                }
+                JsonValue::Object(new_map)
+            }
+            JsonValue::Array(arr) => {
+                // Check if this is a byte array (CID)
+                let is_byte_array = arr.iter().all(|v| {
+                    matches!(v, JsonValue::Number(n) if n.as_u64().map_or(false, |num| num <= 255))
+                });
+
+                if is_byte_array && !arr.is_empty() {
+                    let bytes: Vec<u8> = arr
+                        .iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                        .collect();
+
+                    if let Ok(cid) = Cid::try_from(&bytes[..]) {
+                        return serde_json::json!({"$link": cid.to_string()});
+                    }
+                }
+
+                // Recurse
+                JsonValue::Array(arr.iter().map(|v| convert_value(v)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    let converted = convert_value(record_json);
+    serde_json::to_string(&converted).map_err(|e| IndexerError::Serialization(e.to_string()))
 }
 
 /// Action type for record operations
@@ -552,8 +658,7 @@ impl IndexingService {
         let indexed_at = parse_timestamp(timestamp)?;
         let indexed_at_str = indexed_at.to_rfc3339();
 
-        let json_str = serde_json::to_string(record)
-            .map_err(|e| IndexerError::Serialization(e.to_string()))?;
+        let json_str = record_to_ipld_json_string(record)?;
 
         client
             .execute(

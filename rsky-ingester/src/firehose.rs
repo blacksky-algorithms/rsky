@@ -173,7 +173,9 @@ impl FirehoseIngester {
                     if let Ok(live_len) = conn.xlen::<_, usize>(streams::FIREHOSE_LIVE).await {
                         metrics::FIREHOSE_LIVE_LENGTH.set(live_len as i64);
                     }
-                    if let Ok(backfill_len) = conn.xlen::<_, usize>(streams::FIREHOSE_BACKFILL).await {
+                    if let Ok(backfill_len) =
+                        conn.xlen::<_, usize>(streams::FIREHOSE_BACKFILL).await
+                    {
                         metrics::FIREHOSE_BACKFILL_LENGTH.set(backfill_len as i64);
                     }
                     if let Ok(repo_len) = conn.xlen::<_, usize>(streams::REPO_BACKFILL).await {
@@ -454,8 +456,10 @@ impl FirehoseIngester {
                 Ok(serde_json::Value::Object(obj))
             }
             Ipld::Link(cid) => {
-                // Convert CID to string representation
-                Ok(json!(cid.to_string()))
+                // FIXED: Convert to IPLD format {"$link": "..."}
+                Ok(serde_json::json!({
+                    "$link": cid.to_string()
+                }))
             }
         }
     }

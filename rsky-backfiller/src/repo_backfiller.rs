@@ -1,5 +1,6 @@
 use crate::metrics;
 use crate::{BackfillEvent, BackfillerConfig, BackfillerError, StreamEvent, SEQ_BACKFILL};
+use lexicon_cid::Cid;
 use redis::AsyncCommands;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::car::read_car_with_root;
@@ -12,6 +13,40 @@ use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
+
+/// Convert JSON Value to IPLD-formatted JSON
+fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Value {
+    match record_json {
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map.iter() {
+                new_map.insert(k.clone(), convert_record_to_ipld(v));
+            }
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            // Check if byte array (CID)
+            let is_byte_array = arr.iter().all(|v| {
+                matches!(v, serde_json::Value::Number(n) if n.as_u64().map_or(false, |num| num <= 255))
+            });
+
+            if is_byte_array && !arr.is_empty() {
+                let bytes: Vec<u8> = arr
+                    .iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect();
+
+                if let Ok(cid) = Cid::try_from(&bytes[..]) {
+                    return serde_json::json!({"$link": cid.to_string()});
+                }
+            }
+
+            // Recurse
+            serde_json::Value::Array(arr.iter().map(|v| convert_record_to_ipld(v)).collect())
+        }
+        other => other.clone(),
+    }
+}
 
 /// Redis stream message
 #[derive(Debug, Clone)]
@@ -677,8 +712,9 @@ impl RepoBackfiller {
                 // Get and parse record
                 match get_and_parse_record(&blocks_result.blocks, entry.value) {
                     Ok(parsed) => {
-                        let record_json = serde_json::to_value(&parsed.record)
+                        let record_json_raw = serde_json::to_value(&parsed.record)
                             .map_err(|e| BackfillerError::Serialization(e))?;
+                        let record_json = convert_record_to_ipld(&record_json_raw);
 
                         events.push(StreamEvent::Create {
                             seq: SEQ_BACKFILL,
