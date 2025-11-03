@@ -68,6 +68,10 @@ async fn main() -> Result<()> {
 
     info!("Starting rsky-ingester");
 
+    // Initialize metrics (ensures all metrics are registered with Prometheus)
+    metrics::initialize_metrics();
+    info!("Metrics initialized");
+
     // Start metrics server
     let metrics_port = env::var("METRICS_PORT")
         .unwrap_or_else(|_| "4100".to_string())

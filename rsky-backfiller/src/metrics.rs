@@ -89,6 +89,24 @@ lazy_static! {
     .unwrap();
 }
 
+/// Initialize all metrics to ensure they're registered with Prometheus
+/// This forces lazy_static evaluation even for metrics that haven't been accessed yet
+pub fn initialize_metrics() {
+    // Touch all metrics to force registration
+    let _ = &*REPOS_PROCESSED;
+    let _ = &*REPOS_FAILED;
+    let _ = &*REPOS_DEAD_LETTERED;
+    let _ = &*RECORDS_EXTRACTED;
+    let _ = &*RECORDS_FILTERED;
+    let _ = &*RETRIES_ATTEMPTED;
+    let _ = &*REPOS_WAITING;
+    let _ = &*REPOS_RUNNING;
+    let _ = &*OUTPUT_STREAM_LENGTH;
+    let _ = &*CAR_FETCH_ERRORS;
+    let _ = &*CAR_PARSE_ERRORS;
+    let _ = &*VERIFICATION_ERRORS;
+}
+
 /// Encode metrics for Prometheus scraping
 pub fn encode_metrics() -> Result<String, Box<dyn std::error::Error>> {
     let encoder = TextEncoder::new();

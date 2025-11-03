@@ -155,6 +155,33 @@ lazy_static! {
     .unwrap();
 }
 
+/// Initialize all metrics to ensure they're registered with Prometheus
+/// This forces lazy_static evaluation even for metrics that haven't been accessed yet
+pub fn initialize_metrics() {
+    // Touch all metrics to force registration
+    let _ = &*FIREHOSE_EVENTS_TOTAL;
+    let _ = &*FIREHOSE_CREATE_EVENTS;
+    let _ = &*FIREHOSE_UPDATE_EVENTS;
+    let _ = &*FIREHOSE_DELETE_EVENTS;
+    let _ = &*FIREHOSE_FILTERED_OPERATIONS;
+    let _ = &*STREAM_EVENTS_TOTAL;
+    let _ = &*ERRORS_TOTAL;
+    let _ = &*FIREHOSE_LIVE_LENGTH;
+    let _ = &*FIREHOSE_BACKFILL_LENGTH;
+    let _ = &*LABEL_LIVE_LENGTH;
+    let _ = &*REPO_BACKFILL_LENGTH;
+    let _ = &*BACKPRESSURE_ACTIVE;
+    let _ = &*WEBSOCKET_CONNECTIONS;
+    let _ = &*EVENTS_IN_MEMORY;
+    let _ = &*LABELER_EVENTS_TOTAL;
+    let _ = &*LABELS_WRITTEN_TOTAL;
+    let _ = &*BACKFILL_REPOS_FETCHED;
+    let _ = &*BACKFILL_REPOS_WRITTEN;
+    let _ = &*BACKFILL_FETCH_ERRORS;
+    let _ = &*BACKFILL_CURSOR_SKIPS;
+    let _ = &*BACKFILL_COMPLETE;
+}
+
 /// Encode metrics for Prometheus scraping
 pub fn encode_metrics() -> Result<String, Box<dyn std::error::Error>> {
     let encoder = TextEncoder::new();

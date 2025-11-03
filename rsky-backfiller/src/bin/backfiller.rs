@@ -17,6 +17,10 @@ async fn main() {
 
     info!("Starting rsky-backfiller");
 
+    // Initialize metrics (ensures all metrics are registered with Prometheus)
+    metrics::initialize_metrics();
+    info!("Metrics initialized");
+
     // Load configuration from environment
     let config = BackfillerConfig {
         redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
