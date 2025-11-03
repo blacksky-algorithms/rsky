@@ -216,12 +216,28 @@ impl BackfillIngester {
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                         error!(
                             "Max consecutive errors reached for cursor {:?}. \
-                            This is likely a relay-side issue with a specific repo. \
-                            Returning error to trigger outer 30s retry loop.",
+                            Relay-side issue with specific repo. Skipping to next cursor...",
                             current_cursor
                         );
-                        // Return error to trigger the outer retry loop (line 62-67)
-                        // This gives the relay time to recover and doesn't skip any repos
+                        // Skip past the problematic cursor by incrementing it by the limit (1000)
+                        // This skips the entire batch containing the broken DID
+                        if let Some(ref cursor_str) = current_cursor {
+                            if let Ok(cursor_num) = cursor_str.parse::<u64>() {
+                                let next_cursor = (cursor_num + 1000).to_string();
+                                warn!(
+                                    "Advancing cursor from {} to {} to skip problematic batch",
+                                    cursor_str, next_cursor
+                                );
+                                current_cursor = Some(next_cursor);
+                                // Update Redis cursor so we don't retry this again
+                                conn.set::<_, _, ()>(&cursor_key, current_cursor.as_ref().unwrap())
+                                    .await?;
+                                // Reset error counter and continue
+                                consecutive_errors = 0;
+                                continue;
+                            }
+                        }
+                        // If we can't parse/increment cursor, return error
                         return Err(e);
                     } else {
                         // Exponential backoff before retrying
