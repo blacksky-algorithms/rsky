@@ -348,15 +348,6 @@ impl FirehoseIngester {
                         _ => {}
                     }
                 }
-
-                // Add repo sync event at the end
-                events.push(StreamEvent::Repo {
-                    seq,
-                    time: time.clone(),
-                    did,
-                    commit: commit_cid,
-                    rev,
-                });
             }
             SubscribeRepos::Handle(handle_evt) => {
                 events.push(StreamEvent::Identity {
