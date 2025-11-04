@@ -12,7 +12,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_postgres::NoTls;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warp::Filter;
 
@@ -56,6 +56,10 @@ struct Args {
     /// Index a specific repo by DID (one-off operation, bypasses Redis streams)
     #[arg(long)]
     index_repo: Option<String>,
+
+    /// Index multiple repos from a CSV file (one DID per line, with optional header)
+    #[arg(long)]
+    index_repos_file: Option<String>,
 }
 
 #[tokio::main]
@@ -71,6 +75,12 @@ async fn main() -> Result<()> {
 
     // Parse CLI arguments
     let args = Args::parse();
+
+    // Check if we're in bulk repo indexing mode
+    if let Some(csv_path) = args.index_repos_file {
+        info!("Bulk repo indexing mode from file: {}", csv_path);
+        return run_bulk_indexing(&csv_path).await;
+    }
 
     // Check if we're in one-off repo indexing mode
     if let Some(did) = args.index_repo {
@@ -499,6 +509,113 @@ async fn run_one_off_indexing(did: &str) -> Result<()> {
     info!("   Total records: {}", leaves.len());
     info!("   Indexed: {}", indexed_count);
     info!("   Skipped: {}", skipped_count);
+
+    Ok(())
+}
+
+/// Bulk repo indexing: read DIDs from CSV file and index each one
+async fn run_bulk_indexing(csv_path: &str) -> Result<()> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    info!("Starting bulk repo indexing from file: {}", csv_path);
+
+    // Open and read CSV file
+    let file = File::open(csv_path)?;
+    let reader = BufReader::new(file);
+
+    // Collect all DIDs (skip header line if present)
+    let mut dids = Vec::new();
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+
+        // Skip empty lines
+        if line.is_empty() {
+            continue;
+        }
+
+        // Skip header line (if first line contains "did" as text)
+        if line_num == 0 && (line == "did" || line == "DID") {
+            info!("Skipping CSV header line");
+            continue;
+        }
+
+        // Validate DID format
+        if !line.starts_with("did:") {
+            warn!("Skipping invalid DID on line {}: {}", line_num + 1, line);
+            continue;
+        }
+
+        dids.push(line.to_string());
+    }
+
+    info!("Loaded {} DIDs from CSV file", dids.len());
+
+    if dids.is_empty() {
+        return Err(anyhow::anyhow!("No valid DIDs found in CSV file"));
+    }
+
+    // Process each DID
+    let mut success_count = 0;
+    let mut failure_count = 0;
+    let start_time = std::time::Instant::now();
+
+    for (idx, did) in dids.iter().enumerate() {
+        let progress = idx + 1;
+        info!("Processing DID {}/{}: {}", progress, dids.len(), did);
+
+        match run_one_off_indexing(did).await {
+            Ok(()) => {
+                success_count += 1;
+                info!("✅ Successfully indexed {}/{}", progress, dids.len());
+            }
+            Err(e) => {
+                failure_count += 1;
+                error!("❌ Failed to index {} ({}/{}): {:?}", did, progress, dids.len(), e);
+            }
+        }
+
+        // Progress report every 10 DIDs
+        if progress % 10 == 0 || progress == dids.len() {
+            let elapsed = start_time.elapsed().as_secs();
+            let rate = if elapsed > 0 {
+                progress as f64 / elapsed as f64
+            } else {
+                0.0
+            };
+            info!(
+                "Progress: {}/{} ({:.1}%) - Success: {} - Failed: {} - Rate: {:.2} DIDs/sec",
+                progress,
+                dids.len(),
+                (progress as f64 / dids.len() as f64) * 100.0,
+                success_count,
+                failure_count,
+                rate
+            );
+        }
+    }
+
+    let total_time = start_time.elapsed();
+    info!("========================================");
+    info!("Bulk indexing complete!");
+    info!("Total DIDs processed: {}", dids.len());
+    info!("✅ Successful: {}", success_count);
+    info!("❌ Failed: {}", failure_count);
+    info!("⏱️  Total time: {:.2?}", total_time);
+    info!(
+        "📊 Average rate: {:.2} DIDs/sec",
+        dids.len() as f64 / total_time.as_secs_f64()
+    );
+    info!("========================================");
+
+    if failure_count > 0 {
+        return Err(anyhow::anyhow!(
+            "{} out of {} DIDs failed to index",
+            failure_count,
+            dids.len()
+        ));
+    }
 
     Ok(())
 }
