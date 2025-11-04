@@ -670,6 +670,7 @@ impl IndexingService {
                     json = EXCLUDED.json,
                     "indexedAt" = EXCLUDED."indexedAt",
                     rev = EXCLUDED.rev
+                WHERE record.rev <= EXCLUDED.rev
                 "#,
                 &[&uri, &cid, &did, &json_str, &indexed_at_str, &rev],
             )
