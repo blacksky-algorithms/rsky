@@ -572,7 +572,13 @@ async fn run_bulk_indexing(csv_path: &str) -> Result<()> {
             }
             Err(e) => {
                 failure_count += 1;
-                error!("❌ Failed to index {} ({}/{}): {:?}", did, progress, dids.len(), e);
+                error!(
+                    "❌ Failed to index {} ({}/{}): {:?}",
+                    did,
+                    progress,
+                    dids.len(),
+                    e
+                );
             }
         }
 
