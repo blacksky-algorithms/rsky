@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
+use tracing::debug;
 
 pub struct FollowPlugin;
 
@@ -165,6 +166,9 @@ impl RecordPlugin for FollowPlugin {
         // causing Pool(Timeout) errors and 99.8% data loss (9,777 posts indexed vs 4.1M expected)
         // TODO: Implement incremental updates (followersCount +1/-1) or background job
         // Update aggregates: profile_agg.followersCount for subjectDid
+        if let Some(follow_subject) = subject_did {
+            debug!("Skipping followersCount aggregate (emergency fix) for subject: {}", follow_subject);
+        }
         // if let Some(follow_subject) = subject_did {
         //     client
         //         .execute(
