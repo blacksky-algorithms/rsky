@@ -145,18 +145,21 @@ impl RecordPlugin for LikePlugin {
             }
         }
 
+        // EMERGENCY FIX: Disabled expensive COUNT(*) aggregate update (INSERT)
+        // This query scans the entire like table on EVERY like event, exhausting connection pool
+        // TODO: Implement incremental updates (likeCount +1/-1)
         // Update aggregates: post_agg.likeCount
-        if let Some(like_subject) = subject {
-            client
-                .execute(
-                    r#"INSERT INTO post_agg (uri, "likeCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
-                       ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
-                    &[&like_subject, &like_subject],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
-        }
+        // if let Some(like_subject) = subject {
+        //     client
+        //         .execute(
+        //             r#"INSERT INTO post_agg (uri, "likeCount")
+        //                VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
+        //                ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
+        //             &[&like_subject, &like_subject],
+        //         )
+        //         .await
+        //         .map_err(|e| IndexerError::Database(e.into()))?;
+        // }
 
         Ok(())
     }
@@ -199,18 +202,21 @@ impl RecordPlugin for LikePlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
+        // EMERGENCY FIX: Disabled expensive COUNT(*) aggregate update (DELETE)
+        // This query scans the entire like table on EVERY unlike event, exhausting connection pool
+        // TODO: Implement incremental updates (likeCount -1)
         // Update aggregates: post_agg.likeCount
-        if let Some(like_subject) = subject {
-            client
-                .execute(
-                    r#"INSERT INTO post_agg (uri, "likeCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
-                       ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
-                    &[&like_subject, &like_subject],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
-        }
+        // if let Some(like_subject) = subject {
+        //     client
+        //         .execute(
+        //             r#"INSERT INTO post_agg (uri, "likeCount")
+        //                VALUES ($1, (SELECT COUNT(*) FROM "like" WHERE subject = $2))
+        //                ON CONFLICT (uri) DO UPDATE SET "likeCount" = EXCLUDED."likeCount""#,
+        //             &[&like_subject, &like_subject],
+        //         )
+        //         .await
+        //         .map_err(|e| IndexerError::Database(e.into()))?;
+        // }
 
         Ok(())
     }
