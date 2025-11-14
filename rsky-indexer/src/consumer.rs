@@ -2,7 +2,7 @@ use crate::IndexerError;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::AsyncCommands;
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Redis message from a stream
 #[derive(Debug, Clone)]
@@ -242,6 +242,67 @@ impl RedisConsumer {
         }
 
         Ok(None)
+    }
+
+    /// Auto-claim and ACK old pending messages (older than min_idle_time_ms)
+    /// This is used to clean up phantom pending messages that point to deleted stream entries
+    /// Returns the number of messages claimed and ACKed
+    pub async fn autoclaim_old_pending(&self, min_idle_time_ms: u64) -> Result<usize, IndexerError> {
+        let mut conn = self.manager.clone();
+
+        // Use XAUTOCLAIM to claim messages older than min_idle_time_ms
+        // XAUTOCLAIM stream group consumer min-idle-time start [COUNT count] [JUSTID]
+        let result: redis::RedisResult<redis::Value> = redis::cmd("XAUTOCLAIM")
+            .arg(&self.stream)
+            .arg(&self.group)
+            .arg(&self.consumer)
+            .arg(min_idle_time_ms)
+            .arg("0-0") // Start from beginning
+            .arg("COUNT")
+            .arg(1000) // Claim up to 1000 messages at a time
+            .query_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(redis::Value::Array(parts)) if parts.len() >= 2 => {
+                // XAUTOCLAIM returns [next_id, [claimed_messages], [deleted_ids]]
+                if let Some(redis::Value::Array(claimed)) = parts.get(1) {
+                    let claimed_count = claimed.len();
+
+                    if claimed_count > 0 {
+                        info!(
+                            "XAUTOCLAIM found {} old pending messages (idle > {}ms)",
+                            claimed_count, min_idle_time_ms
+                        );
+
+                        // Extract message IDs and ACK them
+                        for entry in claimed {
+                            if let redis::Value::Array(entry_parts) = entry {
+                                if let Some(redis::Value::BulkString(id_bytes)) = entry_parts.first() {
+                                    let id = String::from_utf8_lossy(id_bytes).to_string();
+
+                                    // ACK this message
+                                    let _: redis::RedisResult<i64> = redis::cmd("XACK")
+                                        .arg(&self.stream)
+                                        .arg(&self.group)
+                                        .arg(&id)
+                                        .query_async(&mut conn)
+                                        .await;
+                                }
+                            }
+                        }
+
+                        return Ok(claimed_count);
+                    }
+                }
+                Ok(0)
+            }
+            Ok(_) => Ok(0),
+            Err(e) => {
+                warn!("XAUTOCLAIM error: {:?}", e);
+                Err(IndexerError::Redis(e))
+            }
+        }
     }
 }
 
