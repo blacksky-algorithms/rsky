@@ -64,6 +64,8 @@ impl StreamIndexer {
         self.consumer.ensure_consumer_group().await?;
 
         let mut cursor = "0".to_string(); // Start with pending messages
+        let mut empty_reads = 0; // Track consecutive empty reads
+        let mut last_cursor = String::new(); // Track last cursor to detect stuckness
 
         loop {
             // Check for shutdown signal
@@ -72,7 +74,7 @@ impl StreamIndexer {
                     info!("Shutdown signal received, draining in-flight messages...");
                     break;
                 }
-                result = self.read_and_process_batch(&mut cursor) => {
+                result = self.read_and_process_batch(&mut cursor, &mut empty_reads, &mut last_cursor) => {
                     match result {
                         Ok(should_continue) => {
                             if !should_continue {
@@ -101,7 +103,12 @@ impl StreamIndexer {
 
     /// Read and process a batch of messages
     /// Returns Ok(true) to continue, Ok(false) to stop
-    async fn read_and_process_batch(&self, cursor: &mut String) -> Result<bool, IndexerError> {
+    async fn read_and_process_batch(
+        &self,
+        cursor: &mut String,
+        empty_reads: &mut u32,
+        last_cursor: &mut String,
+    ) -> Result<bool, IndexerError> {
         // Read messages from Redis
         let messages = match self
             .consumer
@@ -118,10 +125,49 @@ impl StreamIndexer {
         };
 
         if messages.is_empty() {
+            // Detect stuck cursor: if we're getting empty reads with the same cursor repeatedly
+            if *cursor != ">" && *cursor == *last_cursor {
+                *empty_reads += 1;
+
+                // After 50 consecutive empty reads with same cursor (5 seconds), we're stuck on a phantom message
+                if *empty_reads >= 50 {
+                    warn!(
+                        "Detected stuck cursor after {} empty reads: {}. This indicates pending messages \
+                        that no longer exist in the stream (likely trimmed). Attempting auto-recovery...",
+                        empty_reads, cursor
+                    );
+
+                    // Try to claim and ACK old pending messages
+                    match self.consumer.autoclaim_old_pending(30000).await {
+                        Ok(claimed) => {
+                            if claimed > 0 {
+                                info!("Auto-claimed and ACKed {} old pending messages", claimed);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to auto-claim old pending messages: {:?}", e);
+                        }
+                    }
+
+                    // Reset to check pending from start
+                    info!("Resetting to cursor='0' to re-check pending messages after cleanup");
+                    *cursor = "0".to_string();
+                    *empty_reads = 0;
+                    *last_cursor = String::new();
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    return Ok(true);
+                }
+            } else {
+                // Different cursor or first read at this cursor
+                *empty_reads = if *cursor == *last_cursor { *empty_reads + 1 } else { 1 };
+                *last_cursor = cursor.clone();
+            }
+
             // Switch to live stream after processing pending
             if *cursor == "0" {
                 *cursor = ">".to_string();
                 info!("Switched to live stream");
+                *empty_reads = 0; // Reset counter when switching to live
             }
 
             // Still trim even when no messages, to clean up already-processed messages
@@ -135,6 +181,10 @@ impl StreamIndexer {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             return Ok(true);
         }
+
+        // Got messages - reset stuck cursor detection
+        *empty_reads = 0;
+        *last_cursor = cursor.clone();
 
         // Update cursor for next iteration
         if *cursor != ">" {
