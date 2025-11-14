@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use serde_json::Value as JsonValue;
+use tracing::debug;
 
 pub struct LikePlugin;
 
@@ -149,6 +150,9 @@ impl RecordPlugin for LikePlugin {
         // This query scans the entire like table on EVERY like event, exhausting connection pool
         // TODO: Implement incremental updates (likeCount +1/-1)
         // Update aggregates: post_agg.likeCount
+        if let Some(like_subject) = subject {
+            debug!("Skipping likeCount aggregate (emergency fix) for subject: {}", like_subject);
+        }
         // if let Some(like_subject) = subject {
         //     client
         //         .execute(
