@@ -160,18 +160,22 @@ impl RecordPlugin for FollowPlugin {
                 .map_err(|e| IndexerError::Database(e.into()))?;
         }
 
+        // EMERGENCY FIX: Disabled expensive COUNT(*) aggregate update (INSERT)
+        // This query scans the entire follow table (millions of rows) on EVERY follow event
+        // causing Pool(Timeout) errors and 99.8% data loss (9,777 posts indexed vs 4.1M expected)
+        // TODO: Implement incremental updates (followersCount +1/-1) or background job
         // Update aggregates: profile_agg.followersCount for subjectDid
-        if let Some(follow_subject) = subject_did {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, "followersCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
-                       ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
-                    &[&follow_subject, &follow_subject],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
-        }
+        // if let Some(follow_subject) = subject_did {
+        //     client
+        //         .execute(
+        //             r#"INSERT INTO profile_agg (did, "followersCount")
+        //                VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
+        //                ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
+        //             &[&follow_subject, &follow_subject],
+        //         )
+        //         .await
+        //         .map_err(|e| IndexerError::Database(e.into()))?;
+        // }
 
         // Update aggregates: profile_agg.followsCount for creator
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
@@ -229,18 +233,22 @@ impl RecordPlugin for FollowPlugin {
             .await
             .map_err(|e| IndexerError::Database(e.into()))?;
 
+        // EMERGENCY FIX: Disabled expensive COUNT(*) aggregate update (DELETE)
+        // This query scans the entire follow table (millions of rows) on EVERY unfollow event
+        // causing Pool(Timeout) errors and 99.8% data loss
+        // TODO: Implement incremental updates (followersCount -1) or background job
         // Update aggregates: profile_agg.followersCount for subjectDid
-        if let Some(follow_subject) = subject_did {
-            client
-                .execute(
-                    r#"INSERT INTO profile_agg (did, "followersCount")
-                       VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
-                       ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
-                    &[&follow_subject, &follow_subject],
-                )
-                .await
-                .map_err(|e| IndexerError::Database(e.into()))?;
-        }
+        // if let Some(follow_subject) = subject_did {
+        //     client
+        //         .execute(
+        //             r#"INSERT INTO profile_agg (did, "followersCount")
+        //                VALUES ($1, (SELECT COUNT(*) FROM follow WHERE "subjectDid" = $2))
+        //                ON CONFLICT (did) DO UPDATE SET "followersCount" = EXCLUDED."followersCount""#,
+        //             &[&follow_subject, &follow_subject],
+        //         )
+        //         .await
+        //         .map_err(|e| IndexerError::Database(e.into()))?;
+        // }
 
         // Update aggregates: profile_agg.followsCount for creator
         // Use explicit locking (coalesceWithLock) to avoid thrash during backfills
