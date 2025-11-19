@@ -161,7 +161,7 @@ impl LabelerIngester {
         &self,
         data: &[u8],
     ) -> Result<Option<LabelStreamEvent>, IngesterError> {
-        let (header, body) = rsky_firehose::firehose::read_labels(data)
+        let (_, body) = rsky_firehose::firehose::read_labels(data)
             .map_err(|e| IngesterError::Serialization(format!("{:?}", e)))?;
 
         let seq = body.seq; // Use the message's sequence number, not header.operation

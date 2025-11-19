@@ -261,7 +261,7 @@ impl FirehoseIngester {
             .map_err(|e| IngesterError::Serialization(format!("{:?}", e)))?;
 
         // Skip if message was filtered (e.g., #sync, #info messages)
-        let Some((header, body)) = result else {
+        let Some((_, body)) = result else {
             return Ok(Vec::new());
         };
 

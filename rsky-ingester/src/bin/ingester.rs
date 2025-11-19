@@ -203,13 +203,6 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     }
-
-    // This line should NEVER be reached
-    eprintln!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
-    error!("[EXIT-TRACE] IMPOSSIBLE: Reached end of main() after match - EXIT PATH Z");
-    Err(anyhow::anyhow!(
-        "CRITICAL: main() reached impossible code path after match statement"
-    ))
 }
 
 async fn run_firehose(config: IngesterConfig) -> Result<()> {
