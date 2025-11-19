@@ -1,0 +1,289 @@
+mod tests;
+
+use crate::SHUTDOWN;
+use crate::config::{BACKFILLER_BATCH_SIZE, BACKFILLER_TIMEOUT, WORKERS_BACKFILLER};
+use crate::storage::Storage;
+use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
+use iroh_car::CarReader;
+use rsky_identity::IdResolver;
+use rsky_identity::types::IdentityResolverOpts;
+use rsky_repo::parse::get_and_parse_record;
+use rsky_repo::readable_repo::ReadableRepo;
+use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
+use rsky_syntax::aturi::AtUri;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+
+pub struct BackfillerManager {
+    workers: usize,
+    storage: Arc<Storage>,
+    http_client: reqwest::Client,
+    semaphore: Arc<Semaphore>,
+}
+
+impl BackfillerManager {
+    pub fn new(storage: Arc<Storage>) -> Result<Self, WintermuteError> {
+        let http_client = reqwest::Client::builder()
+            .timeout(BACKFILLER_TIMEOUT)
+            .build()?;
+
+        Ok(Self {
+            workers: WORKERS_BACKFILLER,
+            storage,
+            http_client,
+            semaphore: Arc::new(Semaphore::new(WORKERS_BACKFILLER)),
+        })
+    }
+
+    pub fn run(self) -> Result<(), WintermuteError> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(self.workers)
+            .enable_all()
+            .build()
+            .map_err(|e| WintermuteError::Other(format!("failed to create runtime: {e}")))?;
+
+        rt.block_on(async {
+            self.process_loop().await;
+        });
+
+        Ok(())
+    }
+
+    async fn process_loop(&self) {
+        loop {
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!("shutdown requested for backfiller");
+                break;
+            }
+
+            let mut jobs = Vec::new();
+            for _ in 0..BACKFILLER_BATCH_SIZE {
+                match self.storage.dequeue_backfill() {
+                    Ok(Some((key, job))) => jobs.push((key, job)),
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue backfill job: {e}");
+                        break;
+                    }
+                }
+            }
+
+            if jobs.is_empty() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
+            let mut tasks = Vec::new();
+            for (key, job) in jobs {
+                let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
+                    break;
+                };
+
+                let storage = Arc::clone(&self.storage);
+                let http_client = self.http_client.clone();
+
+                let task = tokio::spawn(async move {
+                    let result = Self::process_job(&storage, &http_client, &job).await;
+                    drop(permit);
+                    (key, job, result)
+                });
+
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                match task.await {
+                    Ok((key, _job, Ok(()))) => {
+                        if let Err(e) = self.storage.remove_backfill(&key) {
+                            tracing::error!("failed to remove backfill job: {e}");
+                        }
+                    }
+                    Ok((key, mut job, Err(e))) => {
+                        tracing::error!("backfill job failed for {}: {e}", job.did);
+                        job.retry_count += 1;
+                        if job.retry_count < 3 {
+                            drop(self.storage.remove_backfill(&key));
+                            drop(self.storage.enqueue_backfill(&job));
+                        } else {
+                            tracing::error!("backfill job exceeded retries: {}", job.did);
+                            drop(self.storage.remove_backfill(&key));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("task panicked: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn process_job(
+        storage: &Storage,
+        http_client: &reqwest::Client,
+        job: &BackfillJob,
+    ) -> Result<(), WintermuteError> {
+        let did = &job.did;
+
+        let resolver_opts = IdentityResolverOpts {
+            timeout: None,
+            plc_url: None,
+            did_cache: None,
+            backup_nameservers: None,
+        };
+        let mut resolver = IdResolver::new(resolver_opts);
+        let doc = resolver
+            .did
+            .resolve(did.to_string(), None)
+            .await
+            .map_err(|e| WintermuteError::Other(format!("did resolution failed: {e}")))?
+            .ok_or_else(|| WintermuteError::Other(format!("did not found: {did}")))?;
+
+        let mut pds_endpoint = None;
+        if let Some(services) = &doc.service {
+            for service in services {
+                if service.r#type == "AtprotoPersonalDataServer" || service.id == "#atproto_pds" {
+                    pds_endpoint = Some(service.service_endpoint.clone());
+                    break;
+                }
+            }
+        }
+
+        let pds_endpoint =
+            pds_endpoint.ok_or_else(|| WintermuteError::Other(format!("no pds found: {did}")))?;
+
+        let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
+        let response = http_client.get(&repo_url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(WintermuteError::Other(format!(
+                "http error: {}",
+                response.status()
+            )));
+        }
+
+        let car_bytes = response.bytes().await?;
+        let mut reader = CarReader::new(Cursor::new(car_bytes.to_vec()))
+            .await
+            .map_err(|e| WintermuteError::Repo(format!("car read failed: {e}")))?;
+
+        let root = *reader
+            .header()
+            .roots()
+            .first()
+            .ok_or_else(|| WintermuteError::Repo("no root cid".into()))?;
+
+        let mut blocks = rsky_repo::block_map::BlockMap::new();
+        while let Some((cid, data)) = reader
+            .next_block()
+            .await
+            .map_err(|e| WintermuteError::Repo(format!("read block failed: {e}")))?
+        {
+            blocks.set(cid, data.clone());
+        }
+
+        let blockstore = MemoryBlockstore::new(Some(blocks))
+            .await
+            .map_err(|e| WintermuteError::Repo(format!("blockstore failed: {e}")))?;
+        let storage_arc = Arc::new(tokio::sync::RwLock::new(blockstore));
+
+        let mut repo = ReadableRepo::load(storage_arc, root)
+            .await
+            .map_err(|e| WintermuteError::Repo(format!("repo load failed: {e}")))?;
+
+        if repo.did() != did {
+            return Err(WintermuteError::Repo(format!(
+                "did mismatch: expected {did}, got {}",
+                repo.did()
+            )));
+        }
+
+        let leaves = repo
+            .data
+            .list(None, None, None)
+            .await
+            .map_err(|e| WintermuteError::Repo(format!("list failed: {e}")))?;
+
+        let blocks_result = {
+            let storage_guard = repo.storage.read().await;
+            storage_guard
+                .get_blocks(leaves.iter().map(|e| e.value).collect())
+                .await
+                .map_err(|e| WintermuteError::Repo(format!("get blocks failed: {e}")))?
+        };
+
+        let rev = repo.commit.rev.clone();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for entry in &leaves {
+            let uri_string = format!("at://{did}/{}", entry.key);
+            let Ok(uri) = AtUri::new(uri_string, None) else {
+                continue;
+            };
+
+            let collection = uri.get_collection();
+            let rkey = uri.get_rkey();
+
+            if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+                continue;
+            }
+
+            if let Ok(parsed) = get_and_parse_record(&blocks_result.blocks, entry.value) {
+                let record_json_raw = serde_json::to_value(&parsed.record)
+                    .map_err(|e| WintermuteError::Serialization(format!("json failed: {e}")))?;
+                let record_json = convert_record_to_ipld(&record_json_raw);
+
+                let uri_string = format!("at://{did}/{collection}/{rkey}");
+                let uri = AtUri::new(uri_string, None)
+                    .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+                let cid = entry.value.to_string();
+
+                let index_job = IndexJob {
+                    uri: uri.to_string(),
+                    cid,
+                    action: WriteAction::Create,
+                    record: Some(record_json),
+                    indexed_at: now.clone(),
+                    rev: rev.clone(),
+                };
+
+                storage.enqueue_index(&index_job)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Value {
+    match record_json {
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), convert_record_to_ipld(v));
+            }
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            let is_byte_array = arr.iter().all(|v| {
+                matches!(v, serde_json::Value::Number(n) if n.as_u64().is_some_and(|num| num <= 255))
+            });
+
+            if is_byte_array && !arr.is_empty() {
+                let bytes: Vec<u8> = arr
+                    .iter()
+                    .filter_map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                    .collect();
+
+                if let Ok(cid) = lexicon_cid::Cid::try_from(&bytes[..]) {
+                    return serde_json::json!({"$link": cid.to_string()});
+                }
+            }
+
+            serde_json::Value::Array(arr.iter().map(convert_record_to_ipld).collect())
+        }
+        other => other.clone(),
+    }
+}
