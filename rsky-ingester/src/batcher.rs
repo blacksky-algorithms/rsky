@@ -96,9 +96,9 @@ mod tests {
     async fn test_batcher_size() {
         let (tx, mut rx) = Batcher::new(3, 1000);
 
-        tx.send(1).unwrap();
-        tx.send(2).unwrap();
-        tx.send(3).unwrap();
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        tx.send(3).await.unwrap();
 
         let batch = rx.recv().await.unwrap();
         assert_eq!(batch, vec![1, 2, 3]);
@@ -108,8 +108,8 @@ mod tests {
     async fn test_batcher_timeout() {
         let (tx, mut rx) = Batcher::new(10, 100);
 
-        tx.send(1).unwrap();
-        tx.send(2).unwrap();
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
 
         let batch = rx.recv().await.unwrap();
         assert_eq!(batch, vec![1, 2]);
