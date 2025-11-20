@@ -110,6 +110,8 @@ impl IngesterManager {
     }
 
     async fn connect_and_stream(storage: &Storage, hostname: &str) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
         let cursor_key = format!("firehose:{hostname}");
         let cursor = storage.get_cursor(&cursor_key)?.unwrap_or(0);
 
@@ -129,6 +131,9 @@ impl IngesterManager {
         tracing::info!("connecting to {url} with cursor {cursor}");
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
+        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+            .with_label_values(&["firehose"])
+            .inc();
         let (mut write, mut read) = ws_stream.split();
 
         let ping_task = tokio::spawn(async move {
@@ -146,12 +151,18 @@ impl IngesterManager {
 
             if let Message::Binary(data) = msg {
                 if let Some(event) = Self::parse_message(&data)? {
+                    metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
+                        .with_label_values(&["firehose_live"])
+                        .inc();
                     storage.write_firehose_event(event.seq, &event)?;
                     storage.set_cursor(&cursor_key, event.seq)?;
                 }
             }
         }
 
+        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+            .with_label_values(&["firehose"])
+            .dec();
         ping_task.abort();
         Ok(())
     }

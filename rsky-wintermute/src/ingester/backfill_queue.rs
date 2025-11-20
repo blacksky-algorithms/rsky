@@ -19,6 +19,8 @@ pub async fn populate_backfill_queue(
     storage: Arc<Storage>,
     relay_host: String,
 ) -> Result<(), WintermuteError> {
+    use crate::metrics;
+
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -44,9 +46,16 @@ pub async fn populate_backfill_queue(
 
         tracing::info!("fetching repos from {url}");
 
-        let response = http_client.get(url.as_str()).send().await?;
+        let response = match http_client.get(url.as_str()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                metrics::INGESTER_BACKFILL_FETCH_ERRORS_TOTAL.inc();
+                return Err(WintermuteError::Other(format!("http error: {e}")));
+            }
+        };
 
         if !response.status().is_success() {
+            metrics::INGESTER_BACKFILL_FETCH_ERRORS_TOTAL.inc();
             return Err(WintermuteError::Other(format!(
                 "http error: {}",
                 response.status()
@@ -58,11 +67,13 @@ pub async fn populate_backfill_queue(
         tracing::info!("received {} repos", list_response.repos.len());
 
         for repo in &list_response.repos {
+            metrics::INGESTER_BACKFILL_REPOS_FETCHED_TOTAL.inc();
             let job = BackfillJob {
                 did: repo.did.clone(),
                 retry_count: 0,
             };
             storage.enqueue_backfill(&job)?;
+            metrics::INGESTER_BACKFILL_REPOS_WRITTEN_TOTAL.inc();
         }
 
         if let Some(next_cursor) = list_response.cursor {
@@ -70,6 +81,7 @@ pub async fn populate_backfill_queue(
             cursor = Some(next_cursor);
         } else {
             tracing::info!("backfill queue population complete for {relay_host}");
+            metrics::INGESTER_BACKFILL_COMPLETE.set(1);
             break;
         }
     }

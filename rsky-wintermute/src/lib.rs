@@ -41,6 +41,7 @@ pub mod backfiller;
 pub mod config;
 pub mod indexer;
 pub mod ingester;
+pub mod metrics;
 pub mod storage;
 pub mod types;
 

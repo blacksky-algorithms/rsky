@@ -1,7 +1,7 @@
 //! Indexer integration tests
 //!
 //! These tests verify end-to-end indexing from backfill through postgres writes.
-//! Each test uses an isolated fjall database via TempDir and shares a PostgreSQL database.
+//! Each test uses an isolated fjall database via `TempDir` and shares a `PostgreSQL` database.
 //!
 //! Run with: `DATABASE_URL=... cargo test --lib indexer::tests`
 
@@ -126,7 +126,7 @@ mod indexer_tests {
 
         assert!(result.is_ok(), "backfill job failed: {:?}", result.err());
 
-        let queue_len = storage.index_queue_len().unwrap();
+        let queue_len = storage.firehose_backfill_len().unwrap();
         tracing::info!("backfill complete, {queue_len} records enqueued for indexing");
         assert!(
             queue_len > 5000,
@@ -149,13 +149,13 @@ mod indexer_tests {
             let mut batch_processed = 0;
 
             for _ in 0..batch_size {
-                match indexer.storage.dequeue_index() {
+                match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
                         let result = IndexerManager::process_job(&indexer.pool, &index_job).await;
 
                         match result {
                             Ok(()) => {
-                                drop(indexer.storage.remove_index(&key));
+                                drop(indexer.storage.remove_firehose_backfill(&key));
                                 batch_processed += 1;
                             }
                             Err(e) => {
@@ -391,12 +391,12 @@ mod indexer_tests {
             let mut batch_processed = 0;
 
             for _ in 0..batch_size {
-                match indexer.storage.dequeue_index() {
+                match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
                         let result = IndexerManager::process_job(&indexer.pool, &index_job).await;
 
                         if result.is_ok() {
-                            drop(indexer.storage.remove_index(&key));
+                            drop(indexer.storage.remove_firehose_backfill(&key));
                             batch_processed += 1;
                         }
                     }

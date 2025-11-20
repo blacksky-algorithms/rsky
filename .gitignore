@@ -163,3 +163,5 @@ dist
 .pnp.*
 
 wintermute_db
+rsky-wintermute/*.md
+CLAUDE.md

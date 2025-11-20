@@ -59,6 +59,16 @@ impl BackfillerManager {
                 break;
             }
 
+            // Update queue length metrics
+            if let Ok(queue_len) = self.storage.repo_backfill_len() {
+                crate::metrics::BACKFILLER_REPOS_WAITING
+                    .set(i64::try_from(queue_len).unwrap_or(i64::MAX));
+            }
+            if let Ok(output_len) = self.storage.firehose_backfill_len() {
+                crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH
+                    .set(i64::try_from(output_len).unwrap_or(i64::MAX));
+            }
+
             let mut jobs = Vec::new();
             for _ in 0..BACKFILLER_BATCH_SIZE {
                 match self.storage.dequeue_backfill() {
@@ -105,10 +115,12 @@ impl BackfillerManager {
                         tracing::error!("backfill job failed for {}: {e}", job.did);
                         job.retry_count += 1;
                         if job.retry_count < 3 {
+                            crate::metrics::BACKFILLER_RETRIES_ATTEMPTED_TOTAL.inc();
                             drop(self.storage.remove_backfill(&key));
                             drop(self.storage.enqueue_backfill(&job));
                         } else {
                             tracing::error!("backfill job exceeded retries: {}", job.did);
+                            crate::metrics::BACKFILLER_REPOS_DEAD_LETTERED_TOTAL.inc();
                             drop(self.storage.remove_backfill(&key));
                         }
                     }
@@ -125,6 +137,10 @@ impl BackfillerManager {
         http_client: &reqwest::Client,
         job: &BackfillJob,
     ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        metrics::BACKFILLER_REPOS_RUNNING.inc();
+
         let did = &job.did;
 
         let resolver_opts = IdentityResolverOpts {
@@ -134,12 +150,13 @@ impl BackfillerManager {
             backup_nameservers: None,
         };
         let mut resolver = IdResolver::new(resolver_opts);
-        let doc = resolver
-            .did
-            .resolve(did.to_string(), None)
-            .await
-            .map_err(|e| WintermuteError::Other(format!("did resolution failed: {e}")))?
-            .ok_or_else(|| WintermuteError::Other(format!("did not found: {did}")))?;
+        let Ok(Some(doc)) = resolver.did.resolve(did.to_string(), None).await else {
+            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_RUNNING.dec();
+            return Err(WintermuteError::Other(format!(
+                "did resolution failed for: {did}"
+            )));
+        };
 
         let mut pds_endpoint = None;
         if let Some(services) = &doc.service {
@@ -151,13 +168,27 @@ impl BackfillerManager {
             }
         }
 
-        let pds_endpoint =
-            pds_endpoint.ok_or_else(|| WintermuteError::Other(format!("no pds found: {did}")))?;
+        let Some(pds_endpoint) = pds_endpoint else {
+            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_RUNNING.dec();
+            return Err(WintermuteError::Other(format!("no pds found: {did}")));
+        };
 
         let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
-        let response = http_client.get(&repo_url).send().await?;
+        let response = match http_client.get(&repo_url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_RUNNING.dec();
+                return Err(WintermuteError::Other(format!("http error: {e}")));
+            }
+        };
 
         if !response.status().is_success() {
+            metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_RUNNING.dec();
             return Err(WintermuteError::Other(format!(
                 "http error: {}",
                 response.status()
@@ -165,9 +196,15 @@ impl BackfillerManager {
         }
 
         let car_bytes = response.bytes().await?;
-        let mut reader = CarReader::new(Cursor::new(car_bytes.to_vec()))
-            .await
-            .map_err(|e| WintermuteError::Repo(format!("car read failed: {e}")))?;
+        let mut reader = match CarReader::new(Cursor::new(car_bytes.to_vec())).await {
+            Ok(r) => r,
+            Err(e) => {
+                metrics::BACKFILLER_CAR_PARSE_ERRORS_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_RUNNING.dec();
+                return Err(WintermuteError::Repo(format!("car read failed: {e}")));
+            }
+        };
 
         let root = *reader
             .header()
@@ -194,6 +231,9 @@ impl BackfillerManager {
             .map_err(|e| WintermuteError::Repo(format!("repo load failed: {e}")))?;
 
         if repo.did() != did {
+            metrics::BACKFILLER_VERIFICATION_ERRORS_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+            metrics::BACKFILLER_REPOS_RUNNING.dec();
             return Err(WintermuteError::Repo(format!(
                 "did mismatch: expected {did}, got {}",
                 repo.did()
@@ -227,10 +267,12 @@ impl BackfillerManager {
             let rkey = uri.get_rkey();
 
             if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+                metrics::BACKFILLER_RECORDS_FILTERED_TOTAL.inc();
                 continue;
             }
 
             if let Ok(parsed) = get_and_parse_record(&blocks_result.blocks, entry.value) {
+                metrics::BACKFILLER_RECORDS_EXTRACTED_TOTAL.inc();
                 let record_json_raw = serde_json::to_value(&parsed.record)
                     .map_err(|e| WintermuteError::Serialization(format!("json failed: {e}")))?;
                 let record_json = convert_record_to_ipld(&record_json_raw);
@@ -249,9 +291,12 @@ impl BackfillerManager {
                     rev: rev.clone(),
                 };
 
-                storage.enqueue_index(&index_job)?;
+                storage.enqueue_firehose_backfill(&index_job)?;
             }
         }
+
+        metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
+        metrics::BACKFILLER_REPOS_RUNNING.dec();
 
         Ok(())
     }

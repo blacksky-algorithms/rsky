@@ -12,6 +12,14 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_postgres::NoTls;
 
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum QueueSource {
+    FirehoseLive,
+    FirehoseBackfill,
+    LabelLive, // Future use for label stream processing
+}
+
 pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
@@ -60,17 +68,53 @@ impl IndexerManager {
                 break;
             }
 
+            // Update queue length metrics for all three streams
+            if let Ok(live_len) = self.storage.firehose_live_len() {
+                crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
+                    .set(i64::try_from(live_len).unwrap_or(i64::MAX));
+            }
+            if let Ok(backfill_len) = self.storage.firehose_backfill_len() {
+                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
+                    .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
+            }
+            if let Ok(label_len) = self.storage.label_live_len() {
+                crate::metrics::INGESTER_LABEL_LIVE_LENGTH
+                    .set(i64::try_from(label_len).unwrap_or(i64::MAX));
+            }
+
+            // Collect jobs from all three queues with priority: live > backfill > labels
             let mut jobs = Vec::new();
+
+            // Priority 1: firehose_live (from ingester)
             for _ in 0..INDEXER_BATCH_SIZE {
-                match self.storage.dequeue_index() {
-                    Ok(Some((key, job))) => jobs.push((key, job)),
+                match self.storage.dequeue_firehose_live() {
+                    Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::error!("failed to dequeue index job: {e}");
+                        tracing::error!("failed to dequeue firehose_live job: {e}");
                         break;
                     }
                 }
             }
+
+            // Priority 2: firehose_backfill (from backfiller) if batch not full
+            if jobs.len() < INDEXER_BATCH_SIZE {
+                for _ in 0..(INDEXER_BATCH_SIZE - jobs.len()) {
+                    match self.storage.dequeue_firehose_backfill() {
+                        Ok(Some((key, job))) => {
+                            jobs.push((key, job, QueueSource::FirehoseBackfill));
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::error!("failed to dequeue firehose_backfill job: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Priority 3: label_live (future) if batch still not full
+            // Labels will be processed separately, so we don't dequeue them here yet
 
             if jobs.is_empty() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -78,7 +122,7 @@ impl IndexerManager {
             }
 
             let mut tasks = Vec::new();
-            for (key, job) in jobs {
+            for (key, job, source) in jobs {
                 let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
                     break;
                 };
@@ -88,7 +132,7 @@ impl IndexerManager {
                 let task = tokio::spawn(async move {
                     let result = Self::process_job(&pool, &job).await;
                     drop(permit);
-                    (key, result)
+                    (key, source, result)
                 });
 
                 tasks.push(task);
@@ -96,12 +140,20 @@ impl IndexerManager {
 
             for task in tasks {
                 match task.await {
-                    Ok((key, Ok(()))) => {
-                        if let Err(e) = self.storage.remove_index(&key) {
-                            tracing::error!("failed to remove index job: {e}");
+                    Ok((key, source, Ok(()))) => {
+                        let remove_result = match source {
+                            QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
+                            QueueSource::FirehoseBackfill => {
+                                self.storage.remove_firehose_backfill(&key)
+                            }
+                            QueueSource::LabelLive => self.storage.remove_label_live(&key),
+                        };
+                        if let Err(e) = remove_result {
+                            tracing::error!("failed to remove index job from {:?}: {e}", source);
                         }
                     }
-                    Ok((_, Err(e))) => {
+                    Ok((_, _, Err(e))) => {
+                        crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
                         tracing::error!("index job failed: {e}");
                     }
                     Err(e) => {
@@ -165,6 +217,10 @@ impl IndexerManager {
     }
 
     async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
+
         let uri = AtUri::new(job.uri.clone(), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
 
@@ -192,12 +248,14 @@ impl IndexerManager {
                 .await?;
 
                 if !applied {
+                    metrics::INDEXER_STALE_WRITES_SKIPPED_TOTAL.inc();
                     tracing::debug!("skipping stale write for {}", job.uri);
                     return Ok(());
                 }
 
                 match collection.as_str() {
                     "app.bsky.feed.post" => {
+                        metrics::INDEXER_POST_EVENTS_TOTAL.inc();
                         Self::index_post(
                             &client,
                             did.as_str(),
@@ -209,6 +267,7 @@ impl IndexerManager {
                         .await?;
                     }
                     "app.bsky.feed.like" => {
+                        metrics::INDEXER_LIKE_EVENTS_TOTAL.inc();
                         Self::index_like(
                             &client,
                             did.as_str(),
@@ -220,6 +279,7 @@ impl IndexerManager {
                         .await?;
                     }
                     "app.bsky.graph.follow" => {
+                        metrics::INDEXER_FOLLOW_EVENTS_TOTAL.inc();
                         Self::index_follow(
                             &client,
                             did.as_str(),
@@ -231,6 +291,7 @@ impl IndexerManager {
                         .await?;
                     }
                     "app.bsky.feed.repost" => {
+                        metrics::INDEXER_REPOST_EVENTS_TOTAL.inc();
                         Self::index_repost(
                             &client,
                             did.as_str(),
@@ -242,6 +303,7 @@ impl IndexerManager {
                         .await?;
                     }
                     "app.bsky.graph.block" => {
+                        metrics::INDEXER_BLOCK_EVENTS_TOTAL.inc();
                         Self::index_block(
                             &client,
                             did.as_str(),
@@ -253,6 +315,7 @@ impl IndexerManager {
                         .await?;
                     }
                     "app.bsky.actor.profile" => {
+                        metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
                         Self::index_profile(
                             &client,
                             did.as_str(),
