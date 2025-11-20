@@ -139,7 +139,11 @@ impl IndexerManager {
             )
             .await?;
 
-        Ok(result.is_some())
+        let applied = result.is_some();
+        if !applied {
+            tracing::trace!("stale write rejected for {uri} with rev {rev}");
+        }
+        Ok(applied)
     }
 
     async fn delete_generic_record(
@@ -188,6 +192,7 @@ impl IndexerManager {
                 .await?;
 
                 if !applied {
+                    tracing::debug!("skipping stale write for {}", job.uri);
                     return Ok(());
                 }
 
@@ -401,61 +406,62 @@ impl IndexerManager {
                 }
 
                 match collection.as_str() {
-                "app.bsky.feed.post" => {
-                    Self::delete_post(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.feed.like" => {
-                    Self::delete_like(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.follow" => {
-                    Self::delete_follow(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.feed.repost" => {
-                    Self::delete_repost(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.block" => {
-                    Self::delete_block(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.actor.profile" => {
-                    Self::delete_profile(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.feed.generator" => {
-                    Self::delete_feed_generator(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.list" => {
-                    Self::delete_list(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.listitem" => {
-                    Self::delete_list_item(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.listblock" => {
-                    Self::delete_list_block(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.graph.starterpack" => {
-                    Self::delete_starter_pack(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.labeler.service" => {
-                    Self::delete_labeler(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.feed.threadgate" => {
-                    Self::delete_threadgate(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.feed.postgate" => {
-                    Self::delete_postgate(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "chat.bsky.actor.declaration" => {
-                    Self::delete_chat_declaration(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.notification.declaration" => {
-                    Self::delete_notif_declaration(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.actor.status" => {
-                    Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                "app.bsky.verification.proof" => {
-                    Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
-                }
-                _ => {}
+                    "app.bsky.feed.post" => {
+                        Self::delete_post(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.feed.like" => {
+                        Self::delete_like(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.follow" => {
+                        Self::delete_follow(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.feed.repost" => {
+                        Self::delete_repost(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.block" => {
+                        Self::delete_block(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.actor.profile" => {
+                        Self::delete_profile(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.feed.generator" => {
+                        Self::delete_feed_generator(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.list" => {
+                        Self::delete_list(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.listitem" => {
+                        Self::delete_list_item(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.listblock" => {
+                        Self::delete_list_block(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.graph.starterpack" => {
+                        Self::delete_starter_pack(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.labeler.service" => {
+                        Self::delete_labeler(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.feed.threadgate" => {
+                        Self::delete_threadgate(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.feed.postgate" => {
+                        Self::delete_postgate(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "chat.bsky.actor.declaration" => {
+                        Self::delete_chat_declaration(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.notification.declaration" => {
+                        Self::delete_notif_declaration(&client, did.as_str(), rkey.as_str())
+                            .await?;
+                    }
+                    "app.bsky.actor.status" => {
+                        Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "app.bsky.verification.proof" => {
+                        Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    _ => {}
                 }
             }
         }

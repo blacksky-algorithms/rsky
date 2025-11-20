@@ -1,5 +1,6 @@
 mod backfill_queue;
 mod labels;
+mod tests;
 
 use crate::SHUTDOWN;
 use crate::config::{FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};

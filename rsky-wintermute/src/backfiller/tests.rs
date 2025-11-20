@@ -9,8 +9,7 @@ mod backfiller_tests {
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("backfiller_test_").unwrap();
         let db_path = temp_dir.path().join("test_db");
-        crate::storage::DB_PATH.with(|p| *p.borrow_mut() = Some(db_path));
-        let storage = Storage::new().unwrap();
+        let storage = Storage::new(Some(db_path)).unwrap();
         (storage, temp_dir)
     }
 
