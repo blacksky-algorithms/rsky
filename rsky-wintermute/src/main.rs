@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     flag::register_conditional_shutdown(SIGINT, 1, Arc::clone(&terminate_now))?;
     flag::register(SIGINT, Arc::clone(&terminate_now))?;
 
-    let storage = Arc::new(Storage::new()?);
+    let storage = Arc::new(Storage::new(None)?);
     let labeler_hosts: Vec<String> = args
         .labeler_hosts
         .into_iter()

@@ -1,23 +1,10 @@
 use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFER_SIZE};
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
-use std::sync::LazyLock;
-
-thread_local! {
-    pub static DB_PATH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
-    let path = DB_PATH.with(|p| p.borrow().clone().unwrap_or_else(|| "wintermute_db".into()));
-    Config::new(path)
-        .cache_size(CACHE_SIZE)
-        .max_write_buffer_size(WRITE_BUFFER_SIZE)
-        .fsync_ms(FSYNC_MS)
-        .open()
-        .unwrap_or_else(|e| panic!("failed to open database: {e}"))
-});
+use std::sync::Arc;
 
 pub struct Storage {
+    _db: Arc<Keyspace>,
     firehose_events: PartitionHandle,
     backfill_queue: PartitionHandle,
     index_queue: PartitionHandle,
@@ -25,31 +12,42 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new() -> Result<Self, WintermuteError> {
-        let firehose_events = DB.open_partition(
+    pub fn new(db_path: Option<std::path::PathBuf>) -> Result<Self, WintermuteError> {
+        let path = db_path.unwrap_or_else(|| "wintermute_db".into());
+        let db = Config::new(path)
+            .cache_size(CACHE_SIZE)
+            .max_write_buffer_size(WRITE_BUFFER_SIZE)
+            .fsync_ms(FSYNC_MS)
+            .open()
+            .map_err(|e| WintermuteError::Other(format!("failed to open database: {e}")))?;
+
+        let db = Arc::new(db);
+
+        let firehose_events = db.open_partition(
             "firehose_events",
             PartitionCreateOptions::default()
                 .max_memtable_size(MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let backfill_queue = DB.open_partition(
+        let backfill_queue = db.open_partition(
             "backfill_queue",
             PartitionCreateOptions::default()
                 .max_memtable_size(MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let index_queue = DB.open_partition(
+        let index_queue = db.open_partition(
             "index_queue",
             PartitionCreateOptions::default()
                 .max_memtable_size(MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let cursors = DB.open_partition("cursors", PartitionCreateOptions::default())?;
+        let cursors = db.open_partition("cursors", PartitionCreateOptions::default())?;
 
         Ok(Self {
+            _db: db,
             firehose_events,
             backfill_queue,
             index_queue,
@@ -174,8 +172,7 @@ mod tests {
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("wintermute_test_").unwrap();
         let db_path = temp_dir.path().join("test_db");
-        DB_PATH.with(|p| *p.borrow_mut() = Some(db_path));
-        let storage = Storage::new().unwrap();
+        let storage = Storage::new(Some(db_path)).unwrap();
         (storage, temp_dir)
     }
 

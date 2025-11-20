@@ -1,3 +1,10 @@
+//! Indexer integration tests
+//!
+//! These tests verify end-to-end indexing from backfill through postgres writes.
+//! Each test uses an isolated fjall database via TempDir and shares a PostgreSQL database.
+//!
+//! Run with: `DATABASE_URL=... cargo test --lib indexer::tests`
+
 #[cfg(test)]
 mod indexer_tests {
     use crate::backfiller::BackfillerManager;
@@ -12,8 +19,7 @@ mod indexer_tests {
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("indexer_test_").unwrap();
         let db_path = temp_dir.path().join("test_db");
-        crate::storage::DB_PATH.with(|p| *p.borrow_mut() = Some(db_path));
-        let storage = Storage::new().unwrap();
+        let storage = Storage::new(Some(db_path)).unwrap();
         (storage, temp_dir)
     }
 
@@ -62,9 +68,24 @@ mod indexer_tests {
             drop(client.execute(&query, &[&did]).await);
         }
 
-        drop(client.execute("DELETE FROM record WHERE did = $1", &[&did]).await);
-        drop(client.execute("DELETE FROM profile_agg WHERE did = $1", &[&did]).await);
-        drop(client.execute("DELETE FROM post_agg WHERE uri IN (SELECT uri FROM post WHERE creator = $1)", &[&did]).await);
+        drop(
+            client
+                .execute("DELETE FROM record WHERE did = $1", &[&did])
+                .await,
+        );
+        drop(
+            client
+                .execute("DELETE FROM profile_agg WHERE did = $1", &[&did])
+                .await,
+        );
+        drop(
+            client
+                .execute(
+                    "DELETE FROM post_agg WHERE uri IN (SELECT uri FROM post WHERE creator = $1)",
+                    &[&did],
+                )
+                .await,
+        );
     }
 
     #[test]
@@ -170,7 +191,11 @@ mod indexer_tests {
         let success_rate = (f64::from(processed) / queue_len as f64) * 100.0;
         tracing::info!("indexing success rate: {success_rate:.2}%");
 
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let min_expected = (queue_len as f64 * 0.99) as usize;
 
         assert!(
@@ -188,7 +213,10 @@ mod indexer_tests {
         tracing::info!("records in generic table: {record_count}");
 
         let notification_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM notification WHERE author = $1", &[&test_did])
+            .query_one(
+                "SELECT COUNT(*) FROM notification WHERE author = $1",
+                &[&test_did],
+            )
             .await
             .unwrap()
             .get(0);
@@ -239,7 +267,10 @@ mod indexer_tests {
         tracing::info!("reposts indexed: {repost_count}");
 
         let block_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM actor_block WHERE creator = $1", &[&test_did])
+            .query_one(
+                "SELECT COUNT(*) FROM actor_block WHERE creator = $1",
+                &[&test_did],
+            )
             .await
             .unwrap()
             .get(0);
@@ -253,14 +284,20 @@ mod indexer_tests {
         tracing::info!("lists indexed: {list_count}");
 
         let list_item_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM list_item WHERE creator = $1", &[&test_did])
+            .query_one(
+                "SELECT COUNT(*) FROM list_item WHERE creator = $1",
+                &[&test_did],
+            )
             .await
             .unwrap()
             .get(0);
         tracing::info!("list items indexed: {list_item_count}");
 
         let feed_gen_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM feed_generator WHERE creator = $1", &[&test_did])
+            .query_one(
+                "SELECT COUNT(*) FROM feed_generator WHERE creator = $1",
+                &[&test_did],
+            )
             .await
             .unwrap()
             .get(0);
@@ -294,14 +331,22 @@ mod indexer_tests {
             .map(|row| (row.get(0), row.get(1), row.get(2)));
 
         if let Some((followers, follows, posts)) = profile_agg {
-            tracing::info!("profile_agg for {test_did}: followers={followers}, follows={follows}, posts={posts}");
-            assert_eq!(posts, post_count, "profile_agg postsCount should match post count");
+            tracing::info!(
+                "profile_agg for {test_did}: followers={followers}, follows={follows}, posts={posts}"
+            );
+            assert_eq!(
+                posts, post_count,
+                "profile_agg postsCount should match post count"
+            );
         } else {
             tracing::warn!("profile_agg not found for {test_did}");
         }
 
         let post_agg_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM post_agg WHERE uri LIKE $1", &[&format!("at://{test_did}/%")])
+            .query_one(
+                "SELECT COUNT(*) FROM post_agg WHERE uri LIKE $1",
+                &[&format!("at://{test_did}/%")],
+            )
             .await
             .unwrap()
             .get(0);
@@ -314,7 +359,8 @@ mod indexer_tests {
     async fn test_notification_creation() {
         let (storage, _dir) = setup_test_storage();
         let pool = setup_test_pool();
-        let test_did = "did:plc:w4xbfzo7kqfes5zb7r6qv3rw";
+        // Use a different DID to avoid interfering with test_index_job_processing
+        let test_did = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
 
         cleanup_test_data(&pool, test_did).await;
 
@@ -413,6 +459,11 @@ mod indexer_tests {
         drop(
             client
                 .execute("DELETE FROM post WHERE creator = 'did:plc:test'", &[])
+                .await,
+        );
+        drop(
+            client
+                .execute("DELETE FROM record WHERE did = 'did:plc:test'", &[])
                 .await,
         );
     }
