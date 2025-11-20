@@ -1,6 +1,5 @@
-use crate::SHUTDOWN;
-use crate::storage::Storage;
-use crate::types::WintermuteError;
+use crate::types::{Label, LabelEvent, WintermuteError};
+use crate::{SHUTDOWN, metrics, storage::Storage};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use ipld_core::ipld::Ipld;
@@ -56,6 +55,11 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
     let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
     let (mut write, mut read) = ws_stream.split();
 
+    // Track active connection
+    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+        .with_label_values(&["labels"])
+        .inc();
+
     let ping_task = tokio::spawn(async move {
         let mut ping_interval = interval(Duration::from_secs(30));
         loop {
@@ -70,17 +74,61 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
         let msg = msg_result?;
 
         if let Message::Binary(data) = msg {
-            if let Some(seq) = parse_label_message(&data)? {
-                storage.set_cursor(&cursor_key, seq)?;
+            match parse_label_message(&data) {
+                Ok(Some(label_event)) => {
+                    // Update cursor
+                    if let Err(e) = storage.set_cursor(&cursor_key, label_event.seq) {
+                        tracing::error!("failed to set label cursor: {e}");
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["label_cursor"])
+                            .inc();
+                        continue;
+                    }
+
+                    // Enqueue label event to label_live queue
+                    if let Err(e) = storage.enqueue_label_live(&label_event) {
+                        tracing::error!("failed to enqueue label event: {e}");
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["label_enqueue"])
+                            .inc();
+                        continue;
+                    }
+
+                    // Update metrics
+                    metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
+                        .with_label_values(&["label_live"])
+                        .inc();
+
+                    tracing::debug!(
+                        "enqueued label event seq={} with {} labels",
+                        label_event.seq,
+                        label_event.labels.len()
+                    );
+                }
+                Ok(None) => {
+                    // Not a label message, skip
+                }
+                Err(e) => {
+                    tracing::error!("failed to parse label message: {e}");
+                    metrics::INGESTER_ERRORS_TOTAL
+                        .with_label_values(&["label_parse"])
+                        .inc();
+                }
             }
         }
     }
 
     ping_task.abort();
+
+    // Track connection closed
+    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+        .with_label_values(&["labels"])
+        .dec();
+
     Ok(())
 }
 
-fn parse_label_message(data: &[u8]) -> Result<Option<i64>, WintermuteError> {
+pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, WintermuteError> {
     let ipld: Ipld = serde_ipld_dagcbor::from_reader(data)
         .map_err(|e| WintermuteError::Serialization(format!("failed to parse ipld: {e}")))?;
 
@@ -113,5 +161,69 @@ fn parse_label_message(data: &[u8]) -> Result<Option<i64>, WintermuteError> {
         })
         .ok_or_else(|| WintermuteError::Serialization("missing seq".into()))?;
 
-    Ok(Some(seq))
+    // Parse labels array
+    let labels_ipld = body
+        .get("labels")
+        .ok()
+        .flatten()
+        .ok_or_else(|| WintermuteError::Serialization("missing labels field".into()))?;
+
+    let Ipld::List(labels_list) = labels_ipld else {
+        return Err(WintermuteError::Serialization(
+            "labels is not a list".into(),
+        ));
+    };
+
+    let mut labels = Vec::new();
+    for label_ipld in labels_list {
+        if let Some(label) = parse_label(label_ipld)? {
+            labels.push(label);
+        }
+    }
+
+    Ok(Some(LabelEvent { seq, labels }))
+}
+
+fn parse_label(ipld: &Ipld) -> Result<Option<Label>, WintermuteError> {
+    let src = ipld
+        .get("src")
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            Ipld::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| WintermuteError::Serialization("missing src in label".into()))?;
+
+    let uri = ipld
+        .get("uri")
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            Ipld::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| WintermuteError::Serialization("missing uri in label".into()))?;
+
+    let val = ipld
+        .get("val")
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            Ipld::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| WintermuteError::Serialization("missing val in label".into()))?;
+
+    let cts = ipld
+        .get("cts")
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            Ipld::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| WintermuteError::Serialization("missing cts in label".into()))?;
+
+    Ok(Some(Label { src, uri, val, cts }))
 }

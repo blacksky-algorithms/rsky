@@ -113,10 +113,51 @@ impl IndexerManager {
                 }
             }
 
-            // Priority 3: label_live (future) if batch still not full
-            // Labels will be processed separately, so we don't dequeue them here yet
+            // Priority 3: label_live - Process labels separately since they're different from IndexJobs
+            let mut label_jobs = Vec::new();
+            for _ in 0..INDEXER_BATCH_SIZE {
+                match self.storage.dequeue_label_live() {
+                    Ok(Some((key, label_event))) => {
+                        label_jobs.push((key, label_event));
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue label_live: {e}");
+                        break;
+                    }
+                }
+            }
 
-            if jobs.is_empty() {
+            let label_jobs_empty = label_jobs.is_empty();
+
+            // Process label jobs first (highest priority for user safety)
+            if !label_jobs_empty {
+                for (key, label_event) in label_jobs {
+                    if let Ok(permit) = self.semaphore.clone().acquire_owned().await {
+                        let pool = self.pool.clone();
+                        let storage = self.storage.clone();
+
+                        tokio::spawn(async move {
+                            let result = Self::process_label_event(&pool, &label_event).await;
+                            drop(permit);
+
+                            match result {
+                                Ok(()) => {
+                                    if let Err(e) = storage.remove_label_live(&key) {
+                                        tracing::error!("failed to remove label from queue: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("failed to process label event: {e}");
+                                    crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            if jobs.is_empty() && label_jobs_empty {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -525,6 +566,51 @@ impl IndexerManager {
                         Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn process_label_event(
+        pool: &Pool,
+        label_event: &crate::types::LabelEvent,
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
+
+        let client = pool.get().await?;
+
+        // Process each label in the event
+        for label in &label_event.labels {
+            // Insert or update the label
+            // Note: Using empty string for cid since label messages don't include it
+            // The primary key is (src, uri, cid, val), so we use "" as cid
+            let result = client
+                .execute(
+                    "INSERT INTO label (src, uri, cid, val, cts, neg)
+                     VALUES ($1, $2, $3, $4, $5, false)
+                     ON CONFLICT (src, uri, cid, val) DO UPDATE SET
+                       cts = EXCLUDED.cts",
+                    &[&label.src, &label.uri, &"", &label.val, &label.cts],
+                )
+                .await;
+
+            match result {
+                Ok(_) => {
+                    tracing::debug!(
+                        "indexed label: src={} uri={} val={}",
+                        label.src,
+                        label.uri,
+                        label.val
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("failed to insert label: {e}");
+                    metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                    // Continue processing other labels even if one fails
                 }
             }
         }
