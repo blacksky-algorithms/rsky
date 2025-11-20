@@ -467,4 +467,388 @@ mod indexer_tests {
                 .await,
         );
     }
+
+    // =============================================================================
+    // LABELS INDEXING TESTS
+    // =============================================================================
+
+    async fn cleanup_test_labels(pool: &Pool, src: &str) {
+        let client = pool.get().await.unwrap();
+        drop(
+            client
+                .execute("DELETE FROM label WHERE src = $1", &[&src])
+                .await,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_single_label() {
+        let pool = setup_test_pool();
+        let test_src = "did:plc:test_labeler_single";
+        let test_uri = "at://did:plc:user123/app.bsky.feed.post/abc123";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        let label_event = crate::types::LabelEvent {
+            seq: 1000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event).await;
+        assert!(
+            result.is_ok(),
+            "label indexing should succeed: {result:?}"
+        );
+
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = $3",
+                &[&test_src, &test_uri, &"spam"],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "expected label to be inserted");
+
+        // Verify the label data
+        let row = client
+            .query_one(
+                "SELECT src, uri, val, cts FROM label WHERE src = $1 AND cid = ''",
+                &[&test_src],
+            )
+            .await
+            .unwrap();
+
+        let src: String = row.get(0);
+        let uri: String = row.get(1);
+        let val: String = row.get(2);
+        let cts: String = row.get(3);
+
+        assert_eq!(src, test_src);
+        assert_eq!(uri, test_uri);
+        assert_eq!(val, "spam");
+        assert_eq!(cts, "2025-01-20T10:00:00Z");
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_multiple_labels() {
+        let pool = setup_test_pool();
+        let test_src = "did:plc:test_labeler_multi";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        let label_event = crate::types::LabelEvent {
+            seq: 2000,
+            labels: vec![
+                crate::types::Label {
+                    src: test_src.to_owned(),
+                    uri: "at://did:plc:user1/app.bsky.feed.post/post1".to_owned(),
+                    val: "spam".to_owned(),
+                    cts: "2025-01-20T10:00:00Z".to_owned(),
+                },
+                crate::types::Label {
+                    src: test_src.to_owned(),
+                    uri: "at://did:plc:user2/app.bsky.feed.post/post2".to_owned(),
+                    val: "nsfw".to_owned(),
+                    cts: "2025-01-20T10:01:00Z".to_owned(),
+                },
+                crate::types::Label {
+                    src: test_src.to_owned(),
+                    uri: "at://did:plc:user3/app.bsky.feed.post/post3".to_owned(),
+                    val: "porn".to_owned(),
+                    cts: "2025-01-20T10:02:00Z".to_owned(),
+                },
+            ],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event).await;
+        assert!(result.is_ok());
+
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 3, "expected all 3 labels to be inserted");
+
+        // Verify each label
+        let spam_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = '' AND val = 'spam'",
+                &[&test_src],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(spam_count, 1);
+
+        let nsfw_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = '' AND val = 'nsfw'",
+                &[&test_src],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(nsfw_count, 1);
+
+        let porn_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = '' AND val = 'porn'",
+                &[&test_src],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(porn_count, 1);
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_upsert_behavior() {
+        let pool = setup_test_pool();
+        let test_src = "did:plc:test_labeler_upsert";
+        let test_uri = "at://did:plc:user/app.bsky.feed.post/test";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // First insert
+        let label_event1 = crate::types::LabelEvent {
+            seq: 3000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event1).await;
+        assert!(result.is_ok());
+
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1);
+
+        // Second insert (same label, updated timestamp) - should upsert
+        let label_event2 = crate::types::LabelEvent {
+            seq: 3001,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T11:00:00Z".to_owned(), // Different timestamp
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event2).await;
+        assert!(result.is_ok());
+
+        // Should still be 1 row (upserted, not inserted)
+        let count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "expected label to be upserted, not duplicated");
+
+        // Verify the timestamp was updated
+        let cts: String = client
+            .query_one(
+                "SELECT cts FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = $3",
+                &[&test_src, &test_uri, &"spam"],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(cts, "2025-01-20T11:00:00Z", "timestamp should be updated");
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_multiple_labelers_same_uri() {
+        let pool = setup_test_pool();
+        let test_src1 = "did:plc:labeler1";
+        let test_src2 = "did:plc:labeler2";
+        let test_uri = "at://did:plc:user/app.bsky.feed.post/shared";
+
+        cleanup_test_labels(&pool, test_src1).await;
+        cleanup_test_labels(&pool, test_src2).await;
+
+        // Label from first labeler
+        let label_event1 = crate::types::LabelEvent {
+            seq: 4000,
+            labels: vec![crate::types::Label {
+                src: test_src1.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event1).await;
+        assert!(result.is_ok());
+
+        // Label from second labeler (same URI, same val)
+        let label_event2 = crate::types::LabelEvent {
+            seq: 4001,
+            labels: vec![crate::types::Label {
+                src: test_src2.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:01:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event2).await;
+        assert!(result.is_ok());
+
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE uri = $1 AND cid = ''", &[&test_uri])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            count, 2,
+            "expected 2 labels (different labelers can label same URI)"
+        );
+
+        cleanup_test_labels(&pool, test_src1).await;
+        cleanup_test_labels(&pool, test_src2).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_different_vals_same_labeler_uri() {
+        let pool = setup_test_pool();
+        let test_src = "did:plc:labeler_multival";
+        let test_uri = "at://did:plc:user/app.bsky.feed.post/multival";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // First label: spam
+        let label_event1 = crate::types::LabelEvent {
+            seq: 5000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event1).await;
+        assert!(result.is_ok());
+
+        // Second label: nsfw (different val)
+        let label_event2 = crate::types::LabelEvent {
+            seq: 5001,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                val: "nsfw".to_owned(),
+                cts: "2025-01-20T10:01:00Z".to_owned(),
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event2).await;
+        assert!(result.is_ok());
+
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND uri = $2 AND cid = ''",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            count, 2,
+            "expected 2 labels (same labeler can apply different vals to same URI)"
+        );
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_storage_and_indexing_roundtrip() {
+        let (storage, _dir) = setup_test_storage();
+        let pool = setup_test_pool();
+        let test_src = "did:plc:labeler_roundtrip";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // Create and enqueue label event
+        let label_event = crate::types::LabelEvent {
+            seq: 6000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: "at://did:plc:user/app.bsky.feed.post/roundtrip".to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+            }],
+        };
+
+        // Enqueue
+        storage.enqueue_label_live(&label_event).unwrap();
+        assert!(storage.label_live_len().unwrap() > 0);
+
+        // Dequeue
+        let dequeued = storage.dequeue_label_live().unwrap();
+        assert!(dequeued.is_some());
+
+        let (key, retrieved_event) = dequeued.unwrap();
+        assert_eq!(retrieved_event.seq, label_event.seq);
+
+        // Index the label
+        let result = IndexerManager::process_label_event(&pool, &retrieved_event).await;
+        assert!(result.is_ok());
+
+        // Remove from queue
+        storage.remove_label_live(&key).unwrap();
+
+        // Verify in database
+        let client = pool.get().await.unwrap();
+        let count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "label should be in database");
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_indexing_empty_labels_array() {
+        let pool = setup_test_pool();
+
+        // Label event with empty labels array - should succeed without error
+        let label_event = crate::types::LabelEvent {
+            seq: 7000,
+            labels: vec![],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event).await;
+        assert!(
+            result.is_ok(),
+            "empty labels array should succeed without error"
+        );
+    }
 }

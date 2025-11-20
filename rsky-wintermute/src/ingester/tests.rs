@@ -404,4 +404,409 @@ mod ingester_tests {
         assert_eq!(storage.get_cursor(&cursor1_key).unwrap(), Some(5100));
         assert_eq!(storage.get_cursor(&cursor2_key).unwrap(), Some(3000));
     }
+
+    // =============================================================================
+    // LABELS TESTS
+    // =============================================================================
+
+    #[test]
+    fn test_parse_label_message_valid() {
+        // Create a valid label message
+        let label_map = {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "src".to_owned(),
+                Ipld::String("did:plc:labeler123".to_owned()),
+            );
+            m.insert(
+                "uri".to_owned(),
+                Ipld::String("at://did:plc:user456/app.bsky.feed.post/abc123".to_owned()),
+            );
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:30:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes).unwrap();
+
+        assert!(result.is_some());
+        let label_event = result.unwrap();
+        assert_eq!(label_event.seq, 12345);
+        assert_eq!(label_event.labels.len(), 1);
+
+        let label = &label_event.labels[0];
+        assert_eq!(label.src, "did:plc:labeler123");
+        assert_eq!(label.uri, "at://did:plc:user456/app.bsky.feed.post/abc123");
+        assert_eq!(label.val, "spam");
+        assert_eq!(label.cts, "2025-01-20T10:30:00Z");
+    }
+
+    #[test]
+    fn test_parse_label_message_multiple_labels() {
+        // Create multiple labels in one message
+        let label1 = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            m.insert(
+                "uri".to_owned(),
+                Ipld::String("at://did:plc:user/app.bsky.feed.post/1".to_owned()),
+            );
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:00:00Z".to_owned()),
+            );
+            m
+        };
+
+        let label2 = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            m.insert(
+                "uri".to_owned(),
+                Ipld::String("at://did:plc:user/app.bsky.feed.post/2".to_owned()),
+            );
+            m.insert("val".to_owned(), Ipld::String("nsfw".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:01:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label1), Ipld::Map(label2)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(67890));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes).unwrap();
+
+        assert!(result.is_some());
+        let label_event = result.unwrap();
+        assert_eq!(label_event.seq, 67890);
+        assert_eq!(label_event.labels.len(), 2);
+
+        assert_eq!(label_event.labels[0].val, "spam");
+        assert_eq!(label_event.labels[1].val, "nsfw");
+    }
+
+    #[test]
+    fn test_parse_label_message_non_labels() {
+        // Create a message with wrong type
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#info".to_owned()));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_seq() {
+        let label_map = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            m.insert("uri".to_owned(), Ipld::String("at://test".to_owned()));
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:00:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        // No seq field
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing seq"));
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_labels_field() {
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        // No labels field
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing labels"));
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_src() {
+        let label_map = {
+            let mut m = BTreeMap::new();
+            // No src field
+            m.insert("uri".to_owned(), Ipld::String("at://test".to_owned()));
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:00:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing src"));
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_uri() {
+        let label_map = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            // No uri field
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:00:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing uri"));
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_val() {
+        let label_map = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            m.insert("uri".to_owned(), Ipld::String("at://test".to_owned()));
+            // No val field
+            m.insert(
+                "cts".to_owned(),
+                Ipld::String("2025-01-20T10:00:00Z".to_owned()),
+            );
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing val"));
+    }
+
+    #[test]
+    fn test_parse_label_message_missing_cts() {
+        let label_map = {
+            let mut m = BTreeMap::new();
+            m.insert("src".to_owned(), Ipld::String("did:plc:labeler".to_owned()));
+            m.insert("uri".to_owned(), Ipld::String("at://test".to_owned()));
+            m.insert("val".to_owned(), Ipld::String("spam".to_owned()));
+            // No cts field
+            m
+        };
+
+        let labels_list = Ipld::List(vec![Ipld::Map(label_map)]);
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing cts"));
+    }
+
+    #[test]
+    fn test_label_storage_roundtrip() {
+        let (storage, _dir) = setup_test_storage();
+
+        let label_event = crate::types::LabelEvent {
+            seq: 54321,
+            labels: vec![
+                crate::types::Label {
+                    src: "did:plc:labeler".to_owned(),
+                    uri: "at://did:plc:user/app.bsky.feed.post/abc".to_owned(),
+                    val: "spam".to_owned(),
+                    cts: "2025-01-20T10:00:00Z".to_owned(),
+                },
+                crate::types::Label {
+                    src: "did:plc:labeler".to_owned(),
+                    uri: "at://did:plc:user/app.bsky.feed.post/def".to_owned(),
+                    val: "nsfw".to_owned(),
+                    cts: "2025-01-20T10:01:00Z".to_owned(),
+                },
+            ],
+        };
+
+        // Enqueue the label event
+        storage.enqueue_label_live(&label_event).unwrap();
+
+        // Check queue length increased
+        assert!(storage.label_live_len().unwrap() > 0);
+
+        // Dequeue the label event
+        let dequeued = storage.dequeue_label_live().unwrap();
+        assert!(dequeued.is_some());
+
+        let (key, retrieved_event) = dequeued.unwrap();
+        assert_eq!(retrieved_event.seq, label_event.seq);
+        assert_eq!(retrieved_event.labels.len(), label_event.labels.len());
+        assert_eq!(retrieved_event.labels[0].src, label_event.labels[0].src);
+        assert_eq!(retrieved_event.labels[0].val, label_event.labels[0].val);
+
+        // Remove from queue
+        storage.remove_label_live(&key).unwrap();
+
+        // Queue should be empty now
+        let empty = storage.dequeue_label_live().unwrap();
+        assert!(empty.is_none());
+    }
+
+    #[test]
+    fn test_label_cursor_management() {
+        let (storage, _dir) = setup_test_storage();
+
+        let cursor_key = "labels:https://mod.bsky.app";
+
+        // Initially no cursor
+        assert!(storage.get_cursor(cursor_key).unwrap().is_none());
+
+        // Set cursor
+        storage.set_cursor(cursor_key, 10000).unwrap();
+        assert_eq!(storage.get_cursor(cursor_key).unwrap(), Some(10000));
+
+        // Update cursor
+        storage.set_cursor(cursor_key, 20000).unwrap();
+        assert_eq!(storage.get_cursor(cursor_key).unwrap(), Some(20000));
+    }
+
+    #[test]
+    fn test_multiple_label_cursors() {
+        let (storage, _dir) = setup_test_storage();
+
+        storage
+            .set_cursor("labels:https://mod.bsky.app", 1000)
+            .unwrap();
+        storage
+            .set_cursor("labels:https://custom-labeler.example", 2000)
+            .unwrap();
+
+        assert_eq!(
+            storage.get_cursor("labels:https://mod.bsky.app").unwrap(),
+            Some(1000)
+        );
+        assert_eq!(
+            storage
+                .get_cursor("labels:https://custom-labeler.example")
+                .unwrap(),
+            Some(2000)
+        );
+    }
+
+    #[test]
+    fn test_parse_label_message_empty_labels_array() {
+        let labels_list = Ipld::List(vec![]); // Empty array
+
+        let mut op_map = BTreeMap::new();
+        op_map.insert("seq".to_owned(), Ipld::Integer(12345));
+        op_map.insert("labels".to_owned(), labels_list);
+
+        let mut msg_map = BTreeMap::new();
+        msg_map.insert("t".to_owned(), Ipld::String("#labels".to_owned()));
+        msg_map.insert("op".to_owned(), Ipld::Map(op_map));
+
+        let msg_ipld = Ipld::Map(msg_map);
+        let msg_bytes = serde_ipld_dagcbor::to_vec(&msg_ipld).unwrap();
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes).unwrap();
+        assert!(result.is_some());
+        let label_event = result.unwrap();
+        assert_eq!(label_event.labels.len(), 0);
+    }
 }
