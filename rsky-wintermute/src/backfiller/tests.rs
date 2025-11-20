@@ -69,7 +69,7 @@ mod backfiller_tests {
 
         match result {
             Ok(()) => {
-                let queue_len = storage.index_queue_len().unwrap();
+                let queue_len = storage.firehose_backfill_len().unwrap();
                 assert!(
                     queue_len > 7000,
                     "expected more than 20000 records to be enqueued for indexing, found {queue_len}"

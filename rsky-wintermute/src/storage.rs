@@ -6,8 +6,10 @@ use std::sync::Arc;
 pub struct Storage {
     _db: Arc<Keyspace>,
     firehose_events: PartitionHandle,
-    backfill_queue: PartitionHandle,
-    index_queue: PartitionHandle,
+    repo_backfill: PartitionHandle,
+    firehose_live: PartitionHandle,
+    firehose_backfill: PartitionHandle,
+    label_live: PartitionHandle,
     cursors: PartitionHandle,
 }
 
@@ -30,15 +32,29 @@ impl Storage {
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let backfill_queue = db.open_partition(
-            "backfill_queue",
+        let repo_backfill = db.open_partition(
+            "repo_backfill",
             PartitionCreateOptions::default()
                 .max_memtable_size(MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let index_queue = db.open_partition(
-            "index_queue",
+        let firehose_live = db.open_partition(
+            "firehose_live",
+            PartitionCreateOptions::default()
+                .max_memtable_size(MEMTABLE_SIZE)
+                .block_size(BLOCK_SIZE),
+        )?;
+
+        let firehose_backfill = db.open_partition(
+            "firehose_backfill",
+            PartitionCreateOptions::default()
+                .max_memtable_size(MEMTABLE_SIZE)
+                .block_size(BLOCK_SIZE),
+        )?;
+
+        let label_live = db.open_partition(
+            "label_live",
             PartitionCreateOptions::default()
                 .max_memtable_size(MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
@@ -49,8 +65,10 @@ impl Storage {
         Ok(Self {
             _db: db,
             firehose_events,
-            backfill_queue,
-            index_queue,
+            repo_backfill,
+            firehose_live,
+            firehose_backfill,
+            label_live,
             cursors,
         })
     }
@@ -88,28 +106,31 @@ impl Storage {
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
-        self.backfill_queue
+        self.repo_backfill
             .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.inc();
         Ok(())
     }
 
     pub fn dequeue_backfill(&self) -> Result<Option<(Vec<u8>, BackfillJob)>, WintermuteError> {
-        let mut iter = self.backfill_queue.iter();
+        let mut iter = self.repo_backfill.iter();
         let Some(entry) = iter.next() else {
             return Ok(None);
         };
         let (key, value) = entry?;
         let job = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.dec();
         Ok(Some((key.to_vec(), job)))
     }
 
     pub fn remove_backfill(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.backfill_queue.remove(key)?;
+        self.repo_backfill.remove(key)?;
         Ok(())
     }
 
-    pub fn enqueue_index(&self, job: &IndexJob) -> Result<(), WintermuteError> {
+    // Firehose live queue (from ingester)
+    pub fn enqueue_firehose_live(&self, job: &IndexJob) -> Result<(), WintermuteError> {
         let key = format!(
             "{}:{}",
             job.uri,
@@ -118,23 +139,95 @@ impl Storage {
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
-        self.index_queue.insert(key.as_bytes(), value.as_slice())?;
+        self.firehose_live
+            .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.inc();
         Ok(())
     }
 
-    pub fn dequeue_index(&self) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {
-        let mut iter = self.index_queue.iter();
+    pub fn dequeue_firehose_live(&self) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let mut iter = self.firehose_live.iter();
         let Some(entry) = iter.next() else {
             return Ok(None);
         };
         let (key, value) = entry?;
         let job = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.dec();
         Ok(Some((key.to_vec(), job)))
     }
 
-    pub fn remove_index(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.index_queue.remove(key)?;
+    pub fn remove_firehose_live(&self, key: &[u8]) -> Result<(), WintermuteError> {
+        self.firehose_live.remove(key)?;
+        Ok(())
+    }
+
+    // Firehose backfill queue (from backfiller)
+    pub fn enqueue_firehose_backfill(&self, job: &IndexJob) -> Result<(), WintermuteError> {
+        let key = format!(
+            "{}:{}",
+            job.uri,
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let mut value = Vec::new();
+        ciborium::into_writer(job, &mut value)
+            .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        self.firehose_backfill
+            .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
+    pub fn dequeue_firehose_backfill(
+        &self,
+    ) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let mut iter = self.firehose_backfill.iter();
+        let Some(entry) = iter.next() else {
+            return Ok(None);
+        };
+        let (key, value) = entry?;
+        let job = ciborium::from_reader(value.as_ref())
+            .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+        Ok(Some((key.to_vec(), job)))
+    }
+
+    pub fn remove_firehose_backfill(&self, key: &[u8]) -> Result<(), WintermuteError> {
+        self.firehose_backfill.remove(key)?;
+        Ok(())
+    }
+
+    // Label live queue (future implementation)
+    pub fn enqueue_label_live(
+        &self,
+        event: &crate::types::LabelEvent,
+    ) -> Result<(), WintermuteError> {
+        let key = format!("{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let mut value = Vec::new();
+        ciborium::into_writer(event, &mut value).map_err(|e| {
+            WintermuteError::Serialization(format!("failed to serialize event: {e}"))
+        })?;
+        self.label_live.insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_LABEL_LIVE_LENGTH.inc();
+        Ok(())
+    }
+
+    pub fn dequeue_label_live(
+        &self,
+    ) -> Result<Option<(Vec<u8>, crate::types::LabelEvent)>, WintermuteError> {
+        let mut iter = self.label_live.iter();
+        let Some(entry) = iter.next() else {
+            return Ok(None);
+        };
+        let (key, value) = entry?;
+        let event = ciborium::from_reader(value.as_ref())
+            .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        crate::metrics::INGESTER_LABEL_LIVE_LENGTH.dec();
+        Ok(Some((key.to_vec(), event)))
+    }
+
+    pub fn remove_label_live(&self, key: &[u8]) -> Result<(), WintermuteError> {
+        self.label_live.remove(key)?;
         Ok(())
     }
 
@@ -154,19 +247,29 @@ impl Storage {
         Ok(())
     }
 
-    pub fn backfill_queue_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.backfill_queue.len()?)
+    pub fn repo_backfill_len(&self) -> Result<usize, WintermuteError> {
+        Ok(self.repo_backfill.len()?)
     }
 
-    pub fn index_queue_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.index_queue.len()?)
+    pub fn firehose_live_len(&self) -> Result<usize, WintermuteError> {
+        Ok(self.firehose_live.len()?)
+    }
+
+    pub fn firehose_backfill_len(&self) -> Result<usize, WintermuteError> {
+        Ok(self.firehose_backfill.len()?)
+    }
+
+    pub fn label_live_len(&self) -> Result<usize, WintermuteError> {
+        Ok(self.label_live.len()?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BackfillJob, CommitData, FirehoseEvent, IndexJob, WriteAction};
+    use crate::types::{
+        BackfillJob, CommitData, FirehoseEvent, IndexJob, Label, LabelEvent, WriteAction,
+    };
     use tempfile::TempDir;
 
     fn setup_test_storage() -> (Storage, TempDir) {
@@ -221,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_queue() {
+    fn test_firehose_live_queue() {
         let (storage, _dir) = setup_test_storage();
 
         let job = IndexJob {
@@ -233,14 +336,61 @@ mod tests {
             rev: "rev123".to_owned(),
         };
 
-        storage.enqueue_index(&job).unwrap();
-        let (key, retrieved) = storage.dequeue_index().unwrap().unwrap();
+        storage.enqueue_firehose_live(&job).unwrap();
+        let (key, retrieved) = storage.dequeue_firehose_live().unwrap().unwrap();
 
         assert_eq!(retrieved.uri, job.uri);
         assert_eq!(retrieved.cid, job.cid);
 
-        storage.remove_index(&key).unwrap();
-        assert!(storage.dequeue_index().unwrap().is_none());
+        storage.remove_firehose_live(&key).unwrap();
+        assert!(storage.dequeue_firehose_live().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_firehose_backfill_queue() {
+        let (storage, _dir) = setup_test_storage();
+
+        let job = IndexJob {
+            uri: "at://did:plc:test/app.bsky.feed.post/456".to_owned(),
+            cid: "bafytest456".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"test": "backfill"})),
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev456".to_owned(),
+        };
+
+        storage.enqueue_firehose_backfill(&job).unwrap();
+        let (key, retrieved) = storage.dequeue_firehose_backfill().unwrap().unwrap();
+
+        assert_eq!(retrieved.uri, job.uri);
+        assert_eq!(retrieved.cid, job.cid);
+
+        storage.remove_firehose_backfill(&key).unwrap();
+        assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_label_live_queue() {
+        let (storage, _dir) = setup_test_storage();
+
+        let event = LabelEvent {
+            seq: 789,
+            labels: vec![Label {
+                src: "did:plc:labeler".to_owned(),
+                uri: "at://did:plc:test/app.bsky.feed.post/123".to_owned(),
+                val: "spam".to_owned(),
+                cts: "2025-01-01T00:00:00Z".to_owned(),
+            }],
+        };
+
+        storage.enqueue_label_live(&event).unwrap();
+        let (key, retrieved) = storage.dequeue_label_live().unwrap().unwrap();
+
+        assert_eq!(retrieved.seq, event.seq);
+        assert_eq!(retrieved.labels.len(), 1);
+
+        storage.remove_label_live(&key).unwrap();
+        assert!(storage.dequeue_label_live().unwrap().is_none());
     }
 
     #[test]

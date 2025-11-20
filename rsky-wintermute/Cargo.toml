@@ -35,6 +35,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
 tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
+prometheus = { version = "0.13", features = ["process"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }

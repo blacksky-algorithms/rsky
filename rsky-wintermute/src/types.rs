@@ -66,3 +66,17 @@ pub enum WriteAction {
     Update,
     Delete,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelEvent {
+    pub seq: i64,
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Label {
+    pub src: String,
+    pub uri: String,
+    pub val: String,
+    pub cts: String,
+}
