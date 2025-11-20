@@ -5,6 +5,7 @@ use crate::config::{INDEXER_BATCH_SIZE, WORKERS_INDEXER};
 use crate::storage::Storage;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -111,20 +112,61 @@ impl IndexerManager {
         }
     }
 
-    async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
-        let uri_parts: Vec<&str> = job
-            .uri
-            .strip_prefix("at://")
-            .unwrap_or(&job.uri)
-            .split('/')
-            .collect();
-        if uri_parts.len() != 3 {
-            return Err(WintermuteError::Other(format!("invalid uri: {}", job.uri)));
-        }
+    async fn insert_generic_record(
+        client: &deadpool_postgres::Client,
+        uri: &str,
+        cid: &str,
+        did: &str,
+        json: &serde_json::Value,
+        rev: &str,
+        indexed_at: &str,
+    ) -> Result<bool, WintermuteError> {
+        let json_str = serde_json::to_string(json)
+            .map_err(|e| WintermuteError::Serialization(format!("json stringify failed: {e}")))?;
 
-        let did = uri_parts[0];
-        let collection = uri_parts[1];
-        let rkey = uri_parts[2];
+        let result = client
+            .query_opt(
+                "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO UPDATE SET
+                   rev = EXCLUDED.rev,
+                   cid = EXCLUDED.cid,
+                   json = EXCLUDED.json,
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"
+                 WHERE record.rev <= EXCLUDED.rev
+                 RETURNING uri",
+                &[&uri, &cid, &did, &json_str, &rev, &indexed_at],
+            )
+            .await?;
+
+        Ok(result.is_some())
+    }
+
+    async fn delete_generic_record(
+        client: &deadpool_postgres::Client,
+        uri: &str,
+        rev: &str,
+    ) -> Result<bool, WintermuteError> {
+        let result = client
+            .query_opt(
+                "UPDATE record
+                 SET rev = $2, json = '', cid = ''
+                 WHERE uri = $1 AND rev <= $2
+                 RETURNING uri",
+                &[&uri, &rev],
+            )
+            .await?;
+
+        Ok(result.is_some())
+    }
+
+    async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
+        let uri = AtUri::new(job.uri.clone(), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+
+        let did = uri.get_hostname();
+        let collection = uri.get_collection();
+        let rkey = uri.get_rkey();
 
         let client = pool.get().await?;
 
@@ -134,39 +176,288 @@ impl IndexerManager {
                     WintermuteError::Other("missing record for create/update".into())
                 })?;
 
-                match collection {
+                let applied = Self::insert_generic_record(
+                    &client,
+                    &job.uri,
+                    &job.cid,
+                    did.as_str(),
+                    record_json,
+                    &job.rev,
+                    &job.indexed_at,
+                )
+                .await?;
+
+                if !applied {
+                    return Ok(());
+                }
+
+                match collection.as_str() {
                     "app.bsky.feed.post" => {
-                        Self::index_post(&client, did, rkey, record_json, &job.indexed_at).await?;
+                        Self::index_post(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
                     }
                     "app.bsky.feed.like" => {
-                        Self::index_like(&client, did, rkey, record_json, &job.indexed_at).await?;
+                        Self::index_like(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
                     }
                     "app.bsky.graph.follow" => {
-                        Self::index_follow(&client, did, rkey, record_json, &job.indexed_at)
-                            .await?;
+                        Self::index_follow(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
                     }
                     "app.bsky.feed.repost" => {
-                        Self::index_repost(&client, did, rkey, record_json, &job.indexed_at)
-                            .await?;
+                        Self::index_repost(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.graph.block" => {
+                        Self::index_block(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.actor.profile" => {
+                        Self::index_profile(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.feed.generator" => {
+                        Self::index_feed_generator(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.graph.list" => {
+                        Self::index_list(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.graph.listitem" => {
+                        Self::index_list_item(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.graph.listblock" => {
+                        Self::index_list_block(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.graph.starterpack" => {
+                        Self::index_starter_pack(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.labeler.service" => {
+                        Self::index_labeler(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.feed.threadgate" => {
+                        Self::index_threadgate(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.feed.postgate" => {
+                        Self::index_postgate(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "chat.bsky.actor.declaration" => {
+                        Self::index_chat_declaration(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.notification.declaration" => {
+                        Self::index_notif_declaration(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.actor.status" => {
+                        Self::index_status(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "app.bsky.verification.proof" => {
+                        Self::index_verification(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
                     }
                     _ => {}
                 }
             }
-            WriteAction::Delete => match collection {
+            WriteAction::Delete => {
+                let applied = Self::delete_generic_record(&client, &job.uri, &job.rev).await?;
+
+                if !applied {
+                    return Ok(());
+                }
+
+                match collection.as_str() {
                 "app.bsky.feed.post" => {
-                    Self::delete_post(&client, did, rkey).await?;
+                    Self::delete_post(&client, did.as_str(), rkey.as_str()).await?;
                 }
                 "app.bsky.feed.like" => {
-                    Self::delete_like(&client, did, rkey).await?;
+                    Self::delete_like(&client, did.as_str(), rkey.as_str()).await?;
                 }
                 "app.bsky.graph.follow" => {
-                    Self::delete_follow(&client, did, rkey).await?;
+                    Self::delete_follow(&client, did.as_str(), rkey.as_str()).await?;
                 }
                 "app.bsky.feed.repost" => {
-                    Self::delete_repost(&client, did, rkey).await?;
+                    Self::delete_repost(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.graph.block" => {
+                    Self::delete_block(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.actor.profile" => {
+                    Self::delete_profile(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.feed.generator" => {
+                    Self::delete_feed_generator(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.graph.list" => {
+                    Self::delete_list(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.graph.listitem" => {
+                    Self::delete_list_item(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.graph.listblock" => {
+                    Self::delete_list_block(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.graph.starterpack" => {
+                    Self::delete_starter_pack(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.labeler.service" => {
+                    Self::delete_labeler(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.feed.threadgate" => {
+                    Self::delete_threadgate(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.feed.postgate" => {
+                    Self::delete_postgate(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "chat.bsky.actor.declaration" => {
+                    Self::delete_chat_declaration(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.notification.declaration" => {
+                    Self::delete_notif_declaration(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.actor.status" => {
+                    Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
+                }
+                "app.bsky.verification.proof" => {
+                    Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
                 }
                 _ => {}
-            },
+                }
+            }
         }
 
         Ok(())
@@ -177,9 +468,12 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
         record: &serde_json::Value,
+        cid: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.post/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.post/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         let text = record.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let created_at = record
             .get("createdAt")
@@ -188,10 +482,19 @@ impl IndexerManager {
 
         client
             .execute(
-                "INSERT INTO post (uri, creator, text, created_at, indexed_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO UPDATE SET text = $3, indexed_at = $5",
-                &[&uri, &did, &text, &created_at, &indexed_at],
+                "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &text, &created_at, &indexed_at],
+            )
+            .await?;
+
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"postsCount\")
+                 SELECT $1::varchar, COUNT(*) FROM post WHERE creator = $1
+                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
+                &[&did],
             )
             .await?;
 
@@ -203,7 +506,9 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.post/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.post/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         client
             .execute("DELETE FROM post WHERE uri = $1", &[&uri])
             .await?;
@@ -215,12 +520,20 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
         record: &serde_json::Value,
+        cid: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.like/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.like/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         let subject = record
             .get("subject")
             .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let subject_cid = record
+            .get("subject")
+            .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let created_at = record
@@ -228,14 +541,40 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        client
+        let row_count = client
             .execute(
-                "INSERT INTO like (uri, creator, subject, created_at, indexed_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO UPDATE SET indexed_at = $5",
-                &[&uri, &did, &subject, &created_at, &indexed_at],
+                "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
             )
             .await?;
+
+        if row_count > 0 && !subject.is_empty() {
+            if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
+                let subject_author = subject_uri.get_hostname();
+                if subject_author != did {
+                    client
+                        .execute(
+                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                            &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        if !subject.is_empty() {
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"likeCount\")
+                     SELECT $1::varchar, COUNT(*) FROM \"like\" WHERE subject = $1
+                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = EXCLUDED.\"likeCount\"",
+                    &[&subject],
+                )
+                .await?;
+        }
 
         Ok(())
     }
@@ -245,9 +584,11 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.like/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.like/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         client
-            .execute("DELETE FROM like WHERE uri = $1", &[&uri])
+            .execute("DELETE FROM \"like\" WHERE uri = $1", &[&uri])
             .await?;
         Ok(())
     }
@@ -257,21 +598,52 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
         record: &serde_json::Value,
+        cid: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.graph.follow/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.follow/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
         let created_at = record
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        let row_count = client
+            .execute(
+                "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
+            )
+            .await?;
+
+        if row_count > 0 {
+            client
+                .execute(
+                    "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
+                )
+                .await?;
+        }
+
         client
             .execute(
-                "INSERT INTO follow (uri, creator, subject, created_at, indexed_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO UPDATE SET indexed_at = $5",
-                &[&uri, &did, &subject, &created_at, &indexed_at],
+                "INSERT INTO profile_agg (did, \"followersCount\")
+                 SELECT $1::varchar, COUNT(*) FROM follow WHERE \"subjectDid\" = $1
+                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
+                &[&subject],
+            )
+            .await?;
+
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"followsCount\")
+                 SELECT $1::varchar, COUNT(*) FROM follow WHERE creator = $1
+                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
+                &[&did],
             )
             .await?;
 
@@ -283,7 +655,9 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.graph.follow/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.follow/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         client
             .execute("DELETE FROM follow WHERE uri = $1", &[&uri])
             .await?;
@@ -295,12 +669,20 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
         record: &serde_json::Value,
+        cid: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.repost/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.repost/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         let subject = record
             .get("subject")
             .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let subject_cid = record
+            .get("subject")
+            .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let created_at = record
@@ -308,14 +690,40 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        client
+        let row_count = client
             .execute(
-                "INSERT INTO repost (uri, creator, subject, created_at, indexed_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO UPDATE SET indexed_at = $5",
-                &[&uri, &did, &subject, &created_at, &indexed_at],
+                "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
             )
             .await?;
+
+        if row_count > 0 && !subject.is_empty() {
+            if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
+                let subject_author = subject_uri.get_hostname();
+                if subject_author != did {
+                    client
+                        .execute(
+                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        if !subject.is_empty() {
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"repostCount\")
+                     SELECT $1::varchar, COUNT(*) FROM repost WHERE subject = $1
+                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = EXCLUDED.\"repostCount\"",
+                    &[&subject],
+                )
+                .await?;
+        }
 
         Ok(())
     }
@@ -325,9 +733,668 @@ impl IndexerManager {
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/app.bsky.feed.repost/{rkey}");
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.repost/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
         client
             .execute("DELETE FROM repost WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_block(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.block/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT ON CONSTRAINT actor_block_unique_subject DO NOTHING",
+                &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_block(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.block/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM actor_block WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_profile(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        if rkey != "self" {
+            return Ok(());
+        }
+
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.profile/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let display_name = record.get("displayName").and_then(|v| v.as_str());
+        let description = record.get("description").and_then(|v| v.as_str());
+        let avatar_cid = record
+            .get("avatar")
+            .and_then(|v| v.get("ref"))
+            .and_then(|v| v.as_str());
+        let banner_cid = record
+            .get("banner")
+            .and_then(|v| v.get("ref"))
+            .and_then(|v| v.as_str());
+        let joined_via_uri = record
+            .get("joinedViaStarterPack")
+            .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        let row_count = client
+            .execute(
+                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"joinedViaStarterPackUri\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &display_name, &description, &avatar_cid, &banner_cid, &joined_via_uri, &created_at, &indexed_at],
+            )
+            .await?;
+
+        if row_count > 0 {
+            if let Some(starter_pack_uri_str) = joined_via_uri {
+                if let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None) {
+                    let starter_pack_author = starter_pack_uri.get_hostname();
+                    client
+                        .execute(
+                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                            &[&starter_pack_author, &did, &uri, &cid, &"starterpack-joined", &Some(starter_pack_uri_str), &indexed_at],
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn delete_profile(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.profile/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM profile WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_feed_generator(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.generator/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let feed_did = record.get("did").and_then(|v| v.as_str());
+        let display_name = record.get("displayName").and_then(|v| v.as_str());
+        let description = record.get("description").and_then(|v| v.as_str());
+        let description_facets = record
+            .get("descriptionFacets")
+            .map(std::string::ToString::to_string);
+        let avatar_cid = record
+            .get("avatar")
+            .and_then(|v| v.get("ref"))
+            .and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO feed_generator (uri, cid, creator, \"feedDid\", \"displayName\", description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &feed_did, &display_name, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_feed_generator(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.generator/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM feed_generator WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_list(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.list/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let name = record.get("name").and_then(|v| v.as_str());
+        let purpose = record.get("purpose").and_then(|v| v.as_str());
+        let description = record.get("description").and_then(|v| v.as_str());
+        let description_facets = record
+            .get("descriptionFacets")
+            .map(std::string::ToString::to_string);
+        let avatar_cid = record
+            .get("avatar")
+            .and_then(|v| v.get("ref"))
+            .and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO list (uri, cid, creator, name, purpose, description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &name, &purpose, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_list(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.list/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM list WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_list_item(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.listitem/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let list_uri = record.get("list").and_then(|v| v.as_str());
+        let subject = record.get("subject").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO list_item (uri, cid, creator, \"listUri\", \"subjectDid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &list_uri, &subject, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_list_item(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.listitem/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM list_item WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_list_block(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.listblock/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let subject = record.get("subject").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO list_block (uri, cid, creator, \"subjectUri\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_list_block(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.listblock/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM list_block WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_starter_pack(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.graph.starterpack/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let name = record.get("name").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO starter_pack (uri, cid, creator, name, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &name, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_starter_pack(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.graph.starterpack/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM starter_pack WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_labeler(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.labeler.service/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let policies = record.get("policies").map(std::string::ToString::to_string);
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO labeler (uri, cid, creator, policies, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &policies, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_labeler(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.labeler.service/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM labeler WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_threadgate(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.threadgate/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let post_uri = record.get("post").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO thread_gate (uri, cid, creator, \"postUri\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &post_uri, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_threadgate(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.threadgate/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM thread_gate WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_postgate(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.postgate/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let post_uri = record.get("post").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        client
+            .execute(
+                "INSERT INTO post_gate (uri, cid, creator, \"postUri\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &post_uri, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_postgate(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.postgate/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM post_gate WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn index_chat_declaration(
+        _client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        _record: &serde_json::Value,
+        _cid: &str,
+        _indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/chat.bsky.actor.declaration/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn delete_chat_declaration(
+        _client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/chat.bsky.actor.declaration/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    async fn index_notif_declaration(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.notification.declaration/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let allow_incoming = record.get("allowIncoming").and_then(|v| v.as_str());
+
+        client
+            .execute(
+                "INSERT INTO notif_declaration (uri, cid, creator, \"allowIncoming\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &allow_incoming, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_notif_declaration(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.notification.declaration/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM notif_declaration WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_status(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.status/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let status = record.get("status").and_then(|v| v.as_str());
+
+        client
+            .execute(
+                "INSERT INTO status (uri, cid, creator, status, \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &status, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_status(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.status/{rkey}"), None)
+            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM status WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_verification(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        let proof = record.get("proof").and_then(|v| v.as_str());
+
+        client
+            .execute(
+                "INSERT INTO verification (uri, cid, creator, proof, \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (uri) DO NOTHING",
+                &[&uri, &cid, &did, &proof, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_verification(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri_obj = AtUri::new(
+            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            None,
+        )
+        .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+        let uri = uri_obj.to_string();
+        client
+            .execute("DELETE FROM verification WHERE uri = $1", &[&uri])
             .await?;
         Ok(())
     }
