@@ -22,6 +22,7 @@ iroh-car = "0.5.1"
 mimalloc = "0.1"
 rtrb = "0.3"
 serde = { workspace = true }
+serde_bytes = "0.11"
 serde_json = { workspace = true }
 sha2 = "0.10"
 signal-hook = { version = "0.3", features = ["extended-siginfo"] }

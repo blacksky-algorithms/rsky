@@ -6968,6 +6968,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "731e0d9356b0c25f16f33b5be79b1c57b562f141ebfcdb0ad8ac2c13a24293b4"
+dependencies = [
+ "bitflags 2.9.2",
+ "hex",
+ "lazy_static",
+ "procfs-core",
+ "rustix 0.38.44",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3554923a69f4ce04c4a754260c338f505ce22642d3830e049a399fc2059a29"
+dependencies = [
+ "bitflags 2.9.2",
+ "hex",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6995,8 +7018,10 @@ dependencies = [
  "cfg-if",
  "fnv",
  "lazy_static",
+ "libc",
  "memchr",
  "parking_lot",
+ "procfs",
  "protobuf",
  "thiserror 1.0.69",
 ]
@@ -8242,6 +8267,53 @@ dependencies = [
  "serde",
  "serde_derive",
  "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
+name = "rsky-wintermute"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "ciborium",
+ "cid 0.11.1",
+ "clap",
+ "color-eyre",
+ "deadpool-postgres",
+ "derive_more 2.0.1",
+ "fjall",
+ "futures",
+ "http-body-util",
+ "hyper 1.7.0",
+ "hyper-util",
+ "ipld-core",
+ "iroh-car",
+ "mimalloc",
+ "prometheus",
+ "reqwest 0.12.23",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-identity",
+ "rsky-lexicon",
+ "rsky-repo",
+ "rsky-syntax",
+ "rtrb",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor 0.6.3",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "tempfile",
+ "thingbuf",
+ "thiserror 2.0.16",
+ "tokio",
+ "tokio-postgres",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite 0.26.2",
  "url",
 ]
 
@@ -9851,9 +9923,13 @@ dependencies = [
  "futures-util",
  "log",
  "native-tls",
+ "rustls 0.23.31",
+ "rustls-pki-types",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls 0.26.2",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -10245,8 +10321,11 @@ dependencies = [
  "log",
  "native-tls",
  "rand 0.8.5",
+ "rustls 0.23.31",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
+ "url",
  "utf-8",
 ]
 
