@@ -500,10 +500,7 @@ mod indexer_tests {
         };
 
         let result = IndexerManager::process_label_event(&pool, &label_event).await;
-        assert!(
-            result.is_ok(),
-            "label indexing should succeed: {result:?}"
-        );
+        assert!(result.is_ok(), "label indexing should succeed: {result:?}");
 
         let client = pool.get().await.unwrap();
         let count: i64 = client
@@ -574,7 +571,10 @@ mod indexer_tests {
 
         let client = pool.get().await.unwrap();
         let count: i64 = client
-            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''",
+                &[&test_src],
+            )
             .await
             .unwrap()
             .get(0);
@@ -638,7 +638,10 @@ mod indexer_tests {
 
         let client = pool.get().await.unwrap();
         let count: i64 = client
-            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''",
+                &[&test_src],
+            )
             .await
             .unwrap()
             .get(0);
@@ -660,7 +663,10 @@ mod indexer_tests {
 
         // Should still be 1 row (upserted, not inserted)
         let count: i64 = client
-            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''",
+                &[&test_src],
+            )
             .await
             .unwrap()
             .get(0);
@@ -720,7 +726,10 @@ mod indexer_tests {
 
         let client = pool.get().await.unwrap();
         let count: i64 = client
-            .query_one("SELECT COUNT(*) FROM label WHERE uri = $1 AND cid = ''", &[&test_uri])
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE uri = $1 AND cid = ''",
+                &[&test_uri],
+            )
             .await
             .unwrap()
             .get(0);
@@ -826,7 +835,10 @@ mod indexer_tests {
         // Verify in database
         let client = pool.get().await.unwrap();
         let count: i64 = client
-            .query_one("SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''", &[&test_src])
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND cid = ''",
+                &[&test_src],
+            )
             .await
             .unwrap()
             .get(0);
@@ -850,5 +862,163 @@ mod indexer_tests {
             result.is_ok(),
             "empty labels array should succeed without error"
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // Ignored by default, run with: cargo test -- --ignored test_live_label_stream
+    async fn test_live_label_stream_integration() {
+        use futures::stream::StreamExt;
+        use tokio::time::{Duration, timeout};
+        use tokio_tungstenite::connect_async;
+
+        // Initialize tracing for test output
+        drop(
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::Level::INFO.into()),
+                )
+                .with_test_writer()
+                .try_init(),
+        );
+
+        let (storage, _dir) = setup_test_storage();
+        let pool = setup_test_pool();
+        let test_src = "did:plc:live_integration_test";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // Connect to live atproto.africa label stream
+        let url = "wss://atproto.africa/xrpc/com.atproto.label.subscribeLabels";
+        tracing::info!("connecting to live label stream: {url}");
+
+        let (ws_stream, _) = connect_async(url)
+            .await
+            .expect("failed to connect to atproto.africa");
+
+        let (_, mut read) = ws_stream.split();
+
+        // Collect labels for 5 seconds
+        let mut label_events = Vec::new();
+        let mut total_labels = 0;
+
+        tracing::info!("listening to label stream for 5 seconds...");
+        let mut message_count = 0;
+        let collection_result = timeout(Duration::from_secs(5), async {
+            while let Some(msg_result) = read.next().await {
+                message_count += 1;
+                match msg_result {
+                    Ok(msg) => {
+                        tracing::info!("received message #{}: {:?}", message_count, msg);
+                        if let tokio_tungstenite::tungstenite::Message::Binary(data) = msg {
+                            tracing::info!("binary message size: {} bytes", data.len());
+                            match crate::ingester::labels::parse_label_message(&data) {
+                                Ok(Some(label_event)) => {
+                                    total_labels += label_event.labels.len();
+                                    label_events.push(label_event);
+                                    tracing::info!(
+                                        "successfully parsed label event with {} labels (total so far: {})",
+                                        label_events.last().unwrap().labels.len(),
+                                        total_labels
+                                    );
+                                }
+                                Ok(None) => {
+                                    tracing::info!("binary message was not a label event (different message type)");
+                                }
+                                Err(e) => {
+                                    tracing::error!("failed to parse label message: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("websocket error: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
+        .await;
+
+        // Timeout is expected (we want to disconnect after 5 seconds)
+        drop(collection_result);
+
+        tracing::info!(
+            "disconnected from stream. received {} messages total, {} label events with {} total labels",
+            message_count,
+            label_events.len(),
+            total_labels
+        );
+
+        if total_labels == 0 {
+            tracing::warn!("no labels received from stream - skipping rest of test");
+            return;
+        }
+
+        // Enqueue all label events to storage
+        for label_event in &label_events {
+            storage
+                .enqueue_label_live(label_event)
+                .expect("failed to enqueue label event");
+        }
+
+        let queue_len = storage
+            .label_live_len()
+            .expect("failed to get queue length");
+        assert_eq!(
+            queue_len,
+            label_events.len(),
+            "queue should contain all label events"
+        );
+
+        tracing::info!("enqueued {} label events to storage", label_events.len());
+
+        // Process all labels through the indexer
+        let mut processed_count = 0;
+        while let Ok(Some((key, label_event))) = storage.dequeue_label_live() {
+            let result = IndexerManager::process_label_event(&pool, &label_event).await;
+            assert!(result.is_ok(), "indexing should succeed");
+
+            storage
+                .remove_label_live(&key)
+                .expect("failed to remove from queue");
+            processed_count += 1;
+        }
+
+        assert_eq!(
+            processed_count,
+            label_events.len(),
+            "should process all label events"
+        );
+
+        tracing::info!("processed {} label events through indexer", processed_count);
+
+        // Count labels in database
+        let client = pool.get().await.expect("failed to get db client");
+
+        // We need to count labels from all sources since we don't control which labeler sent them
+        let db_label_count: i64 = client
+            .query_one("SELECT COUNT(*) FROM label WHERE cid = ''", &[])
+            .await
+            .expect("failed to query label count")
+            .get(0);
+
+        tracing::info!(
+            "database contains {} labels after indexing (expected at least {})",
+            db_label_count,
+            total_labels
+        );
+
+        // The database should have at least as many labels as we received
+        // (may have more if labels were already in the database)
+        assert!(
+            db_label_count >= i64::try_from(total_labels).unwrap(),
+            "database should contain at least {total_labels} labels, found {db_label_count}"
+        );
+
+        // Clean up - remove test labels
+        // Note: We can't reliably clean up all labels we inserted since we don't know
+        // which labeler DIDs were in the stream, so we'll just clean up what we can identify
+        tracing::info!("integration test complete - received and indexed {total_labels} labels");
     }
 }
