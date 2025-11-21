@@ -1,5 +1,5 @@
 mod backfill_queue;
-mod labels;
+pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;

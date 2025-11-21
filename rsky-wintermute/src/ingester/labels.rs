@@ -2,7 +2,6 @@ use crate::types::{Label, LabelEvent, WintermuteError};
 use crate::{SHUTDOWN, metrics, storage::Storage};
 use futures::SinkExt;
 use futures::stream::StreamExt;
-use ipld_core::ipld::Ipld;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -129,101 +128,62 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
 }
 
 pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, WintermuteError> {
-    let ipld: Ipld = serde_ipld_dagcbor::from_reader(data)
-        .map_err(|e| WintermuteError::Serialization(format!("failed to parse ipld: {e}")))?;
+    // AT Protocol sends two concatenated CBOR messages:
+    // 1. Header (parsed with ciborium): {t: "#labels", op: 1}
+    // 2. Body (parsed with serde_ipld_dagcbor): {seq: N, labels: [...]}
 
-    let Ok(Some(header)) = ipld.get("t") else {
-        return Ok(None);
-    };
+    #[derive(serde::Deserialize)]
+    struct Header {
+        #[serde(rename = "t")]
+        type_: String,
+        #[serde(rename = "op")]
+        _operation: u8,
+    }
 
-    let header_str = match header {
-        Ipld::String(s) => s.as_str(),
-        _ => return Ok(None),
-    };
+    #[derive(serde::Deserialize)]
+    struct SubscribeLabels {
+        seq: i64,
+        labels: Vec<RawLabel>,
+    }
 
-    if header_str != "#labels" {
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        src: String,
+        uri: String,
+        val: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        cid: Option<String>,
+        cts: String,
+    }
+
+    let mut cursor = std::io::Cursor::new(data);
+
+    // Parse header with ciborium
+    let header: Header = ciborium::from_reader(&mut cursor)
+        .map_err(|e| WintermuteError::Serialization(format!("failed to parse header: {e}")))?;
+
+    if header.type_ != "#labels" {
         return Ok(None);
     }
 
-    let body = ipld
-        .get("op")
-        .ok()
-        .flatten()
-        .ok_or_else(|| WintermuteError::Serialization("missing op field".into()))?;
+    // Parse body with serde_ipld_dagcbor
+    let body: SubscribeLabels = serde_ipld_dagcbor::from_reader(&mut cursor)
+        .map_err(|e| WintermuteError::Serialization(format!("failed to parse body: {e}")))?;
 
-    let seq = body
-        .get("seq")
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Ipld::Integer(i) => i64::try_from(*i).ok(),
-            _ => None,
+    let labels = body
+        .labels
+        .into_iter()
+        .map(|raw| Label {
+            src: raw.src,
+            uri: raw.uri,
+            val: raw.val,
+            cts: raw.cts,
         })
-        .ok_or_else(|| WintermuteError::Serialization("missing seq".into()))?;
+        .collect();
 
-    // Parse labels array
-    let labels_ipld = body
-        .get("labels")
-        .ok()
-        .flatten()
-        .ok_or_else(|| WintermuteError::Serialization("missing labels field".into()))?;
-
-    let Ipld::List(labels_list) = labels_ipld else {
-        return Err(WintermuteError::Serialization(
-            "labels is not a list".into(),
-        ));
-    };
-
-    let mut labels = Vec::new();
-    for label_ipld in labels_list {
-        if let Some(label) = parse_label(label_ipld)? {
-            labels.push(label);
-        }
-    }
-
-    Ok(Some(LabelEvent { seq, labels }))
-}
-
-fn parse_label(ipld: &Ipld) -> Result<Option<Label>, WintermuteError> {
-    let src = ipld
-        .get("src")
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Ipld::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| WintermuteError::Serialization("missing src in label".into()))?;
-
-    let uri = ipld
-        .get("uri")
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Ipld::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| WintermuteError::Serialization("missing uri in label".into()))?;
-
-    let val = ipld
-        .get("val")
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Ipld::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| WintermuteError::Serialization("missing val in label".into()))?;
-
-    let cts = ipld
-        .get("cts")
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Ipld::String(s) => Some(s.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| WintermuteError::Serialization("missing cts in label".into()))?;
-
-    Ok(Some(Label { src, uri, val, cts }))
+    Ok(Some(LabelEvent {
+        seq: body.seq,
+        labels,
+    }))
 }
