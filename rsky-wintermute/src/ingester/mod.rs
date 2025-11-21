@@ -8,7 +8,6 @@ use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, WintermuteError};
 use futures::SinkExt;
 use futures::stream::StreamExt;
-use ipld_core::ipld::Ipld;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -168,87 +167,55 @@ impl IngesterManager {
     }
 
     fn parse_message(data: &[u8]) -> Result<Option<FirehoseEvent>, WintermuteError> {
-        let ipld: Ipld = serde_ipld_dagcbor::from_reader(data)
-            .map_err(|e| WintermuteError::Serialization(format!("failed to parse ipld: {e}")))?;
+        // AT Protocol sends two concatenated CBOR messages:
+        // 1. Header (parsed with ciborium): {t: "#commit", op: 1}
+        // 2. Body (parsed with serde_ipld_dagcbor): {seq: N, repo: "...", ...}
 
-        let Ok(Some(header)) = ipld.get("t") else {
-            return Ok(None);
-        };
+        #[derive(serde::Deserialize)]
+        struct Header {
+            #[serde(rename = "t")]
+            type_: String,
+            #[serde(rename = "op")]
+            _operation: u8,
+        }
 
-        let header_str = match header {
-            Ipld::String(s) => s.as_str(),
-            _ => return Ok(None),
-        };
+        let mut cursor = std::io::Cursor::new(data);
 
-        if header_str != "#commit" {
+        // Parse header with ciborium
+        let header: Header = ciborium::from_reader(&mut cursor)
+            .map_err(|e| WintermuteError::Serialization(format!("failed to parse header: {e}")))?;
+
+        // Only process #commit messages for now
+        if header.type_ != "#commit" {
             return Ok(None);
         }
 
-        let body = ipld
-            .get("op")
-            .ok()
-            .flatten()
-            .ok_or_else(|| WintermuteError::Serialization("missing op field".into()))?;
+        // Parse body with serde_ipld_dagcbor using the official SubscribeReposCommit struct
+        let body: rsky_lexicon::com::atproto::sync::SubscribeReposCommit =
+            serde_ipld_dagcbor::from_reader(&mut cursor).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to parse body: {e}"))
+            })?;
 
-        let seq = body
-            .get("seq")
-            .ok()
-            .flatten()
-            .and_then(|v| match v {
-                Ipld::Integer(i) => i64::try_from(*i).ok(),
-                _ => None,
+        // Convert operations to our format
+        let ops = body
+            .ops
+            .into_iter()
+            .map(|op| crate::types::RepoOp {
+                action: op.action,
+                path: op.path,
+                cid: op.cid.map(|c| c.to_string()),
             })
-            .ok_or_else(|| WintermuteError::Serialization("missing seq".into()))?;
-
-        let did = body
-            .get("repo")
-            .ok()
-            .flatten()
-            .and_then(|v| match v {
-                Ipld::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| WintermuteError::Serialization("missing repo".into()))?;
-
-        let time = body
-            .get("time")
-            .ok()
-            .flatten()
-            .and_then(|v| match v {
-                Ipld::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| WintermuteError::Serialization("missing time".into()))?;
-
-        let rev = body
-            .get("rev")
-            .ok()
-            .flatten()
-            .and_then(|v| match v {
-                Ipld::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| WintermuteError::Serialization("missing rev".into()))?;
-
-        let blocks_data = body
-            .get("blocks")
-            .ok()
-            .flatten()
-            .and_then(|v| match v {
-                Ipld::Bytes(b) => Some(b.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+            .collect();
 
         let event = FirehoseEvent {
-            seq,
-            did,
-            time,
+            seq: body.seq,
+            did: body.repo,
+            time: body.time.to_rfc3339(),
             kind: "commit".to_owned(),
             commit: Some(CommitData {
-                rev,
-                ops: vec![],
-                blocks: blocks_data,
+                rev: body.rev,
+                ops,
+                blocks: body.blocks,
             }),
         };
 

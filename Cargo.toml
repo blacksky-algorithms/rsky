@@ -16,6 +16,7 @@ members = [
   "rsky-ingester",
   "rsky-indexer",
   "rsky-backfiller",
+  "rsky-wintermute",
   "rsky-integration-tests",
 ]
 resolver = "2"
