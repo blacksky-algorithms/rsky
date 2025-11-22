@@ -153,7 +153,18 @@ impl IngesterManager {
                     metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
                         .with_label_values(&["firehose_live"])
                         .inc();
+
+                    // Store the raw event for historical lookup
                     storage.write_firehose_event(event.seq, &event)?;
+
+                    // Convert event to index jobs and enqueue for indexer
+                    if let Err(e) = Self::enqueue_event_for_indexing(storage, &event).await {
+                        tracing::error!("failed to enqueue event seq={} for indexing: {e}", event.seq);
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["enqueue_failed"])
+                            .inc();
+                    }
+
                     storage.set_cursor(&cursor_key, event.seq)?;
                 }
             }
@@ -220,5 +231,100 @@ impl IngesterManager {
         };
 
         Ok(Some(event))
+    }
+
+    pub async fn enqueue_event_for_indexing(
+        storage: &Storage,
+        event: &FirehoseEvent,
+    ) -> Result<(), WintermuteError> {
+        use rsky_repo::parse::get_and_parse_record;
+
+        // Only process commit events with operations
+        let Some(ref commit) = event.commit else {
+            return Ok(());
+        };
+
+        if commit.ops.is_empty() {
+            return Ok(());
+        }
+
+        // Parse CAR blocks into a BlockMap
+        let block_map = if commit.blocks.is_empty() {
+            None
+        } else {
+            let cursor = std::io::Cursor::new(&commit.blocks);
+            match iroh_car::CarReader::new(cursor).await {
+                Ok(mut car_reader) => {
+                    let mut block_map = rsky_repo::block_map::BlockMap::new();
+                    while let Ok(Some((cid, data))) = car_reader.next_block().await {
+                        block_map.set(cid, data);
+                    }
+                    Some(block_map)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse CAR blocks for seq={}: {e}", event.seq);
+                    None
+                }
+            }
+        };
+
+        let indexed_at = chrono::Utc::now().to_rfc3339();
+
+        // Convert each operation to an IndexJob
+        for op in &commit.ops {
+            let action = match op.action.as_str() {
+                "create" => crate::types::WriteAction::Create,
+                "update" => crate::types::WriteAction::Update,
+                "delete" => crate::types::WriteAction::Delete,
+                _ => {
+                    tracing::warn!("unknown action type: {}", op.action);
+                    continue;
+                }
+            };
+
+            // Build AT-URI from repo DID + record path
+            let uri = format!("at://{}/{}", event.did, op.path);
+
+            // Use CID from operation, or empty string for deletes
+            let cid_str = op.cid.clone().unwrap_or_default();
+
+            // Extract record from CAR blocks if we have a CID and block_map
+            let record = if let (Some(cid_value), Some(blocks)) = (&op.cid, &block_map) {
+                match lexicon_cid::Cid::try_from(cid_value.as_str()) {
+                    Ok(cid) => match get_and_parse_record(blocks, cid) {
+                        Ok(parsed) => match serde_json::to_value(&parsed.record) {
+                            Ok(record_json) => Some(record_json),
+                            Err(e) => {
+                                tracing::warn!("failed to serialize record for {uri}: {e}");
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("failed to parse record for {uri}: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("invalid CID {cid_value} for {uri}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let job = crate::types::IndexJob {
+                uri,
+                cid: cid_str,
+                action,
+                record,
+                indexed_at: indexed_at.clone(),
+                rev: commit.rev.clone(),
+            };
+
+            storage.enqueue_firehose_live(&job)?;
+        }
+
+        Ok(())
     }
 }
