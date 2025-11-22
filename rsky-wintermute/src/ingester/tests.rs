@@ -35,7 +35,7 @@ mod ingester_tests {
         }
 
         let header = Header {
-            t: "#commit".to_string(),
+            t: "#commit".to_owned(),
             op: 1,
         };
 
@@ -44,18 +44,18 @@ mod ingester_tests {
             time: time.parse::<DateTime<Utc>>().unwrap(),
             rebase: false,
             too_big: false,
-            repo: repo.to_string(),
+            repo: repo.to_owned(),
             commit: Cid::try_from("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa")
                 .unwrap(),
             prev: None,
-            rev: rev.to_string(),
+            rev: rev.to_owned(),
             since: None,
             blocks,
             ops: ops
                 .into_iter()
                 .map(|(action, path, cid)| SubscribeReposCommitOperation {
-                    action: action.to_string(),
-                    path: path.to_string(),
+                    action: action.to_owned(),
+                    path: path.to_owned(),
                     cid: cid.and_then(|c| Cid::try_from(c).ok()),
                 })
                 .collect(),
@@ -146,7 +146,7 @@ mod ingester_tests {
         }
 
         let header = Header {
-            t: "#info".to_string(),
+            t: "#info".to_owned(),
             op: 1,
         };
 
@@ -406,7 +406,7 @@ mod ingester_tests {
         }
 
         let header = Header {
-            t: "#labels".to_string(),
+            t: "#labels".to_owned(),
             op: 1,
         };
 
@@ -415,10 +415,10 @@ mod ingester_tests {
             labels: labels
                 .into_iter()
                 .map(|(src, uri, val, cts)| RawLabel {
-                    src: src.to_string(),
-                    uri: uri.to_string(),
-                    val: val.to_string(),
-                    cts: cts.to_string(),
+                    src: src.to_owned(),
+                    uri: uri.to_owned(),
+                    val: val.to_owned(),
+                    cts: cts.to_owned(),
                 })
                 .collect(),
         };
@@ -496,7 +496,7 @@ mod ingester_tests {
         }
 
         let header = Header {
-            t: "#info".to_string(),
+            t: "#info".to_owned(),
             op: 1,
         };
 
@@ -636,22 +636,20 @@ mod ingester_tests {
         // Collect messages for 5 seconds
         let collection_result = timeout(Duration::from_secs(5), async {
             while let Some(msg_result) = read.next().await {
-                if let Ok(msg) = msg_result {
-                    if let Message::Binary(data) = msg {
-                        total_messages += 1;
+                if let Ok(Message::Binary(data)) = msg_result {
+                    total_messages += 1;
 
-                        // Parse the message
-                        if let Ok(Some(event)) = IngesterManager::parse_message(&data) {
-                            if let Some(commit) = event.commit {
-                                // Count operation types
-                                for op in commit.ops {
-                                    total_operations += 1;
-                                    match op.action.as_str() {
-                                        "create" => total_creates += 1,
-                                        "update" => total_updates += 1,
-                                        "delete" => total_deletes += 1,
-                                        _ => {}
-                                    }
+                    // Parse the message
+                    if let Ok(Some(event)) = IngesterManager::parse_message(&data) {
+                        if let Some(commit) = event.commit {
+                            // Count operation types
+                            for op in commit.ops {
+                                total_operations += 1;
+                                match op.action.as_str() {
+                                    "create" => total_creates += 1,
+                                    "update" => total_updates += 1,
+                                    "delete" => total_deletes += 1,
+                                    _ => {}
                                 }
                             }
                         }
@@ -691,5 +689,114 @@ mod ingester_tests {
         tracing::info!(
             "integration test complete - successfully parsed {total_operations} operations from live firehose"
         );
+    }
+
+    #[tokio::test]
+    async fn test_event_to_index_jobs_conversion() {
+        use crate::types::{CommitData, FirehoseEvent, RepoOp};
+
+        let (storage, _dir) = setup_test_storage();
+
+        // Create a firehose event with multiple operations
+        let event = FirehoseEvent {
+            seq: 12345,
+            did: "did:plc:test123".to_owned(),
+            time: "2024-01-01T00:00:00Z".to_owned(),
+            kind: "commit".to_owned(),
+            commit: Some(CommitData {
+                rev: "rev-abc".to_owned(),
+                ops: vec![
+                    RepoOp {
+                        action: "create".to_owned(),
+                        path: "app.bsky.feed.post/abc123".to_owned(),
+                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                    },
+                    RepoOp {
+                        action: "update".to_owned(),
+                        path: "app.bsky.actor.profile/self".to_owned(),
+                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                    },
+                    RepoOp {
+                        action: "delete".to_owned(),
+                        path: "app.bsky.feed.like/xyz789".to_owned(),
+                        cid: None,
+                    },
+                ],
+                blocks: vec![],
+            }),
+        };
+
+        // Queue should be empty initially
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+
+        // Enqueue the event for indexing
+        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+
+        // Should have 3 jobs (one for each operation)
+        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+
+        // Dequeue and verify jobs (order not guaranteed)
+        let mut jobs = Vec::new();
+        while let Ok(Some((key, job))) = storage.dequeue_firehose_live() {
+            jobs.push(job);
+            storage.remove_firehose_live(&key).unwrap();
+        }
+
+        assert_eq!(jobs.len(), 3);
+
+        // Verify we have one of each action type
+        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Create)).count(), 1);
+        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Update)).count(), 1);
+        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Delete)).count(), 1);
+
+        // Verify URIs are correct
+        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.post/abc123"));
+        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.actor.profile/self"));
+        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.like/xyz789"));
+
+        // Queue should be empty again
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_with_no_operations() {
+        use crate::types::{CommitData, FirehoseEvent};
+
+        let (storage, _dir) = setup_test_storage();
+
+        let event = FirehoseEvent {
+            seq: 12345,
+            did: "did:plc:test123".to_owned(),
+            time: "2024-01-01T00:00:00Z".to_owned(),
+            kind: "commit".to_owned(),
+            commit: Some(CommitData {
+                rev: "rev-abc".to_owned(),
+                ops: vec![], // No operations
+                blocks: vec![],
+            }),
+        };
+
+        // Should succeed but not enqueue anything
+        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_with_no_commit() {
+        use crate::types::FirehoseEvent;
+
+        let (storage, _dir) = setup_test_storage();
+
+        let event = FirehoseEvent {
+            seq: 12345,
+            did: "did:plc:test123".to_owned(),
+            time: "2024-01-01T00:00:00Z".to_owned(),
+            kind: "identity".to_owned(),
+            commit: None, // No commit data
+        };
+
+        // Should succeed but not enqueue anything
+        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
 }

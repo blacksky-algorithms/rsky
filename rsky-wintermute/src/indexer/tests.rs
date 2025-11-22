@@ -1021,4 +1021,157 @@ mod indexer_tests {
         // which labeler DIDs were in the stream, so we'll just clean up what we can identify
         tracing::info!("integration test complete - received and indexed {total_labels} labels");
     }
+
+    #[tokio::test]
+    async fn test_firehose_live_pipeline() {
+        use crate::ingester::IngesterManager;
+        use crate::types::{CommitData, FirehoseEvent, IndexJob, RepoOp};
+
+        // Initialize tracing
+        drop(tracing_subscriber::fmt().with_env_filter("info").try_init());
+
+        let (storage, _dir) = setup_test_storage();
+        let pool = setup_test_pool();
+        let test_did = "did:plc:firehoselivetest";
+
+        // Cleanup any existing test data
+        cleanup_test_data(&pool, test_did).await;
+
+        tracing::info!("starting firehose_live pipeline test");
+
+        // Step 1: Create a firehose event with operations
+        let event = FirehoseEvent {
+            seq: 99999,
+            did: test_did.to_owned(),
+            time: chrono::Utc::now().to_rfc3339(),
+            kind: "commit".to_owned(),
+            commit: Some(CommitData {
+                rev: "test-rev-live".to_owned(),
+                ops: vec![
+                    RepoOp {
+                        action: "create".to_owned(),
+                        path: "app.bsky.feed.post/testpost1".to_owned(),
+                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                    },
+                    RepoOp {
+                        action: "create".to_owned(),
+                        path: "app.bsky.feed.like/testlike1".to_owned(),
+                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                    },
+                ],
+                blocks: vec![],
+            }),
+        };
+
+        // Step 2: Simulate ingester processing event (enqueue to firehose_live)
+        tracing::info!("enqueuing event to firehose_live queue");
+        IngesterManager::enqueue_event_for_indexing(&storage, &event)
+            .await
+            .expect("failed to enqueue event");
+
+        // Verify queue has 2 jobs
+        let queue_len = storage.firehose_live_len().unwrap();
+        assert_eq!(queue_len, 2, "expected 2 jobs in firehose_live queue");
+        tracing::info!("firehose_live queue has {queue_len} jobs");
+
+        // Step 3: Simulate indexer dequeuing and processing jobs
+        let mut processed_count = 0;
+
+        while let Ok(Some((key, job))) = storage.dequeue_firehose_live() {
+            tracing::info!(
+                "processing job: uri={}, action={:?}",
+                job.uri,
+                job.action
+            );
+
+            // For this test, we'll create minimal records directly
+            // (in production, indexer would extract from CAR blocks)
+            let record = match job.uri.as_str() {
+                uri if uri.contains("app.bsky.feed.post") => {
+                    Some(serde_json::json!({
+                        "text": "Test post from firehose_live pipeline",
+                        "createdAt": job.indexed_at,
+                    }))
+                }
+                uri if uri.contains("app.bsky.feed.like") => {
+                    Some(serde_json::json!({
+                        "subject": {
+                            "uri": "at://did:plc:test/app.bsky.feed.post/abc",
+                            "cid": "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                        },
+                        "createdAt": job.indexed_at,
+                    }))
+                }
+                _ => None,
+            };
+
+            let job_with_record = IndexJob {
+                record: record.clone(),
+                ..job
+            };
+
+            tracing::info!(
+                "about to process job with record: uri={}, has_record={}, record={:?}",
+                job_with_record.uri,
+                job_with_record.record.is_some(),
+                record
+            );
+
+            // Process the job through indexer
+            match IndexerManager::process_job(&pool, &job_with_record).await {
+                Ok(()) => tracing::info!("successfully processed job {}", job_with_record.uri),
+                Err(e) => {
+                    tracing::error!("failed to process job {}: {}", job_with_record.uri, e);
+                    panic!("failed to process index job: {e}");
+                }
+            }
+
+            // Remove from queue after successful processing
+            storage
+                .remove_firehose_live(&key)
+                .expect("failed to remove job from queue");
+
+            processed_count += 1;
+        }
+
+        assert_eq!(processed_count, 2, "expected to process 2 jobs");
+        tracing::info!("processed {processed_count} jobs from firehose_live queue");
+
+        // Step 4: Verify queue is empty
+        let final_queue_len = storage.firehose_live_len().unwrap();
+        assert_eq!(final_queue_len, 0, "queue should be empty after processing");
+
+        // Step 5: Verify data was written to database
+        let client = pool.get().await.expect("failed to get db client");
+
+        let post_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM post WHERE creator = $1",
+                &[&test_did],
+            )
+            .await
+            .expect("failed to query post count")
+            .get(0);
+
+        let like_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM \"like\" WHERE creator = $1",
+                &[&test_did],
+            )
+            .await
+            .expect("failed to query like count")
+            .get(0);
+
+        tracing::info!("database verification: {post_count} posts, {like_count} likes");
+
+        assert_eq!(post_count, 1, "expected 1 post in database");
+        assert_eq!(like_count, 1, "expected 1 like in database");
+
+        // Cleanup
+        cleanup_test_data(&pool, test_did).await;
+
+        tracing::info!(
+            "firehose_live pipeline test complete - successfully processed 2 operations end-to-end"
+        );
+    }
 }

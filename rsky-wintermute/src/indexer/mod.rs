@@ -217,6 +217,8 @@ impl IndexerManager {
         let json_str = serde_json::to_string(json)
             .map_err(|e| WintermuteError::Serialization(format!("json stringify failed: {e}")))?;
 
+        tracing::debug!("inserting generic record: uri={uri}, rev={rev}, did={did}");
+
         let result = client
             .query_opt(
                 "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
@@ -233,6 +235,7 @@ impl IndexerManager {
             .await?;
 
         let applied = result.is_some();
+        tracing::debug!("generic record insert result for {uri}: applied={applied}, result={:?}", result);
         if !applied {
             tracing::trace!("stale write rejected for {uri} with rev {rev}");
         }
@@ -257,8 +260,10 @@ impl IndexerManager {
         Ok(result.is_some())
     }
 
-    async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
+    pub async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
         use crate::metrics;
+
+        tracing::debug!("process_job called: uri={}, action={:?}, has_record={}", job.uri, job.action, job.record.is_some());
 
         metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
 
@@ -269,10 +274,14 @@ impl IndexerManager {
         let collection = uri.get_collection();
         let rkey = uri.get_rkey();
 
+        tracing::debug!("parsed uri: did={did}, collection={collection}, rkey={rkey}");
+
         let client = pool.get().await?;
+        tracing::debug!("got database client");
 
         match job.action {
             WriteAction::Create | WriteAction::Update => {
+                tracing::debug!("processing create/update action");
                 let record_json = job.record.as_ref().ok_or_else(|| {
                     WintermuteError::Other("missing record for create/update".into())
                 })?;
@@ -293,6 +302,7 @@ impl IndexerManager {
                     tracing::debug!("skipping stale write for {}", job.uri);
                     return Ok(());
                 }
+                tracing::debug!("proceeding to collection-specific indexing for {}", collection);
 
                 match collection.as_str() {
                     "app.bsky.feed.post" => {
