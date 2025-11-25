@@ -3,7 +3,7 @@ mod tests;
 use crate::SHUTDOWN;
 use crate::config::{INDEXER_BATCH_SIZE, WORKERS_INDEXER};
 use crate::storage::Storage;
-use crate::types::{IndexJob, WintermuteError, WriteAction};
+use crate::types::{IndexJob, LabelEvent, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
@@ -14,11 +14,16 @@ use tokio_postgres::NoTls;
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-enum QueueSource {
+pub enum QueueSource {
     FirehoseLive,
     FirehoseBackfill,
     LabelLive, // Future use for label stream processing
 }
+
+// Type aliases to reduce complexity
+type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
+type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
+type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
 
 pub struct IndexerManager {
     workers: usize,
@@ -68,138 +73,160 @@ impl IndexerManager {
                 break;
             }
 
-            // Update queue length metrics for all three streams
-            if let Ok(live_len) = self.storage.firehose_live_len() {
-                crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
-                    .set(i64::try_from(live_len).unwrap_or(i64::MAX));
-            }
-            if let Ok(backfill_len) = self.storage.firehose_backfill_len() {
-                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
-                    .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
-            }
-            if let Ok(label_len) = self.storage.label_live_len() {
-                crate::metrics::INGESTER_LABEL_LIVE_LENGTH
-                    .set(i64::try_from(label_len).unwrap_or(i64::MAX));
-            }
+            self.update_queue_metrics();
 
-            // Collect jobs from all three queues with priority: live > backfill > labels
-            let mut jobs = Vec::new();
+            let (jobs, label_jobs) = self.dequeue_prioritized_jobs();
 
-            // Priority 1: firehose_live (from ingester)
-            for _ in 0..INDEXER_BATCH_SIZE {
-                match self.storage.dequeue_firehose_live() {
-                    Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("failed to dequeue firehose_live job: {e}");
-                        break;
-                    }
-                }
-            }
+            self.process_label_jobs_batch(label_jobs).await;
 
-            // Priority 2: firehose_backfill (from backfiller) if batch not full
-            if jobs.len() < INDEXER_BATCH_SIZE {
-                for _ in 0..(INDEXER_BATCH_SIZE - jobs.len()) {
-                    match self.storage.dequeue_firehose_backfill() {
-                        Ok(Some((key, job))) => {
-                            jobs.push((key, job, QueueSource::FirehoseBackfill));
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            tracing::error!("failed to dequeue firehose_backfill job: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Priority 3: label_live - Process labels separately since they're different from IndexJobs
-            let mut label_jobs = Vec::new();
-            for _ in 0..INDEXER_BATCH_SIZE {
-                match self.storage.dequeue_label_live() {
-                    Ok(Some((key, label_event))) => {
-                        label_jobs.push((key, label_event));
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("failed to dequeue label_live: {e}");
-                        break;
-                    }
-                }
-            }
-
-            let label_jobs_empty = label_jobs.is_empty();
-
-            // Process label jobs first (highest priority for user safety)
-            if !label_jobs_empty {
-                for (key, label_event) in label_jobs {
-                    if let Ok(permit) = self.semaphore.clone().acquire_owned().await {
-                        let pool = self.pool.clone();
-                        let storage = self.storage.clone();
-
-                        tokio::spawn(async move {
-                            let result = Self::process_label_event(&pool, &label_event).await;
-                            drop(permit);
-
-                            match result {
-                                Ok(()) => {
-                                    if let Err(e) = storage.remove_label_live(&key) {
-                                        tracing::error!("failed to remove label from queue: {e}");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("failed to process label event: {e}");
-                                    crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            if jobs.is_empty() && label_jobs_empty {
+            if jobs.is_empty() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
 
-            let mut tasks = Vec::new();
-            for (key, job, source) in jobs {
-                let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
+            let tasks = self.spawn_index_job_tasks(jobs).await;
+            self.handle_job_results(tasks).await;
+        }
+    }
+
+    fn update_queue_metrics(&self) {
+        if let Ok(live_len) = self.storage.firehose_live_len() {
+            crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
+                .set(i64::try_from(live_len).unwrap_or(i64::MAX));
+        }
+        if let Ok(backfill_len) = self.storage.firehose_backfill_len() {
+            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
+                .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
+        }
+        if let Ok(label_len) = self.storage.label_live_len() {
+            crate::metrics::INGESTER_LABEL_LIVE_LENGTH
+                .set(i64::try_from(label_len).unwrap_or(i64::MAX));
+        }
+    }
+
+    fn dequeue_prioritized_jobs(&self) -> (Vec<IndexJobWithMetadata>, Vec<LabelJobWithMetadata>) {
+        let mut jobs = Vec::new();
+
+        // Priority 1: firehose_live (from ingester)
+        for _ in 0..INDEXER_BATCH_SIZE {
+            match self.storage.dequeue_firehose_live() {
+                Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("failed to dequeue firehose_live job: {e}");
                     break;
-                };
-
-                let pool = self.pool.clone();
-
-                let task = tokio::spawn(async move {
-                    let result = Self::process_job(&pool, &job).await;
-                    drop(permit);
-                    (key, source, result)
-                });
-
-                tasks.push(task);
+                }
             }
+        }
 
-            for task in tasks {
-                match task.await {
-                    Ok((key, source, Ok(()))) => {
-                        let remove_result = match source {
-                            QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
-                            QueueSource::FirehoseBackfill => {
-                                self.storage.remove_firehose_backfill(&key)
+        // Priority 2: firehose_backfill (from backfiller) if batch not full
+        if jobs.len() < INDEXER_BATCH_SIZE {
+            for _ in 0..(INDEXER_BATCH_SIZE - jobs.len()) {
+                match self.storage.dequeue_firehose_backfill() {
+                    Ok(Some((key, job))) => {
+                        jobs.push((key, job, QueueSource::FirehoseBackfill));
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue firehose_backfill job: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Priority 3: label_live - Process labels separately since they're different from IndexJobs
+        let mut label_jobs = Vec::new();
+        for _ in 0..INDEXER_BATCH_SIZE {
+            match self.storage.dequeue_label_live() {
+                Ok(Some((key, label_event))) => {
+                    label_jobs.push((key, label_event));
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("failed to dequeue label_live: {e}");
+                    break;
+                }
+            }
+        }
+
+        (jobs, label_jobs)
+    }
+
+    async fn process_label_jobs_batch(&self, label_jobs: Vec<(Vec<u8>, LabelEvent)>) {
+        if label_jobs.is_empty() {
+            return;
+        }
+
+        for (key, label_event) in label_jobs {
+            if let Ok(permit) = self.semaphore.clone().acquire_owned().await {
+                let pool = self.pool.clone();
+                let storage = self.storage.clone();
+
+                tokio::spawn(async move {
+                    let result = Self::process_label_event(&pool, &label_event).await;
+                    drop(permit);
+
+                    match result {
+                        Ok(()) => {
+                            if let Err(e) = storage.remove_label_live(&key) {
+                                tracing::error!("failed to remove label from queue: {e}");
                             }
-                            QueueSource::LabelLive => self.storage.remove_label_live(&key),
-                        };
-                        if let Err(e) = remove_result {
-                            tracing::error!("failed to remove index job from {:?}: {e}", source);
+                        }
+                        Err(e) => {
+                            tracing::error!("failed to process label event: {e}");
+                            crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
                         }
                     }
-                    Ok((_, _, Err(e))) => {
-                        crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                        tracing::error!("index job failed: {e}");
+                });
+            }
+        }
+    }
+
+    async fn spawn_index_job_tasks(
+        &self,
+        jobs: Vec<(Vec<u8>, IndexJob, QueueSource)>,
+    ) -> Vec<tokio::task::JoinHandle<(Vec<u8>, QueueSource, Result<(), WintermuteError>)>> {
+        let mut tasks = Vec::new();
+        for (key, job, source) in jobs {
+            let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
+                break;
+            };
+
+            let pool = self.pool.clone();
+
+            let task = tokio::spawn(async move {
+                let result = Self::process_job(&pool, &job).await;
+                drop(permit);
+                (key, source, result)
+            });
+
+            tasks.push(task);
+        }
+        tasks
+    }
+
+    async fn handle_job_results(&self, tasks: Vec<tokio::task::JoinHandle<JobTaskResult>>) {
+        for task in tasks {
+            match task.await {
+                Ok((key, source, Ok(()))) => {
+                    let remove_result = match source {
+                        QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
+                        QueueSource::FirehoseBackfill => {
+                            self.storage.remove_firehose_backfill(&key)
+                        }
+                        QueueSource::LabelLive => self.storage.remove_label_live(&key),
+                    };
+                    if let Err(e) = remove_result {
+                        tracing::error!("failed to remove index job from {:?}: {e}", source);
                     }
-                    Err(e) => {
-                        tracing::error!("task panicked: {e}");
-                    }
+                }
+                Ok((_, _, Err(e))) => {
+                    crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                    tracing::error!("index job failed: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("task panicked: {e}");
                 }
             }
         }
@@ -235,7 +262,10 @@ impl IndexerManager {
             .await?;
 
         let applied = result.is_some();
-        tracing::debug!("generic record insert result for {uri}: applied={applied}, result={:?}", result);
+        tracing::debug!(
+            "generic record insert result for {uri}: applied={applied}, result={:?}",
+            result
+        );
         if !applied {
             tracing::trace!("stale write rejected for {uri} with rev {rev}");
         }
@@ -263,7 +293,12 @@ impl IndexerManager {
     pub async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
         use crate::metrics;
 
-        tracing::debug!("process_job called: uri={}, action={:?}, has_record={}", job.uri, job.action, job.record.is_some());
+        tracing::debug!(
+            "process_job called: uri={}, action={:?}, has_record={}",
+            job.uri,
+            job.action,
+            job.record.is_some()
+        );
 
         metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
 
@@ -302,7 +337,10 @@ impl IndexerManager {
                     tracing::debug!("skipping stale write for {}", job.uri);
                     return Ok(());
                 }
-                tracing::debug!("proceeding to collection-specific indexing for {}", collection);
+                tracing::debug!(
+                    "proceeding to collection-specific indexing for {}",
+                    collection
+                );
 
                 match collection.as_str() {
                     "app.bsky.feed.post" => {
@@ -1276,7 +1314,6 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.labeler.service/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
-        let policies = record.get("policies").map(std::string::ToString::to_string);
         let created_at = record
             .get("createdAt")
             .and_then(|v| v.as_str())
@@ -1284,10 +1321,10 @@ impl IndexerManager {
 
         client
             .execute(
-                "INSERT INTO labeler (uri, cid, creator, policies, \"createdAt\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                "INSERT INTO labeler (uri, cid, creator, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT (uri) DO NOTHING",
-                &[&uri, &cid, &did, &policies, &created_at, &indexed_at],
+                &[&uri, &cid, &did, &created_at, &indexed_at],
             )
             .await?;
 
@@ -1533,14 +1570,31 @@ impl IndexerManager {
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
-        let proof = record.get("proof").and_then(|v| v.as_str());
+
+        // Extract fields from the verification record
+        let subject = record
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let handle = record
+            .get("handle")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let display_name = record
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
 
         client
             .execute(
-                "INSERT INTO verification (uri, cid, creator, proof, \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5)
+                "INSERT INTO verification (uri, cid, rkey, creator, subject, handle, \"displayName\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (uri) DO NOTHING",
-                &[&uri, &cid, &did, &proof, &indexed_at],
+                &[&uri, &cid, &rkey, &did, &subject, &handle, &display_name, &created_at, &indexed_at],
             )
             .await?;
 

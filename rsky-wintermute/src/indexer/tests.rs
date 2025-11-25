@@ -1051,12 +1051,18 @@ mod indexer_tests {
                     RepoOp {
                         action: "create".to_owned(),
                         path: "app.bsky.feed.post/testpost1".to_owned(),
-                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                        cid: Some(
+                            "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                                .to_owned(),
+                        ),
                     },
                     RepoOp {
                         action: "create".to_owned(),
                         path: "app.bsky.feed.like/testlike1".to_owned(),
-                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                        cid: Some(
+                            "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                                .to_owned(),
+                        ),
                     },
                 ],
                 blocks: vec![],
@@ -1078,30 +1084,22 @@ mod indexer_tests {
         let mut processed_count = 0;
 
         while let Ok(Some((key, job))) = storage.dequeue_firehose_live() {
-            tracing::info!(
-                "processing job: uri={}, action={:?}",
-                job.uri,
-                job.action
-            );
+            tracing::info!("processing job: uri={}, action={:?}", job.uri, job.action);
 
             // For this test, we'll create minimal records directly
             // (in production, indexer would extract from CAR blocks)
             let record = match job.uri.as_str() {
-                uri if uri.contains("app.bsky.feed.post") => {
-                    Some(serde_json::json!({
-                        "text": "Test post from firehose_live pipeline",
-                        "createdAt": job.indexed_at,
-                    }))
-                }
-                uri if uri.contains("app.bsky.feed.like") => {
-                    Some(serde_json::json!({
-                        "subject": {
-                            "uri": "at://did:plc:test/app.bsky.feed.post/abc",
-                            "cid": "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
-                        },
-                        "createdAt": job.indexed_at,
-                    }))
-                }
+                uri if uri.contains("app.bsky.feed.post") => Some(serde_json::json!({
+                    "text": "Test post from firehose_live pipeline",
+                    "createdAt": job.indexed_at,
+                })),
+                uri if uri.contains("app.bsky.feed.like") => Some(serde_json::json!({
+                    "subject": {
+                        "uri": "at://did:plc:test/app.bsky.feed.post/abc",
+                        "cid": "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                    },
+                    "createdAt": job.indexed_at,
+                })),
                 _ => None,
             };
 
@@ -1145,10 +1143,7 @@ mod indexer_tests {
         let client = pool.get().await.expect("failed to get db client");
 
         let post_count: i64 = client
-            .query_one(
-                "SELECT COUNT(*) FROM post WHERE creator = $1",
-                &[&test_did],
-            )
+            .query_one("SELECT COUNT(*) FROM post WHERE creator = $1", &[&test_did])
             .await
             .expect("failed to query post count")
             .get(0);
@@ -1173,5 +1168,471 @@ mod indexer_tests {
         tracing::info!(
             "firehose_live pipeline test complete - successfully processed 2 operations end-to-end"
         );
+    }
+
+    #[tokio::test]
+    async fn test_index_job_create_without_record() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+
+        let job = IndexJob {
+            uri: "at://did:plc:test/app.bsky.feed.post/123".to_owned(),
+            cid: "bafytest".to_owned(),
+            action: WriteAction::Create,
+            record: None, // Missing record for create
+            indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+            rev: "test".to_owned(),
+        };
+
+        let result = IndexerManager::process_job(&pool, &job).await;
+
+        // Should fail with missing record error
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("missing record"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_job_delete_operation() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:deletetest";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.post/abc123");
+
+        // First create a post
+        let create_job = IndexJob {
+            uri: test_uri.clone(),
+            cid: "bafytest1".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({
+                "text": "Test post to be deleted",
+                "createdAt": "2024-01-01T00:00:00Z"
+            })),
+            indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+            rev: "rev1".to_owned(),
+        };
+
+        IndexerManager::process_job(&pool, &create_job)
+            .await
+            .unwrap();
+
+        // Verify post exists
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one("SELECT COUNT(*) FROM post WHERE uri = $1", &[&test_uri])
+            .await
+            .unwrap();
+        let count: i64 = row.get(0);
+        assert_eq!(count, 1, "post should exist before delete");
+
+        // Now delete it
+        let delete_job = IndexJob {
+            uri: test_uri.clone(),
+            cid: "bafytest1".to_owned(),
+            action: WriteAction::Delete,
+            record: None,
+            indexed_at: "2024-01-01T01:00:00Z".to_owned(),
+            rev: "rev2".to_owned(),
+        };
+
+        IndexerManager::process_job(&pool, &delete_job)
+            .await
+            .unwrap();
+
+        // Verify post was deleted
+        let row = client
+            .query_one("SELECT COUNT(*) FROM post WHERE uri = $1", &[&test_uri])
+            .await
+            .unwrap();
+        let count: i64 = row.get(0);
+        assert_eq!(count, 0, "post should be deleted");
+
+        // Cleanup
+        cleanup_test_data(&pool, test_did).await;
+    }
+
+    #[tokio::test]
+    async fn test_index_job_stale_write_detection() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:staletest";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.post/xyz789");
+
+        // Create initial post with rev2
+        let initial_job = IndexJob {
+            uri: test_uri.clone(),
+            cid: "bafytest2".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({
+                "text": "Newer post",
+                "createdAt": "2024-01-01T00:00:00Z"
+            })),
+            indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+            rev: "rev2".to_owned(),
+        };
+
+        IndexerManager::process_job(&pool, &initial_job)
+            .await
+            .unwrap();
+
+        // Try to write older revision (rev1)
+        let stale_job = IndexJob {
+            uri: test_uri.clone(),
+            cid: "bafytest1".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({
+                "text": "Older post",
+                "createdAt": "2024-01-01T00:00:00Z"
+            })),
+            indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+            rev: "rev1".to_owned(), // Older revision
+        };
+
+        // Should succeed but skip the stale write
+        IndexerManager::process_job(&pool, &stale_job)
+            .await
+            .unwrap();
+
+        // Verify the newer revision is still there
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one("SELECT rev FROM record WHERE uri = $1", &[&test_uri])
+            .await
+            .unwrap();
+        let stored_rev: String = row.get(0);
+        assert_eq!(stored_rev, "rev2", "should keep newer revision");
+
+        // Cleanup
+        cleanup_test_data(&pool, test_did).await;
+    }
+
+    // Tests for new helper functions
+
+    #[tokio::test]
+    async fn test_update_queue_metrics() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        // Enqueue some jobs
+        for i in 0..5 {
+            let job = crate::types::IndexJob {
+                uri: format!("at://did:plc:test/app.bsky.feed.post/test{}", i),
+                cid: "bafytest".to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"text": "test"})),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "test".to_owned(),
+            };
+            manager.storage.enqueue_firehose_live(&job).unwrap();
+        }
+
+        // Call update_queue_metrics
+        manager.update_queue_metrics();
+
+        // Verify metrics were updated (can't directly access metrics, but verify it doesn't panic)
+        let queue_len = manager.storage.firehose_live_len().unwrap();
+        assert_eq!(queue_len, 5);
+    }
+
+    #[tokio::test]
+    async fn test_dequeue_prioritized_jobs_empty_queues() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        let (jobs, label_jobs) = manager.dequeue_prioritized_jobs();
+        assert_eq!(jobs.len(), 0, "should return empty jobs vec");
+        assert_eq!(label_jobs.len(), 0, "should return empty label_jobs vec");
+    }
+
+    #[tokio::test]
+    async fn test_dequeue_prioritized_jobs_firehose_live_priority() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        // Add jobs to both queues
+        for i in 0..3 {
+            let job = crate::types::IndexJob {
+                uri: format!("at://did:plc:live/app.bsky.feed.post/test{}", i),
+                cid: "bafylive".to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"text": "live"})),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "test".to_owned(),
+            };
+            manager.storage.enqueue_firehose_live(&job).unwrap();
+        }
+
+        for i in 0..3 {
+            let job = crate::types::IndexJob {
+                uri: format!("at://did:plc:backfill/app.bsky.feed.post/test{}", i),
+                cid: "bafybackfill".to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"text": "backfill"})),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "test".to_owned(),
+            };
+            manager.storage.enqueue_firehose_backfill(&job).unwrap();
+        }
+
+        let (jobs, _label_jobs) = manager.dequeue_prioritized_jobs();
+
+        // Should get firehose_live jobs first (dequeue returns same items until removed)
+        assert!(!jobs.is_empty());
+        // First batch should be from firehose_live
+        let first_cid = &jobs[0].1.cid;
+        assert_eq!(first_cid, "bafylive", "should prioritize firehose_live over backfill");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_index_job_tasks_empty() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        let tasks = manager.spawn_index_job_tasks(vec![]).await;
+        assert_eq!(tasks.len(), 0, "should return empty tasks vec for empty input");
+    }
+
+    #[tokio::test]
+    async fn test_handle_job_results_success() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        // Enqueue a job
+        let job = crate::types::IndexJob {
+            uri: "at://did:plc:test123/app.bsky.feed.post/test123".to_owned(),
+            cid: "bafytest".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"text": "test"})),
+            indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+            rev: "test".to_owned(),
+        };
+        manager.storage.enqueue_firehose_live(&job).unwrap();
+
+        let (key, _) = manager.storage.dequeue_firehose_live().unwrap().unwrap();
+
+        // Create a successful task result
+        let task = tokio::spawn(async move {
+            (key, crate::indexer::QueueSource::FirehoseLive, Ok(()))
+        });
+
+        manager.handle_job_results(vec![task]).await;
+
+        // Verify job was removed (queue should be empty after removal)
+        // Note: We can't verify directly as the queue still has items until we explicitly remove them
+        // This test verifies the handler logic runs without panicking
+    }
+
+    #[tokio::test]
+    async fn test_handle_job_results_failure() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        // Create a failed task result
+        let task = tokio::spawn(async move {
+            (
+                b"test_key".to_vec(),
+                crate::indexer::QueueSource::FirehoseLive,
+                Err(crate::types::WintermuteError::Other("test error".into())),
+            )
+        });
+
+        manager.handle_job_results(vec![task]).await;
+
+        // Verify the error was handled (this test verifies error handling doesn't panic)
+        // The INDEXER_RECORDS_FAILED_TOTAL metric should be incremented
+    }
+
+    #[tokio::test]
+    async fn test_process_label_jobs_batch_empty() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+
+        // Empty batch should return immediately
+        manager.process_label_jobs_batch(vec![]).await;
+
+        // Should not panic and should complete quickly
+    }
+
+    // Test delete operations for existing collection types
+    // This tests the delete_* functions which are largely uncovered
+    #[tokio::test]
+    async fn test_delete_operations() {
+        use crate::types::{IndexJob, WriteAction};
+        use serde_json::json;
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:deleteopstest";
+
+        cleanup_test_data(&pool, test_did).await;
+
+        let indexed_at = chrono::Utc::now().to_rfc3339();
+
+        // Test delete for each major collection type
+        let test_collections = vec![
+            ("app.bsky.feed.post", json!({"text": "test post", "createdAt": indexed_at.clone()})),
+            ("app.bsky.feed.like", json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/abc", "cid": "bafytest"}, "createdAt": indexed_at.clone()})),
+            ("app.bsky.graph.follow", json!({"subject": "did:plc:test", "createdAt": indexed_at.clone()})),
+            ("app.bsky.feed.repost", json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/def", "cid": "bafytest"}, "createdAt": indexed_at.clone()})),
+            ("app.bsky.graph.block", json!({"subject": "did:plc:blocked", "createdAt": indexed_at.clone()})),
+            ("app.bsky.actor.profile", json!({"displayName": "Test Profile"})),
+            ("app.bsky.feed.generator", json!({"did": test_did, "displayName": "Test Feed"})),
+            ("app.bsky.graph.list", json!({"name": "Test List", "purpose": "app.bsky.graph.defs#modlist"})),
+            ("app.bsky.graph.listitem", json!({"subject": "did:plc:test", "list": format!("at://{test_did}/app.bsky.graph.list/testlist")})),
+        ];
+
+        for (collection, record) in test_collections {
+            let uri = format!("at://{test_did}/{collection}/testrkey");
+
+            // First create the record
+            let create_job = IndexJob {
+                action: WriteAction::Create,
+                uri: uri.clone(),
+                cid: "bafytest123".to_owned(),
+                rev: "rev1".to_owned(),
+                record: Some(record),
+                indexed_at: indexed_at.clone(),
+            };
+
+            let result = IndexerManager::process_job(&pool, &create_job).await;
+            assert!(result.is_ok(), "Failed to create {collection}: {:?}", result.err());
+
+            // Then delete it
+            let delete_job = IndexJob {
+                action: WriteAction::Delete,
+                uri: uri.clone(),
+                cid: String::new(),
+                rev: "rev2".to_owned(),
+                record: None,
+                indexed_at: indexed_at.clone(),
+            };
+
+            let result = IndexerManager::process_job(&pool, &delete_job).await;
+            assert!(result.is_ok(), "Failed to delete {collection}: {:?}", result.err());
+        }
+
+        cleanup_test_data(&pool, test_did).await;
+    }
+
+    #[tokio::test]
+    async fn test_newer_collection_types() {
+        use crate::types::{IndexJob, WriteAction};
+        use serde_json::json;
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:newercollections";
+        cleanup_test_data(&pool, test_did).await;
+        let indexed_at = chrono::Utc::now().to_rfc3339();
+
+        // Test newer collection types that were previously untested
+        let test_collections = vec![
+            (
+                "app.bsky.verification.proof",
+                json!({
+                    "subject": "did:plc:verified",
+                    "handle": "verified.test",
+                    "displayName": "Verified User",
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+            (
+                "app.bsky.graph.starterpack",
+                json!({
+                    "name": "Test Starter Pack",
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+            (
+                "app.bsky.labeler.service",
+                json!({
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+            (
+                "app.bsky.feed.threadgate",
+                json!({
+                    "post": format!("at://{}/app.bsky.feed.post/testpost", test_did),
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+            (
+                "app.bsky.feed.postgate",
+                json!({
+                    "post": format!("at://{}/app.bsky.feed.post/testpost", test_did),
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+            (
+                "app.bsky.graph.listblock",
+                json!({
+                    "subject": format!("at://{}/app.bsky.graph.list/testlist", test_did),
+                    "createdAt": indexed_at.clone()
+                }),
+            ),
+        ];
+
+        for (collection, record) in test_collections.iter() {
+            let uri = format!("at://{test_did}/{collection}/testrkey");
+
+            // First create the record
+            let create_job = IndexJob {
+                action: WriteAction::Create,
+                uri: uri.clone(),
+                cid: "bafytest123".to_owned(),
+                rev: "rev1".to_owned(),
+                record: Some(record.clone()),
+                indexed_at: indexed_at.clone(),
+            };
+            let result = IndexerManager::process_job(&pool, &create_job).await;
+            assert!(
+                result.is_ok(),
+                "Failed to create {collection}: {:?}",
+                result.err()
+            );
+
+            // Then delete it
+            let delete_job = IndexJob {
+                action: WriteAction::Delete,
+                uri: uri.clone(),
+                cid: String::new(),
+                rev: "rev2".to_owned(),
+                record: None,
+                indexed_at: indexed_at.clone(),
+            };
+            let result = IndexerManager::process_job(&pool, &delete_job).await;
+            assert!(
+                result.is_ok(),
+                "Failed to delete {collection}: {:?}",
+                result.err()
+            );
+        }
+
+        cleanup_test_data(&pool, test_did).await;
     }
 }

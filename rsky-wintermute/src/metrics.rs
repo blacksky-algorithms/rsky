@@ -265,6 +265,14 @@ pub static BACKFILLER_VERIFICATION_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock
     .unwrap()
 });
 
+pub static BACKFILLER_BACKPRESSURE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfiller_backpressure_events_total",
+        "Total number of times backfiller paused due to output stream backpressure"
+    )
+    .unwrap()
+});
+
 // =============================================================================
 // INDEXER METRICS
 // =============================================================================

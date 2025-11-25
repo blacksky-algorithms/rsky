@@ -709,12 +709,18 @@ mod ingester_tests {
                     RepoOp {
                         action: "create".to_owned(),
                         path: "app.bsky.feed.post/abc123".to_owned(),
-                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                        cid: Some(
+                            "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                                .to_owned(),
+                        ),
                     },
                     RepoOp {
                         action: "update".to_owned(),
                         path: "app.bsky.actor.profile/self".to_owned(),
-                        cid: Some("bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa".to_owned()),
+                        cid: Some(
+                            "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa"
+                                .to_owned(),
+                        ),
                     },
                     RepoOp {
                         action: "delete".to_owned(),
@@ -730,7 +736,9 @@ mod ingester_tests {
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
 
         // Enqueue the event for indexing
-        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+        IngesterManager::enqueue_event_for_indexing(&storage, &event)
+            .await
+            .unwrap();
 
         // Should have 3 jobs (one for each operation)
         assert_eq!(storage.firehose_live_len().unwrap(), 3);
@@ -745,14 +753,38 @@ mod ingester_tests {
         assert_eq!(jobs.len(), 3);
 
         // Verify we have one of each action type
-        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Create)).count(), 1);
-        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Update)).count(), 1);
-        assert_eq!(jobs.iter().filter(|j| matches!(j.action, crate::types::WriteAction::Delete)).count(), 1);
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| matches!(j.action, crate::types::WriteAction::Create))
+                .count(),
+            1
+        );
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| matches!(j.action, crate::types::WriteAction::Update))
+                .count(),
+            1
+        );
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| matches!(j.action, crate::types::WriteAction::Delete))
+                .count(),
+            1
+        );
 
         // Verify URIs are correct
-        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.post/abc123"));
-        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.actor.profile/self"));
-        assert!(jobs.iter().any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.like/xyz789"));
+        assert!(
+            jobs.iter()
+                .any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.post/abc123")
+        );
+        assert!(
+            jobs.iter()
+                .any(|j| j.uri == "at://did:plc:test123/app.bsky.actor.profile/self")
+        );
+        assert!(
+            jobs.iter()
+                .any(|j| j.uri == "at://did:plc:test123/app.bsky.feed.like/xyz789")
+        );
 
         // Queue should be empty again
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
@@ -777,7 +809,9 @@ mod ingester_tests {
         };
 
         // Should succeed but not enqueue anything
-        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+        IngesterManager::enqueue_event_for_indexing(&storage, &event)
+            .await
+            .unwrap();
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
 
@@ -796,7 +830,9 @@ mod ingester_tests {
         };
 
         // Should succeed but not enqueue anything
-        IngesterManager::enqueue_event_for_indexing(&storage, &event).await.unwrap();
+        IngesterManager::enqueue_event_for_indexing(&storage, &event)
+            .await
+            .unwrap();
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
 }

@@ -54,5 +54,6 @@ serde_ipld_dagcbor = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
 
 [dev-dependencies]
+mockito = "1.7.0"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

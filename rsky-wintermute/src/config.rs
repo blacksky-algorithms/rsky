@@ -18,3 +18,6 @@ pub const FIREHOSE_PING_INTERVAL: Duration = Duration::from_secs(30);
 pub const BACKFILLER_TIMEOUT: Duration = Duration::from_secs(60);
 pub const INDEXER_BATCH_SIZE: usize = 500;
 pub const BACKFILLER_BATCH_SIZE: usize = 100;
+
+// Backpressure: pause backfiller when output stream exceeds this length
+pub const BACKFILLER_OUTPUT_HIGH_WATER_MARK: usize = 10_000;

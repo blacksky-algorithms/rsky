@@ -1,4 +1,6 @@
-mod backfill_queue;
+pub mod backfill_queue;
+#[cfg(test)]
+mod backfill_queue_tests;
 pub mod labels;
 mod tests;
 
@@ -159,7 +161,10 @@ impl IngesterManager {
 
                     // Convert event to index jobs and enqueue for indexer
                     if let Err(e) = Self::enqueue_event_for_indexing(storage, &event).await {
-                        tracing::error!("failed to enqueue event seq={} for indexing: {e}", event.seq);
+                        tracing::error!(
+                            "failed to enqueue event seq={} for indexing: {e}",
+                            event.seq
+                        );
                         metrics::INGESTER_ERRORS_TOTAL
                             .with_label_values(&["enqueue_failed"])
                             .inc();
