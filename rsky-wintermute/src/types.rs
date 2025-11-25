@@ -10,7 +10,7 @@ pub enum WintermuteError {
     #[error("pool error: {0}")]
     Pool(#[from] deadpool_postgres::PoolError),
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("serialization error: {0}")]
@@ -19,6 +19,12 @@ pub enum WintermuteError {
     Repo(String),
     #[error("other: {0}")]
     Other(String),
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for WintermuteError {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::WebSocket(Box::new(error))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,10 @@
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{BACKFILLER_BATCH_SIZE, BACKFILLER_TIMEOUT, WORKERS_BACKFILLER};
+use crate::config::{
+    BACKFILLER_BATCH_SIZE, BACKFILLER_OUTPUT_HIGH_WATER_MARK, BACKFILLER_TIMEOUT,
+    WORKERS_BACKFILLER,
+};
 use crate::storage::Storage;
 use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
 use iroh_car::CarReader;
@@ -16,6 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+
+// Type alias to reduce complexity
+type BackfillTaskResult = (Vec<u8>, BackfillJob, Result<(), WintermuteError>);
 
 pub struct BackfillerManager {
     workers: usize,
@@ -59,74 +65,111 @@ impl BackfillerManager {
                 break;
             }
 
-            // Update queue length metrics
-            if let Ok(queue_len) = self.storage.repo_backfill_len() {
-                crate::metrics::BACKFILLER_REPOS_WAITING
-                    .set(i64::try_from(queue_len).unwrap_or(i64::MAX));
-            }
-            if let Ok(output_len) = self.storage.firehose_backfill_len() {
-                crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH
-                    .set(i64::try_from(output_len).unwrap_or(i64::MAX));
+            self.update_metrics();
+
+            if self.check_backpressure().await {
+                continue;
             }
 
-            let mut jobs = Vec::new();
-            for _ in 0..BACKFILLER_BATCH_SIZE {
-                match self.storage.dequeue_backfill() {
-                    Ok(Some((key, job))) => jobs.push((key, job)),
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("failed to dequeue backfill job: {e}");
-                        break;
-                    }
-                }
-            }
-
+            let jobs = self.dequeue_batch();
             if jobs.is_empty() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
 
-            let mut tasks = Vec::new();
-            for (key, job) in jobs {
-                let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
-                    break;
-                };
+            let tasks = self.spawn_job_tasks(jobs).await;
+            self.handle_task_results(tasks).await;
+        }
+    }
 
-                let storage = Arc::clone(&self.storage);
-                let http_client = self.http_client.clone();
+    fn update_metrics(&self) {
+        if let Ok(queue_len) = self.storage.repo_backfill_len() {
+            crate::metrics::BACKFILLER_REPOS_WAITING
+                .set(i64::try_from(queue_len).unwrap_or(i64::MAX));
+        }
+    }
 
-                let task = tokio::spawn(async move {
-                    let result = Self::process_job(&storage, &http_client, &job).await;
-                    drop(permit);
-                    (key, job, result)
-                });
+    async fn check_backpressure(&self) -> bool {
+        if let Ok(output_len) = self.storage.firehose_backfill_len() {
+            crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH
+                .set(i64::try_from(output_len).unwrap_or(i64::MAX));
 
-                tasks.push(task);
+            if output_len >= BACKFILLER_OUTPUT_HIGH_WATER_MARK {
+                crate::metrics::BACKFILLER_BACKPRESSURE_EVENTS_TOTAL.inc();
+                tracing::warn!(
+                    "backpressure: output stream at {}, pausing backfiller (high water mark: {})",
+                    output_len,
+                    BACKFILLER_OUTPUT_HIGH_WATER_MARK
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                return true;
             }
+        }
+        false
+    }
 
-            for task in tasks {
-                match task.await {
-                    Ok((key, _job, Ok(()))) => {
-                        if let Err(e) = self.storage.remove_backfill(&key) {
-                            tracing::error!("failed to remove backfill job: {e}");
-                        }
+    fn dequeue_batch(&self) -> Vec<(Vec<u8>, BackfillJob)> {
+        let mut jobs = Vec::new();
+        for _ in 0..BACKFILLER_BATCH_SIZE {
+            match self.storage.dequeue_backfill() {
+                Ok(Some((key, job))) => jobs.push((key, job)),
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("failed to dequeue backfill job: {e}");
+                    break;
+                }
+            }
+        }
+        jobs
+    }
+
+    async fn spawn_job_tasks(
+        &self,
+        jobs: Vec<(Vec<u8>, BackfillJob)>,
+    ) -> Vec<tokio::task::JoinHandle<(Vec<u8>, BackfillJob, Result<(), WintermuteError>)>> {
+        let mut tasks = Vec::new();
+        for (key, job) in jobs {
+            let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
+                break;
+            };
+
+            let storage = Arc::clone(&self.storage);
+            let http_client = self.http_client.clone();
+
+            let task = tokio::spawn(async move {
+                let result = Self::process_job(&storage, &http_client, &job).await;
+                drop(permit);
+                (key, job, result)
+            });
+
+            tasks.push(task);
+        }
+        tasks
+    }
+
+    async fn handle_task_results(&self, tasks: Vec<tokio::task::JoinHandle<BackfillTaskResult>>) {
+        for task in tasks {
+            match task.await {
+                Ok((key, _job, Ok(()))) => {
+                    if let Err(e) = self.storage.remove_backfill(&key) {
+                        tracing::error!("failed to remove backfill job: {e}");
                     }
-                    Ok((key, mut job, Err(e))) => {
-                        tracing::error!("backfill job failed for {}: {e}", job.did);
-                        job.retry_count += 1;
-                        if job.retry_count < 3 {
-                            crate::metrics::BACKFILLER_RETRIES_ATTEMPTED_TOTAL.inc();
-                            drop(self.storage.remove_backfill(&key));
-                            drop(self.storage.enqueue_backfill(&job));
-                        } else {
-                            tracing::error!("backfill job exceeded retries: {}", job.did);
-                            crate::metrics::BACKFILLER_REPOS_DEAD_LETTERED_TOTAL.inc();
-                            drop(self.storage.remove_backfill(&key));
-                        }
+                }
+                Ok((key, mut job, Err(e))) => {
+                    tracing::error!("backfill job failed for {}: {e}", job.did);
+                    job.retry_count += 1;
+                    if job.retry_count < 3 {
+                        crate::metrics::BACKFILLER_RETRIES_ATTEMPTED_TOTAL.inc();
+                        drop(self.storage.remove_backfill(&key));
+                        drop(self.storage.enqueue_backfill(&job));
+                    } else {
+                        tracing::error!("backfill job exceeded retries: {}", job.did);
+                        crate::metrics::BACKFILLER_REPOS_DEAD_LETTERED_TOTAL.inc();
+                        drop(self.storage.remove_backfill(&key));
                     }
-                    Err(e) => {
-                        tracing::error!("task panicked: {e}");
-                    }
+                }
+                Err(e) => {
+                    tracing::error!("task panicked: {e}");
                 }
             }
         }

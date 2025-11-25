@@ -28,14 +28,26 @@ pub async fn populate_backfill_queue(
     let cursor_key = format!("backfill_enum:{relay_host}");
     let mut cursor = storage.get_cursor(&cursor_key)?.map(|c| c.to_string());
 
-    let clean_hostname = relay_host
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
+    // Preserve the scheme (http:// or https://) from the original URL for testing
+    let (scheme, clean_hostname) = if relay_host.starts_with("http://") {
+        (
+            "http",
+            relay_host
+                .trim_start_matches("http://")
+                .trim_end_matches('/'),
+        )
+    } else {
+        (
+            "https",
+            relay_host
+                .trim_start_matches("https://")
+                .trim_end_matches('/'),
+        )
+    };
 
     loop {
         let mut url = url::Url::parse(&format!(
-            "https://{clean_hostname}/xrpc/com.atproto.sync.listRepos"
+            "{scheme}://{clean_hostname}/xrpc/com.atproto.sync.listRepos"
         ))
         .map_err(|e| WintermuteError::Other(format!("invalid url: {e}")))?;
 
