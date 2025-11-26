@@ -1,12 +1,16 @@
 mod tests;
 
 use crate::SHUTDOWN;
+#[cfg(test)]
+use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
     HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID, IDENTITY_RESOLVER_TIMEOUT,
-    INDEXER_BATCH_SIZE, WORKERS_INDEXER,
+    WORKERS_INDEXER,
 };
 use crate::storage::Storage;
-use crate::types::{IndexJob, LabelEvent, WintermuteError, WriteAction};
+#[cfg(test)]
+use crate::types::LabelEvent;
+use crate::types::{IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
@@ -29,16 +33,21 @@ pub enum QueueSource {
 // Type aliases to reduce complexity
 #[cfg(test)]
 type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
+#[cfg(test)]
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
 type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
 type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
+type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
+type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
 pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
     pool: Pool,
-    semaphore: Arc<Semaphore>,
+    semaphore_live: Arc<Semaphore>,
+    semaphore_backfill: Arc<Semaphore>,
+    semaphore_labels: Arc<Semaphore>,
     id_resolver: Arc<Mutex<IdResolver>>,
 }
 
@@ -61,11 +70,15 @@ impl IndexerManager {
             backup_nameservers: None,
         });
 
+        let workers = *WORKERS_INDEXER;
         Ok(Self {
-            workers: *WORKERS_INDEXER,
+            workers,
             storage,
             pool,
-            semaphore: Arc::new(Semaphore::new(*WORKERS_INDEXER)),
+            // Each queue gets its own semaphore for independent concurrency
+            semaphore_live: Arc::new(Semaphore::new(workers)),
+            semaphore_backfill: Arc::new(Semaphore::new(workers)),
+            semaphore_labels: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(Mutex::new(id_resolver)),
         })
     }
@@ -218,8 +231,21 @@ impl IndexerManager {
                     "shutdown requested for firehose_live processor, draining {} in-flight tasks",
                     in_flight.len()
                 );
-                while let Some(result) = in_flight.next().await {
-                    self.handle_single_job_result(result);
+                // Drain with timeout to avoid hanging forever
+                let drain_start = std::time::Instant::now();
+                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
+                    tokio::select! {
+                        Some(result) = in_flight.next() => {
+                            self.handle_single_job_result(result);
+                        }
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+                if !in_flight.is_empty() {
+                    tracing::warn!(
+                        "firehose_live: {} tasks still in-flight after drain timeout",
+                        in_flight.len()
+                    );
                 }
                 break;
             }
@@ -227,10 +253,13 @@ impl IndexerManager {
             self.update_queue_metrics();
 
             // Try to fill up to semaphore capacity with new jobs
-            while self.semaphore.available_permits() > 0 {
+            while self.semaphore_live.available_permits() > 0 {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 match self.storage.dequeue_firehose_live() {
                     Ok(Some((key, job))) => {
-                        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+                        if let Ok(permit) = self.semaphore_live.clone().try_acquire_owned() {
                             let pool = self.pool.clone();
                             let task = tokio::spawn(async move {
                                 let result = Self::process_job(&pool, &job).await;
@@ -286,17 +315,33 @@ impl IndexerManager {
                     "shutdown requested for firehose_backfill processor, draining {} in-flight tasks",
                     in_flight.len()
                 );
-                while let Some(result) = in_flight.next().await {
-                    self.handle_single_job_result(result);
+                // Drain with timeout to avoid hanging forever
+                let drain_start = std::time::Instant::now();
+                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
+                    tokio::select! {
+                        Some(result) = in_flight.next() => {
+                            self.handle_single_job_result(result);
+                        }
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+                if !in_flight.is_empty() {
+                    tracing::warn!(
+                        "firehose_backfill: {} tasks still in-flight after drain timeout",
+                        in_flight.len()
+                    );
                 }
                 break;
             }
 
             // Try to fill up to semaphore capacity with new jobs
-            while self.semaphore.available_permits() > 0 {
+            while self.semaphore_backfill.available_permits() > 0 {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 match self.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, job))) => {
-                        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+                        if let Ok(permit) = self.semaphore_backfill.clone().try_acquire_owned() {
                             let pool = self.pool.clone();
                             let task = tokio::spawn(async move {
                                 let result = Self::process_job(&pool, &job).await;
@@ -341,30 +386,99 @@ impl IndexerManager {
 
     async fn process_labels_loop(&self) {
         tracing::info!("label_live processor started");
-        let mut batch_count = 0u64;
+        let mut in_flight: FuturesUnordered<LabelTaskHandle> = FuturesUnordered::new();
+        let mut processed_count = 0u64;
+        let mut last_log = std::time::Instant::now();
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for label_live processor");
+                tracing::info!(
+                    "shutdown requested for label_live processor, draining {} in-flight tasks",
+                    in_flight.len()
+                );
+                // Drain with timeout to avoid hanging forever
+                let drain_start = std::time::Instant::now();
+                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
+                    tokio::select! {
+                        Some(result) = in_flight.next() => {
+                            self.handle_single_label_result(result);
+                        }
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+                if !in_flight.is_empty() {
+                    tracing::warn!(
+                        "label_live: {} tasks still in-flight after drain timeout",
+                        in_flight.len()
+                    );
+                }
                 break;
             }
 
-            let label_jobs = self.dequeue_label_jobs();
-
-            if label_jobs.is_empty() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
+            // Try to fill up to semaphore capacity with new jobs
+            while self.semaphore_labels.available_permits() > 0 {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                match self.storage.dequeue_label_live() {
+                    Ok(Some((key, label_event))) => {
+                        if let Ok(permit) = self.semaphore_labels.clone().try_acquire_owned() {
+                            let pool = self.pool.clone();
+                            let task = tokio::spawn(async move {
+                                let result = Self::process_label_event(&pool, &label_event).await;
+                                drop(permit);
+                                (key, result)
+                            });
+                            in_flight.push(task);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue label_live job: {e}");
+                        break;
+                    }
+                }
             }
 
-            batch_count += 1;
-            if batch_count % 10 == 1 {
+            // Process completed tasks or wait briefly if nothing to do
+            if in_flight.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            } else {
+                tokio::select! {
+                    Some(result) = in_flight.next() => {
+                        self.handle_single_label_result(result);
+                        processed_count += 1;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+
+            // Log progress periodically
+            if last_log.elapsed() > Duration::from_secs(5) {
                 tracing::info!(
-                    "label_live processing batch {}, {} labels",
-                    batch_count,
-                    label_jobs.len()
+                    "label_live: processed {}, in_flight {}",
+                    processed_count,
+                    in_flight.len()
                 );
+                last_log = std::time::Instant::now();
             }
+        }
+    }
 
-            self.process_label_jobs_batch(label_jobs).await;
+    fn handle_single_label_result(&self, result: Result<LabelTaskResult, tokio::task::JoinError>) {
+        match result {
+            Ok((key, Ok(()))) => {
+                if let Err(e) = self.storage.remove_label_live(&key) {
+                    tracing::error!("failed to remove label from queue: {e}");
+                }
+            }
+            Ok((_, Err(e))) => {
+                crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                tracing::error!("label job failed: {e}");
+            }
+            Err(e) => {
+                tracing::error!("label task panicked: {e}");
+            }
         }
     }
 
@@ -415,6 +529,7 @@ impl IndexerManager {
         jobs
     }
 
+    #[cfg(test)]
     fn dequeue_label_jobs(&self) -> Vec<LabelJobWithMetadata> {
         let mut label_jobs = Vec::new();
         for _ in 0..*INDEXER_BATCH_SIZE {
@@ -440,36 +555,6 @@ impl IndexerManager {
         }
         let label_jobs = self.dequeue_label_jobs();
         (jobs, label_jobs)
-    }
-
-    async fn process_label_jobs_batch(&self, label_jobs: Vec<(Vec<u8>, LabelEvent)>) {
-        if label_jobs.is_empty() {
-            return;
-        }
-
-        for (key, label_event) in label_jobs {
-            if let Ok(permit) = self.semaphore.clone().acquire_owned().await {
-                let pool = self.pool.clone();
-                let storage = self.storage.clone();
-
-                tokio::spawn(async move {
-                    let result = Self::process_label_event(&pool, &label_event).await;
-                    drop(permit);
-
-                    match result {
-                        Ok(()) => {
-                            if let Err(e) = storage.remove_label_live(&key) {
-                                tracing::error!("failed to remove label from queue: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("failed to process label event: {e}");
-                            crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                        }
-                    }
-                });
-            }
-        }
     }
 
     fn handle_single_job_result(&self, result: JobTaskJoinResult) {
@@ -501,7 +586,8 @@ impl IndexerManager {
     ) -> Vec<tokio::task::JoinHandle<(Vec<u8>, QueueSource, Result<(), WintermuteError>)>> {
         let mut tasks = Vec::new();
         for (key, job, source) in jobs {
-            let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
+            // Use backfill semaphore for tests (most tests use backfill queue)
+            let Ok(permit) = self.semaphore_backfill.clone().acquire_owned().await else {
                 break;
             };
 

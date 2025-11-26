@@ -1,8 +1,10 @@
+use crate::SHUTDOWN;
 use crate::storage::Storage;
 use crate::types::{BackfillJob, WintermuteError};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
@@ -123,7 +125,15 @@ pub async fn populate_backfill_queue(
         )
     };
 
+    let mut total_enumerated = 0u64;
+    let mut last_log_count = 0u64;
+
     loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            tracing::info!("shutdown requested for backfill enumeration");
+            break;
+        }
+
         let mut url = url::Url::parse(&format!(
             "{scheme}://{clean_hostname}/xrpc/com.atproto.sync.listRepos"
         ))
@@ -133,8 +143,6 @@ pub async fn populate_backfill_queue(
         if let Some(ref c) = cursor {
             url.query_pairs_mut().append_pair("cursor", c);
         }
-
-        tracing::info!("fetching repos from {url}");
 
         let response = match http_client.get(url.as_str()).send().await {
             Ok(r) => r,
@@ -154,8 +162,6 @@ pub async fn populate_backfill_queue(
 
         let list_response: ListReposResponse = response.json().await?;
 
-        tracing::info!("received {} repos", list_response.repos.len());
-
         for repo in &list_response.repos {
             metrics::INGESTER_BACKFILL_REPOS_FETCHED_TOTAL.inc();
             let job = BackfillJob {
@@ -164,6 +170,7 @@ pub async fn populate_backfill_queue(
             };
             storage.enqueue_backfill(&job)?;
             metrics::INGESTER_BACKFILL_REPOS_WRITTEN_TOTAL.inc();
+            total_enumerated += 1;
         }
 
         if let Some(next_cursor) = list_response.cursor {
@@ -171,9 +178,26 @@ pub async fn populate_backfill_queue(
             cursor_store
                 .set(&cursor_key, next_cursor.parse::<i64>().unwrap_or(0))
                 .await?;
-            cursor = Some(next_cursor);
+            cursor = Some(next_cursor.clone());
+
+            // Log every 10K repos
+            if total_enumerated / 10_000 > last_log_count {
+                last_log_count = total_enumerated / 10_000;
+                let queue_len = storage.repo_backfill_len().unwrap_or(0);
+                tracing::info!(
+                    "enumerated {} repos, cursor={}, queue_len={}",
+                    total_enumerated,
+                    next_cursor,
+                    queue_len
+                );
+            }
         } else {
-            tracing::info!("backfill queue population complete for {relay_host}");
+            let queue_len = storage.repo_backfill_len().unwrap_or(0);
+            tracing::info!(
+                "backfill enumeration complete: {} repos, queue_len={}",
+                total_enumerated,
+                queue_len
+            );
             metrics::INGESTER_BACKFILL_COMPLETE.set(1);
             break;
         }

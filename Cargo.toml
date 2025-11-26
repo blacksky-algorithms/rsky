@@ -13,11 +13,7 @@ members = [
   "rsky-repo",
   "rsky-satnav",
   "rsky-syntax",
-  "rsky-ingester",
-  "rsky-indexer",
-  "rsky-backfiller",
   "rsky-wintermute",
-  "rsky-integration-tests",
 ]
 resolver = "2"
 

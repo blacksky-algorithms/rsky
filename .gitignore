@@ -163,6 +163,8 @@ dist
 .pnp.*
 
 wintermute_db
+backfill_cache
 rsky-wintermute/*.md
+!rsky-wintermute/README.md
 CLAUDE.md
 .claude
