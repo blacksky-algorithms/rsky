@@ -2,8 +2,8 @@ mod tests;
 
 use crate::SHUTDOWN;
 use crate::config::{
-    BACKFILLER_BATCH_SIZE, BACKFILLER_OUTPUT_HIGH_WATER_MARK, BACKFILLER_TIMEOUT,
-    WORKERS_BACKFILLER,
+    BACKFILLER_BATCH_SIZE, BACKFILLER_OUTPUT_HIGH_WATER_MARK, WORKERS_BACKFILLER,
+    backfiller_timeout,
 };
 use crate::storage::Storage;
 use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
@@ -32,15 +32,24 @@ pub struct BackfillerManager {
 
 impl BackfillerManager {
     pub fn new(storage: Arc<Storage>) -> Result<Self, WintermuteError> {
+        let workers = *WORKERS_BACKFILLER;
         let http_client = reqwest::Client::builder()
-            .timeout(BACKFILLER_TIMEOUT)
+            .timeout(backfiller_timeout())
             .build()?;
 
+        tracing::info!(
+            "backfiller config: workers={}, batch_size={}, high_water_mark={}, timeout={:?}",
+            workers,
+            *BACKFILLER_BATCH_SIZE,
+            *BACKFILLER_OUTPUT_HIGH_WATER_MARK,
+            backfiller_timeout()
+        );
+
         Ok(Self {
-            workers: WORKERS_BACKFILLER,
+            workers,
             storage,
             http_client,
-            semaphore: Arc::new(Semaphore::new(WORKERS_BACKFILLER)),
+            semaphore: Arc::new(Semaphore::new(workers)),
         })
     }
 
@@ -59,6 +68,10 @@ impl BackfillerManager {
     }
 
     async fn process_loop(&self) {
+        // Exponential backoff for empty queue: 100ms -> 200ms -> 400ms -> ... -> 5s max
+        const MAX_EMPTY_BACKOFF_MS: u64 = 5000;
+        let mut empty_backoff_ms = 100u64;
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for backfiller");
@@ -73,9 +86,13 @@ impl BackfillerManager {
 
             let jobs = self.dequeue_batch();
             if jobs.is_empty() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(empty_backoff_ms)).await;
+                empty_backoff_ms = (empty_backoff_ms * 2).min(MAX_EMPTY_BACKOFF_MS);
                 continue;
             }
+
+            // Reset backoff when we have work
+            empty_backoff_ms = 100;
 
             let tasks = self.spawn_job_tasks(jobs).await;
             self.handle_task_results(tasks).await;
@@ -90,16 +107,15 @@ impl BackfillerManager {
     }
 
     async fn check_backpressure(&self) -> bool {
+        let high_water_mark = *BACKFILLER_OUTPUT_HIGH_WATER_MARK;
         if let Ok(output_len) = self.storage.firehose_backfill_len() {
             crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH
                 .set(i64::try_from(output_len).unwrap_or(i64::MAX));
 
-            if output_len >= BACKFILLER_OUTPUT_HIGH_WATER_MARK {
+            if output_len >= high_water_mark {
                 crate::metrics::BACKFILLER_BACKPRESSURE_EVENTS_TOTAL.inc();
                 tracing::warn!(
-                    "backpressure: output stream at {}, pausing backfiller (high water mark: {})",
-                    output_len,
-                    BACKFILLER_OUTPUT_HIGH_WATER_MARK
+                    "backpressure: output stream at {output_len}, pausing (high water mark: {high_water_mark})"
                 );
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 return true;
@@ -109,8 +125,9 @@ impl BackfillerManager {
     }
 
     fn dequeue_batch(&self) -> Vec<(Vec<u8>, BackfillJob)> {
-        let mut jobs = Vec::new();
-        for _ in 0..BACKFILLER_BATCH_SIZE {
+        let batch_size = *BACKFILLER_BATCH_SIZE;
+        let mut jobs = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
             match self.storage.dequeue_backfill() {
                 Ok(Some((key, job))) => jobs.push((key, job)),
                 Ok(None) => break,

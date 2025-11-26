@@ -90,7 +90,7 @@ mod backfiller_tests {
         let (storage, _dir) = setup_test_storage();
 
         // Fill output stream beyond high water mark
-        for i in 0..BACKFILLER_OUTPUT_HIGH_WATER_MARK + 100 {
+        for i in 0..*BACKFILLER_OUTPUT_HIGH_WATER_MARK + 100 {
             let job = IndexJob {
                 uri: format!("at://did:plc:test/app.bsky.feed.post/test{i}"),
                 cid: "bafytest".to_owned(),
@@ -104,9 +104,10 @@ mod backfiller_tests {
 
         // Verify output stream length exceeds high water mark
         let output_len = storage.firehose_backfill_len().unwrap();
+        let high_water_mark = *BACKFILLER_OUTPUT_HIGH_WATER_MARK;
         assert!(
-            output_len > BACKFILLER_OUTPUT_HIGH_WATER_MARK,
-            "output stream should exceed high water mark: {output_len} > {BACKFILLER_OUTPUT_HIGH_WATER_MARK}"
+            output_len > high_water_mark,
+            "output stream should exceed high water mark: {output_len} > {high_water_mark}"
         );
     }
 
@@ -333,7 +334,7 @@ mod backfiller_tests {
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
         // Fill output stream beyond high water mark
-        for i in 0..BACKFILLER_OUTPUT_HIGH_WATER_MARK + 10 {
+        for i in 0..*BACKFILLER_OUTPUT_HIGH_WATER_MARK + 10 {
             let job = IndexJob {
                 uri: format!("at://did:plc:test/app.bsky.feed.post/test{i}"),
                 cid: "bafytest".to_owned(),
@@ -388,7 +389,7 @@ mod backfiller_tests {
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
         // Enqueue more than batch size
-        for i in 0..(BACKFILLER_BATCH_SIZE + 5) {
+        for i in 0..(*BACKFILLER_BATCH_SIZE + 5) {
             let job = BackfillJob {
                 did: format!("did:plc:test{i}"),
                 retry_count: 0,
@@ -399,7 +400,7 @@ mod backfiller_tests {
         let jobs = manager.dequeue_batch();
         assert_eq!(
             jobs.len(),
-            BACKFILLER_BATCH_SIZE,
+            *BACKFILLER_BATCH_SIZE,
             "should return batch_size jobs, not more"
         );
     }
@@ -702,7 +703,7 @@ mod backfiller_tests {
         assert!(result.is_ok());
 
         let manager = result.unwrap();
-        assert_eq!(manager.workers, crate::config::WORKERS_BACKFILLER);
+        assert_eq!(manager.workers, *crate::config::WORKERS_BACKFILLER);
 
         // HTTP client should be configured with timeout
         // We can't directly test the timeout config, but we know it was created

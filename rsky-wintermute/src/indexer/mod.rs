@@ -62,10 +62,10 @@ impl IndexerManager {
         });
 
         Ok(Self {
-            workers: WORKERS_INDEXER,
+            workers: *WORKERS_INDEXER,
             storage,
             pool,
-            semaphore: Arc::new(Semaphore::new(WORKERS_INDEXER)),
+            semaphore: Arc::new(Semaphore::new(*WORKERS_INDEXER)),
             id_resolver: Arc::new(Mutex::new(id_resolver)),
         })
     }
@@ -386,7 +386,7 @@ impl IndexerManager {
     #[cfg(test)]
     fn dequeue_firehose_live_jobs(&self) -> Vec<IndexJobWithMetadata> {
         let mut jobs = Vec::new();
-        for _ in 0..INDEXER_BATCH_SIZE {
+        for _ in 0..*INDEXER_BATCH_SIZE {
             match self.storage.dequeue_firehose_live() {
                 Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
                 Ok(None) => break,
@@ -402,7 +402,7 @@ impl IndexerManager {
     #[cfg(test)]
     fn dequeue_firehose_backfill_jobs(&self) -> Vec<IndexJobWithMetadata> {
         let mut jobs = Vec::new();
-        for _ in 0..INDEXER_BATCH_SIZE {
+        for _ in 0..*INDEXER_BATCH_SIZE {
             match self.storage.dequeue_firehose_backfill() {
                 Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseBackfill)),
                 Ok(None) => break,
@@ -417,7 +417,7 @@ impl IndexerManager {
 
     fn dequeue_label_jobs(&self) -> Vec<LabelJobWithMetadata> {
         let mut label_jobs = Vec::new();
-        for _ in 0..INDEXER_BATCH_SIZE {
+        for _ in 0..*INDEXER_BATCH_SIZE {
             match self.storage.dequeue_label_live() {
                 Ok(Some((key, label_event))) => {
                     label_jobs.push((key, label_event));
@@ -435,7 +435,7 @@ impl IndexerManager {
     #[cfg(test)]
     fn dequeue_prioritized_jobs(&self) -> (Vec<IndexJobWithMetadata>, Vec<LabelJobWithMetadata>) {
         let mut jobs = self.dequeue_firehose_live_jobs();
-        if jobs.len() < INDEXER_BATCH_SIZE {
+        if jobs.len() < *INDEXER_BATCH_SIZE {
             jobs.extend(self.dequeue_firehose_backfill_jobs());
         }
         let label_jobs = self.dequeue_label_jobs();
