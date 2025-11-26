@@ -1,11 +1,11 @@
+use rsky_wintermute::SHUTDOWN;
 use rsky_wintermute::backfiller::BackfillerManager;
 use rsky_wintermute::config::{BACKFILLER_BATCH_SIZE, BACKFILLER_OUTPUT_HIGH_WATER_MARK};
 use rsky_wintermute::storage::Storage;
 use rsky_wintermute::types::{BackfillJob, IndexJob, WriteAction};
-use rsky_wintermute::SHUTDOWN;
 use serde_json::json;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -50,10 +50,7 @@ async fn test_backfiller_processes_single_job() {
         });
 
         // This will fail because run() blocks forever, but we're testing the setup
-        let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            manager.run()
-        })
-        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), async { manager.run() }).await;
 
         manager_handle.abort();
     });

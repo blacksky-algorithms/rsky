@@ -1,15 +1,21 @@
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{INDEXER_BATCH_SIZE, WORKERS_INDEXER};
+use crate::config::{
+    HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID, IDENTITY_RESOLVER_TIMEOUT,
+    INDEXER_BATCH_SIZE, WORKERS_INDEXER,
+};
 use crate::storage::Storage;
 use crate::types::{IndexJob, LabelEvent, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures::stream::{FuturesUnordered, StreamExt};
+use rsky_identity::IdResolver;
+use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio_postgres::NoTls;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,15 +27,19 @@ pub enum QueueSource {
 }
 
 // Type aliases to reduce complexity
+#[cfg(test)]
 type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
+type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
+type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
 
 pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
     pool: Pool,
     semaphore: Arc<Semaphore>,
+    id_resolver: Arc<Mutex<IdResolver>>,
 }
 
 impl IndexerManager {
@@ -44,11 +54,19 @@ impl IndexerManager {
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))?;
 
+        let id_resolver = IdResolver::new(IdentityResolverOpts {
+            timeout: Some(IDENTITY_RESOLVER_TIMEOUT),
+            plc_url: None,
+            did_cache: None,
+            backup_nameservers: None,
+        });
+
         Ok(Self {
             workers: WORKERS_INDEXER,
             storage,
             pool,
             semaphore: Arc::new(Semaphore::new(WORKERS_INDEXER)),
+            id_resolver: Arc::new(Mutex::new(id_resolver)),
         })
     }
 
@@ -59,33 +77,294 @@ impl IndexerManager {
             .build()
             .map_err(|e| WintermuteError::Other(format!("failed to create runtime: {e}")))?;
 
+        // Wrap self in Arc for sharing across spawned tasks
+        let manager = Arc::new(self);
+
         rt.block_on(async {
-            self.process_loop().await;
+            tracing::info!("indexer starting 4 parallel processors");
+
+            // Spawn each processor as independent task for true parallelism
+            let live_handle = {
+                let mgr = manager.clone();
+                tokio::spawn(async move { mgr.process_firehose_live_loop().await })
+            };
+
+            let backfill_handle = {
+                let mgr = manager.clone();
+                tokio::spawn(async move { mgr.process_firehose_backfill_loop().await })
+            };
+
+            let labels_handle = {
+                let mgr = manager.clone();
+                tokio::spawn(async move { mgr.process_labels_loop().await })
+            };
+
+            let handles_handle = {
+                let mgr = manager.clone();
+                tokio::spawn(async move { mgr.process_handle_resolution_loop().await })
+            };
+
+            // Wait for all to complete (they run until shutdown)
+            let _results =
+                tokio::join!(live_handle, backfill_handle, labels_handle, handles_handle);
         });
 
         Ok(())
     }
 
-    async fn process_loop(&self) {
+    async fn process_handle_resolution_loop(&self) {
+        tracing::info!("handle resolution processor started");
+        let mut batch_count = 0u64;
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for indexer");
+                tracing::info!("shutdown requested for handle resolution processor");
+                break;
+            }
+
+            // Query actors with NULL handle or stale indexedAt
+            let dids_to_resolve = match self.get_actors_needing_handle_resolution().await {
+                Ok(dids) => dids,
+                Err(e) => {
+                    tracing::warn!("failed to get actors needing handle resolution: {e}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            if dids_to_resolve.is_empty() {
+                // No work to do, sleep longer
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                continue;
+            }
+
+            batch_count += 1;
+            if batch_count % 10 == 1 {
+                tracing::info!(
+                    "handle resolution batch {}, {} actors",
+                    batch_count,
+                    dids_to_resolve.len()
+                );
+            }
+
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let client = match self.pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("failed to get db connection: {e}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            let mut resolved_count = 0;
+            for did in dids_to_resolve {
+                match Self::index_handle(&client, &self.id_resolver, &did, &timestamp, false).await
+                {
+                    Ok(true) => resolved_count += 1,
+                    Ok(false) => {}
+                    Err(e) => tracing::debug!("handle resolution error for {did}: {e}"),
+                }
+
+                // Rate limit: 100ms between resolutions to avoid hammering DID resolvers
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            if resolved_count > 0 {
+                tracing::info!("resolved {resolved_count} handles in batch {batch_count}");
+            }
+        }
+    }
+
+    async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {
+        let client = self.pool.get().await?;
+
+        // Get actors with NULL handle or stale indexedAt
+        // Priority: NULL handles first, then stale valid handles
+        // RFC3339 strings are lexicographically sortable, so we compare as text
+        let stale_threshold_invalid = (chrono::Utc::now()
+            - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_INVALID).unwrap_or_default())
+        .to_rfc3339();
+        let stale_threshold_valid = (chrono::Utc::now()
+            - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_VALID).unwrap_or_default())
+        .to_rfc3339();
+
+        let rows = client
+            .query(
+                "SELECT did FROM actor
+                 WHERE (handle IS NULL AND \"indexedAt\" < $1)
+                    OR (handle IS NOT NULL AND \"indexedAt\" < $2)
+                 ORDER BY
+                   CASE WHEN handle IS NULL THEN 0 ELSE 1 END,
+                   \"indexedAt\" ASC
+                 LIMIT 100",
+                &[&stale_threshold_invalid, &stale_threshold_valid],
+            )
+            .await?;
+
+        let dids: Vec<String> = rows.iter().map(|row| row.get("did")).collect();
+        Ok(dids)
+    }
+
+    async fn process_firehose_live_loop(&self) {
+        tracing::info!("firehose_live processor started");
+        let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
+        let mut processed_count = 0u64;
+        let mut last_log = std::time::Instant::now();
+
+        loop {
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!(
+                    "shutdown requested for firehose_live processor, draining {} in-flight tasks",
+                    in_flight.len()
+                );
+                while let Some(result) = in_flight.next().await {
+                    self.handle_single_job_result(result);
+                }
                 break;
             }
 
             self.update_queue_metrics();
 
-            let (jobs, label_jobs) = self.dequeue_prioritized_jobs();
+            // Try to fill up to semaphore capacity with new jobs
+            while self.semaphore.available_permits() > 0 {
+                match self.storage.dequeue_firehose_live() {
+                    Ok(Some((key, job))) => {
+                        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+                            let pool = self.pool.clone();
+                            let task = tokio::spawn(async move {
+                                let result = Self::process_job(&pool, &job).await;
+                                drop(permit);
+                                (key, QueueSource::FirehoseLive, result)
+                            });
+                            in_flight.push(task);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue firehose_live job: {e}");
+                        break;
+                    }
+                }
+            }
 
-            self.process_label_jobs_batch(label_jobs).await;
+            // Process completed tasks or wait briefly if nothing to do
+            if in_flight.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            } else {
+                // Process one completed result (non-blocking if available)
+                tokio::select! {
+                    Some(result) = in_flight.next() => {
+                        self.handle_single_job_result(result);
+                        processed_count += 1;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
 
-            if jobs.is_empty() {
+            // Log progress periodically
+            if last_log.elapsed() > Duration::from_secs(5) {
+                tracing::info!(
+                    "firehose_live: processed {}, in_flight {}",
+                    processed_count,
+                    in_flight.len()
+                );
+                last_log = std::time::Instant::now();
+            }
+        }
+    }
+
+    async fn process_firehose_backfill_loop(&self) {
+        tracing::info!("firehose_backfill processor started");
+        let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
+        let mut processed_count = 0u64;
+        let mut last_log = std::time::Instant::now();
+
+        loop {
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!(
+                    "shutdown requested for firehose_backfill processor, draining {} in-flight tasks",
+                    in_flight.len()
+                );
+                while let Some(result) = in_flight.next().await {
+                    self.handle_single_job_result(result);
+                }
+                break;
+            }
+
+            // Try to fill up to semaphore capacity with new jobs
+            while self.semaphore.available_permits() > 0 {
+                match self.storage.dequeue_firehose_backfill() {
+                    Ok(Some((key, job))) => {
+                        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+                            let pool = self.pool.clone();
+                            let task = tokio::spawn(async move {
+                                let result = Self::process_job(&pool, &job).await;
+                                drop(permit);
+                                (key, QueueSource::FirehoseBackfill, result)
+                            });
+                            in_flight.push(task);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("failed to dequeue firehose_backfill job: {e}");
+                        break;
+                    }
+                }
+            }
+
+            // Process completed tasks or wait briefly if nothing to do
+            if in_flight.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            } else {
+                tokio::select! {
+                    Some(result) = in_flight.next() => {
+                        self.handle_single_job_result(result);
+                        processed_count += 1;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+
+            // Log progress periodically
+            if last_log.elapsed() > Duration::from_secs(5) {
+                tracing::info!(
+                    "firehose_backfill: processed {}, in_flight {}",
+                    processed_count,
+                    in_flight.len()
+                );
+                last_log = std::time::Instant::now();
+            }
+        }
+    }
+
+    async fn process_labels_loop(&self) {
+        tracing::info!("label_live processor started");
+        let mut batch_count = 0u64;
+        loop {
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!("shutdown requested for label_live processor");
+                break;
+            }
+
+            let label_jobs = self.dequeue_label_jobs();
+
+            if label_jobs.is_empty() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
 
-            let tasks = self.spawn_index_job_tasks(jobs).await;
-            self.handle_job_results(tasks).await;
+            batch_count += 1;
+            if batch_count % 10 == 1 {
+                tracing::info!(
+                    "label_live processing batch {}, {} labels",
+                    batch_count,
+                    label_jobs.len()
+                );
+            }
+
+            self.process_label_jobs_batch(label_jobs).await;
         }
     }
 
@@ -104,10 +383,9 @@ impl IndexerManager {
         }
     }
 
-    fn dequeue_prioritized_jobs(&self) -> (Vec<IndexJobWithMetadata>, Vec<LabelJobWithMetadata>) {
+    #[cfg(test)]
+    fn dequeue_firehose_live_jobs(&self) -> Vec<IndexJobWithMetadata> {
         let mut jobs = Vec::new();
-
-        // Priority 1: firehose_live (from ingester)
         for _ in 0..INDEXER_BATCH_SIZE {
             match self.storage.dequeue_firehose_live() {
                 Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
@@ -118,24 +396,26 @@ impl IndexerManager {
                 }
             }
         }
+        jobs
+    }
 
-        // Priority 2: firehose_backfill (from backfiller) if batch not full
-        if jobs.len() < INDEXER_BATCH_SIZE {
-            for _ in 0..(INDEXER_BATCH_SIZE - jobs.len()) {
-                match self.storage.dequeue_firehose_backfill() {
-                    Ok(Some((key, job))) => {
-                        jobs.push((key, job, QueueSource::FirehoseBackfill));
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("failed to dequeue firehose_backfill job: {e}");
-                        break;
-                    }
+    #[cfg(test)]
+    fn dequeue_firehose_backfill_jobs(&self) -> Vec<IndexJobWithMetadata> {
+        let mut jobs = Vec::new();
+        for _ in 0..INDEXER_BATCH_SIZE {
+            match self.storage.dequeue_firehose_backfill() {
+                Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseBackfill)),
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!("failed to dequeue firehose_backfill job: {e}");
+                    break;
                 }
             }
         }
+        jobs
+    }
 
-        // Priority 3: label_live - Process labels separately since they're different from IndexJobs
+    fn dequeue_label_jobs(&self) -> Vec<LabelJobWithMetadata> {
         let mut label_jobs = Vec::new();
         for _ in 0..INDEXER_BATCH_SIZE {
             match self.storage.dequeue_label_live() {
@@ -149,7 +429,16 @@ impl IndexerManager {
                 }
             }
         }
+        label_jobs
+    }
 
+    #[cfg(test)]
+    fn dequeue_prioritized_jobs(&self) -> (Vec<IndexJobWithMetadata>, Vec<LabelJobWithMetadata>) {
+        let mut jobs = self.dequeue_firehose_live_jobs();
+        if jobs.len() < INDEXER_BATCH_SIZE {
+            jobs.extend(self.dequeue_firehose_backfill_jobs());
+        }
+        let label_jobs = self.dequeue_label_jobs();
         (jobs, label_jobs)
     }
 
@@ -183,6 +472,29 @@ impl IndexerManager {
         }
     }
 
+    fn handle_single_job_result(&self, result: JobTaskJoinResult) {
+        match result {
+            Ok((key, source, Ok(()))) => {
+                let remove_result = match source {
+                    QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
+                    QueueSource::FirehoseBackfill => self.storage.remove_firehose_backfill(&key),
+                    QueueSource::LabelLive => self.storage.remove_label_live(&key),
+                };
+                if let Err(e) = remove_result {
+                    tracing::error!("failed to remove index job from {:?}: {e}", source);
+                }
+            }
+            Ok((_, _, Err(e))) => {
+                crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                tracing::error!("index job failed: {e}");
+            }
+            Err(e) => {
+                tracing::error!("task panicked: {e}");
+            }
+        }
+    }
+
+    #[cfg(test)]
     async fn spawn_index_job_tasks(
         &self,
         jobs: Vec<(Vec<u8>, IndexJob, QueueSource)>,
@@ -206,6 +518,7 @@ impl IndexerManager {
         tasks
     }
 
+    #[cfg(test)]
     async fn handle_job_results(&self, tasks: Vec<tokio::task::JoinHandle<JobTaskResult>>) {
         for task in tasks {
             match task.await {
@@ -230,6 +543,154 @@ impl IndexerManager {
                 }
             }
         }
+    }
+
+    async fn ensure_actor_exists(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        client
+            .execute(
+                "INSERT INTO actor (did, \"indexedAt\")
+                 VALUES ($1, $2)
+                 ON CONFLICT (did) DO NOTHING",
+                &[&did, &indexed_at],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve and verify a handle for a DID, updating the actor table.
+    /// Returns true if handle was successfully resolved and stored.
+    pub async fn index_handle(
+        client: &deadpool_postgres::Client,
+        id_resolver: &Arc<Mutex<IdResolver>>,
+        did: &str,
+        timestamp: &str,
+        force: bool,
+    ) -> Result<bool, WintermuteError> {
+        // Check if actor exists and needs reindex
+        let actor_row = client
+            .query_opt(
+                "SELECT handle, \"indexedAt\" FROM actor WHERE did = $1",
+                &[&did],
+            )
+            .await?;
+
+        if !force {
+            if let Some(row) = &actor_row {
+                let current_handle: Option<String> = row.get("handle");
+                let indexed_at: String = row.get("indexedAt");
+
+                if let Ok(last_indexed) = chrono::DateTime::parse_from_rfc3339(&indexed_at) {
+                    let now = chrono::Utc::now();
+                    let age = now.signed_duration_since(last_indexed);
+
+                    let reindex_threshold = if current_handle.is_some() {
+                        HANDLE_REINDEX_INTERVAL_VALID
+                    } else {
+                        HANDLE_REINDEX_INTERVAL_INVALID
+                    };
+
+                    if age < chrono::Duration::from_std(reindex_threshold).unwrap_or_default() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        // Resolve DID document to get handle
+        let did_doc = {
+            let mut resolver = id_resolver.lock().await;
+            match resolver.did.resolve(did.to_owned(), Some(true)).await {
+                Ok(Some(doc)) => doc,
+                Ok(None) => {
+                    tracing::debug!("DID not found: {did}");
+                    return Ok(false);
+                }
+                Err(e) => {
+                    tracing::debug!("failed to resolve DID {did}: {e}");
+                    return Ok(false);
+                }
+            }
+        };
+
+        // Extract handle from alsoKnownAs (format: "at://<handle>")
+        let handle = did_doc.also_known_as.as_ref().and_then(|aka| {
+            aka.iter()
+                .find(|s| s.starts_with("at://"))
+                .map(|s| s.trim_start_matches("at://").to_lowercase())
+        });
+
+        let handle = match handle {
+            Some(h) if !h.is_empty() => h,
+            _ => {
+                tracing::debug!("no handle found in DID document for {did}");
+                // Update actor indexedAt even if no handle found
+                client
+                    .execute(
+                        "UPDATE actor SET \"indexedAt\" = $2 WHERE did = $1",
+                        &[&did, &timestamp],
+                    )
+                    .await?;
+                return Ok(false);
+            }
+        };
+
+        // Verify bidirectional binding: handle -> DID
+        let handle_did = {
+            let mut resolver = id_resolver.lock().await;
+            match resolver.handle.resolve(&handle).await {
+                Ok(Some(resolved_did)) => resolved_did,
+                Ok(None) => {
+                    tracing::debug!("handle {handle} does not resolve to a DID");
+                    client
+                        .execute(
+                            "UPDATE actor SET handle = NULL, \"indexedAt\" = $2 WHERE did = $1",
+                            &[&did, &timestamp],
+                        )
+                        .await?;
+                    return Ok(false);
+                }
+                Err(e) => {
+                    tracing::debug!("failed to resolve handle {handle}: {e}");
+                    return Ok(false);
+                }
+            }
+        };
+
+        // Handle is only valid if it resolves back to this DID
+        let verified_handle = if handle_did == did {
+            Some(handle)
+        } else {
+            tracing::debug!("handle {handle} resolves to {handle_did}, expected {did}");
+            None
+        };
+
+        // Handle contention: if another actor has this handle, remove it
+        if let Some(ref h) = verified_handle {
+            client
+                .execute(
+                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
+                    &[&h, &did],
+                )
+                .await?;
+        }
+
+        // Update actor with handle
+        client
+            .execute(
+                "INSERT INTO actor (did, handle, \"indexedAt\")
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (did) DO UPDATE SET
+                   handle = EXCLUDED.handle,
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                &[&did, &verified_handle, &timestamp],
+            )
+            .await?;
+
+        Ok(verified_handle.is_some())
     }
 
     async fn insert_generic_record(
@@ -317,6 +778,10 @@ impl IndexerManager {
         match job.action {
             WriteAction::Create | WriteAction::Update => {
                 tracing::debug!("processing create/update action");
+
+                // Ensure actor row exists for this DID
+                Self::ensure_actor_exists(&client, did.as_str(), &job.indexed_at).await?;
+
                 let record_json = job.record.as_ref().ok_or_else(|| {
                     WintermuteError::Other("missing record for create/update".into())
                 })?;
@@ -687,7 +1152,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &text, &created_at, &indexed_at],
             )
             .await?;
@@ -748,7 +1213,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -813,11 +1278,16 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        // Ensure the follow subject also has an actor row
+        if !subject.is_empty() {
+            Self::ensure_actor_exists(client, subject, indexed_at).await?;
+        }
+
         let row_count = client
             .execute(
                 "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
             )
             .await?;
@@ -897,7 +1367,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -961,6 +1431,11 @@ impl IndexerManager {
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
+
+        // Ensure the block subject also has an actor row
+        if !subject.is_empty() {
+            Self::ensure_actor_exists(client, subject, indexed_at).await?;
+        }
 
         client
             .execute(
@@ -1026,7 +1501,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"joinedViaStarterPackUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &display_name, &description, &avatar_cid, &banner_cid, &joined_via_uri, &created_at, &indexed_at],
             )
             .await?;
@@ -1093,7 +1568,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO feed_generator (uri, cid, creator, \"feedDid\", \"displayName\", description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &feed_did, &display_name, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -1145,7 +1620,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO list (uri, cid, creator, name, purpose, description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &name, &purpose, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -1185,11 +1660,18 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        // Ensure the list item subject also has an actor row
+        if let Some(subj) = subject {
+            if !subj.is_empty() {
+                Self::ensure_actor_exists(client, subj, indexed_at).await?;
+            }
+        }
+
         client
             .execute(
                 "INSERT INTO list_item (uri, cid, creator, \"listUri\", \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &list_uri, &subject, &created_at, &indexed_at],
             )
             .await?;
@@ -1232,7 +1714,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO list_block (uri, cid, creator, \"subjectUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
             )
             .await?;
@@ -1278,7 +1760,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO starter_pack (uri, cid, creator, name, \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &name, &created_at, &indexed_at],
             )
             .await?;
@@ -1323,7 +1805,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO labeler (uri, cid, creator, \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &created_at, &indexed_at],
             )
             .await?;
@@ -1366,7 +1848,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO thread_gate (uri, cid, creator, \"postUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &post_uri, &created_at, &indexed_at],
             )
             .await?;
@@ -1409,7 +1891,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO post_gate (uri, cid, creator, \"postUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &post_uri, &created_at, &indexed_at],
             )
             .await?;
@@ -1472,87 +1954,83 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(clippy::unused_async)]
     async fn index_notif_declaration(
-        client: &deadpool_postgres::Client,
+        _client: &deadpool_postgres::Client,
         did: &str,
         rkey: &str,
-        record: &serde_json::Value,
-        cid: &str,
-        indexed_at: &str,
+        _record: &serde_json::Value,
+        _cid: &str,
+        _indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        // Placeholder - this record type is only indexed in the generic record table
         let uri_obj = AtUri::new(
             format!("at://{did}/app.bsky.notification.declaration/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
-        let uri = uri_obj.to_string();
-        let allow_incoming = record.get("allowIncoming").and_then(|v| v.as_str());
 
-        client
-            .execute(
-                "INSERT INTO notif_declaration (uri, cid, creator, \"allowIncoming\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO NOTHING",
-                &[&uri, &cid, &did, &allow_incoming, &indexed_at],
-            )
-            .await?;
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
 
         Ok(())
     }
 
+    #[allow(clippy::unused_async)]
     async fn delete_notif_declaration(
-        client: &deadpool_postgres::Client,
+        _client: &deadpool_postgres::Client,
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
+        // Placeholder - this record type is only indexed in the generic record table
         let uri_obj = AtUri::new(
             format!("at://{did}/app.bsky.notification.declaration/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
-        let uri = uri_obj.to_string();
-        client
-            .execute("DELETE FROM notif_declaration WHERE uri = $1", &[&uri])
-            .await?;
+
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
+
         Ok(())
     }
 
+    #[allow(clippy::unused_async)]
     async fn index_status(
-        client: &deadpool_postgres::Client,
+        _client: &deadpool_postgres::Client,
         did: &str,
         rkey: &str,
-        record: &serde_json::Value,
-        cid: &str,
-        indexed_at: &str,
+        _record: &serde_json::Value,
+        _cid: &str,
+        _indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        // Placeholder - app.bsky.actor.status table doesn't exist in production schema
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.status/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
-        let uri = uri_obj.to_string();
-        let status = record.get("status").and_then(|v| v.as_str());
 
-        client
-            .execute(
-                "INSERT INTO status (uri, cid, creator, status, \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (uri) DO NOTHING",
-                &[&uri, &cid, &did, &status, &indexed_at],
-            )
-            .await?;
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
 
         Ok(())
     }
 
+    #[allow(clippy::unused_async)]
     async fn delete_status(
-        client: &deadpool_postgres::Client,
+        _client: &deadpool_postgres::Client,
         did: &str,
         rkey: &str,
     ) -> Result<(), WintermuteError> {
+        // Placeholder - app.bsky.actor.status table doesn't exist in production schema
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.status/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
-        let uri = uri_obj.to_string();
-        client
-            .execute("DELETE FROM status WHERE uri = $1", &[&uri])
-            .await?;
+
+        if uri_obj.get_rkey() != "self" {
+            return Ok(());
+        }
+
         Ok(())
     }
 
@@ -1572,14 +2050,8 @@ impl IndexerManager {
         let uri = uri_obj.to_string();
 
         // Extract fields from the verification record
-        let subject = record
-            .get("subject")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let handle = record
-            .get("handle")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+        let handle = record.get("handle").and_then(|v| v.as_str()).unwrap_or("");
         let display_name = record
             .get("displayName")
             .and_then(|v| v.as_str())
@@ -1593,7 +2065,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO verification (uri, cid, rkey, creator, subject, handle, \"displayName\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT (uri) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &rkey, &did, &subject, &handle, &display_name, &created_at, &indexed_at],
             )
             .await?;

@@ -148,10 +148,34 @@ fn start_metrics_server(port: u16) -> Result<()> {
         .map_err(|e| color_eyre::eyre::eyre!("failed to create tokio runtime: {e}"))?;
 
     rt.block_on(async move {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!("failed to bind metrics server: {e}"))?;
+        // Try up to 10 consecutive ports starting from the requested one
+        let mut listener = None;
+        let mut bound_port = port;
+        for offset in 0..10 {
+            let try_port = port.saturating_add(offset);
+            let addr = SocketAddr::from(([0, 0, 0, 0], try_port));
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    if offset > 0 {
+                        tracing::warn!("port {port} in use, using alternate port {try_port}");
+                    }
+                    listener = Some(l);
+                    bound_port = try_port;
+                    break;
+                }
+                Err(e) if offset < 9 => {
+                    tracing::debug!("port {try_port} unavailable: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to bind metrics server on ports {port}-{try_port}: {e}"
+                    ));
+                }
+            }
+        }
+        let listener = listener.unwrap();
+        let addr = SocketAddr::from(([0, 0, 0, 0], bound_port));
 
         tracing::info!("metrics server listening on http://{addr}/metrics");
 

@@ -118,14 +118,18 @@ impl Storage {
             return Ok(None);
         };
         let (key, value) = entry?;
+        let key_vec = key.to_vec();
         let job = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        // Remove immediately to prevent re-dequeue race condition
+        self.repo_backfill.remove(&key_vec)?;
         crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.dec();
-        Ok(Some((key.to_vec(), job)))
+        Ok(Some((key_vec, job)))
     }
 
-    pub fn remove_backfill(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.repo_backfill.remove(key)?;
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn remove_backfill(&self, _key: &[u8]) -> Result<(), WintermuteError> {
+        // Item already removed in dequeue - this is now a no-op for compatibility
         Ok(())
     }
 
@@ -151,14 +155,18 @@ impl Storage {
             return Ok(None);
         };
         let (key, value) = entry?;
+        let key_vec = key.to_vec();
         let job = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        // Remove immediately to prevent re-dequeue race condition
+        self.firehose_live.remove(&key_vec)?;
         crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.dec();
-        Ok(Some((key.to_vec(), job)))
+        Ok(Some((key_vec, job)))
     }
 
-    pub fn remove_firehose_live(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.firehose_live.remove(key)?;
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn remove_firehose_live(&self, _key: &[u8]) -> Result<(), WintermuteError> {
+        // Item already removed in dequeue - this is now a no-op for compatibility
         Ok(())
     }
 
@@ -186,14 +194,18 @@ impl Storage {
             return Ok(None);
         };
         let (key, value) = entry?;
+        let key_vec = key.to_vec();
         let job = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        // Remove immediately to prevent re-dequeue race condition
+        self.firehose_backfill.remove(&key_vec)?;
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
-        Ok(Some((key.to_vec(), job)))
+        Ok(Some((key_vec, job)))
     }
 
-    pub fn remove_firehose_backfill(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.firehose_backfill.remove(key)?;
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn remove_firehose_backfill(&self, _key: &[u8]) -> Result<(), WintermuteError> {
+        // Item already removed in dequeue - this is now a no-op for compatibility
         Ok(())
     }
 
@@ -220,14 +232,18 @@ impl Storage {
             return Ok(None);
         };
         let (key, value) = entry?;
+        let key_vec = key.to_vec();
         let event = ciborium::from_reader(value.as_ref())
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
+        // Remove immediately to prevent re-dequeue race condition
+        self.label_live.remove(&key_vec)?;
         crate::metrics::INGESTER_LABEL_LIVE_LENGTH.dec();
-        Ok(Some((key.to_vec(), event)))
+        Ok(Some((key_vec, event)))
     }
 
-    pub fn remove_label_live(&self, key: &[u8]) -> Result<(), WintermuteError> {
-        self.label_live.remove(key)?;
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn remove_label_live(&self, _key: &[u8]) -> Result<(), WintermuteError> {
+        // Item already removed in dequeue - this is now a no-op for compatibility
         Ok(())
     }
 
@@ -244,6 +260,11 @@ impl Storage {
 
     pub fn set_cursor(&self, name: &str, value: i64) -> Result<(), WintermuteError> {
         self.cursors.insert(name.as_bytes(), value.to_be_bytes())?;
+        Ok(())
+    }
+
+    pub fn delete_cursor(&self, name: &str) -> Result<(), WintermuteError> {
+        self.cursors.remove(name.as_bytes())?;
         Ok(())
     }
 
@@ -404,5 +425,16 @@ mod tests {
 
         storage.set_cursor("test", 100).unwrap();
         assert_eq!(storage.get_cursor("test").unwrap(), Some(100));
+    }
+
+    #[test]
+    fn test_delete_cursor() {
+        let (storage, _dir) = setup_test_storage();
+
+        storage.set_cursor("test_delete", 42).unwrap();
+        assert_eq!(storage.get_cursor("test_delete").unwrap(), Some(42));
+
+        storage.delete_cursor("test_delete").unwrap();
+        assert!(storage.get_cursor("test_delete").unwrap().is_none());
     }
 }

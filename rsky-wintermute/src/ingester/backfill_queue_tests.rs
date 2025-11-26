@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod backfill_queue_tests {
+mod tests {
     use crate::ingester::backfill_queue::populate_backfill_queue;
     use crate::storage::Storage;
     use std::sync::Arc;
@@ -38,6 +38,7 @@ mod backfill_queue_tests {
             .await;
 
         let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        drop(server);
 
         assert!(
             result.is_ok(),
@@ -108,6 +109,7 @@ mod backfill_queue_tests {
             .await;
 
         let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        drop(server);
 
         assert!(
             result.is_ok(),
@@ -133,6 +135,7 @@ mod backfill_queue_tests {
             .await;
 
         let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        drop(server);
 
         assert!(result.is_err(), "should fail with HTTP 500");
         let err_msg = format!("{}", result.unwrap_err());
@@ -161,6 +164,7 @@ mod backfill_queue_tests {
             .await;
 
         let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        drop(server);
 
         assert!(
             result.is_ok(),
@@ -212,7 +216,9 @@ mod backfill_queue_tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        let server_url = server.url();
+        let result = populate_backfill_queue(storage.clone(), server_url.clone()).await;
+        drop(server);
 
         assert!(
             result.is_ok(),
@@ -220,7 +226,7 @@ mod backfill_queue_tests {
         );
 
         // Verify cursor was stored
-        let cursor_key = format!("backfill_enum:{}", server.url());
+        let cursor_key = format!("backfill_enum:{server_url}");
         let stored_cursor = storage.get_cursor(&cursor_key).unwrap();
         assert!(stored_cursor.is_some(), "cursor should be stored");
     }
