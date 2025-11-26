@@ -5,7 +5,7 @@ pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{CURSOR_STALE_TIMEOUT, FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
+use crate::config::{FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, WintermuteError};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -22,7 +22,15 @@ use tokio_tungstenite::tungstenite::Message;
 enum ConnectionResult {
     Closed,
     Error(WintermuteError),
-    CursorStale,
+    FutureCursor,
+}
+
+#[derive(Debug)]
+pub enum ParseResult {
+    Event(FirehoseEvent),
+    Skip,
+    OutdatedCursor,
+    FutureCursor,
 }
 
 pub struct IngesterManager {
@@ -124,6 +132,10 @@ impl IngesterManager {
             }
         };
 
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s max
+        let max_backoff_secs = 60u64;
+        let mut backoff_secs = 1u64;
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for {hostname}");
@@ -132,25 +144,34 @@ impl IngesterManager {
 
             match Self::connect_and_stream(&storage, &hostname, &pool).await {
                 ConnectionResult::Closed => {
-                    tracing::warn!("connection closed for {hostname}, reconnecting in 5s");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tracing::warn!(
+                        "connection closed for {hostname}, reconnecting in {backoff_secs}s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
                 }
                 ConnectionResult::Error(e) => {
-                    tracing::error!("connection error for {hostname}: {e}, retrying in 5s");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tracing::error!(
+                        "connection error for {hostname}: {e}, retrying in {backoff_secs}s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
                 }
-                ConnectionResult::CursorStale => {
+                ConnectionResult::FutureCursor => {
+                    // Cursor is somehow ahead of relay (wrong cursor for wrong relay, etc)
+                    // Delete cursor and reconnect from 0 to let relay give us everything
                     let cursor_key = format!("firehose:{hostname}");
                     tracing::warn!(
-                        "connection timeout for {hostname}, deleting cursor to restart from oldest available"
+                        "cursor in future for {hostname}, deleting cursor to restart from 0"
                     );
-                    // Delete cursor from both Fjall and postgres
                     if let Err(e) = storage.delete_cursor(&cursor_key) {
                         tracing::error!("failed to delete cursor from fjall: {e}");
                     }
                     if let Err(e) = delete_cursor_from_postgres(&pool, &cursor_key).await {
                         tracing::error!("failed to delete cursor from postgres: {e}");
                     }
+                    // Reset backoff since we're intentionally reconnecting with new state
+                    backoff_secs = 1;
                 }
             }
         }
@@ -225,54 +246,42 @@ impl IngesterManager {
             }
         });
 
-        let mut first_message = true;
         let mut events_since_cursor_update = 0u64;
 
         loop {
-            let msg_future = read.next();
-
-            let msg_result = if first_message && cursor > 0 {
-                match tokio::time::timeout(CURSOR_STALE_TIMEOUT, msg_future).await {
-                    Ok(Some(result)) => {
-                        first_message = false;
-                        result
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        tracing::warn!(
-                            "no message received within {:?}, resetting cursor to start from oldest available",
-                            CURSOR_STALE_TIMEOUT
-                        );
-                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
-                            .with_label_values(&["firehose"])
-                            .dec();
-                        ping_task.abort();
-                        return ConnectionResult::CursorStale;
-                    }
-                }
-            } else {
-                first_message = false;
-                match msg_future.await {
-                    Some(result) => result,
-                    None => break,
-                }
-            };
-
-            let msg = match msg_result {
-                Ok(m) => m,
-                Err(e) => {
+            let msg = match read.next().await {
+                Some(Ok(m)) => m,
+                Some(Err(e)) => {
                     metrics::INGESTER_WEBSOCKET_CONNECTIONS
                         .with_label_values(&["firehose"])
                         .dec();
                     ping_task.abort();
                     return ConnectionResult::Error(e.into());
                 }
+                None => break,
             };
 
             if let Message::Binary(data) = msg {
                 let event = match Self::parse_message(&data) {
-                    Ok(Some(e)) => e,
-                    Ok(None) => continue,
+                    Ok(ParseResult::Event(e)) => e,
+                    Ok(ParseResult::Skip) => continue,
+                    Ok(ParseResult::OutdatedCursor) => {
+                        // Per AT Protocol spec: after OutdatedCursor info, relay continues
+                        // from its oldest available position. We just continue processing.
+                        tracing::warn!(
+                            "cursor too old - relay will resume from oldest available position"
+                        );
+                        continue;
+                    }
+                    Ok(ParseResult::FutureCursor) => {
+                        // Cursor is ahead of relay - delete cursor and reconnect from 0
+                        tracing::warn!("cursor in future - relay closed connection");
+                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                            .with_label_values(&["firehose"])
+                            .dec();
+                        ping_task.abort();
+                        return ConnectionResult::FutureCursor;
+                    }
                     Err(e) => {
                         tracing::warn!("failed to parse message: {e}");
                         continue;
@@ -322,7 +331,7 @@ impl IngesterManager {
         ConnectionResult::Closed
     }
 
-    fn parse_message(data: &[u8]) -> Result<Option<FirehoseEvent>, WintermuteError> {
+    pub fn parse_message(data: &[u8]) -> Result<ParseResult, WintermuteError> {
         // AT Protocol sends two concatenated CBOR messages:
         // 1. Header (parsed with ciborium): {t: "#commit", op: 1}
         // 2. Body (parsed with serde_ipld_dagcbor): {seq: N, repo: "...", ...}
@@ -355,13 +364,33 @@ impl IngesterManager {
                     info.name,
                     info.message
                 );
+                // OutdatedCursor means the cursor is too old - relay continues from oldest
+                if info.name == "OutdatedCursor" {
+                    return Ok(ParseResult::OutdatedCursor);
+                }
             }
-            return Ok(None);
+            return Ok(ParseResult::Skip);
+        }
+
+        // Handle #error messages (future cursor, invalid request, etc)
+        if header.type_ == "#error" {
+            if let Ok(error) = serde_ipld_dagcbor::from_reader::<InfoBody, _>(&mut cursor) {
+                tracing::error!(
+                    "received #error: name={}, message={:?}",
+                    error.name,
+                    error.message
+                );
+                // FutureCursor means cursor is ahead of relay - need to reset
+                if error.name == "FutureCursor" {
+                    return Ok(ParseResult::FutureCursor);
+                }
+            }
+            return Ok(ParseResult::Skip);
         }
 
         // Only process #commit messages
         if header.type_ != "#commit" {
-            return Ok(None);
+            return Ok(ParseResult::Skip);
         }
 
         // Parse body with serde_ipld_dagcbor using the official SubscribeReposCommit struct
@@ -393,7 +422,7 @@ impl IngesterManager {
             }),
         };
 
-        Ok(Some(event))
+        Ok(ParseResult::Event(event))
     }
 
     pub async fn enqueue_event_for_indexing(
