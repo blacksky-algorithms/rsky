@@ -144,6 +144,9 @@ impl IngesterManager {
 
             match Self::connect_and_stream(&storage, &hostname, &pool).await {
                 ConnectionResult::Closed => {
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
                     tracing::warn!(
                         "connection closed for {hostname}, reconnecting in {backoff_secs}s"
                     );
@@ -151,6 +154,9 @@ impl IngesterManager {
                     backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
                 }
                 ConnectionResult::Error(e) => {
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
                     tracing::error!(
                         "connection error for {hostname}: {e}, retrying in {backoff_secs}s"
                     );
@@ -249,16 +255,31 @@ impl IngesterManager {
         let mut events_since_cursor_update = 0u64;
 
         loop {
-            let msg = match read.next().await {
-                Some(Ok(m)) => m,
-                Some(Err(e)) => {
-                    metrics::INGESTER_WEBSOCKET_CONNECTIONS
-                        .with_label_values(&["firehose"])
-                        .dec();
-                    ping_task.abort();
-                    return ConnectionResult::Error(e.into());
+            // Check shutdown with timeout to avoid blocking forever on websocket read
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!("shutdown requested, closing firehose connection");
+                metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                    .with_label_values(&["firehose"])
+                    .dec();
+                ping_task.abort();
+                return ConnectionResult::Closed;
+            }
+
+            let msg = tokio::select! {
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                                .with_label_values(&["firehose"])
+                                .dec();
+                            ping_task.abort();
+                            return ConnectionResult::Error(e.into());
+                        }
+                        None => break,
+                    }
                 }
-                None => break,
+                () = tokio::time::sleep(Duration::from_millis(100)) => continue,
             };
 
             if let Message::Binary(data) = msg {

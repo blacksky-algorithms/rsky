@@ -34,10 +34,16 @@ pub async fn subscribe_labels(
 
         match connect_and_stream(&storage, &labeler_host, &pool).await {
             Ok(()) => {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 tracing::warn!("label connection closed for {labeler_host}, reconnecting in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 tracing::error!("label connection error for {labeler_host}: {e}, retrying in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -66,13 +72,16 @@ async fn connect_and_stream(
     ))
     .map_err(|e| WintermuteError::Other(format!("invalid url: {e}")))?;
 
-    // Only add cursor if we have one, otherwise start from live
+    // Always pass cursor - if 0, starts from beginning (replays all historical labels)
+    url.query_pairs_mut()
+        .append_pair("cursor", &cursor.to_string());
+
     if cursor > 0 {
-        url.query_pairs_mut()
-            .append_pair("cursor", &cursor.to_string());
         tracing::info!("connecting to label stream at {url} resuming from cursor {cursor}");
     } else {
-        tracing::info!("connecting to label stream at {url} starting from live (no stored cursor)");
+        tracing::info!(
+            "connecting to label stream at {url} starting from cursor 0 (replaying historical labels)"
+        );
     }
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
@@ -95,8 +104,33 @@ async fn connect_and_stream(
 
     let mut events_since_cursor_update = 0u64;
 
-    while let Some(msg_result) = read.next().await {
-        let msg = msg_result?;
+    loop {
+        // Check shutdown with timeout to avoid blocking forever on websocket read
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            tracing::info!("shutdown requested, closing label connection to {labeler_host}");
+            metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                .with_label_values(&["labels"])
+                .dec();
+            ping_task.abort();
+            return Ok(());
+        }
+
+        let msg = tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => {
+                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                            .with_label_values(&["labels"])
+                            .dec();
+                        ping_task.abort();
+                        return Err(e.into());
+                    }
+                    None => break,
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => continue,
+        };
 
         if let Message::Binary(data) = msg {
             match parse_label_message(&data) {

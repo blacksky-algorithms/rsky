@@ -133,6 +133,7 @@ fn main() -> Result<()> {
             }
         }
 
+        tracing::info!("goodbye for now");
         Ok(())
     })
 }
@@ -186,15 +187,21 @@ fn start_metrics_server(port: u16) -> Result<()> {
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
+                tracing::info!("shutdown requested for metrics server");
                 break;
             }
 
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!("failed to accept connection: {e}");
-                    continue;
+            let (stream, _) = tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            tracing::error!("failed to accept connection: {e}");
+                            continue;
+                        }
+                    }
                 }
+                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
             };
 
             tokio::task::spawn(async move {
