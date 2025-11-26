@@ -22,7 +22,6 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-cargo = { version = "0.84.0",features = ["vendored-openssl"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}

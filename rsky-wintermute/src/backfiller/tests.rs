@@ -222,7 +222,7 @@ mod backfiller_tests {
     fn test_convert_record_numbers_and_booleans() {
         let input = json!({
             "count": 42,
-            "score": 3.14,
+            "score": 2.5,
             "enabled": true,
             "disabled": false
         });
@@ -269,7 +269,10 @@ mod backfiller_tests {
             }
         });
         let output = convert_record_to_ipld(&input);
-        assert_eq!(output["level1"]["level2"]["level3"]["level4"]["value"], "deep");
+        assert_eq!(
+            output["level1"]["level2"]["level3"]["level4"]["value"],
+            "deep"
+        );
     }
 
     #[test]
@@ -293,7 +296,7 @@ mod backfiller_tests {
         // Enqueue some jobs
         for i in 0..5 {
             let job = BackfillJob {
-                did: format!("did:plc:test{}", i),
+                did: format!("did:plc:test{i}"),
                 retry_count: 0,
             };
             manager.storage.enqueue_backfill(&job).unwrap();
@@ -314,7 +317,10 @@ mod backfiller_tests {
 
         // No jobs in output stream, should return false
         let has_backpressure = manager.check_backpressure().await;
-        assert!(!has_backpressure, "should not have backpressure with empty output stream");
+        assert!(
+            !has_backpressure,
+            "should not have backpressure with empty output stream"
+        );
     }
 
     #[tokio::test]
@@ -329,7 +335,7 @@ mod backfiller_tests {
         // Fill output stream beyond high water mark
         for i in 0..BACKFILLER_OUTPUT_HIGH_WATER_MARK + 10 {
             let job = IndexJob {
-                uri: format!("at://did:plc:test/app.bsky.feed.post/test{}", i),
+                uri: format!("at://did:plc:test/app.bsky.feed.post/test{i}"),
                 cid: "bafytest".to_owned(),
                 action: WriteAction::Create,
                 record: Some(json!({"text": "test"})),
@@ -341,7 +347,10 @@ mod backfiller_tests {
 
         // Should detect backpressure
         let has_backpressure = manager.check_backpressure().await;
-        assert!(has_backpressure, "should detect backpressure when output stream exceeds high water mark");
+        assert!(
+            has_backpressure,
+            "should detect backpressure when output stream exceeds high water mark"
+        );
     }
 
     #[tokio::test]
@@ -355,8 +364,6 @@ mod backfiller_tests {
 
     #[tokio::test]
     async fn test_dequeue_batch_single_job() {
-        use crate::config::BACKFILLER_BATCH_SIZE;
-
         let (storage, _dir) = setup_test_storage();
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
@@ -368,12 +375,8 @@ mod backfiller_tests {
         manager.storage.enqueue_backfill(&job).unwrap();
 
         let jobs = manager.dequeue_batch();
-        // Note: dequeue returns the same item BACKFILLER_BATCH_SIZE times because it doesn't remove
-        assert_eq!(
-            jobs.len(),
-            BACKFILLER_BATCH_SIZE,
-            "should return batch_size copies of the same job since dequeue doesn't remove"
-        );
+        // Dequeue now removes items immediately to prevent race conditions
+        assert_eq!(jobs.len(), 1, "should return only the one job that exists");
         assert_eq!(jobs[0].1.did, "did:plc:test1");
     }
 
@@ -387,7 +390,7 @@ mod backfiller_tests {
         // Enqueue more than batch size
         for i in 0..(BACKFILLER_BATCH_SIZE + 5) {
             let job = BackfillJob {
-                did: format!("did:plc:test{}", i),
+                did: format!("did:plc:test{i}"),
                 retry_count: 0,
             };
             manager.storage.enqueue_backfill(&job).unwrap();
@@ -407,7 +410,11 @@ mod backfiller_tests {
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
         let tasks = manager.spawn_job_tasks(vec![]).await;
-        assert_eq!(tasks.len(), 0, "should return empty tasks vec for empty input");
+        assert_eq!(
+            tasks.len(),
+            0,
+            "should return empty tasks vec for empty input"
+        );
     }
 
     #[tokio::test]
@@ -417,8 +424,20 @@ mod backfiller_tests {
 
         // Create mock jobs (they will fail since DIDs are invalid, but that's ok for this test)
         let jobs = vec![
-            (b"key1".to_vec(), BackfillJob { did: "did:plc:invalid1".to_owned(), retry_count: 0 }),
-            (b"key2".to_vec(), BackfillJob { did: "did:plc:invalid2".to_owned(), retry_count: 0 }),
+            (
+                b"key1".to_vec(),
+                BackfillJob {
+                    did: "did:plc:invalid1".to_owned(),
+                    retry_count: 0,
+                },
+            ),
+            (
+                b"key2".to_vec(),
+                BackfillJob {
+                    did: "did:plc:invalid2".to_owned(),
+                    retry_count: 0,
+                },
+            ),
         ];
 
         let tasks = manager.spawn_job_tasks(jobs).await;
@@ -444,9 +463,7 @@ mod backfiller_tests {
         let (key, _) = manager.storage.dequeue_backfill().unwrap().unwrap();
 
         // Create a successful task result
-        let task = tokio::spawn(async move {
-            (key, job, Ok(()))
-        });
+        let task = tokio::spawn(async move { (key, job, Ok(())) });
 
         manager.handle_task_results(vec![task]).await;
 
@@ -470,7 +487,11 @@ mod backfiller_tests {
 
         // Create a failed task result (retry_count < 3)
         let task = tokio::spawn(async move {
-            (key, job_from_queue, Err(WintermuteError::Other("test error".into())))
+            (
+                key,
+                job_from_queue,
+                Err(WintermuteError::Other("test error".into())),
+            )
         });
 
         manager.handle_task_results(vec![task]).await;
@@ -481,7 +502,10 @@ mod backfiller_tests {
 
         // Dequeue and check retry count
         let (_, retried_job) = manager.storage.dequeue_backfill().unwrap().unwrap();
-        assert_eq!(retried_job.retry_count, 1, "retry_count should be incremented");
+        assert_eq!(
+            retried_job.retry_count, 1,
+            "retry_count should be incremented"
+        );
     }
 
     #[tokio::test]
@@ -499,14 +523,21 @@ mod backfiller_tests {
 
         // Create a failed task result (retry_count will become 3)
         let task = tokio::spawn(async move {
-            (key, job_from_queue, Err(WintermuteError::Other("test error".into())))
+            (
+                key,
+                job_from_queue,
+                Err(WintermuteError::Other("test error".into())),
+            )
         });
 
         manager.handle_task_results(vec![task]).await;
 
         // Verify job was NOT re-enqueued (dead-lettered)
         let queue_len = manager.storage.repo_backfill_len().unwrap();
-        assert_eq!(queue_len, 0, "job exceeding max retries should be dead-lettered");
+        assert_eq!(
+            queue_len, 0,
+            "job exceeding max retries should be dead-lettered"
+        );
     }
 
     #[tokio::test]

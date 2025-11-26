@@ -5,7 +5,7 @@ pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
+use crate::config::{CURSOR_STALE_TIMEOUT, FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, WintermuteError};
 use futures::SinkExt;
@@ -15,6 +15,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
+
+#[derive(Debug)]
+enum ConnectionResult {
+    Closed,
+    Error(WintermuteError),
+    CursorStale,
+}
 
 pub struct IngesterManager {
     workers: usize,
@@ -98,40 +105,72 @@ impl IngesterManager {
             }
 
             match Self::connect_and_stream(&storage, &hostname).await {
-                Ok(()) => {
+                ConnectionResult::Closed => {
                     tracing::warn!("connection closed for {hostname}, reconnecting in 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                Err(e) => {
+                ConnectionResult::Error(e) => {
                     tracing::error!("connection error for {hostname}: {e}, retrying in 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                ConnectionResult::CursorStale => {
+                    let cursor_key = format!("firehose:{hostname}");
+                    tracing::warn!(
+                        "connection timeout for {hostname}, deleting cursor to restart from oldest available"
+                    );
+                    if let Err(e) = storage.delete_cursor(&cursor_key) {
+                        tracing::error!("failed to delete cursor: {e}");
+                    }
                 }
             }
         }
     }
 
-    async fn connect_and_stream(storage: &Storage, hostname: &str) -> Result<(), WintermuteError> {
+    async fn connect_and_stream(storage: &Storage, hostname: &str) -> ConnectionResult {
         use crate::metrics;
 
         let cursor_key = format!("firehose:{hostname}");
-        let cursor = storage.get_cursor(&cursor_key)?.unwrap_or(0);
+        let cursor = match storage.get_cursor(&cursor_key) {
+            Ok(c) => c.unwrap_or(0),
+            Err(e) => return ConnectionResult::Error(e),
+        };
 
         let clean_hostname = hostname
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/');
 
-        let mut url = url::Url::parse(&format!(
+        let url = match url::Url::parse(&format!(
             "wss://{clean_hostname}/xrpc/com.atproto.sync.subscribeRepos"
-        ))
-        .map_err(|e| WintermuteError::Other(format!("invalid url: {e}")))?;
+        )) {
+            Ok(mut u) => {
+                // Only add cursor if we have a saved position
+                // No cursor = start from current stream position (live)
+                // cursor=N = resume from seq N (may be in rollback window)
+                if cursor > 0 {
+                    u.query_pairs_mut()
+                        .append_pair("cursor", &cursor.to_string());
+                }
+                u
+            }
+            Err(e) => {
+                return ConnectionResult::Error(WintermuteError::Other(format!(
+                    "invalid url: {e}"
+                )));
+            }
+        };
 
-        url.query_pairs_mut()
-            .append_pair("cursor", &cursor.to_string());
+        if cursor > 0 {
+            tracing::info!("connecting to {url} resuming from cursor {cursor}");
+        } else {
+            tracing::info!("connecting to {url} starting from live stream");
+        }
 
-        tracing::info!("connecting to {url} with cursor {cursor}");
+        let (ws_stream, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
+            Ok(s) => s,
+            Err(e) => return ConnectionResult::Error(e.into()),
+        };
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
         metrics::INGESTER_WEBSOCKET_CONNECTIONS
             .with_label_values(&["firehose"])
             .inc();
@@ -147,30 +186,79 @@ impl IngesterManager {
             }
         });
 
-        while let Some(msg_result) = read.next().await {
-            let msg = msg_result?;
+        let mut first_message = true;
+
+        loop {
+            let msg_future = read.next();
+
+            let msg_result = if first_message && cursor > 0 {
+                match tokio::time::timeout(CURSOR_STALE_TIMEOUT, msg_future).await {
+                    Ok(Some(result)) => {
+                        first_message = false;
+                        result
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "no message received within {:?}, resetting cursor to start from oldest available",
+                            CURSOR_STALE_TIMEOUT
+                        );
+                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                            .with_label_values(&["firehose"])
+                            .dec();
+                        ping_task.abort();
+                        return ConnectionResult::CursorStale;
+                    }
+                }
+            } else {
+                first_message = false;
+                match msg_future.await {
+                    Some(result) => result,
+                    None => break,
+                }
+            };
+
+            let msg = match msg_result {
+                Ok(m) => m,
+                Err(e) => {
+                    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                        .with_label_values(&["firehose"])
+                        .dec();
+                    ping_task.abort();
+                    return ConnectionResult::Error(e.into());
+                }
+            };
 
             if let Message::Binary(data) = msg {
-                if let Some(event) = Self::parse_message(&data)? {
-                    metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
-                        .with_label_values(&["firehose_live"])
-                        .inc();
-
-                    // Store the raw event for historical lookup
-                    storage.write_firehose_event(event.seq, &event)?;
-
-                    // Convert event to index jobs and enqueue for indexer
-                    if let Err(e) = Self::enqueue_event_for_indexing(storage, &event).await {
-                        tracing::error!(
-                            "failed to enqueue event seq={} for indexing: {e}",
-                            event.seq
-                        );
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["enqueue_failed"])
-                            .inc();
+                let event = match Self::parse_message(&data) {
+                    Ok(Some(e)) => e,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!("failed to parse message: {e}");
+                        continue;
                     }
+                };
 
-                    storage.set_cursor(&cursor_key, event.seq)?;
+                metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
+                    .with_label_values(&["firehose_live"])
+                    .inc();
+
+                if let Err(e) = storage.write_firehose_event(event.seq, &event) {
+                    tracing::error!("failed to write firehose event: {e}");
+                }
+
+                if let Err(e) = Self::enqueue_event_for_indexing(storage, &event).await {
+                    tracing::error!(
+                        "failed to enqueue event seq={} for indexing: {e}",
+                        event.seq
+                    );
+                    metrics::INGESTER_ERRORS_TOTAL
+                        .with_label_values(&["enqueue_failed"])
+                        .inc();
+                }
+
+                if let Err(e) = storage.set_cursor(&cursor_key, event.seq) {
+                    tracing::error!("failed to set cursor: {e}");
                 }
             }
         }
@@ -179,7 +267,7 @@ impl IngesterManager {
             .with_label_values(&["firehose"])
             .dec();
         ping_task.abort();
-        Ok(())
+        ConnectionResult::Closed
     }
 
     fn parse_message(data: &[u8]) -> Result<Option<FirehoseEvent>, WintermuteError> {
@@ -195,13 +283,31 @@ impl IngesterManager {
             _operation: u8,
         }
 
+        #[derive(serde::Deserialize)]
+        struct InfoBody {
+            name: String,
+            message: Option<String>,
+        }
+
         let mut cursor = std::io::Cursor::new(data);
 
         // Parse header with ciborium
         let header: Header = ciborium::from_reader(&mut cursor)
             .map_err(|e| WintermuteError::Serialization(format!("failed to parse header: {e}")))?;
 
-        // Only process #commit messages for now
+        // Handle #info messages (cursor too old, etc)
+        if header.type_ == "#info" {
+            if let Ok(info) = serde_ipld_dagcbor::from_reader::<InfoBody, _>(&mut cursor) {
+                tracing::info!(
+                    "received #info: name={}, message={:?}",
+                    info.name,
+                    info.message
+                );
+            }
+            return Ok(None);
+        }
+
+        // Only process #commit messages
         if header.type_ != "#commit" {
             return Ok(None);
         }

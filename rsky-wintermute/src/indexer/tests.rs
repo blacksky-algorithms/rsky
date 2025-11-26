@@ -1325,7 +1325,7 @@ mod indexer_tests {
         // Enqueue some jobs
         for i in 0..5 {
             let job = crate::types::IndexJob {
-                uri: format!("at://did:plc:test/app.bsky.feed.post/test{}", i),
+                uri: format!("at://did:plc:test/app.bsky.feed.post/test{i}"),
                 cid: "bafytest".to_owned(),
                 action: WriteAction::Create,
                 record: Some(serde_json::json!({"text": "test"})),
@@ -1367,7 +1367,7 @@ mod indexer_tests {
         // Add jobs to both queues
         for i in 0..3 {
             let job = crate::types::IndexJob {
-                uri: format!("at://did:plc:live/app.bsky.feed.post/test{}", i),
+                uri: format!("at://did:plc:live/app.bsky.feed.post/test{i}"),
                 cid: "bafylive".to_owned(),
                 action: WriteAction::Create,
                 record: Some(serde_json::json!({"text": "live"})),
@@ -1379,7 +1379,7 @@ mod indexer_tests {
 
         for i in 0..3 {
             let job = crate::types::IndexJob {
-                uri: format!("at://did:plc:backfill/app.bsky.feed.post/test{}", i),
+                uri: format!("at://did:plc:backfill/app.bsky.feed.post/test{i}"),
                 cid: "bafybackfill".to_owned(),
                 action: WriteAction::Create,
                 record: Some(serde_json::json!({"text": "backfill"})),
@@ -1395,7 +1395,10 @@ mod indexer_tests {
         assert!(!jobs.is_empty());
         // First batch should be from firehose_live
         let first_cid = &jobs[0].1.cid;
-        assert_eq!(first_cid, "bafylive", "should prioritize firehose_live over backfill");
+        assert_eq!(
+            first_cid, "bafylive",
+            "should prioritize firehose_live over backfill"
+        );
     }
 
     #[tokio::test]
@@ -1407,7 +1410,11 @@ mod indexer_tests {
         let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
 
         let tasks = manager.spawn_index_job_tasks(vec![]).await;
-        assert_eq!(tasks.len(), 0, "should return empty tasks vec for empty input");
+        assert_eq!(
+            tasks.len(),
+            0,
+            "should return empty tasks vec for empty input"
+        );
     }
 
     #[tokio::test]
@@ -1432,9 +1439,8 @@ mod indexer_tests {
         let (key, _) = manager.storage.dequeue_firehose_live().unwrap().unwrap();
 
         // Create a successful task result
-        let task = tokio::spawn(async move {
-            (key, crate::indexer::QueueSource::FirehoseLive, Ok(()))
-        });
+        let task =
+            tokio::spawn(async move { (key, crate::indexer::QueueSource::FirehoseLive, Ok(())) });
 
         manager.handle_job_results(vec![task]).await;
 
@@ -1496,15 +1502,42 @@ mod indexer_tests {
 
         // Test delete for each major collection type
         let test_collections = vec![
-            ("app.bsky.feed.post", json!({"text": "test post", "createdAt": indexed_at.clone()})),
-            ("app.bsky.feed.like", json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/abc", "cid": "bafytest"}, "createdAt": indexed_at.clone()})),
-            ("app.bsky.graph.follow", json!({"subject": "did:plc:test", "createdAt": indexed_at.clone()})),
-            ("app.bsky.feed.repost", json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/def", "cid": "bafytest"}, "createdAt": indexed_at.clone()})),
-            ("app.bsky.graph.block", json!({"subject": "did:plc:blocked", "createdAt": indexed_at.clone()})),
-            ("app.bsky.actor.profile", json!({"displayName": "Test Profile"})),
-            ("app.bsky.feed.generator", json!({"did": test_did, "displayName": "Test Feed"})),
-            ("app.bsky.graph.list", json!({"name": "Test List", "purpose": "app.bsky.graph.defs#modlist"})),
-            ("app.bsky.graph.listitem", json!({"subject": "did:plc:test", "list": format!("at://{test_did}/app.bsky.graph.list/testlist")})),
+            (
+                "app.bsky.feed.post",
+                json!({"text": "test post", "createdAt": indexed_at.clone()}),
+            ),
+            (
+                "app.bsky.feed.like",
+                json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/abc", "cid": "bafytest"}, "createdAt": indexed_at.clone()}),
+            ),
+            (
+                "app.bsky.graph.follow",
+                json!({"subject": "did:plc:test", "createdAt": indexed_at.clone()}),
+            ),
+            (
+                "app.bsky.feed.repost",
+                json!({"subject": {"uri": "at://did:plc:test/app.bsky.feed.post/def", "cid": "bafytest"}, "createdAt": indexed_at.clone()}),
+            ),
+            (
+                "app.bsky.graph.block",
+                json!({"subject": "did:plc:blocked", "createdAt": indexed_at.clone()}),
+            ),
+            (
+                "app.bsky.actor.profile",
+                json!({"displayName": "Test Profile"}),
+            ),
+            (
+                "app.bsky.feed.generator",
+                json!({"did": test_did, "displayName": "Test Feed"}),
+            ),
+            (
+                "app.bsky.graph.list",
+                json!({"name": "Test List", "purpose": "app.bsky.graph.defs#modlist"}),
+            ),
+            (
+                "app.bsky.graph.listitem",
+                json!({"subject": "did:plc:test", "list": format!("at://{test_did}/app.bsky.graph.list/testlist")}),
+            ),
         ];
 
         for (collection, record) in test_collections {
@@ -1521,7 +1554,11 @@ mod indexer_tests {
             };
 
             let result = IndexerManager::process_job(&pool, &create_job).await;
-            assert!(result.is_ok(), "Failed to create {collection}: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to create {collection}: {:?}",
+                result.err()
+            );
 
             // Then delete it
             let delete_job = IndexJob {
@@ -1534,7 +1571,11 @@ mod indexer_tests {
             };
 
             let result = IndexerManager::process_job(&pool, &delete_job).await;
-            assert!(result.is_ok(), "Failed to delete {collection}: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to delete {collection}: {:?}",
+                result.err()
+            );
         }
 
         cleanup_test_data(&pool, test_did).await;
@@ -1577,27 +1618,27 @@ mod indexer_tests {
             (
                 "app.bsky.feed.threadgate",
                 json!({
-                    "post": format!("at://{}/app.bsky.feed.post/testpost", test_did),
+                    "post": format!("at://{test_did}/app.bsky.feed.post/testpost"),
                     "createdAt": indexed_at.clone()
                 }),
             ),
             (
                 "app.bsky.feed.postgate",
                 json!({
-                    "post": format!("at://{}/app.bsky.feed.post/testpost", test_did),
+                    "post": format!("at://{test_did}/app.bsky.feed.post/testpost"),
                     "createdAt": indexed_at.clone()
                 }),
             ),
             (
                 "app.bsky.graph.listblock",
                 json!({
-                    "subject": format!("at://{}/app.bsky.graph.list/testlist", test_did),
+                    "subject": format!("at://{test_did}/app.bsky.graph.list/testlist"),
                     "createdAt": indexed_at.clone()
                 }),
             ),
         ];
 
-        for (collection, record) in test_collections.iter() {
+        for (collection, record) in &test_collections {
             let uri = format!("at://{test_did}/{collection}/testrkey");
 
             // First create the record
