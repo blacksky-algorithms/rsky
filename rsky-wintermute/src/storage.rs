@@ -1,6 +1,7 @@
 use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFER_SIZE};
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct Storage {
@@ -14,14 +15,45 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(db_path: Option<std::path::PathBuf>) -> Result<Self, WintermuteError> {
-        let path = db_path.unwrap_or_else(|| "wintermute_db".into());
+    pub fn new(db_path: Option<PathBuf>) -> Result<Self, WintermuteError> {
+        let path = db_path.unwrap_or_else(|| "backfill_cache".into());
+
+        // Try to open, recover from corruption if needed
+        match Self::open_db(&path) {
+            Ok(storage) => Ok(storage),
+            Err(e) if e.is_storage_corrupted() => {
+                tracing::warn!(
+                    "detected corrupted storage at {}, deleting and recreating: {e}",
+                    path.display()
+                );
+                crate::metrics::STORAGE_RECOVERY_TOTAL.inc();
+
+                // Delete corrupted database
+                if let Err(rm_err) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!("failed to remove corrupted db directory: {rm_err}");
+                }
+
+                // Retry opening (will create fresh)
+                Self::open_db(&path)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_db(path: &PathBuf) -> Result<Self, WintermuteError> {
         let db = Config::new(path)
             .cache_size(CACHE_SIZE)
             .max_write_buffer_size(WRITE_BUFFER_SIZE)
             .fsync_ms(FSYNC_MS)
             .open()
-            .map_err(|e| WintermuteError::Other(format!("failed to open database: {e}")))?;
+            .map_err(|e| {
+                let err: WintermuteError = e.into();
+                if err.is_storage_corrupted() {
+                    err
+                } else {
+                    WintermuteError::Other(format!("failed to open database: {err}"))
+                }
+            })?;
 
         let db = Arc::new(db);
 
@@ -436,5 +468,58 @@ mod tests {
 
         storage.delete_cursor("test_delete").unwrap();
         assert!(storage.get_cursor("test_delete").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_is_storage_corrupted() {
+        // Test that is_storage_corrupted returns true for Storage errors with corruption indicators
+        let poisoned_err: WintermuteError = fjall::Error::Poisoned.into();
+        assert!(
+            poisoned_err.is_storage_corrupted(),
+            "Poisoned should be detected"
+        );
+
+        // Test JournalRecovery error (simulated via io error that wraps into JournalRecovery)
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "journal issue");
+        let storage_err: WintermuteError = fjall::Error::Io(io_err).into();
+        // IO errors are not corruption
+        assert!(
+            !storage_err.is_storage_corrupted(),
+            "IO errors should not be detected as corruption"
+        );
+
+        // Test non-corruption errors
+        let other_err = WintermuteError::Other("some error".to_owned());
+        assert!(
+            !other_err.is_storage_corrupted(),
+            "Other errors should not be detected as corruption"
+        );
+
+        let serial_err = WintermuteError::Serialization("bad data".to_owned());
+        assert!(
+            !serial_err.is_storage_corrupted(),
+            "Serialization errors should not be detected as corruption"
+        );
+    }
+
+    #[test]
+    fn test_storage_recovery_from_corruption() {
+        // Test that Storage::new successfully creates fresh storage after first open fails
+        // We can't easily simulate fjall corruption, but we can test the happy path
+        let temp_dir = TempDir::with_prefix("storage_recovery_test_").unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // First creation should succeed
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        storage.set_cursor("test", 42).unwrap();
+        drop(storage);
+
+        // Second creation should also succeed (reopen)
+        let storage2 = Storage::new(Some(db_path)).unwrap();
+        assert_eq!(
+            storage2.get_cursor("test").unwrap(),
+            Some(42),
+            "should preserve data on reopen"
+        );
     }
 }

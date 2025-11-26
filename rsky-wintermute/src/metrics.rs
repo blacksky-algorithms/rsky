@@ -161,6 +161,22 @@ pub static INGESTER_BACKFILL_CURSOR_SKIPS_TOTAL: LazyLock<IntCounter> = LazyLock
     .unwrap()
 });
 
+pub static INGESTER_BACKFILL_CURSOR_RESET_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "ingester_backfill_cursor_reset_total",
+        "Total number of cursor resets due to Fjall data loss detection"
+    )
+    .unwrap()
+});
+
+pub static STORAGE_RECOVERY_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "storage_recovery_total",
+        "Total number of times storage was recovered from corruption"
+    )
+    .unwrap()
+});
+
 // =============================================================================
 // BACKFILLER METRICS
 // =============================================================================

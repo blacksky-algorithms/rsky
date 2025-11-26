@@ -37,7 +37,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
         drop(server);
 
         assert!(
@@ -108,7 +108,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
         drop(server);
 
         assert!(
@@ -134,7 +134,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
         drop(server);
 
         assert!(result.is_err(), "should fail with HTTP 500");
@@ -163,7 +163,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
         drop(server);
 
         assert!(
@@ -217,7 +217,8 @@ mod tests {
             .await;
 
         let server_url = server.url();
-        let result = populate_backfill_queue(storage.clone(), server_url.clone()).await;
+        let result =
+            populate_backfill_queue(storage.clone(), server_url.clone(), String::new()).await;
         drop(server);
 
         assert!(
@@ -229,5 +230,63 @@ mod tests {
         let cursor_key = format!("backfill_enum:{server_url}");
         let stored_cursor = storage.get_cursor(&cursor_key).unwrap();
         assert!(stored_cursor.is_some(), "cursor should be stored");
+    }
+
+    #[tokio::test]
+    async fn test_populate_backfill_queue_fjall_data_loss_reset() {
+        let (storage, _dir) = setup_test_storage();
+
+        let mut server = mockito::Server::new_async().await;
+        let server_url = server.url();
+        let cursor_key = format!("backfill_enum:{server_url}");
+
+        // Simulate a cursor from previous enumeration (e.g., was at cursor 50000)
+        storage.set_cursor(&cursor_key, 50000).unwrap();
+
+        // repo_backfill queue is empty (simulating Fjall data loss)
+        assert_eq!(
+            storage.repo_backfill_len().unwrap(),
+            0,
+            "queue should be empty to simulate data loss"
+        );
+
+        // Mock should expect request WITHOUT cursor parameter (starting from beginning)
+        let response_json = serde_json::json!({
+            "repos": [{"did": "did:plc:recovered1"}],
+            "cursor": null
+        });
+
+        let _mock = server
+            .mock("GET", "/xrpc/com.atproto.sync.listRepos")
+            .match_query(mockito::Matcher::UrlEncoded("limit".into(), "1000".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_json.to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let result =
+            populate_backfill_queue(storage.clone(), server_url.clone(), String::new()).await;
+        drop(server);
+
+        assert!(
+            result.is_ok(),
+            "populate_backfill_queue should succeed after detecting data loss: {result:?}"
+        );
+
+        // Verify cursor was reset (deleted)
+        let stored_cursor = storage.get_cursor(&cursor_key).unwrap();
+        assert!(
+            stored_cursor.is_none(),
+            "cursor should be deleted after data loss detection"
+        );
+
+        // Verify new repo was enqueued
+        assert_eq!(
+            storage.repo_backfill_len().unwrap(),
+            1,
+            "should have re-enumerated repos"
+        );
     }
 }

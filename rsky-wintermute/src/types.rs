@@ -21,6 +21,23 @@ pub enum WintermuteError {
     Other(String),
 }
 
+impl WintermuteError {
+    /// Returns true if this error indicates storage corruption that requires recovery
+    #[must_use]
+    pub fn is_storage_corrupted(&self) -> bool {
+        match self {
+            Self::Storage(fjall_err) => {
+                // Check error message for corruption indicators
+                let msg = format!("{fjall_err:?}");
+                msg.contains("Poisoned")
+                    || msg.contains("JournalRecovery")
+                    || msg.contains("InvalidVersion")
+            }
+            _ => false,
+        }
+    }
+}
+
 impl From<tokio_tungstenite::tungstenite::Error> for WintermuteError {
     fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
         Self::WebSocket(Box::new(error))

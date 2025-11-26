@@ -256,8 +256,10 @@ mod ingester_tests {
 
         let relay_hosts = vec!["https://relay.example.com".to_owned()];
         let labeler_hosts = vec!["https://labeler.example.com".to_owned()];
+        let database_url = "postgresql://test:test@localhost/test".to_owned();
 
-        let manager = IngesterManager::new(relay_hosts, labeler_hosts, Arc::new(storage));
+        let manager =
+            IngesterManager::new(relay_hosts, labeler_hosts, Arc::new(storage), database_url);
 
         assert!(manager.is_ok());
     }
