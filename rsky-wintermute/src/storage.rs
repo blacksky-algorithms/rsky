@@ -480,7 +480,7 @@ mod tests {
         );
 
         // Test JournalRecovery error (simulated via io error that wraps into JournalRecovery)
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "journal issue");
+        let io_err = std::io::Error::other("journal issue");
         let storage_err: WintermuteError = fjall::Error::Io(io_err).into();
         // IO errors are not corruption
         assert!(
