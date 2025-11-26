@@ -70,7 +70,12 @@ fn main() -> Result<()> {
         .into_iter()
         .filter(|h| !h.is_empty())
         .collect();
-    let ingester = IngesterManager::new(args.relay_hosts, labeler_hosts, Arc::clone(&storage))?;
+    let ingester = IngesterManager::new(
+        args.relay_hosts,
+        labeler_hosts,
+        Arc::clone(&storage),
+        args.database_url.clone(),
+    )?;
     let backfiller = BackfillerManager::new(Arc::clone(&storage))?;
     let indexer = IndexerManager::new(Arc::clone(&storage), args.database_url)?;
 

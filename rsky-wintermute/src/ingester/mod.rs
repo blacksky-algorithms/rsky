@@ -8,12 +8,14 @@ use crate::SHUTDOWN;
 use crate::config::{CURSOR_STALE_TIMEOUT, FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, WintermuteError};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::interval;
+use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug)]
@@ -28,6 +30,7 @@ pub struct IngesterManager {
     relay_hosts: Vec<String>,
     labeler_hosts: Vec<String>,
     storage: Arc<Storage>,
+    database_url: String,
 }
 
 impl IngesterManager {
@@ -35,12 +38,14 @@ impl IngesterManager {
         relay_hosts: Vec<String>,
         labeler_hosts: Vec<String>,
         storage: Arc<Storage>,
+        database_url: String,
     ) -> Result<Self, WintermuteError> {
         Ok(Self {
             workers: WORKERS_INGESTER,
             relay_hosts,
             labeler_hosts,
             storage,
+            database_url,
         })
     }
 
@@ -57,18 +62,23 @@ impl IngesterManager {
             for host in &self.relay_hosts {
                 let storage = Arc::clone(&self.storage);
                 let host_clone = host.clone();
+                let db_url = self.database_url.clone();
 
                 let firehose_task = tokio::spawn(async move {
-                    Self::run_connection(Arc::clone(&storage), host_clone.clone()).await;
+                    Self::run_connection(Arc::clone(&storage), host_clone.clone(), db_url).await;
                 });
                 tasks.push(firehose_task);
 
                 let backfill_storage = Arc::clone(&self.storage);
                 let backfill_host = host.clone();
+                let backfill_db_url = self.database_url.clone();
                 let backfill_task = tokio::spawn(async move {
-                    if let Err(e) =
-                        backfill_queue::populate_backfill_queue(backfill_storage, backfill_host)
-                            .await
+                    if let Err(e) = backfill_queue::populate_backfill_queue(
+                        backfill_storage,
+                        backfill_host,
+                        backfill_db_url,
+                    )
+                    .await
                     {
                         tracing::error!("backfill queue population failed: {e}");
                     }
@@ -79,9 +89,10 @@ impl IngesterManager {
             for host in &self.labeler_hosts {
                 let storage = Arc::clone(&self.storage);
                 let host = host.clone();
+                let db_url = self.database_url.clone();
 
                 let task = tokio::spawn(async move {
-                    if let Err(e) = labels::subscribe_labels(storage, host).await {
+                    if let Err(e) = labels::subscribe_labels(storage, host, db_url).await {
                         tracing::error!("label subscription failed: {e}");
                     }
                 });
@@ -97,14 +108,29 @@ impl IngesterManager {
         Ok(())
     }
 
-    async fn run_connection(storage: Arc<Storage>, hostname: String) {
+    async fn run_connection(storage: Arc<Storage>, hostname: String, database_url: String) {
+        // Create postgres pool for cursor storage
+        let mut pg_config = Config::new();
+        pg_config.url = Some(database_url);
+        pg_config.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+
+        let pool = match pg_config.create_pool(Some(Runtime::Tokio1), NoTls) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("failed to create firehose pool: {e}");
+                return;
+            }
+        };
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for {hostname}");
                 break;
             }
 
-            match Self::connect_and_stream(&storage, &hostname).await {
+            match Self::connect_and_stream(&storage, &hostname, &pool).await {
                 ConnectionResult::Closed => {
                     tracing::warn!("connection closed for {hostname}, reconnecting in 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -118,21 +144,34 @@ impl IngesterManager {
                     tracing::warn!(
                         "connection timeout for {hostname}, deleting cursor to restart from oldest available"
                     );
+                    // Delete cursor from both Fjall and postgres
                     if let Err(e) = storage.delete_cursor(&cursor_key) {
-                        tracing::error!("failed to delete cursor: {e}");
+                        tracing::error!("failed to delete cursor from fjall: {e}");
+                    }
+                    if let Err(e) = delete_cursor_from_postgres(&pool, &cursor_key).await {
+                        tracing::error!("failed to delete cursor from postgres: {e}");
                     }
                 }
             }
         }
     }
 
-    async fn connect_and_stream(storage: &Storage, hostname: &str) -> ConnectionResult {
+    async fn connect_and_stream(
+        storage: &Storage,
+        hostname: &str,
+        pool: &Pool,
+    ) -> ConnectionResult {
         use crate::metrics;
 
         let cursor_key = format!("firehose:{hostname}");
-        let cursor = match storage.get_cursor(&cursor_key) {
-            Ok(c) => c.unwrap_or(0),
-            Err(e) => return ConnectionResult::Error(e),
+
+        // Get cursor from postgres (survives Fjall corruption)
+        let cursor = match get_cursor_from_postgres(pool, &cursor_key).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("failed to get cursor from postgres: {e}");
+                return ConnectionResult::Error(e);
+            }
         };
 
         let clean_hostname = hostname
@@ -187,6 +226,7 @@ impl IngesterManager {
         });
 
         let mut first_message = true;
+        let mut events_since_cursor_update = 0u64;
 
         loop {
             let msg_future = read.next();
@@ -257,8 +297,20 @@ impl IngesterManager {
                         .inc();
                 }
 
+                // Update cursor in Fjall for fast local access
                 if let Err(e) = storage.set_cursor(&cursor_key, event.seq) {
-                    tracing::error!("failed to set cursor: {e}");
+                    tracing::error!("failed to set cursor in fjall: {e}");
+                }
+
+                // Update cursor in postgres every 20 events (survives corruption)
+                events_since_cursor_update += 1;
+                if events_since_cursor_update % 20 == 0 {
+                    if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, event.seq).await {
+                        tracing::error!("failed to set cursor in postgres: {e}");
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["firehose_cursor"])
+                            .inc();
+                    }
                 }
             }
         }
@@ -438,4 +490,41 @@ impl IngesterManager {
 
         Ok(())
     }
+}
+
+async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, WintermuteError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT cursor FROM sub_state WHERE service = $1",
+            &[&service],
+        )
+        .await?;
+
+    Ok(row.map_or(0, |r| r.get::<_, i64>("cursor")))
+}
+
+async fn set_cursor_in_postgres(
+    pool: &Pool,
+    service: &str,
+    cursor: i64,
+) -> Result<(), WintermuteError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO sub_state (service, cursor)
+             VALUES ($1, $2)
+             ON CONFLICT (service) DO UPDATE SET cursor = EXCLUDED.cursor",
+            &[&service, &cursor],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn delete_cursor_from_postgres(pool: &Pool, service: &str) -> Result<(), WintermuteError> {
+    let client = pool.get().await?;
+    client
+        .execute("DELETE FROM sub_state WHERE service = $1", &[&service])
+        .await?;
+    Ok(())
 }

@@ -1,24 +1,38 @@
 use crate::types::{Label, LabelEvent, WintermuteError};
 use crate::{SHUTDOWN, metrics, storage::Storage};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::interval;
+use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
 
 pub async fn subscribe_labels(
     storage: Arc<Storage>,
     labeler_host: String,
+    database_url: String,
 ) -> Result<(), WintermuteError> {
+    // Create postgres pool for cursor storage
+    let mut pg_config = Config::new();
+    pg_config.url = Some(database_url);
+    pg_config.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+
+    let pool = pg_config
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .map_err(|e| WintermuteError::Other(format!("label pool creation failed: {e}")))?;
+
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             tracing::info!("shutdown requested for label subscriber {labeler_host}");
             break;
         }
 
-        match connect_and_stream(&storage, &labeler_host).await {
+        match connect_and_stream(&storage, &labeler_host, &pool).await {
             Ok(()) => {
                 tracing::warn!("label connection closed for {labeler_host}, reconnecting in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -32,9 +46,15 @@ pub async fn subscribe_labels(
     Ok(())
 }
 
-async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(), WintermuteError> {
+async fn connect_and_stream(
+    storage: &Storage,
+    labeler_host: &str,
+    pool: &Pool,
+) -> Result<(), WintermuteError> {
     let cursor_key = format!("labels:{labeler_host}");
-    let cursor = storage.get_cursor(&cursor_key)?.unwrap_or(0);
+
+    // Get cursor from postgres sub_state table
+    let cursor = get_cursor_from_postgres(pool, &cursor_key).await?;
 
     let clean_hostname = labeler_host
         .trim_start_matches("https://")
@@ -46,10 +66,14 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
     ))
     .map_err(|e| WintermuteError::Other(format!("invalid url: {e}")))?;
 
-    url.query_pairs_mut()
-        .append_pair("cursor", &cursor.to_string());
-
-    tracing::info!("connecting to label stream at {url} with cursor {cursor}");
+    // Only add cursor if we have one, otherwise start from live
+    if cursor > 0 {
+        url.query_pairs_mut()
+            .append_pair("cursor", &cursor.to_string());
+        tracing::info!("connecting to label stream at {url} resuming from cursor {cursor}");
+    } else {
+        tracing::info!("connecting to label stream at {url} starting from live (no stored cursor)");
+    }
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -69,21 +93,14 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
         }
     });
 
+    let mut events_since_cursor_update = 0u64;
+
     while let Some(msg_result) = read.next().await {
         let msg = msg_result?;
 
         if let Message::Binary(data) = msg {
             match parse_label_message(&data) {
                 Ok(Some(label_event)) => {
-                    // Update cursor
-                    if let Err(e) = storage.set_cursor(&cursor_key, label_event.seq) {
-                        tracing::error!("failed to set label cursor: {e}");
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["label_cursor"])
-                            .inc();
-                        continue;
-                    }
-
                     // Enqueue label event to label_live queue
                     if let Err(e) = storage.enqueue_label_live(&label_event) {
                         tracing::error!("failed to enqueue label event: {e}");
@@ -91,6 +108,19 @@ async fn connect_and_stream(storage: &Storage, labeler_host: &str) -> Result<(),
                             .with_label_values(&["label_enqueue"])
                             .inc();
                         continue;
+                    }
+
+                    // Update cursor in postgres every 20 events (like rsky-firehose)
+                    events_since_cursor_update += 1;
+                    if events_since_cursor_update % 20 == 0 {
+                        if let Err(e) =
+                            set_cursor_in_postgres(pool, &cursor_key, label_event.seq).await
+                        {
+                            tracing::error!("failed to set label cursor: {e}");
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["label_cursor"])
+                                .inc();
+                        }
                     }
 
                     // Update metrics
@@ -186,4 +216,33 @@ pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, Wintermute
         seq: body.seq,
         labels,
     }))
+}
+
+async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, WintermuteError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT cursor FROM sub_state WHERE service = $1",
+            &[&service],
+        )
+        .await?;
+
+    Ok(row.map_or(0, |r| r.get::<_, i64>("cursor")))
+}
+
+async fn set_cursor_in_postgres(
+    pool: &Pool,
+    service: &str,
+    cursor: i64,
+) -> Result<(), WintermuteError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO sub_state (service, cursor)
+             VALUES ($1, $2)
+             ON CONFLICT (service) DO UPDATE SET cursor = EXCLUDED.cursor",
+            &[&service, &cursor],
+        )
+        .await?;
+    Ok(())
 }
