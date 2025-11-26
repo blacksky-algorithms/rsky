@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod ingester_tests {
-    use crate::ingester::IngesterManager;
+    use crate::ingester::{IngesterManager, ParseResult};
     use crate::storage::Storage;
     use crate::types::{CommitData, FirehoseEvent};
     use std::sync::Arc;
@@ -81,8 +81,9 @@ mod ingester_tests {
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
 
-        assert!(result.is_some());
-        let event = result.unwrap();
+        let ParseResult::Event(event) = result else {
+            panic!("expected Event, got {result:?}");
+        };
         assert_eq!(event.seq, 12345);
         assert_eq!(event.did, "did:plc:test123");
         assert_eq!(event.time, "2024-01-01T00:00:00+00:00");
@@ -114,9 +115,10 @@ mod ingester_tests {
         );
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
-        assert!(result.is_some());
+        let ParseResult::Event(event) = result else {
+            panic!("expected Event");
+        };
 
-        let event = result.unwrap();
         assert_eq!(event.seq, 54321);
         assert!(event.commit.is_some());
 
@@ -154,7 +156,71 @@ mod ingester_tests {
         ciborium::ser::into_writer(&header, &mut msg_bytes).unwrap();
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
-        assert!(result.is_none());
+        assert!(matches!(result, ParseResult::Skip));
+    }
+
+    #[test]
+    fn test_parse_message_outdated_cursor() {
+        #[derive(serde::Serialize)]
+        struct Header {
+            t: String,
+            op: u8,
+        }
+
+        #[derive(serde::Serialize)]
+        struct InfoBody {
+            name: String,
+            message: Option<String>,
+        }
+
+        let header = Header {
+            t: "#info".to_owned(),
+            op: 1,
+        };
+
+        let body = InfoBody {
+            name: "OutdatedCursor".to_owned(),
+            message: Some("cursor too old".to_owned()),
+        };
+
+        let mut msg_bytes = Vec::new();
+        ciborium::ser::into_writer(&header, &mut msg_bytes).unwrap();
+        serde_ipld_dagcbor::to_writer(&mut msg_bytes, &body).unwrap();
+
+        let result = IngesterManager::parse_message(&msg_bytes).unwrap();
+        assert!(matches!(result, ParseResult::OutdatedCursor));
+    }
+
+    #[test]
+    fn test_parse_message_future_cursor() {
+        #[derive(serde::Serialize)]
+        struct Header {
+            t: String,
+            op: u8,
+        }
+
+        #[derive(serde::Serialize)]
+        struct ErrorBody {
+            name: String,
+            message: Option<String>,
+        }
+
+        let header = Header {
+            t: "#error".to_owned(),
+            op: 1,
+        };
+
+        let body = ErrorBody {
+            name: "FutureCursor".to_owned(),
+            message: Some("cursor is in the future".to_owned()),
+        };
+
+        let mut msg_bytes = Vec::new();
+        ciborium::ser::into_writer(&header, &mut msg_bytes).unwrap();
+        serde_ipld_dagcbor::to_writer(&mut msg_bytes, &body).unwrap();
+
+        let result = IngesterManager::parse_message(&msg_bytes).unwrap();
+        assert!(matches!(result, ParseResult::FutureCursor));
     }
 
     #[test]
@@ -169,9 +235,9 @@ mod ingester_tests {
         );
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
-        assert!(result.is_some());
-
-        let event = result.unwrap();
+        let ParseResult::Event(event) = result else {
+            panic!("expected Event");
+        };
         let commit = event.commit.unwrap();
         assert!(commit.blocks.is_empty());
     }
@@ -276,9 +342,9 @@ mod ingester_tests {
         );
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
-        assert!(result.is_some());
-
-        let event = result.unwrap();
+        let ParseResult::Event(event) = result else {
+            panic!("expected Event");
+        };
         assert_eq!(event.seq, 9_999_999_999);
     }
 
@@ -296,9 +362,9 @@ mod ingester_tests {
         );
 
         let result = IngesterManager::parse_message(&msg_bytes).unwrap();
-        assert!(result.is_some());
-
-        let event = result.unwrap();
+        let ParseResult::Event(event) = result else {
+            panic!("expected Event");
+        };
         let commit = event.commit.unwrap();
         assert_eq!(commit.blocks.len(), large_blocks.len());
     }
@@ -642,7 +708,7 @@ mod ingester_tests {
                     total_messages += 1;
 
                     // Parse the message
-                    if let Ok(Some(event)) = IngesterManager::parse_message(&data) {
+                    if let Ok(ParseResult::Event(event)) = IngesterManager::parse_message(&data) {
                         if let Some(commit) = event.commit {
                             // Count operation types
                             for op in commit.ops {
