@@ -85,10 +85,10 @@ RUST_LOG=info \
 
 ### Required Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay2.us-west.bsky.network`) |
-| `DATABASE_URL` | PostgreSQL connection string |
+| Variable | Description                                                                                                     |
+|----------|-----------------------------------------------------------------------------------------------------------------|
+| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay1.us-west.bsky.network`) |
+| `DATABASE_URL` | PostgreSQL connection string                                                                                    |
 
 ### Optional Environment Variables
 
