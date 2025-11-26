@@ -548,14 +548,17 @@ impl IndexerManager {
     async fn ensure_actor_exists(
         client: &deadpool_postgres::Client,
         did: &str,
-        indexed_at: &str,
+        _indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        // Use epoch as indexedAt for new actors so they get picked up for handle resolution immediately
+        // The handle resolution loop will update indexedAt after attempting resolution
+        let epoch = "1970-01-01T00:00:00Z";
         client
             .execute(
                 "INSERT INTO actor (did, \"indexedAt\")
                  VALUES ($1, $2)
                  ON CONFLICT (did) DO NOTHING",
-                &[&did, &indexed_at],
+                &[&did, &epoch],
             )
             .await?;
         Ok(())
