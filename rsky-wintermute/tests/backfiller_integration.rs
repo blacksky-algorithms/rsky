@@ -78,7 +78,7 @@ async fn test_backfiller_respects_batch_size() {
     let (storage, _dir) = setup_test_storage();
 
     // Enqueue more jobs than batch size
-    for i in 0..(BACKFILLER_BATCH_SIZE * 2) {
+    for i in 0..(*BACKFILLER_BATCH_SIZE * 2) {
         let job = BackfillJob {
             did: format!("did:plc:test{}", i),
             retry_count: 0,
@@ -87,10 +87,11 @@ async fn test_backfiller_respects_batch_size() {
     }
 
     let initial_len = storage.repo_backfill_len().unwrap();
+    let batch_size = *BACKFILLER_BATCH_SIZE;
     assert!(
-        initial_len >= BACKFILLER_BATCH_SIZE * 2,
+        initial_len >= batch_size * 2,
         "should have at least {} jobs, got {}",
-        BACKFILLER_BATCH_SIZE * 2,
+        batch_size * 2,
         initial_len
     );
 }
@@ -100,7 +101,7 @@ async fn test_backfiller_detects_backpressure() {
     let (storage, _dir) = setup_test_storage();
 
     // Fill output stream beyond high water mark to trigger backpressure
-    for i in 0..(BACKFILLER_OUTPUT_HIGH_WATER_MARK + 100) {
+    for i in 0..(*BACKFILLER_OUTPUT_HIGH_WATER_MARK + 100) {
         let job = IndexJob {
             uri: format!("at://did:plc:test/app.bsky.feed.post/test{}", i),
             cid: "bafytest".to_owned(),
@@ -113,11 +114,12 @@ async fn test_backfiller_detects_backpressure() {
     }
 
     let output_len = storage.firehose_backfill_len().unwrap();
+    let high_water_mark = *BACKFILLER_OUTPUT_HIGH_WATER_MARK;
     assert!(
-        output_len > BACKFILLER_OUTPUT_HIGH_WATER_MARK,
+        output_len > high_water_mark,
         "output stream should exceed high water mark for backpressure test: {} > {}",
         output_len,
-        BACKFILLER_OUTPUT_HIGH_WATER_MARK
+        high_water_mark
     );
 }
 
@@ -256,7 +258,8 @@ async fn test_backfiller_batch_dequeuing() {
     let (storage, _dir) = setup_test_storage();
 
     // Enqueue exactly BATCH_SIZE jobs
-    for i in 0..BACKFILLER_BATCH_SIZE {
+    let batch_size = *BACKFILLER_BATCH_SIZE;
+    for i in 0..batch_size {
         let job = BackfillJob {
             did: format!("did:plc:batch{}", i),
             retry_count: 0,
@@ -265,11 +268,11 @@ async fn test_backfiller_batch_dequeuing() {
     }
 
     let initial_len = storage.repo_backfill_len().unwrap();
-    assert_eq!(initial_len, BACKFILLER_BATCH_SIZE);
+    assert_eq!(initial_len, batch_size);
 
     // Dequeue in a batch - dequeue doesn't remove, just peeks
     let mut dequeued = Vec::new();
-    for _ in 0..BACKFILLER_BATCH_SIZE {
+    for _ in 0..batch_size {
         if let Ok(Some((key, job))) = storage.dequeue_backfill() {
             dequeued.push((key, job));
             // Note: dequeue doesn't remove the item, need to call remove_backfill separately
@@ -280,7 +283,7 @@ async fn test_backfiller_batch_dequeuing() {
     assert!(!dequeued.is_empty(), "should dequeue at least one item");
 
     // Remove all items from queue
-    for _ in 0..BACKFILLER_BATCH_SIZE {
+    for _ in 0..batch_size {
         if let Ok(Some((key, _))) = storage.dequeue_backfill() {
             storage.remove_backfill(&key).unwrap();
         } else {
