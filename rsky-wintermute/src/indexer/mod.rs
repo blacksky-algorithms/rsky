@@ -4,14 +4,15 @@ use crate::SHUTDOWN;
 #[cfg(test)]
 use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
-    HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID, IDENTITY_RESOLVER_TIMEOUT,
-    WORKERS_INDEXER,
+    DB_POOL_SIZE, HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID,
+    IDENTITY_RESOLVER_TIMEOUT, WORKERS_INDEXER,
 };
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
@@ -41,23 +42,32 @@ type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
+fn sanitize_text(s: &str) -> String {
+    s.replace('\0', "")
+}
+
+fn sanitize_opt(s: Option<&str>) -> Option<String> {
+    s.map(|v| v.replace('\0', ""))
+}
+
 pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
     pool: Pool,
-    semaphore_live: Arc<Semaphore>,
     semaphore_backfill: Arc<Semaphore>,
-    semaphore_labels: Arc<Semaphore>,
     id_resolver: Arc<Mutex<IdResolver>>,
 }
 
 impl IndexerManager {
     pub fn new(storage: Arc<Storage>, database_url: String) -> Result<Self, WintermuteError> {
+        let pool_size = *DB_POOL_SIZE;
+        tracing::info!("indexer DB pool size: {pool_size}");
         let mut pg_config = Config::new();
         pg_config.url = Some(database_url);
         pg_config.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
+        pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
 
         let pool = pg_config
             .create_pool(Some(Runtime::Tokio1), NoTls)
@@ -75,10 +85,8 @@ impl IndexerManager {
             workers,
             storage,
             pool,
-            // Each queue gets its own semaphore for independent concurrency
-            semaphore_live: Arc::new(Semaphore::new(workers)),
+            // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
-            semaphore_labels: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(Mutex::new(id_resolver)),
         })
     }
@@ -220,7 +228,9 @@ impl IndexerManager {
     }
 
     async fn process_firehose_live_loop(&self) {
-        tracing::info!("firehose_live processor started");
+        const MAX_CONCURRENT: usize = 100;
+
+        tracing::info!("firehose_live processor started (unbounded concurrency)");
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -252,22 +262,25 @@ impl IndexerManager {
 
             self.update_queue_metrics();
 
-            // Try to fill up to semaphore capacity with new jobs
-            while self.semaphore_live.available_permits() > 0 {
+            // First, drain all completed tasks (non-blocking)
+            while let Some(result) = in_flight.next().now_or_never().flatten() {
+                self.handle_single_job_result(result);
+                processed_count += 1;
+            }
+
+            // Dequeue jobs up to max concurrent limit (matches pool capacity)
+            while in_flight.len() < MAX_CONCURRENT {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
                 match self.storage.dequeue_firehose_live() {
                     Ok(Some((key, job))) => {
-                        if let Ok(permit) = self.semaphore_live.clone().try_acquire_owned() {
-                            let pool = self.pool.clone();
-                            let task = tokio::spawn(async move {
-                                let result = Self::process_job(&pool, &job).await;
-                                drop(permit);
-                                (key, QueueSource::FirehoseLive, result)
-                            });
-                            in_flight.push(task);
-                        }
+                        let pool = self.pool.clone();
+                        let task = tokio::spawn(async move {
+                            let result = Self::process_job(&pool, &job).await;
+                            (key, QueueSource::FirehoseLive, result)
+                        });
+                        in_flight.push(task);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -277,18 +290,17 @@ impl IndexerManager {
                 }
             }
 
-            // Process completed tasks or wait briefly if nothing to do
+            // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else {
-                // Process one completed result (non-blocking if available)
-                tokio::select! {
-                    Some(result) = in_flight.next() => {
-                        self.handle_single_job_result(result);
-                        processed_count += 1;
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            } else if in_flight.len() >= MAX_CONCURRENT {
+                // At capacity - wait for one to complete
+                if let Some(result) = in_flight.next().await {
+                    self.handle_single_job_result(result);
+                    processed_count += 1;
                 }
+            } else {
+                tokio::task::yield_now().await;
             }
 
             // Log progress periodically
@@ -385,7 +397,9 @@ impl IndexerManager {
     }
 
     async fn process_labels_loop(&self) {
-        tracing::info!("label_live processor started");
+        const MAX_CONCURRENT: usize = 100;
+
+        tracing::info!("label_live processor started (unbounded concurrency)");
         let mut in_flight: FuturesUnordered<LabelTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -415,22 +429,25 @@ impl IndexerManager {
                 break;
             }
 
-            // Try to fill up to semaphore capacity with new jobs
-            while self.semaphore_labels.available_permits() > 0 {
+            // First, drain all completed tasks (non-blocking)
+            while let Some(result) = in_flight.next().now_or_never().flatten() {
+                self.handle_single_label_result(result);
+                processed_count += 1;
+            }
+
+            // Dequeue jobs up to max concurrent limit (matches pool capacity)
+            while in_flight.len() < MAX_CONCURRENT {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
                 match self.storage.dequeue_label_live() {
                     Ok(Some((key, label_event))) => {
-                        if let Ok(permit) = self.semaphore_labels.clone().try_acquire_owned() {
-                            let pool = self.pool.clone();
-                            let task = tokio::spawn(async move {
-                                let result = Self::process_label_event(&pool, &label_event).await;
-                                drop(permit);
-                                (key, result)
-                            });
-                            in_flight.push(task);
-                        }
+                        let pool = self.pool.clone();
+                        let task = tokio::spawn(async move {
+                            let result = Self::process_label_event(&pool, &label_event).await;
+                            (key, result)
+                        });
+                        in_flight.push(task);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -440,17 +457,17 @@ impl IndexerManager {
                 }
             }
 
-            // Process completed tasks or wait briefly if nothing to do
+            // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else {
-                tokio::select! {
-                    Some(result) = in_flight.next() => {
-                        self.handle_single_label_result(result);
-                        processed_count += 1;
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            } else if in_flight.len() >= MAX_CONCURRENT {
+                // At capacity - wait for one to complete
+                if let Some(result) = in_flight.next().await {
+                    self.handle_single_label_result(result);
+                    processed_count += 1;
                 }
+            } else {
+                tokio::task::yield_now().await;
             }
 
             // Log progress periodically
@@ -1175,7 +1192,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    async fn process_label_event(
+    pub async fn process_label_event(
         pool: &Pool,
         label_event: &crate::types::LabelEvent,
     ) -> Result<(), WintermuteError> {
@@ -1231,7 +1248,7 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.post/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
-        let text = record.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let text = sanitize_text(record.get("text").and_then(|v| v.as_str()).unwrap_or(""));
         let created_at = record
             .get("createdAt")
             .and_then(|v| v.as_str())
@@ -1567,8 +1584,8 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.actor.profile/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
-        let display_name = record.get("displayName").and_then(|v| v.as_str());
-        let description = record.get("description").and_then(|v| v.as_str());
+        let display_name = sanitize_opt(record.get("displayName").and_then(|v| v.as_str()));
+        let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
         let avatar_cid = record
             .get("avatar")
             .and_then(|v| v.get("ref"))
@@ -1639,8 +1656,8 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
         let feed_did = record.get("did").and_then(|v| v.as_str());
-        let display_name = record.get("displayName").and_then(|v| v.as_str());
-        let description = record.get("description").and_then(|v| v.as_str());
+        let display_name = sanitize_opt(record.get("displayName").and_then(|v| v.as_str()));
+        let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
         let description_facets = record
             .get("descriptionFacets")
             .map(std::string::ToString::to_string);
@@ -1690,9 +1707,9 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.list/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
-        let name = record.get("name").and_then(|v| v.as_str());
+        let name = sanitize_opt(record.get("name").and_then(|v| v.as_str()));
         let purpose = record.get("purpose").and_then(|v| v.as_str());
-        let description = record.get("description").and_then(|v| v.as_str());
+        let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
         let description_facets = record
             .get("descriptionFacets")
             .map(std::string::ToString::to_string);
@@ -2141,10 +2158,12 @@ impl IndexerManager {
         // Extract fields from the verification record
         let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
         let handle = record.get("handle").and_then(|v| v.as_str()).unwrap_or("");
-        let display_name = record
-            .get("displayName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let display_name = sanitize_text(
+            record
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
         let created_at = record
             .get("createdAt")
             .and_then(|v| v.as_str())

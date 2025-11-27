@@ -68,3 +68,21 @@ pub static BACKFILLER_TIMEOUT_SECS: LazyLock<u64> = LazyLock::new(|| {
 pub fn backfiller_timeout() -> Duration {
     Duration::from_secs(*BACKFILLER_TIMEOUT_SECS)
 }
+
+// Inline processing concurrency for firehose events
+// Should be proportional to DB_POOL_SIZE to avoid excessive connection contention
+pub static INLINE_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("INLINE_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100) // Default: 100 concurrent inline indexing tasks (5x pool size)
+});
+
+// Database pool size per component (firehose, labels, indexer, backfiller each get a pool)
+// With 4 pools, default 20 each = 80 connections, leaving headroom under Postgres default 100
+pub static DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("DB_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20) // Default: 20 connections per pool (80 total across 4 pools)
+});

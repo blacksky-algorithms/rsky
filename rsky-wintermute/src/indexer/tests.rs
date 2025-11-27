@@ -10,7 +10,7 @@ mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
-    use crate::types::{BackfillJob, WriteAction};
+    use crate::types::{BackfillJob, LabelEvent, WriteAction};
     use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1473,17 +1473,16 @@ mod indexer_tests {
     }
 
     #[tokio::test]
-    async fn test_process_label_jobs_batch_empty() {
-        let (storage, _dir) = setup_test_storage();
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-        });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+    async fn test_process_label_event_empty() {
+        let pool = setup_test_pool();
 
-        // Empty batch should return immediately
-        manager.process_label_jobs_batch(vec![]).await;
-
-        // Should not panic and should complete quickly
+        // Empty labels list should complete without error
+        let label_event = LabelEvent {
+            seq: 1,
+            labels: vec![],
+        };
+        let result = IndexerManager::process_label_event(&pool, &label_event).await;
+        assert!(result.is_ok());
     }
 
     // Test delete operations for existing collection types
