@@ -5,15 +5,17 @@ pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
+use crate::config::{DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY, WORKERS_INGESTER};
+use crate::indexer::IndexerManager;
 use crate::storage::Storage;
-use crate::types::{CommitData, FirehoseEvent, WintermuteError};
+use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
@@ -117,20 +119,28 @@ impl IngesterManager {
     }
 
     async fn run_connection(storage: Arc<Storage>, hostname: String, database_url: String) {
-        // Create postgres pool for cursor storage
+        // Create postgres pool for cursor storage AND direct indexing
+        let pool_size = *DB_POOL_SIZE;
+        tracing::info!("firehose DB pool size: {pool_size}");
         let mut pg_config = Config::new();
         pg_config.url = Some(database_url);
         pg_config.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
+        pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
 
         let pool = match pg_config.create_pool(Some(Runtime::Tokio1), NoTls) {
-            Ok(p) => p,
+            Ok(p) => Arc::new(p),
             Err(e) => {
                 tracing::error!("failed to create firehose pool: {e}");
                 return;
             }
         };
+
+        // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
+        let concurrency = *INLINE_CONCURRENCY;
+        tracing::info!("firehose inline concurrency: {concurrency}");
+        let semaphore = Arc::new(Semaphore::new(concurrency));
 
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s max
         let max_backoff_secs = 60u64;
@@ -142,7 +152,7 @@ impl IngesterManager {
                 break;
             }
 
-            match Self::connect_and_stream(&storage, &hostname, &pool).await {
+            match Self::connect_and_stream(&storage, &hostname, &pool, &semaphore).await {
                 ConnectionResult::Closed => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
@@ -186,7 +196,8 @@ impl IngesterManager {
     async fn connect_and_stream(
         storage: &Storage,
         hostname: &str,
-        pool: &Pool,
+        pool: &Arc<Pool>,
+        semaphore: &Arc<Semaphore>,
     ) -> ConnectionResult {
         use crate::metrics;
 
@@ -313,18 +324,32 @@ impl IngesterManager {
                     .with_label_values(&["firehose_live"])
                     .inc();
 
-                if let Err(e) = storage.write_firehose_event(event.seq, &event) {
-                    tracing::error!("failed to write firehose event: {e}");
-                }
-
-                if let Err(e) = Self::enqueue_event_for_indexing(storage, &event).await {
-                    tracing::error!(
-                        "failed to enqueue event seq={} for indexing: {e}",
-                        event.seq
-                    );
-                    metrics::INGESTER_ERRORS_TOTAL
-                        .with_label_values(&["enqueue_failed"])
-                        .inc();
+                // Process inline: parse event and spawn indexing tasks directly (skip Fjall queue)
+                match Self::parse_event_to_jobs(&event).await {
+                    Ok(jobs) => {
+                        for job in jobs {
+                            // Acquire semaphore permit (like rsky-firehose)
+                            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                                tracing::error!("semaphore closed during firehose processing");
+                                break;
+                            };
+                            let pool_clone = Arc::clone(pool);
+                            tokio::spawn(async move {
+                                if let Err(e) = IndexerManager::process_job(&pool_clone, &job).await
+                                {
+                                    tracing::error!("inline indexing failed: {e}");
+                                    metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                                }
+                                drop(permit);
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to parse event seq={} to jobs: {e}", event.seq);
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["parse_failed"])
+                            .inc();
+                    }
                 }
 
                 // Update cursor in Fjall for fast local access
@@ -444,6 +469,101 @@ impl IngesterManager {
         };
 
         Ok(ParseResult::Event(event))
+    }
+
+    /// Parse a `FirehoseEvent` into `IndexJob`s for inline processing (skipping Fjall queue)
+    pub async fn parse_event_to_jobs(
+        event: &FirehoseEvent,
+    ) -> Result<Vec<IndexJob>, WintermuteError> {
+        use rsky_repo::parse::get_and_parse_record;
+
+        let mut jobs = Vec::new();
+
+        // Only process commit events with operations
+        let Some(ref commit) = event.commit else {
+            return Ok(jobs);
+        };
+
+        if commit.ops.is_empty() {
+            return Ok(jobs);
+        }
+
+        // Parse CAR blocks into a BlockMap
+        let block_map = if commit.blocks.is_empty() {
+            None
+        } else {
+            let cursor = std::io::Cursor::new(&commit.blocks);
+            match iroh_car::CarReader::new(cursor).await {
+                Ok(mut car_reader) => {
+                    let mut block_map = rsky_repo::block_map::BlockMap::new();
+                    while let Ok(Some((cid, data))) = car_reader.next_block().await {
+                        block_map.set(cid, data);
+                    }
+                    Some(block_map)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse CAR blocks for seq={}: {e}", event.seq);
+                    None
+                }
+            }
+        };
+
+        let indexed_at = chrono::Utc::now().to_rfc3339();
+
+        // Convert each operation to an IndexJob
+        for op in &commit.ops {
+            let action = match op.action.as_str() {
+                "create" => WriteAction::Create,
+                "update" => WriteAction::Update,
+                "delete" => WriteAction::Delete,
+                _ => {
+                    tracing::warn!("unknown action type: {}", op.action);
+                    continue;
+                }
+            };
+
+            // Build AT-URI from repo DID + record path
+            let uri = format!("at://{}/{}", event.did, op.path);
+
+            // Use CID from operation, or empty string for deletes
+            let cid_str = op.cid.clone().unwrap_or_default();
+
+            // Extract record from CAR blocks if we have a CID and block_map
+            let record = if let (Some(cid_value), Some(blocks)) = (&op.cid, &block_map) {
+                match lexicon_cid::Cid::try_from(cid_value.as_str()) {
+                    Ok(cid) => match get_and_parse_record(blocks, cid) {
+                        Ok(parsed) => match serde_json::to_value(&parsed.record) {
+                            Ok(record_json) => Some(record_json),
+                            Err(e) => {
+                                tracing::warn!("failed to serialize record for {uri}: {e}");
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("failed to parse record for {uri}: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("invalid CID {cid_value} for {uri}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            jobs.push(IndexJob {
+                uri,
+                cid: cid_str,
+                action,
+                record,
+                indexed_at: indexed_at.clone(),
+                rev: commit.rev.clone(),
+            });
+        }
+
+        Ok(jobs)
     }
 
     pub async fn enqueue_event_for_indexing(

@@ -1,3 +1,5 @@
+use crate::config::{DB_POOL_SIZE, INLINE_CONCURRENCY};
+use crate::indexer::IndexerManager;
 use crate::types::{Label, LabelEvent, WintermuteError};
 use crate::{SHUTDOWN, metrics, storage::Storage};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -6,6 +8,7 @@ use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
@@ -16,15 +19,23 @@ pub async fn subscribe_labels(
     database_url: String,
 ) -> Result<(), WintermuteError> {
     // Create postgres pool for cursor storage
+    let pool_size = *DB_POOL_SIZE;
+    tracing::info!("label DB pool size: {pool_size}");
     let mut pg_config = Config::new();
     pg_config.url = Some(database_url);
     pg_config.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
+    pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
 
-    let pool = pg_config
-        .create_pool(Some(Runtime::Tokio1), NoTls)
-        .map_err(|e| WintermuteError::Other(format!("label pool creation failed: {e}")))?;
+    let pool = Arc::new(
+        pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .map_err(|e| WintermuteError::Other(format!("label pool creation failed: {e}")))?,
+    );
+
+    // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
+    let semaphore = Arc::new(Semaphore::new(*INLINE_CONCURRENCY));
 
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
@@ -32,7 +43,7 @@ pub async fn subscribe_labels(
             break;
         }
 
-        match connect_and_stream(&storage, &labeler_host, &pool).await {
+        match connect_and_stream(&storage, &labeler_host, &pool, &semaphore).await {
             Ok(()) => {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
@@ -53,9 +64,10 @@ pub async fn subscribe_labels(
 }
 
 async fn connect_and_stream(
-    storage: &Storage,
+    _storage: &Storage,
     labeler_host: &str,
-    pool: &Pool,
+    pool: &Arc<Pool>,
+    semaphore: &Arc<Semaphore>,
 ) -> Result<(), WintermuteError> {
     let cursor_key = format!("labels:{labeler_host}");
 
@@ -135,14 +147,23 @@ async fn connect_and_stream(
         if let Message::Binary(data) = msg {
             match parse_label_message(&data) {
                 Ok(Some(label_event)) => {
-                    // Enqueue label event to label_live queue
-                    if let Err(e) = storage.enqueue_label_live(&label_event) {
-                        tracing::error!("failed to enqueue label event: {e}");
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["label_enqueue"])
-                            .inc();
-                        continue;
-                    }
+                    // Process inline: spawn task to index labels directly (skip Fjall queue)
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                        tracing::error!("semaphore closed during label processing");
+                        break;
+                    };
+                    let pool_clone = Arc::clone(pool);
+                    let label_event_clone = label_event.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            IndexerManager::process_label_event(&pool_clone, &label_event_clone)
+                                .await
+                        {
+                            tracing::error!("inline label indexing failed: {e}");
+                            metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                        }
+                        drop(permit);
+                    });
 
                     // Update cursor in postgres every 20 events (like rsky-firehose)
                     events_since_cursor_update += 1;
@@ -163,7 +184,7 @@ async fn connect_and_stream(
                         .inc();
 
                     tracing::debug!(
-                        "enqueued label event seq={} with {} labels",
+                        "processed label event seq={} with {} labels inline",
                         label_event.seq,
                         label_event.labels.len()
                     );
