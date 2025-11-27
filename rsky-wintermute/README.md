@@ -31,42 +31,42 @@ This tool is designed for operating a bsky app-view that needs to index the enti
     | Firehose  |    | listRepos |    |  Labels   |
     +-----------+    +-----------+    +-----------+
            |                |                |
-           v                v                v
-    +------------+   +-------------+   +------------+
-    |firehose_   |   |repo_backfill|   |label_live  |
-    |live (fjall)|   |   (fjall)   |   |  (fjall)   |
-    +------------+   +-------------+   +------------+
-                            |
-                            v
-                     +-----------+
-                     | Backfiller|
-                     +-----------+
-                            |
-                            v
-                    +--------------+
-                    |firehose_     |
-                    |backfill(fjall|
-                    +--------------+
-
-    +------------+   +--------------+   +------------+
-    |firehose_   |   |firehose_     |   |label_live  |
-    |live        |   |backfill      |   |            |
-    +-----+------+   +------+-------+   +-----+------+
-          |                 |                 |
-          +--------+--------+---------+-------+
-                   |                  |
-                   v                  v
-            +-----------+      +-----------+
-            |  Indexer  |      |  Indexer  |
-            | (workers) |      | (labels)  |
-            +-----------+      +-----------+
-                   |                  |
-                   v                  v
+           |                v                |
+           |         +-------------+         |
+           |         |repo_backfill|         |
+           |         |   (fjall)   |         |
+           |         +------+------+         |
+           |                |                |
+           |                v                |
+           |         +-----------+           |
+           |         | Backfiller|           |
+           |         +-----------+           |
+           |                |                |
+           |                v                |
+           |        +--------------+         |
+           |        |firehose_     |         |
+           |        |backfill(fjall|         |
+           |        +------+-------+         |
+           |               |                 |
+           |    +----------+                 |
+           |    |                            |
+           v    v                            v
+    +------------------+            +------------------+
+    | Inline Indexing  |            | Inline Indexing  |
+    | (firehose+backfill)          |    (labels)      |
+    +--------+---------+            +--------+---------+
+             |                               |
+             v                               v
             +---------------------------+
             |        PostgreSQL         |
             |   (bsky dataplane schema) |
             +---------------------------+
 ```
+
+**Data flow:**
+- **Firehose (live)**: Events are parsed and indexed inline (directly to PostgreSQL, no queue)
+- **Labels (live)**: Events are parsed and indexed inline (directly to PostgreSQL, no queue)
+- **Backfill**: DIDs queued to `repo_backfill`, backfiller fetches CARs, records queued to `firehose_backfill`, then indexed
 
 ## Quick Start
 
@@ -103,6 +103,8 @@ RUST_LOG=info \
 | `BACKFILLER_BATCH_SIZE` | `1000` | Repos to dequeue per batch |
 | `BACKFILLER_OUTPUT_HIGH_WATER_MARK` | `100000` | Max records in firehose_backfill before backpressure |
 | `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
+| `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
+| `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
 
 ## Utilities
 
@@ -126,17 +128,20 @@ Manually queue DIDs for backfill from various sources:
 
 ## Queues
 
-Wintermute maintains five internal queues using Fjall:
+Wintermute uses Fjall for durable backfill queues:
 
 | Queue | Purpose |
 |-------|---------|
-| `firehose_live` | Real-time events from relay firehose |
 | `repo_backfill` | DIDs awaiting full repo fetch |
 | `firehose_backfill` | Records extracted from backfilled repos |
-| `label_live` | Labels from labeler subscriptions |
-| `sub_state` | Cursor positions (stored in PostgreSQL) |
 
-Each queue is processed independently with its own worker pool and semaphore for concurrency control. Live events are never blocked by backfill processing.
+**Inline processing (no queue):**
+- **Firehose live events**: Parsed and indexed directly to PostgreSQL with concurrent tasks
+- **Label live events**: Parsed and indexed directly to PostgreSQL with concurrent tasks
+
+**Cursor state:** Stored in PostgreSQL `sub_state` table, not Fjall
+
+Backfill uses semaphore-controlled concurrency with backpressure. Live events are never blocked by backfill processing.
 
 ## Indexed Record Types
 
