@@ -233,6 +233,7 @@ impl IndexerManager {
         tracing::info!("firehose_live processor started (unbounded concurrency)");
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
+        let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
         loop {
@@ -303,13 +304,20 @@ impl IndexerManager {
                 tokio::task::yield_now().await;
             }
 
-            // Log progress periodically
+            // Log progress periodically - only if work was done
             if last_log.elapsed() > Duration::from_secs(5) {
-                tracing::info!(
-                    "firehose_live: processed {}, in_flight {}",
-                    processed_count,
-                    in_flight.len()
-                );
+                let elapsed_secs = last_log.elapsed().as_secs_f64();
+                #[allow(clippy::cast_precision_loss)]
+                let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
+                if processed_count > last_processed_count {
+                    tracing::info!(
+                        "firehose_live: {} indexed ({:.1}/s), {} in_flight",
+                        processed_count - last_processed_count,
+                        rate,
+                        in_flight.len()
+                    );
+                }
+                last_processed_count = processed_count;
                 last_log = std::time::Instant::now();
             }
         }
@@ -319,6 +327,7 @@ impl IndexerManager {
         tracing::info!("firehose_backfill processor started");
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
+        let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
         loop {
@@ -384,13 +393,20 @@ impl IndexerManager {
                 }
             }
 
-            // Log progress periodically
+            // Log progress periodically - only if work was done
             if last_log.elapsed() > Duration::from_secs(5) {
-                tracing::info!(
-                    "firehose_backfill: processed {}, in_flight {}",
-                    processed_count,
-                    in_flight.len()
-                );
+                let elapsed_secs = last_log.elapsed().as_secs_f64();
+                #[allow(clippy::cast_precision_loss)]
+                let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
+                if processed_count > last_processed_count {
+                    tracing::info!(
+                        "firehose_backfill: {} indexed ({:.1}/s), {} in_flight",
+                        processed_count - last_processed_count,
+                        rate,
+                        in_flight.len()
+                    );
+                }
+                last_processed_count = processed_count;
                 last_log = std::time::Instant::now();
             }
         }
@@ -402,6 +418,7 @@ impl IndexerManager {
         tracing::info!("label_live processor started (unbounded concurrency)");
         let mut in_flight: FuturesUnordered<LabelTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
+        let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
         loop {
@@ -470,13 +487,20 @@ impl IndexerManager {
                 tokio::task::yield_now().await;
             }
 
-            // Log progress periodically
+            // Log progress periodically - only if work was done
             if last_log.elapsed() > Duration::from_secs(5) {
-                tracing::info!(
-                    "label_live: processed {}, in_flight {}",
-                    processed_count,
-                    in_flight.len()
-                );
+                let elapsed_secs = last_log.elapsed().as_secs_f64();
+                #[allow(clippy::cast_precision_loss)]
+                let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
+                if processed_count > last_processed_count {
+                    tracing::info!(
+                        "label_live: {} indexed ({:.1}/s), {} in_flight",
+                        processed_count - last_processed_count,
+                        rate,
+                        in_flight.len()
+                    );
+                }
+                last_processed_count = processed_count;
                 last_log = std::time::Instant::now();
             }
         }
