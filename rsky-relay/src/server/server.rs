@@ -13,7 +13,7 @@ use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
 #[cfg(not(feature = "labeler"))]
 use rusqlite::named_params;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
 use url::Url;
@@ -25,12 +25,15 @@ use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
 #[cfg(not(feature = "labeler"))]
-use crate::server::types::{Host, HostStatus, ListHosts};
+use crate::server::types::{Host, HostStatus, ListHosts, GetHostStatus};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
 #[cfg(not(feature = "labeler"))]
 const PATH_LIST_HOSTS: &str = "/xrpc/com.atproto.sync.listHosts";
+
+#[cfg(not(feature = "labeler"))]
+const PATH_HOST_STATUS: &str = "/xrpc/com.atproto.sync.getHostStatus";
 
 const PATH_SUBSCRIBE: &str = if cfg!(feature = "labeler") {
     "/xrpc/com.atproto.label.subscribeLabels"
@@ -215,23 +218,24 @@ impl Server {
         let method = parser.method.ok_or_else(|| eyre!("method missing"))?;
         let path = parser.path.ok_or_else(|| eyre!("path missing"))?;
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
+
+        let body_response = |status, body: &str| -> Vec<u8> {
+            format!(
+                "HTTP/1.1 {status}\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}",
+                body.len()
+            ).into()
+        };
+
         match (method, url.path()) {
             ("GET", "/") => {
-                let body = INDEX_ASCII;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\n\
-                     Content-Type: text/plain; charset=utf-8\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\
-                     \r\n\
-                     {}",
-                    body.len(),
-                    body
-                );
-
                 #[expect(clippy::unwrap_used)]
                 let mut stream = stream.0.take().unwrap();
-                stream.write_all(response.as_bytes())?;
+                stream.write_all(&body_response("200 OK", INDEX_ASCII))?;
                 stream.flush()?;
                 stream.shutdown()?;
                 Ok(())
@@ -249,21 +253,29 @@ impl Server {
                     }
                 };
 
-                let response = format!(
-                    "HTTP/1.1 {}\r\n\
-                     Content-Type: application/json; charset=utf-8\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\
-                     \r\n\
-                     {}",
-                    status,
-                    body.len(),
-                    body
-                );
+                #[expect(clippy::unwrap_used)]
+                let mut stream = stream.0.take().unwrap();
+                stream.write_all(&body_response(status, &body))?;
+                stream.flush()?;
+                stream.shutdown()?;
+                Ok(())
+            }
+            #[cfg(not(feature = "labeler"))]
+            ("GET", PATH_HOST_STATUS) => {
+                let (status, body) = match self.host_status(&url) {
+                    Ok(hosts) => ("200 OK", serde_json::to_string(&hosts)?),
+                    Err(e) => {
+                        let error = serde_json::json!({
+                            "error": "BadRequest",
+                            "message": e.to_string(),
+                        });
+                        ("400 Bad Request", serde_json::to_string(&error)?)
+                    }
+                };
 
                 #[expect(clippy::unwrap_used)]
                 let mut stream = stream.0.take().unwrap();
-                stream.write_all(response.as_bytes())?;
+                stream.write_all(&body_response(status, &body))?;
                 stream.flush()?;
                 stream.shutdown()?;
                 Ok(())
@@ -360,6 +372,33 @@ impl Server {
             .collect();
 
         Ok(ListHosts { cursor, hosts })
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    fn host_status(&mut self, url: &Url) -> Result<GetHostStatus> {
+        let mut hostname = None;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "hostname" => hostname = Some(value.to_string()),
+                // Ignore unknown query parameters.
+                _ => (),
+            }
+        }
+        let hostname = hostname.ok_or(eyre!("hostname param is required"))?;
+
+        Ok(self.relay_conn
+            .prepare_cached("SELECT cursor FROM hosts WHERE host = :host")?
+            .query_one(
+                named_params! { ":host": hostname.clone() },
+                |row| Ok(GetHostStatus {
+                    hostname: hostname.clone(),
+                    seq: row.get("cursor")?,
+                    // TODO: Track status of hosts.
+                    status: HostStatus::Active,
+                }),
+            )
+            .optional()?
+            .ok_or(eyre!("hostname {hostname:?} not found"))?)
     }
 
     #[cfg(not(feature = "labeler"))]
