@@ -25,7 +25,7 @@ use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
 #[cfg(not(feature = "labeler"))]
-use crate::server::types::{Host, HostStatus, ListHosts, GetHostStatus};
+use crate::server::types::{GetHostStatus, Host, HostStatus, ListHosts};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
@@ -228,7 +228,8 @@ impl Server {
                  \r\n\
                  {body}",
                 body.len()
-            ).into()
+            )
+            .into()
         };
 
         match (method, url.path()) {
@@ -386,17 +387,17 @@ impl Server {
         }
         let hostname = hostname.ok_or(eyre!("hostname param is required"))?;
 
-        Ok(self.relay_conn
+        Ok(self
+            .relay_conn
             .prepare_cached("SELECT cursor FROM hosts WHERE host = :host")?
-            .query_one(
-                named_params! { ":host": hostname.clone() },
-                |row| Ok(GetHostStatus {
+            .query_one(named_params! { ":host": hostname.clone() }, |row| {
+                Ok(GetHostStatus {
                     hostname: hostname.clone(),
                     seq: row.get("cursor")?,
                     // TODO: Track status of hosts.
                     status: HostStatus::Active,
-                }),
-            )
+                })
+            })
             .optional()?
             .ok_or(eyre!("hostname {hostname:?} not found"))?)
     }
