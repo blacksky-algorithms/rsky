@@ -393,12 +393,14 @@ impl IndexerManager {
             }
 
             // Dequeue jobs up to max concurrent limit
+            let mut dequeued_this_batch = 0;
             while in_flight.len() < MAX_CONCURRENT {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
                 match self.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, job))) => {
+                        dequeued_this_batch += 1;
                         let pool = self.pool_backfill.clone();
                         let task = tokio::spawn(async move {
                             let result = Self::process_job(&pool, &job).await;
@@ -406,7 +408,20 @@ impl IndexerManager {
                         });
                         in_flight.push(task);
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        // Queue appears empty - log this for debugging
+                        if dequeued_this_batch == 0 && in_flight.is_empty() {
+                            // Only log occasionally to avoid spam
+                            if last_log.elapsed() > Duration::from_secs(10) {
+                                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                                tracing::warn!(
+                                    "firehose_backfill: dequeue returned None but queue_len={}",
+                                    queue_len
+                                );
+                            }
+                        }
+                        break;
+                    }
                     Err(e) => {
                         tracing::error!("failed to dequeue firehose_backfill job: {e}");
                         break;
