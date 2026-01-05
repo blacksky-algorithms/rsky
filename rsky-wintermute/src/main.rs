@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         args.database_url.clone(),
     )?;
     let backfiller = BackfillerManager::new(Arc::clone(&storage))?;
-    let indexer = IndexerManager::new(Arc::clone(&storage), args.database_url)?;
+    let indexer = IndexerManager::new(Arc::clone(&storage), &args.database_url)?;
 
     let metrics_port = args.metrics_port;
 

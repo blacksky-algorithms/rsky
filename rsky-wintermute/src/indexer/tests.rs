@@ -133,13 +133,10 @@ mod indexer_tests {
             "expected more than 5000 records to be enqueued, found {queue_len}"
         );
 
-        let indexer = IndexerManager::new(
-            Arc::new(storage),
-            std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-            }),
-        )
-        .unwrap();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         let mut processed = 0;
         let batch_size = 100;
@@ -151,7 +148,8 @@ mod indexer_tests {
             for _ in 0..batch_size {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
-                        let result = IndexerManager::process_job(&indexer.pool, &index_job).await;
+                        let result =
+                            IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
 
                         match result {
                             Ok(()) => {
@@ -377,13 +375,10 @@ mod indexer_tests {
         let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
         assert!(result.is_ok());
 
-        let indexer = IndexerManager::new(
-            Arc::new(storage),
-            std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-            }),
-        )
-        .unwrap();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         let batch_size = 100;
 
@@ -393,7 +388,8 @@ mod indexer_tests {
             for _ in 0..batch_size {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
-                        let result = IndexerManager::process_job(&indexer.pool, &index_job).await;
+                        let result =
+                            IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
 
                         if result.is_ok() {
                             drop(indexer.storage.remove_firehose_backfill(&key));
@@ -1320,7 +1316,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         // Enqueue some jobs
         for i in 0..5 {
@@ -1349,7 +1345,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         let (jobs, label_jobs) = manager.dequeue_prioritized_jobs();
         assert_eq!(jobs.len(), 0, "should return empty jobs vec");
@@ -1362,7 +1358,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         // Add jobs to both queues
         for i in 0..3 {
@@ -1407,7 +1403,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         let tasks = manager.spawn_index_job_tasks(vec![]).await;
         assert_eq!(
@@ -1423,7 +1419,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         // Enqueue a job
         let job = crate::types::IndexJob {
@@ -1455,7 +1451,7 @@ mod indexer_tests {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
-        let manager = IndexerManager::new(Arc::new(storage), database_url).unwrap();
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
         // Create a failed task result
         let task = tokio::spawn(async move {

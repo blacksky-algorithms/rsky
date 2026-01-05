@@ -53,25 +53,33 @@ fn sanitize_opt(s: Option<&str>) -> Option<String> {
 pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
-    pool: Pool,
+    pool_live: Pool,
+    pool_backfill: Pool,
+    pool_labels: Pool,
+    #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<Mutex<IdResolver>>,
 }
 
 impl IndexerManager {
-    pub fn new(storage: Arc<Storage>, database_url: String) -> Result<Self, WintermuteError> {
+    pub fn new(storage: Arc<Storage>, database_url: &str) -> Result<Self, WintermuteError> {
         let pool_size = *DB_POOL_SIZE;
-        tracing::info!("indexer DB pool size: {pool_size}");
-        let mut pg_config = Config::new();
-        pg_config.url = Some(database_url);
-        pg_config.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
+        // Create separate pools for each stream to prevent starvation
+        // Backfill gets 50% of connections since it's the main bottleneck
+        let backfill_pool_size = pool_size / 2;
+        let live_pool_size = pool_size / 4;
+        let labels_pool_size = pool_size / 4;
 
-        let pool = pg_config
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))?;
+        tracing::info!(
+            "indexer DB pools: live={}, backfill={}, labels={}",
+            live_pool_size,
+            backfill_pool_size,
+            labels_pool_size
+        );
+
+        let pool_live = Self::create_pool(database_url, live_pool_size.max(5))?;
+        let pool_backfill = Self::create_pool(database_url, backfill_pool_size.max(10))?;
+        let pool_labels = Self::create_pool(database_url, labels_pool_size.max(5))?;
 
         let id_resolver = IdResolver::new(IdentityResolverOpts {
             timeout: Some(IDENTITY_RESOLVER_TIMEOUT),
@@ -84,11 +92,26 @@ impl IndexerManager {
         Ok(Self {
             workers,
             storage,
-            pool,
+            pool_live,
+            pool_backfill,
+            pool_labels,
             // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(Mutex::new(id_resolver)),
         })
+    }
+
+    fn create_pool(database_url: &str, size: usize) -> Result<Pool, WintermuteError> {
+        let mut pg_config = Config::new();
+        pg_config.url = Some(database_url.to_owned());
+        pg_config.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        pg_config.pool = Some(deadpool_postgres::PoolConfig::new(size));
+
+        pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
@@ -169,7 +192,8 @@ impl IndexerManager {
             }
 
             let timestamp = chrono::Utc::now().to_rfc3339();
-            let client = match self.pool.get().await {
+            // Use labels pool for handle resolution (low priority, low volume)
+            let client = match self.pool_labels.get().await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("failed to get db connection: {e}");
@@ -198,7 +222,7 @@ impl IndexerManager {
     }
 
     async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {
-        let client = self.pool.get().await?;
+        let client = self.pool_labels.get().await?;
 
         // Get actors with NULL handle or stale indexedAt
         // Priority: NULL handles first, then stale valid handles
@@ -276,7 +300,7 @@ impl IndexerManager {
                 }
                 match self.storage.dequeue_firehose_live() {
                     Ok(Some((key, job))) => {
-                        let pool = self.pool.clone();
+                        let pool = self.pool_live.clone();
                         let task = tokio::spawn(async move {
                             let result = Self::process_job(&pool, &job).await;
                             (key, QueueSource::FirehoseLive, result)
@@ -324,7 +348,14 @@ impl IndexerManager {
     }
 
     async fn process_firehose_backfill_loop(&self) {
-        tracing::info!("firehose_backfill processor started");
+        // Use higher concurrency for backfill since it's the main bottleneck
+        // This should match or exceed the backfill pool size
+        const MAX_CONCURRENT: usize = 50;
+
+        tracing::info!(
+            "firehose_backfill processor started (max concurrent: {})",
+            MAX_CONCURRENT
+        );
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
@@ -355,22 +386,25 @@ impl IndexerManager {
                 break;
             }
 
-            // Try to fill up to semaphore capacity with new jobs
-            while self.semaphore_backfill.available_permits() > 0 {
+            // First, drain all completed tasks (non-blocking)
+            while let Some(result) = in_flight.next().now_or_never().flatten() {
+                self.handle_single_job_result(result);
+                processed_count += 1;
+            }
+
+            // Dequeue jobs up to max concurrent limit
+            while in_flight.len() < MAX_CONCURRENT {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
                 match self.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, job))) => {
-                        if let Ok(permit) = self.semaphore_backfill.clone().try_acquire_owned() {
-                            let pool = self.pool.clone();
-                            let task = tokio::spawn(async move {
-                                let result = Self::process_job(&pool, &job).await;
-                                drop(permit);
-                                (key, QueueSource::FirehoseBackfill, result)
-                            });
-                            in_flight.push(task);
-                        }
+                        let pool = self.pool_backfill.clone();
+                        let task = tokio::spawn(async move {
+                            let result = Self::process_job(&pool, &job).await;
+                            (key, QueueSource::FirehoseBackfill, result)
+                        });
+                        in_flight.push(task);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -380,32 +414,32 @@ impl IndexerManager {
                 }
             }
 
-            // Process completed tasks or wait briefly if nothing to do
+            // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else {
-                tokio::select! {
-                    Some(result) = in_flight.next() => {
-                        self.handle_single_job_result(result);
-                        processed_count += 1;
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            } else if in_flight.len() >= MAX_CONCURRENT {
+                // At capacity - wait for one to complete
+                if let Some(result) = in_flight.next().await {
+                    self.handle_single_job_result(result);
+                    processed_count += 1;
                 }
+            } else {
+                tokio::task::yield_now().await;
             }
 
-            // Log progress periodically - only if work was done
+            // Log progress periodically - always log to show backfill is running
             if last_log.elapsed() > Duration::from_secs(5) {
                 let elapsed_secs = last_log.elapsed().as_secs_f64();
                 #[allow(clippy::cast_precision_loss)]
                 let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
-                if processed_count > last_processed_count {
-                    tracing::info!(
-                        "firehose_backfill: {} indexed ({:.1}/s), {} in_flight",
-                        processed_count - last_processed_count,
-                        rate,
-                        in_flight.len()
-                    );
-                }
+                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                tracing::info!(
+                    "firehose_backfill: {} indexed ({:.1}/s), {} in_flight, {} queued",
+                    processed_count - last_processed_count,
+                    rate,
+                    in_flight.len(),
+                    queue_len
+                );
                 last_processed_count = processed_count;
                 last_log = std::time::Instant::now();
             }
@@ -459,7 +493,7 @@ impl IndexerManager {
                 }
                 match self.storage.dequeue_label_live() {
                     Ok(Some((key, label_event))) => {
-                        let pool = self.pool.clone();
+                        let pool = self.pool_labels.clone();
                         let task = tokio::spawn(async move {
                             let result = Self::process_label_event(&pool, &label_event).await;
                             (key, result)
@@ -632,7 +666,7 @@ impl IndexerManager {
                 break;
             };
 
-            let pool = self.pool.clone();
+            let pool = self.pool_backfill.clone();
 
             let task = tokio::spawn(async move {
                 let result = Self::process_job(&pool, &job).await;
