@@ -361,7 +361,19 @@ impl IndexerManager {
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
+        let mut loop_count = 0u64;
         loop {
+            loop_count += 1;
+
+            // Log startup debug info
+            if loop_count == 1 {
+                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                tracing::info!(
+                    "firehose_backfill: first loop iteration, queue_len={}",
+                    queue_len
+                );
+            }
+
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!(
                     "shutdown requested for firehose_backfill processor, draining {} in-flight tasks",
