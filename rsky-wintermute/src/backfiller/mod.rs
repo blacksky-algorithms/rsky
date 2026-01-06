@@ -351,7 +351,11 @@ impl BackfillerManager {
                     rev: rev.clone(),
                 };
 
-                storage.enqueue_firehose_backfill(&index_job)?;
+                if job.priority {
+                    storage.enqueue_firehose_backfill_priority(&index_job)?;
+                } else {
+                    storage.enqueue_firehose_backfill(&index_job)?;
+                }
             }
         }
 

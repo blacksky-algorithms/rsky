@@ -35,6 +35,7 @@ async fn test_backfiller_processes_single_job() {
     let job = BackfillJob {
         did: "did:plc:w4xbfzo7kqfes5zb7r6qv3rw".to_owned(),
         retry_count: 0,
+        priority: false,
     };
     storage.enqueue_backfill(&job).unwrap();
 
@@ -82,6 +83,7 @@ async fn test_backfiller_respects_batch_size() {
         let job = BackfillJob {
             did: format!("did:plc:test{}", i),
             retry_count: 0,
+            priority: false,
         };
         storage.enqueue_backfill(&job).unwrap();
     }
@@ -132,6 +134,7 @@ async fn test_backfiller_processes_multiple_jobs_concurrently() {
         let job = BackfillJob {
             did: format!("did:plc:invalid{}", i),
             retry_count: 0,
+            priority: false,
         };
         storage.enqueue_backfill(&job).unwrap();
     }
@@ -147,6 +150,7 @@ async fn test_backfiller_handles_job_failures_with_retry() {
     let job = BackfillJob {
         did: "did:plc:nonexistent123".to_owned(),
         retry_count: 0,
+        priority: false,
     };
     storage.enqueue_backfill(&job).unwrap();
 
@@ -172,6 +176,7 @@ async fn test_backfiller_dead_letters_after_max_retries() {
     let job = BackfillJob {
         did: "did:plc:nonexistent456".to_owned(),
         retry_count: 3, // Already at max retries
+        priority: false,
     };
 
     // This job should not be retried (retry_count >= 3)
@@ -194,6 +199,7 @@ async fn test_process_job_error_paths() {
     let job1 = BackfillJob {
         did: "did:plc:doesnotexist999".to_owned(),
         retry_count: 0,
+        priority: false,
     };
     let result1 = BackfillerManager::process_job(&storage, &http_client, &job1).await;
     assert!(result1.is_err());
@@ -202,6 +208,7 @@ async fn test_process_job_error_paths() {
     let job2 = BackfillJob {
         did: "invalid:did:format".to_owned(),
         retry_count: 0,
+        priority: false,
     };
     let result2 = BackfillerManager::process_job(&storage, &http_client, &job2).await;
     assert!(result2.is_err());
@@ -241,6 +248,7 @@ async fn test_backfiller_metrics_tracking() {
     let job = BackfillJob {
         did: "did:plc:test789".to_owned(),
         retry_count: 0,
+        priority: false,
     };
     storage.enqueue_backfill(&job).unwrap();
 
@@ -263,6 +271,7 @@ async fn test_backfiller_batch_dequeuing() {
         let job = BackfillJob {
             did: format!("did:plc:batch{}", i),
             retry_count: 0,
+            priority: false,
         };
         storage.enqueue_backfill(&job).unwrap();
     }

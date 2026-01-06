@@ -58,6 +58,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:w4xbfzo7kqfes5zb7r6qv3rw".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::builder()
@@ -118,6 +119,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:nonexistent123456789".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::builder()
@@ -144,6 +146,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:web:example.invalid".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::builder()
@@ -299,6 +302,7 @@ mod backfiller_tests {
             let job = BackfillJob {
                 did: format!("did:plc:test{i}"),
                 retry_count: 0,
+                priority: false,
             };
             manager.storage.enqueue_backfill(&job).unwrap();
         }
@@ -372,6 +376,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:test1".to_owned(),
             retry_count: 0,
+            priority: false,
         };
         manager.storage.enqueue_backfill(&job).unwrap();
 
@@ -393,6 +398,7 @@ mod backfiller_tests {
             let job = BackfillJob {
                 did: format!("did:plc:test{i}"),
                 retry_count: 0,
+                priority: false,
             };
             manager.storage.enqueue_backfill(&job).unwrap();
         }
@@ -430,6 +436,7 @@ mod backfiller_tests {
                 BackfillJob {
                     did: "did:plc:invalid1".to_owned(),
                     retry_count: 0,
+                    priority: false,
                 },
             ),
             (
@@ -437,6 +444,7 @@ mod backfiller_tests {
                 BackfillJob {
                     did: "did:plc:invalid2".to_owned(),
                     retry_count: 0,
+                    priority: false,
                 },
             ),
         ];
@@ -459,6 +467,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:test123".to_owned(),
             retry_count: 0,
+            priority: false,
         };
         manager.storage.enqueue_backfill(&job).unwrap();
         let (key, _) = manager.storage.dequeue_backfill().unwrap().unwrap();
@@ -482,6 +491,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:test456".to_owned(),
             retry_count: 0,
+            priority: false,
         };
         manager.storage.enqueue_backfill(&job).unwrap();
         let (key, job_from_queue) = manager.storage.dequeue_backfill().unwrap().unwrap();
@@ -518,6 +528,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:test789".to_owned(),
             retry_count: 2, // Will become 3 after increment
+            priority: false,
         };
         manager.storage.enqueue_backfill(&job).unwrap();
         let (key, job_from_queue) = manager.storage.dequeue_backfill().unwrap().unwrap();
@@ -555,6 +566,7 @@ mod backfiller_tests {
                 BackfillJob {
                     did: "test".to_owned(),
                     retry_count: 0,
+                    priority: false,
                 },
                 Ok(()),
             )
@@ -571,6 +583,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:nonexistent123456789".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::new();
@@ -665,6 +678,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "did:plc:invalidtestdid123".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::new();
@@ -684,6 +698,7 @@ mod backfiller_tests {
         let job = BackfillJob {
             did: "not-a-valid-did".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::new();

@@ -434,15 +434,16 @@ impl IndexerManager {
             };
 
             // Log when queue appears empty
-            if dequeued_this_batch == 0 && in_flight.is_empty() {
-                if last_log.elapsed() > Duration::from_secs(10) {
-                    let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
-                    if queue_len > 0 {
-                        tracing::warn!(
-                            "firehose_backfill: dequeue returned 0 but queue_len={}",
-                            queue_len
-                        );
-                    }
+            if dequeued_this_batch == 0
+                && in_flight.is_empty()
+                && last_log.elapsed() > Duration::from_secs(10)
+            {
+                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                if queue_len > 0 {
+                    tracing::warn!(
+                        "firehose_backfill: dequeue returned 0 but queue_len={}",
+                        queue_len
+                    );
                 }
             }
 

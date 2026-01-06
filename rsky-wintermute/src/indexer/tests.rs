@@ -114,6 +114,7 @@ mod indexer_tests {
         let job = BackfillJob {
             did: test_did.to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::builder()
@@ -365,6 +366,7 @@ mod indexer_tests {
         let job = BackfillJob {
             did: test_did.to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         let http_client = reqwest::Client::builder()

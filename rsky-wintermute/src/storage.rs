@@ -227,11 +227,34 @@ impl Storage {
     }
 
     // Firehose backfill queue (from backfiller)
+    /// Enqueue a firehose backfill job with normal priority (prefix "1:")
     pub fn enqueue_firehose_backfill(&self, job: &IndexJob) -> Result<(), WintermuteError> {
+        // Key format: "1:{timestamp}:{uri}" - "1:" prefix for normal priority
         let key = format!(
-            "{}:{}",
-            job.uri,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            "1:{}:{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            job.uri
+        );
+        let mut value = Vec::new();
+        ciborium::into_writer(job, &mut value)
+            .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        self.firehose_backfill
+            .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
+    /// Enqueue a firehose backfill job with HIGH priority (prefix "0:")
+    /// Priority items are indexed BEFORE all normal backfill items
+    pub fn enqueue_firehose_backfill_priority(
+        &self,
+        job: &IndexJob,
+    ) -> Result<(), WintermuteError> {
+        // Key format: "0:{timestamp}:{uri}" - "0:" prefix for high priority
+        let key = format!(
+            "0:{}:{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            job.uri
         );
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
@@ -259,8 +282,8 @@ impl Storage {
         Ok(Some((key_vec, job)))
     }
 
-    /// Batch dequeue up to `limit` jobs from firehose_backfill in a single iteration
-    /// This reduces Fjall lock contention compared to calling dequeue_firehose_backfill() N times
+    /// Batch dequeue up to `limit` jobs from `firehose_backfill` in a single iteration
+    /// This reduces Fjall lock contention compared to calling `dequeue_firehose_backfill()` N times
     pub fn dequeue_firehose_backfill_batch(
         &self,
         limit: usize,
@@ -370,7 +393,7 @@ impl Storage {
         Ok(self.label_live.len()?)
     }
 
-    /// Peek at the first N items in repo_backfill without removing them
+    /// Peek at the first N items in `repo_backfill` without removing them
     pub fn peek_backfill(
         &self,
         limit: usize,
@@ -438,6 +461,7 @@ mod tests {
         let job = BackfillJob {
             did: "did:plc:test456".to_owned(),
             retry_count: 0,
+            priority: false,
         };
 
         storage.enqueue_backfill(&job).unwrap();
@@ -458,10 +482,12 @@ mod tests {
         let normal1 = BackfillJob {
             did: "did:plc:normal1".to_owned(),
             retry_count: 0,
+            priority: false,
         };
         let normal2 = BackfillJob {
             did: "did:plc:normal2".to_owned(),
             retry_count: 0,
+            priority: false,
         };
         storage.enqueue_backfill(&normal1).unwrap();
         storage.enqueue_backfill(&normal2).unwrap();
@@ -470,10 +496,12 @@ mod tests {
         let priority1 = BackfillJob {
             did: "did:plc:priority1".to_owned(),
             retry_count: 0,
+            priority: true,
         };
         let priority2 = BackfillJob {
             did: "did:plc:priority2".to_owned(),
             retry_count: 0,
+            priority: true,
         };
         storage.enqueue_backfill_priority(&priority1).unwrap();
         storage.enqueue_backfill_priority(&priority2).unwrap();
@@ -545,6 +573,88 @@ mod tests {
         assert_eq!(retrieved.cid, job.cid);
 
         storage.remove_firehose_backfill(&key).unwrap();
+        assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_firehose_backfill_priority_queue() {
+        let (storage, _dir) = setup_test_storage();
+
+        // First, enqueue normal priority items
+        let normal1 = IndexJob {
+            uri: "at://did:plc:normal/app.bsky.feed.post/1".to_owned(),
+            cid: "bafynormal1".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"test": "normal1"})),
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev1".to_owned(),
+        };
+        let normal2 = IndexJob {
+            uri: "at://did:plc:normal/app.bsky.feed.post/2".to_owned(),
+            cid: "bafynormal2".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"test": "normal2"})),
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev2".to_owned(),
+        };
+        storage.enqueue_firehose_backfill(&normal1).unwrap();
+        storage.enqueue_firehose_backfill(&normal2).unwrap();
+
+        // Then, enqueue priority items (should come out FIRST despite being added later)
+        let priority1 = IndexJob {
+            uri: "at://did:plc:priority/app.bsky.feed.post/1".to_owned(),
+            cid: "bafypriority1".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"test": "priority1"})),
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev3".to_owned(),
+        };
+        let priority2 = IndexJob {
+            uri: "at://did:plc:priority/app.bsky.feed.post/2".to_owned(),
+            cid: "bafypriority2".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({"test": "priority2"})),
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev4".to_owned(),
+        };
+        storage
+            .enqueue_firehose_backfill_priority(&priority1)
+            .unwrap();
+        storage
+            .enqueue_firehose_backfill_priority(&priority2)
+            .unwrap();
+
+        // Dequeue should return priority items first (0: prefix sorts before 1:)
+        let (_, first) = storage.dequeue_firehose_backfill().unwrap().unwrap();
+        assert!(
+            first.uri.contains("priority"),
+            "priority item should come first, got: {}",
+            first.uri
+        );
+
+        let (_, second) = storage.dequeue_firehose_backfill().unwrap().unwrap();
+        assert!(
+            second.uri.contains("priority"),
+            "priority item should come second, got: {}",
+            second.uri
+        );
+
+        // Then normal items
+        let (_, third) = storage.dequeue_firehose_backfill().unwrap().unwrap();
+        assert!(
+            third.uri.contains("normal"),
+            "normal item should come third, got: {}",
+            third.uri
+        );
+
+        let (_, fourth) = storage.dequeue_firehose_backfill().unwrap().unwrap();
+        assert!(
+            fourth.uri.contains("normal"),
+            "normal item should come fourth, got: {}",
+            fourth.uri
+        );
+
+        // Queue should be empty
         assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
     }
 

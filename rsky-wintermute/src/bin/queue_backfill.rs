@@ -128,6 +128,7 @@ fn queue_from_csv(storage: &Storage, path: &PathBuf, priority: bool) -> Result<(
         let job = BackfillJob {
             did: did.to_string(),
             retry_count: 0,
+            priority,
         };
 
         if priority {
@@ -201,6 +202,7 @@ async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result
             let job = BackfillJob {
                 did: repo.did.clone(),
                 retry_count: 0,
+                priority,
             };
             if priority {
                 storage.enqueue_backfill_priority(&job)?;
@@ -255,6 +257,7 @@ fn queue_dids(storage: &Storage, dids: &[String], priority: bool) -> Result<()> 
             let job = BackfillJob {
                 did: did.to_string(),
                 retry_count: 0,
+                priority,
             };
 
             if priority {

@@ -167,6 +167,7 @@ pub async fn populate_backfill_queue(
             let job = BackfillJob {
                 did: repo.did.clone(),
                 retry_count: 0,
+                priority: false,
             };
             storage.enqueue_backfill(&job)?;
             metrics::INGESTER_BACKFILL_REPOS_WRITTEN_TOTAL.inc();
