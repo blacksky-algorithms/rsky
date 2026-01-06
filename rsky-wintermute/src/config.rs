@@ -15,6 +15,17 @@ pub const BLOCK_SIZE: u32 = 64 * 1024;
 
 pub const FIREHOSE_PING_INTERVAL: Duration = Duration::from_secs(30);
 
+// Cursor save interval - like indigo/tap's cursorSaveInterval
+// Saves cursor to Fjall/Postgres periodically instead of every event
+// This prevents Fjall poisoning from high-frequency writes
+pub static CURSOR_SAVE_INTERVAL: LazyLock<Duration> = LazyLock::new(|| {
+    let secs = std::env::var("CURSOR_SAVE_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5); // Default: save cursor every 5 seconds
+    Duration::from_secs(secs)
+});
+
 // Indexer config - tunable via environment variables
 pub static WORKERS_INDEXER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("INDEXER_WORKERS")
@@ -28,6 +39,16 @@ pub static INDEXER_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000) // Default: 1000 records per batch
+});
+
+// Maximum concurrent indexer tasks for backfill processing
+// Higher values can increase throughput but also increase DB connection contention
+// Should be tuned based on DB pool size and available resources
+pub static INDEXER_MAX_CONCURRENT: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("INDEXER_MAX_CONCURRENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200) // Default: 200 concurrent tasks (increased from 50)
 });
 
 // Handle resolution: revalidate handles after this duration

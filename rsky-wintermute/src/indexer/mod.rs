@@ -5,7 +5,7 @@ use crate::SHUTDOWN;
 use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
     DB_POOL_SIZE, HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID,
-    IDENTITY_RESOLVER_TIMEOUT, WORKERS_INDEXER,
+    IDENTITY_RESOLVER_TIMEOUT, INDEXER_MAX_CONCURRENT, WORKERS_INDEXER,
 };
 use crate::storage::Storage;
 #[cfg(test)]
@@ -348,13 +348,13 @@ impl IndexerManager {
     }
 
     async fn process_firehose_backfill_loop(&self) {
-        // Use higher concurrency for backfill since it's the main bottleneck
-        // This should match or exceed the backfill pool size
-        const MAX_CONCURRENT: usize = 50;
+        // Use configurable concurrency for backfill (env: INDEXER_MAX_CONCURRENT)
+        // Higher values increase throughput but also DB connection contention
+        let max_concurrent = *INDEXER_MAX_CONCURRENT;
 
         tracing::info!(
             "firehose_backfill processor started (max concurrent: {})",
-            MAX_CONCURRENT
+            max_concurrent
         );
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
@@ -404,39 +404,44 @@ impl IndexerManager {
                 processed_count += 1;
             }
 
-            // Dequeue jobs up to max concurrent limit
-            let mut dequeued_this_batch = 0;
-            while in_flight.len() < MAX_CONCURRENT {
-                if SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-                match self.storage.dequeue_firehose_backfill() {
-                    Ok(Some((key, job))) => {
-                        dequeued_this_batch += 1;
-                        let pool = self.pool_backfill.clone();
-                        let task = tokio::spawn(async move {
-                            let result = Self::process_job(&pool, &job).await;
-                            (key, QueueSource::FirehoseBackfill, result)
-                        });
-                        in_flight.push(task);
-                    }
-                    Ok(None) => {
-                        // Queue appears empty - log this for debugging
-                        if dequeued_this_batch == 0 && in_flight.is_empty() {
-                            // Only log occasionally to avoid spam
-                            if last_log.elapsed() > Duration::from_secs(10) {
-                                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
-                                tracing::warn!(
-                                    "firehose_backfill: dequeue returned None but queue_len={}",
-                                    queue_len
-                                );
-                            }
+            // Batch dequeue jobs to reduce Fjall lock contention
+            // Dequeue up to (max_concurrent - in_flight) jobs at once
+            let slots_available = max_concurrent.saturating_sub(in_flight.len());
+            let dequeued_this_batch = if slots_available > 0 && !SHUTDOWN.load(Ordering::Relaxed) {
+                match self
+                    .storage
+                    .dequeue_firehose_backfill_batch(slots_available)
+                {
+                    Ok(jobs) => {
+                        let count = jobs.len();
+                        for (key, job) in jobs {
+                            let pool = self.pool_backfill.clone();
+                            let task = tokio::spawn(async move {
+                                let result = Self::process_job(&pool, &job).await;
+                                (key, QueueSource::FirehoseBackfill, result)
+                            });
+                            in_flight.push(task);
                         }
-                        break;
+                        count
                     }
                     Err(e) => {
-                        tracing::error!("failed to dequeue firehose_backfill job: {e}");
-                        break;
+                        tracing::error!("failed to batch dequeue firehose_backfill jobs: {e}");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
+            // Log when queue appears empty
+            if dequeued_this_batch == 0 && in_flight.is_empty() {
+                if last_log.elapsed() > Duration::from_secs(10) {
+                    let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                    if queue_len > 0 {
+                        tracing::warn!(
+                            "firehose_backfill: dequeue returned 0 but queue_len={}",
+                            queue_len
+                        );
                     }
                 }
             }
@@ -444,7 +449,7 @@ impl IndexerManager {
             // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= MAX_CONCURRENT {
+            } else if in_flight.len() >= max_concurrent {
                 // At capacity - wait for one to complete
                 if let Some(result) = in_flight.next().await {
                     self.handle_single_job_result(result);

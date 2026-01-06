@@ -30,18 +30,27 @@ enum Command {
         /// Path to CSV file containing DIDs
         #[arg(long)]
         file: PathBuf,
+        /// Queue with high priority (processed before normal items)
+        #[arg(long, default_value = "false")]
+        priority: bool,
     },
     /// Queue all repos from a PDS server
     Pds {
         /// PDS host URL (e.g., blacksky.app or https://blacksky.app)
         #[arg(long)]
         host: String,
+        /// Queue with high priority (processed before normal items)
+        #[arg(long, default_value = "false")]
+        priority: bool,
     },
-    /// Queue specific DIDs
+    /// Queue specific DIDs (high priority by default)
     Dids {
         /// DIDs to queue (comma-separated or multiple --did flags)
         #[arg(long = "did", num_args = 1..)]
         dids: Vec<String>,
+        /// Queue with normal priority instead of high priority
+        #[arg(long, default_value = "false")]
+        normal_priority: bool,
     },
     /// Show current queue status
     Status,
@@ -65,22 +74,28 @@ fn main() -> Result<()> {
     let storage = Arc::new(Storage::new(Some(args.db_path))?);
 
     match args.command {
-        Command::Csv { file } => queue_from_csv(&storage, &file),
-        Command::Pds { host } => {
+        Command::Csv { file, priority } => queue_from_csv(&storage, &file, priority),
+        Command::Pds { host, priority } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(queue_from_pds(&storage, &host))
+            rt.block_on(queue_from_pds(&storage, &host, priority))
         }
-        Command::Dids { dids } => queue_dids(&storage, &dids),
+        Command::Dids {
+            dids,
+            normal_priority,
+        } => queue_dids(&storage, &dids, !normal_priority), // DIDs use priority by default
         Command::Status => show_status(&storage),
     }
 }
 
-fn queue_from_csv(storage: &Storage, path: &PathBuf) -> Result<()> {
+fn queue_from_csv(storage: &Storage, path: &PathBuf, priority: bool) -> Result<()> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
     let mut queued = 0;
     let mut skipped = 0;
+
+    let priority_str = if priority { "HIGH PRIORITY" } else { "normal" };
+    println!("Queuing from CSV with {priority_str} priority");
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
@@ -108,7 +123,11 @@ fn queue_from_csv(storage: &Storage, path: &PathBuf) -> Result<()> {
             retry_count: 0,
         };
 
-        storage.enqueue_backfill(&job)?;
+        if priority {
+            storage.enqueue_backfill_priority(&job)?;
+        } else {
+            storage.enqueue_backfill(&job)?;
+        }
         queued += 1;
 
         if queued % 1000 == 0 {
@@ -116,13 +135,16 @@ fn queue_from_csv(storage: &Storage, path: &PathBuf) -> Result<()> {
         }
     }
 
-    println!("Done! Queued {} DIDs, skipped {}", queued, skipped);
+    println!(
+        "Done! Queued {} DIDs ({priority_str}), skipped {}",
+        queued, skipped
+    );
     println!("Current queue length: {}", storage.repo_backfill_len()?);
 
     Ok(())
 }
 
-async fn queue_from_pds(storage: &Storage, host: &str) -> Result<()> {
+async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result<()> {
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -143,7 +165,8 @@ async fn queue_from_pds(storage: &Storage, host: &str) -> Result<()> {
     let mut cursor: Option<String> = None;
     let mut total_queued = 0;
 
-    println!("Fetching repos from {scheme}://{clean_hostname}");
+    let priority_str = if priority { "HIGH PRIORITY" } else { "normal" };
+    println!("Fetching repos from {scheme}://{clean_hostname} ({priority_str} priority)");
 
     loop {
         let mut url = url::Url::parse(&format!(
@@ -172,7 +195,11 @@ async fn queue_from_pds(storage: &Storage, host: &str) -> Result<()> {
                 did: repo.did.clone(),
                 retry_count: 0,
             };
-            storage.enqueue_backfill(&job)?;
+            if priority {
+                storage.enqueue_backfill_priority(&job)?;
+            } else {
+                storage.enqueue_backfill(&job)?;
+            }
             total_queued += 1;
 
             if total_queued % 1000 == 0 {
@@ -187,15 +214,21 @@ async fn queue_from_pds(storage: &Storage, host: &str) -> Result<()> {
         }
     }
 
-    println!("Done! Queued {} DIDs from {}", total_queued, clean_hostname);
+    println!(
+        "Done! Queued {} DIDs from {} ({priority_str})",
+        total_queued, clean_hostname
+    );
     println!("Current queue length: {}", storage.repo_backfill_len()?);
 
     Ok(())
 }
 
-fn queue_dids(storage: &Storage, dids: &[String]) -> Result<()> {
+fn queue_dids(storage: &Storage, dids: &[String], priority: bool) -> Result<()> {
     let mut queued = 0;
     let mut skipped = 0;
+
+    let priority_str = if priority { "HIGH PRIORITY" } else { "normal" };
+    println!("Queuing DIDs with {priority_str} priority");
 
     for did_arg in dids {
         // Support comma-separated DIDs
@@ -217,12 +250,19 @@ fn queue_dids(storage: &Storage, dids: &[String]) -> Result<()> {
                 retry_count: 0,
             };
 
-            storage.enqueue_backfill(&job)?;
+            if priority {
+                storage.enqueue_backfill_priority(&job)?;
+            } else {
+                storage.enqueue_backfill(&job)?;
+            }
             queued += 1;
         }
     }
 
-    println!("Done! Queued {} DIDs, skipped {}", queued, skipped);
+    println!(
+        "Done! Queued {} DIDs ({priority_str}), skipped {}",
+        queued, skipped
+    );
     println!("Current queue length: {}", storage.repo_backfill_len()?);
 
     Ok(())

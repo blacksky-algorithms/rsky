@@ -129,11 +129,35 @@ impl Storage {
         Ok(Some(event))
     }
 
+    /// Enqueue a backfill job with normal priority (prefix "1:")
+    /// Normal priority items are processed after all priority items
     pub fn enqueue_backfill(&self, job: &BackfillJob) -> Result<(), WintermuteError> {
+        // Key format: "1:{timestamp}:{did}" - "1:" prefix for normal priority
+        // Timestamp first ensures FIFO ordering within priority level
         let key = format!(
-            "{}:{}",
-            job.did,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            "1:{}:{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            job.did
+        );
+        let mut value = Vec::new();
+        ciborium::into_writer(job, &mut value)
+            .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        self.repo_backfill
+            .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
+    /// Enqueue a backfill job with HIGH priority (prefix "0:")
+    /// Priority items are processed BEFORE all normal items
+    /// Use this for manual/on-demand backfill requests
+    pub fn enqueue_backfill_priority(&self, job: &BackfillJob) -> Result<(), WintermuteError> {
+        // Key format: "0:{timestamp}:{did}" - "0:" prefix for high priority
+        // Timestamp ensures FIFO ordering within priority level
+        let key = format!(
+            "0:{}:{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            job.did
         );
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
@@ -233,6 +257,36 @@ impl Storage {
         self.firehose_backfill.remove(&key_vec)?;
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
         Ok(Some((key_vec, job)))
+    }
+
+    /// Batch dequeue up to `limit` jobs from firehose_backfill in a single iteration
+    /// This reduces Fjall lock contention compared to calling dequeue_firehose_backfill() N times
+    pub fn dequeue_firehose_backfill_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let mut results = Vec::with_capacity(limit);
+        let mut iter = self.firehose_backfill.iter();
+
+        for _ in 0..limit {
+            let Some(entry) = iter.next() else {
+                break;
+            };
+            let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+            })?;
+            results.push((key_vec, job));
+        }
+
+        // Remove all dequeued items
+        for (key, _) in &results {
+            self.firehose_backfill.remove(key)?;
+            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+        }
+
+        Ok(results)
     }
 
     #[allow(clippy::missing_const_for_fn)]
@@ -377,6 +431,58 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_priority_queue() {
+        let (storage, _dir) = setup_test_storage();
+
+        // First, enqueue normal priority items
+        let normal1 = BackfillJob {
+            did: "did:plc:normal1".to_owned(),
+            retry_count: 0,
+        };
+        let normal2 = BackfillJob {
+            did: "did:plc:normal2".to_owned(),
+            retry_count: 0,
+        };
+        storage.enqueue_backfill(&normal1).unwrap();
+        storage.enqueue_backfill(&normal2).unwrap();
+
+        // Then, enqueue priority items (should come out FIRST despite being added later)
+        let priority1 = BackfillJob {
+            did: "did:plc:priority1".to_owned(),
+            retry_count: 0,
+        };
+        let priority2 = BackfillJob {
+            did: "did:plc:priority2".to_owned(),
+            retry_count: 0,
+        };
+        storage.enqueue_backfill_priority(&priority1).unwrap();
+        storage.enqueue_backfill_priority(&priority2).unwrap();
+
+        // Dequeue should return priority items first (0: prefix sorts before 1:)
+        let (_, first) = storage.dequeue_backfill().unwrap().unwrap();
+        assert_eq!(
+            first.did, "did:plc:priority1",
+            "priority1 should come first"
+        );
+
+        let (_, second) = storage.dequeue_backfill().unwrap().unwrap();
+        assert_eq!(
+            second.did, "did:plc:priority2",
+            "priority2 should come second"
+        );
+
+        // Then normal items
+        let (_, third) = storage.dequeue_backfill().unwrap().unwrap();
+        assert_eq!(third.did, "did:plc:normal1", "normal1 should come third");
+
+        let (_, fourth) = storage.dequeue_backfill().unwrap().unwrap();
+        assert_eq!(fourth.did, "did:plc:normal2", "normal2 should come fourth");
+
+        // Queue should be empty
+        assert!(storage.dequeue_backfill().unwrap().is_none());
+    }
+
+    #[test]
     fn test_firehose_live_queue() {
         let (storage, _dir) = setup_test_storage();
 
@@ -419,6 +525,39 @@ mod tests {
         assert_eq!(retrieved.cid, job.cid);
 
         storage.remove_firehose_backfill(&key).unwrap();
+        assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_firehose_backfill_batch_dequeue() {
+        let (storage, _dir) = setup_test_storage();
+
+        // Enqueue 10 jobs
+        for i in 0..10 {
+            let job = IndexJob {
+                uri: format!("at://did:plc:test/app.bsky.feed.post/{i}"),
+                cid: format!("bafytest{i}"),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"index": i})),
+                indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+                rev: format!("rev{i}"),
+            };
+            storage.enqueue_firehose_backfill(&job).unwrap();
+        }
+
+        // Batch dequeue 5
+        let batch1 = storage.dequeue_firehose_backfill_batch(5).unwrap();
+        assert_eq!(batch1.len(), 5, "should dequeue exactly 5 items");
+
+        // Batch dequeue remaining 5
+        let batch2 = storage.dequeue_firehose_backfill_batch(5).unwrap();
+        assert_eq!(batch2.len(), 5, "should dequeue remaining 5 items");
+
+        // Queue should be empty
+        let batch3 = storage.dequeue_firehose_backfill_batch(5).unwrap();
+        assert_eq!(batch3.len(), 0, "should return empty when queue is empty");
+
+        // Regular dequeue should also return None
         assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
     }
 

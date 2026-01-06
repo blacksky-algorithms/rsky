@@ -5,7 +5,10 @@ pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY, WORKERS_INGESTER};
+use crate::config::{
+    CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY,
+    WORKERS_INGESTER,
+};
 use crate::indexer::IndexerManager;
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
@@ -13,6 +16,7 @@ use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -194,7 +198,7 @@ impl IngesterManager {
     }
 
     async fn connect_and_stream(
-        storage: &Storage,
+        _storage: &Storage,
         hostname: &str,
         pool: &Arc<Pool>,
         semaphore: &Arc<Semaphore>,
@@ -202,6 +206,9 @@ impl IngesterManager {
         use crate::metrics;
 
         let cursor_key = format!("firehose:{hostname}");
+
+        // Use AtomicI64 for cheap, lock-free cursor updates (like indigo/tap's lastSeq)
+        let last_seq = Arc::new(AtomicI64::new(0));
 
         // Get cursor from postgres (survives Fjall corruption)
         let cursor = match get_cursor_from_postgres(pool, &cursor_key).await {
@@ -263,16 +270,53 @@ impl IngesterManager {
             }
         });
 
-        let mut events_since_cursor_update = 0u64;
+        // Spawn interval-based cursor saver (like indigo/tap's RunCursorSaver)
+        // This prevents Fjall poisoning from high-frequency per-event writes
+        let cursor_saver_seq = Arc::clone(&last_seq);
+        let cursor_saver_pool = Arc::clone(pool);
+        let cursor_saver_key = cursor_key.clone();
+        let cursor_saver_task = tokio::spawn(async move {
+            let mut cursor_interval = interval(*CURSOR_SAVE_INTERVAL);
+            let mut last_saved_seq = 0i64;
+            loop {
+                cursor_interval.tick().await;
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                let current_seq = cursor_saver_seq.load(Ordering::Relaxed);
+                if current_seq > 0 && current_seq != last_saved_seq {
+                    if let Err(e) =
+                        set_cursor_in_postgres(&cursor_saver_pool, &cursor_saver_key, current_seq)
+                            .await
+                    {
+                        tracing::error!("cursor saver failed to save to postgres: {e}");
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["firehose_cursor"])
+                            .inc();
+                    } else {
+                        last_saved_seq = current_seq;
+                        tracing::debug!("cursor saved: {current_seq}");
+                    }
+                }
+            }
+        });
 
         loop {
             // Check shutdown with timeout to avoid blocking forever on websocket read
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested, closing firehose connection");
+                // Save final cursor before shutdown
+                let final_seq = last_seq.load(Ordering::Relaxed);
+                if final_seq > 0 {
+                    if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await {
+                        tracing::error!("failed to save cursor on shutdown: {e}");
+                    }
+                }
                 metrics::INGESTER_WEBSOCKET_CONNECTIONS
                     .with_label_values(&["firehose"])
                     .dec();
                 ping_task.abort();
+                cursor_saver_task.abort();
                 return ConnectionResult::Closed;
             }
 
@@ -281,10 +325,16 @@ impl IngesterManager {
                     match msg {
                         Some(Ok(m)) => m,
                         Some(Err(e)) => {
+                            // Save cursor before returning on error
+                            let final_seq = last_seq.load(Ordering::Relaxed);
+                            if final_seq > 0 {
+                                drop(set_cursor_in_postgres(pool, &cursor_key, final_seq).await);
+                            }
                             metrics::INGESTER_WEBSOCKET_CONNECTIONS
                                 .with_label_values(&["firehose"])
                                 .dec();
                             ping_task.abort();
+                            cursor_saver_task.abort();
                             return ConnectionResult::Error(e.into());
                         }
                         None => break,
@@ -312,6 +362,7 @@ impl IngesterManager {
                             .with_label_values(&["firehose"])
                             .dec();
                         ping_task.abort();
+                        cursor_saver_task.abort();
                         return ConnectionResult::FutureCursor;
                     }
                     Err(e) => {
@@ -352,21 +403,17 @@ impl IngesterManager {
                     }
                 }
 
-                // Update cursor in Fjall for fast local access
-                if let Err(e) = storage.set_cursor(&cursor_key, event.seq) {
-                    tracing::error!("failed to set cursor in fjall: {e}");
-                }
+                // Atomically update last_seq (cheap, lock-free operation)
+                // The cursor_saver_task will persist this to postgres on interval
+                last_seq.store(event.seq, Ordering::Relaxed);
+            }
+        }
 
-                // Update cursor in postgres every 20 events (survives corruption)
-                events_since_cursor_update += 1;
-                if events_since_cursor_update % 20 == 0 {
-                    if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, event.seq).await {
-                        tracing::error!("failed to set cursor in postgres: {e}");
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["firehose_cursor"])
-                            .inc();
-                    }
-                }
+        // Save final cursor before disconnecting
+        let final_seq = last_seq.load(Ordering::Relaxed);
+        if final_seq > 0 {
+            if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await {
+                tracing::error!("failed to save final cursor: {e}");
             }
         }
 
@@ -374,6 +421,7 @@ impl IngesterManager {
             .with_label_values(&["firehose"])
             .dec();
         ping_task.abort();
+        cursor_saver_task.abort();
         ConnectionResult::Closed
     }
 
