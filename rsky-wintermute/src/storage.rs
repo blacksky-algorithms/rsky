@@ -369,6 +369,26 @@ impl Storage {
     pub fn label_live_len(&self) -> Result<usize, WintermuteError> {
         Ok(self.label_live.len()?)
     }
+
+    /// Peek at the first N items in repo_backfill without removing them
+    pub fn peek_backfill(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, BackfillJob)>, WintermuteError> {
+        let mut results = Vec::with_capacity(limit);
+        let mut iter = self.repo_backfill.iter();
+        for _ in 0..limit {
+            let Some(entry) = iter.next() else {
+                break;
+            };
+            let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: BackfillJob = ciborium::from_reader(value.as_ref())
+                .map_err(|e| WintermuteError::Serialization(format!("deserialize failed: {e}")))?;
+            results.push((key_vec, job));
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]

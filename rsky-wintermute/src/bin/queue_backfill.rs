@@ -54,6 +54,12 @@ enum Command {
     },
     /// Show current queue status
     Status,
+    /// Peek at the first N items in the repo_backfill queue
+    Peek {
+        /// Number of items to peek at
+        #[arg(long, default_value = "10")]
+        count: usize,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +90,7 @@ fn main() -> Result<()> {
             normal_priority,
         } => queue_dids(&storage, &dids, !normal_priority), // DIDs use priority by default
         Command::Status => show_status(&storage),
+        Command::Peek { count } => peek_queue(&storage, count),
     }
 }
 
@@ -279,6 +286,39 @@ fn show_status(storage: &Storage) -> Result<()> {
     println!("  firehose_live:     {}", firehose_live_len);
     println!("  firehose_backfill: {}", firehose_backfill_len);
     println!("  label_live:        {}", label_live_len);
+
+    Ok(())
+}
+
+fn peek_queue(storage: &Storage, count: usize) -> Result<()> {
+    println!("Peeking at first {} items in repo_backfill queue:", count);
+    println!();
+
+    let items = storage.peek_backfill(count)?;
+
+    if items.is_empty() {
+        println!("Queue is empty");
+        return Ok(());
+    }
+
+    for (i, (key, job)) in items.iter().enumerate() {
+        let key_str = String::from_utf8_lossy(key);
+        let priority = if key_str.starts_with("0:") {
+            "HIGH"
+        } else if key_str.starts_with("1:") {
+            "normal"
+        } else {
+            "unknown"
+        };
+        println!(
+            "{:3}. [{}] {} (retries: {})",
+            i + 1,
+            priority,
+            job.did,
+            job.retry_count
+        );
+        println!("     key: {}", key_str);
+    }
 
     Ok(())
 }
