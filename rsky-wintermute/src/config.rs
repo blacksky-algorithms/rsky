@@ -56,6 +56,24 @@ pub const HANDLE_REINDEX_INTERVAL_VALID: Duration = Duration::from_secs(24 * 60 
 pub const HANDLE_REINDEX_INTERVAL_INVALID: Duration = Duration::from_secs(60 * 60); // 1 hour
 pub const IDENTITY_RESOLVER_TIMEOUT: Duration = Duration::from_secs(3);
 
+// Handle resolution concurrency - process multiple handles in parallel
+pub static HANDLE_RESOLUTION_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("HANDLE_RESOLUTION_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50) // Default: 50 concurrent handle resolutions
+});
+
+pub static HANDLE_RESOLUTION_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("HANDLE_RESOLUTION_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500) // Default: 500 actors per batch
+});
+
+// Priority window for recently-indexed actors (resolve new actors faster)
+pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
+
 // Backfiller config - tunable via environment variables for 15B+ record backfills
 pub static WORKERS_BACKFILLER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("BACKFILLER_WORKERS")

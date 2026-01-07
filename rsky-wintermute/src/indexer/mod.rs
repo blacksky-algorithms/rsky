@@ -4,7 +4,8 @@ use crate::SHUTDOWN;
 #[cfg(test)]
 use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
-    DB_POOL_SIZE, HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID,
+    DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
+    HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, INDEXER_MAX_CONCURRENT, WORKERS_INDEXER,
 };
 use crate::storage::Storage;
@@ -157,8 +158,16 @@ impl IndexerManager {
     }
 
     async fn process_handle_resolution_loop(&self) {
-        tracing::info!("handle resolution processor started");
+        type HandleFuture =
+            std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send>>;
+
+        let max_concurrent = *HANDLE_RESOLUTION_CONCURRENCY;
+        tracing::info!(
+            "handle resolution processor started (concurrency={max_concurrent}, batch={})",
+            *HANDLE_RESOLUTION_BATCH_SIZE
+        );
         let mut batch_count = 0u64;
+        let mut total_resolved = 0u64;
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
@@ -183,67 +192,115 @@ impl IndexerManager {
             }
 
             batch_count += 1;
-            if batch_count % 10 == 1 {
+            let batch_size = dids_to_resolve.len();
+
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let id_resolver = Arc::clone(&self.id_resolver);
+            let pool = self.pool_labels.clone();
+
+            // Process handles in parallel using FuturesUnordered with boxed futures
+            let mut in_flight: FuturesUnordered<HandleFuture> = FuturesUnordered::new();
+            let mut pending_dids = dids_to_resolve.into_iter();
+            let mut resolved_count = 0usize;
+
+            // Helper to create boxed future
+            let make_future = |pool: Pool,
+                               id_resolver: Arc<Mutex<IdResolver>>,
+                               did: String,
+                               timestamp: String|
+             -> HandleFuture {
+                Box::pin(async move {
+                    let client = pool.get().await.ok()?;
+                    Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
+                        .await
+                        .ok()
+                })
+            };
+
+            // Seed initial batch of concurrent tasks
+            for did in pending_dids.by_ref().take(max_concurrent) {
+                in_flight.push(make_future(
+                    pool.clone(),
+                    Arc::clone(&id_resolver),
+                    did,
+                    timestamp.clone(),
+                ));
+            }
+
+            // Process results and spawn new tasks as slots free up
+            while let Some(result) = in_flight.next().await {
+                if result == Some(true) {
+                    resolved_count += 1;
+                }
+
+                // Spawn next task if there are more DIDs
+                if let Some(did) = pending_dids.next() {
+                    in_flight.push(make_future(
+                        pool.clone(),
+                        Arc::clone(&id_resolver),
+                        did,
+                        timestamp.clone(),
+                    ));
+                }
+            }
+
+            total_resolved += resolved_count as u64;
+
+            // Log progress every 10 batches or when handles are resolved
+            if batch_count % 10 == 1 || resolved_count > 0 {
                 tracing::info!(
-                    "handle resolution batch {}, {} actors",
-                    batch_count,
-                    dids_to_resolve.len()
+                    "handle resolution batch {batch_count}: {resolved_count}/{batch_size} resolved (total: {total_resolved})"
                 );
             }
 
-            let timestamp = chrono::Utc::now().to_rfc3339();
-            // Use labels pool for handle resolution (low priority, low volume)
-            let client = match self.pool_labels.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("failed to get db connection: {e}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-
-            let mut resolved_count = 0;
-            for did in dids_to_resolve {
-                match Self::index_handle(&client, &self.id_resolver, &did, &timestamp, false).await
-                {
-                    Ok(true) => resolved_count += 1,
-                    Ok(false) => {}
-                    Err(e) => tracing::debug!("handle resolution error for {did}: {e}"),
-                }
-
-                // Rate limit: 100ms between resolutions to avoid hammering DID resolvers
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            if resolved_count > 0 {
-                tracing::info!("resolved {resolved_count} handles in batch {batch_count}");
-            }
+            // Small delay between batches to avoid overwhelming the system
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
     async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {
         let client = self.pool_labels.get().await?;
+        let batch_size = i64::try_from(*HANDLE_RESOLUTION_BATCH_SIZE).unwrap_or(500);
 
         // Get actors with NULL handle or stale indexedAt
-        // Priority: NULL handles first, then stale valid handles
-        // RFC3339 strings are lexicographically sortable, so we compare as text
+        // Priority order:
+        // 1. Recently-indexed actors with NULL handle (within priority window) - newest first
+        // 2. Older actors with NULL handle - oldest first
+        // 3. Actors with stale valid handles - oldest first
         let stale_threshold_invalid = (chrono::Utc::now()
             - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_INVALID).unwrap_or_default())
         .to_rfc3339();
         let stale_threshold_valid = (chrono::Utc::now()
             - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_VALID).unwrap_or_default())
         .to_rfc3339();
+        let priority_window = (chrono::Utc::now()
+            - chrono::Duration::from_std(HANDLE_PRIORITY_WINDOW).unwrap_or_default())
+        .to_rfc3339();
 
+        // Query with priority: recent NULL handles first (newest), then older NULL handles (oldest), then stale valid handles
         let rows = client
             .query(
                 "SELECT did FROM actor
                  WHERE (handle IS NULL AND \"indexedAt\" < $1)
                     OR (handle IS NOT NULL AND \"indexedAt\" < $2)
                  ORDER BY
-                   CASE WHEN handle IS NULL THEN 0 ELSE 1 END,
-                   \"indexedAt\" ASC
-                 LIMIT 100",
-                &[&stale_threshold_invalid, &stale_threshold_valid],
+                   CASE
+                     WHEN handle IS NULL AND \"indexedAt\" >= $3 THEN 0  -- Recent NULL: highest priority
+                     WHEN handle IS NULL THEN 1                          -- Older NULL: second priority
+                     ELSE 2                                              -- Stale valid: lowest priority
+                   END,
+                   CASE
+                     WHEN handle IS NULL AND \"indexedAt\" >= $3 THEN \"indexedAt\"  -- Recent: newest first
+                     ELSE NULL
+                   END DESC NULLS LAST,
+                   \"indexedAt\" ASC  -- Older entries: oldest first
+                 LIMIT $4",
+                &[
+                    &stale_threshold_invalid,
+                    &stale_threshold_valid,
+                    &priority_window,
+                    &batch_size,
+                ],
             )
             .await?;
 
