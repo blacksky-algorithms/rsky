@@ -26,16 +26,18 @@ impl HandleResolver {
     }
 
     pub async fn resolve(&mut self, handle: &String) -> Result<Option<String>> {
-        let dns_future = self.resolve_dns(handle);
-        let http_future = self.resolve_http(handle);
-
-        match dns_future.await {
-            Ok(dns_res) => Ok(dns_res),
-            Err(_) => match http_future.await {
-                Ok(http_res) => Ok(http_res),
-                Err(_) => self.resolve_backup_dns(handle).await,
-            },
+        // Try DNS first
+        if let Ok(Some(did)) = self.resolve_dns(handle).await {
+            return Ok(Some(did));
         }
+
+        // Fall back to HTTP (/.well-known/atproto-did)
+        if let Ok(Some(did)) = self.resolve_http(handle).await {
+            return Ok(Some(did));
+        }
+
+        // Last resort: backup DNS nameservers
+        self.resolve_backup_dns(handle).await
     }
 
     pub async fn resolve_dns(&self, handle: &String) -> Result<Option<String>> {
