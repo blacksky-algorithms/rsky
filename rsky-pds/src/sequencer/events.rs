@@ -54,6 +54,7 @@ pub struct CommitEvt {
     pub blocks: Vec<u8>,
     pub ops: Vec<CommitEvtOp>,
     pub blobs: Vec<Cid>,
+    #[serde(rename = "prevData")]
     pub prev_data: Option<Cid>,
 }
 

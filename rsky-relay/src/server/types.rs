@@ -24,3 +24,10 @@ pub enum HostStatus {
     Throttled,
     Banned,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetHostStatus {
+    pub hostname: String,
+    pub seq: u64,
+    pub status: HostStatus,
+}
