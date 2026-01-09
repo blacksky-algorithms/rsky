@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +60,38 @@ enum Command {
         #[arg(long, default_value = "10")]
         count: usize,
     },
+    /// Search for a DID in the repo_backfill queue
+    Search {
+        /// DID to search for
+        #[arg(long)]
+        did: String,
+        /// Maximum items to scan (default: entire queue)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show detailed queue statistics
+    Stats,
+    /// Export repo_backfill queue to a file
+    Export {
+        /// Output file path
+        #[arg(long)]
+        file: PathBuf,
+        /// Maximum items to export (default: all)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Remove a specific DID from the repo_backfill queue
+    Remove {
+        /// DID to remove
+        #[arg(long)]
+        did: String,
+    },
+    /// Clear the entire repo_backfill queue (DANGEROUS)
+    Clear {
+        /// Confirm you want to clear the queue
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +123,11 @@ fn main() -> Result<()> {
         } => queue_dids(&storage, &dids, !normal_priority), // DIDs use priority by default
         Command::Status => show_status(&storage),
         Command::Peek { count } => peek_queue(&storage, count),
+        Command::Search { did, limit } => search_queue(&storage, &did, limit),
+        Command::Stats => show_stats(&storage),
+        Command::Export { file, limit } => export_queue(&storage, &file, limit),
+        Command::Remove { did } => remove_from_queue(&storage, &did),
+        Command::Clear { confirm } => clear_queue(&storage, confirm),
     }
 }
 
@@ -322,6 +359,134 @@ fn peek_queue(storage: &Storage, count: usize) -> Result<()> {
         );
         println!("     key: {}", key_str);
     }
+
+    Ok(())
+}
+
+fn search_queue(storage: &Storage, did: &str, limit: Option<usize>) -> Result<()> {
+    println!("Searching for DID: {}", did);
+    println!();
+
+    let max_scan = limit.unwrap_or(usize::MAX);
+    let items = storage.peek_backfill(max_scan)?;
+
+    let mut found = false;
+    let mut scanned = 0;
+
+    for (i, (key, job)) in items.iter().enumerate() {
+        scanned += 1;
+        if job.did == did || job.did.contains(did) {
+            let key_str = String::from_utf8_lossy(key);
+            let priority = if key_str.starts_with("0:") {
+                "HIGH"
+            } else if key_str.starts_with("1:") {
+                "normal"
+            } else {
+                "unknown"
+            };
+            println!(
+                "Found at position {}: [{}] {} (retries: {})",
+                i + 1,
+                priority,
+                job.did,
+                job.retry_count
+            );
+            println!("  key: {}", key_str);
+            found = true;
+        }
+    }
+
+    if !found {
+        println!("DID not found in first {} items", scanned);
+    }
+
+    Ok(())
+}
+
+fn show_stats(storage: &Storage) -> Result<()> {
+    let items = storage.peek_backfill(usize::MAX)?;
+    let total = items.len();
+
+    let mut priority_count = 0;
+    let mut normal_count = 0;
+    let mut retry_distribution: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+
+    for (key, job) in &items {
+        let key_str = String::from_utf8_lossy(key);
+        if key_str.starts_with("0:") {
+            priority_count += 1;
+        } else {
+            normal_count += 1;
+        }
+        *retry_distribution.entry(job.retry_count).or_insert(0) += 1;
+    }
+
+    println!("Queue Statistics (repo_backfill):");
+    println!("  Total items:     {}", total);
+    println!("  High priority:   {}", priority_count);
+    println!("  Normal priority: {}", normal_count);
+    println!();
+    println!("Retry distribution:");
+
+    let mut retries: Vec<_> = retry_distribution.into_iter().collect();
+    retries.sort_by_key(|(k, _)| *k);
+    for (retry_count, count) in retries {
+        println!("  {} retries: {} items", retry_count, count);
+    }
+
+    Ok(())
+}
+
+fn export_queue(storage: &Storage, path: &PathBuf, limit: Option<usize>) -> Result<()> {
+    let max_export = limit.unwrap_or(usize::MAX);
+    let items = storage.peek_backfill(max_export)?;
+
+    let mut file = File::create(path)?;
+    writeln!(file, "did,priority,retry_count")?;
+
+    for (key, job) in &items {
+        let key_str = String::from_utf8_lossy(key);
+        let priority = if key_str.starts_with("0:") {
+            "high"
+        } else {
+            "normal"
+        };
+        writeln!(file, "{},{},{}", job.did, priority, job.retry_count)?;
+    }
+
+    println!("Exported {} items to {:?}", items.len(), path);
+    Ok(())
+}
+
+fn remove_from_queue(storage: &Storage, did: &str) -> Result<()> {
+    println!("Searching for DID to remove: {}", did);
+
+    let removed = storage.remove_backfill_by_did(did)?;
+
+    if removed > 0 {
+        println!("Removed {} entries for DID: {}", removed, did);
+    } else {
+        println!("DID not found in queue: {}", did);
+    }
+
+    println!("Current queue length: {}", storage.repo_backfill_len()?);
+    Ok(())
+}
+
+fn clear_queue(storage: &Storage, confirm: bool) -> Result<()> {
+    if !confirm {
+        println!("This will DELETE ALL items in the repo_backfill queue!");
+        println!("Current queue length: {}", storage.repo_backfill_len()?);
+        println!();
+        println!("To proceed, run with --confirm flag:");
+        println!("  queue_backfill clear --confirm");
+        return Ok(());
+    }
+
+    let count = storage.repo_backfill_len()?;
+    storage.clear_repo_backfill()?;
+    println!("Cleared {} items from repo_backfill queue", count);
 
     Ok(())
 }

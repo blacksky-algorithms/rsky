@@ -412,6 +412,47 @@ impl Storage {
         }
         Ok(results)
     }
+
+    /// Remove all entries for a specific DID from `repo_backfill`
+    /// Returns the number of entries removed
+    pub fn remove_backfill_by_did(&self, did: &str) -> Result<usize, WintermuteError> {
+        let mut removed = 0;
+        let mut keys_to_remove = Vec::new();
+
+        for entry in self.repo_backfill.iter() {
+            let (key, value) = entry?;
+            let job: BackfillJob = ciborium::from_reader(value.as_ref())
+                .map_err(|e| WintermuteError::Serialization(format!("deserialize failed: {e}")))?;
+            if job.did == did {
+                keys_to_remove.push(key.to_vec());
+            }
+        }
+
+        for key in keys_to_remove {
+            self.repo_backfill.remove(&key)?;
+            crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.dec();
+            removed += 1;
+        }
+
+        Ok(removed)
+    }
+
+    /// Clear all items from `repo_backfill`
+    pub fn clear_repo_backfill(&self) -> Result<(), WintermuteError> {
+        let mut keys_to_remove = Vec::new();
+
+        for entry in self.repo_backfill.iter() {
+            let (key, _) = entry?;
+            keys_to_remove.push(key.to_vec());
+        }
+
+        for key in keys_to_remove {
+            self.repo_backfill.remove(&key)?;
+            crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.dec();
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -790,5 +831,95 @@ mod tests {
             Some(42),
             "should preserve data on reopen"
         );
+    }
+
+    #[test]
+    fn test_remove_backfill_by_did() {
+        let (storage, _dir) = setup_test_storage();
+
+        // Enqueue multiple DIDs
+        let job1 = BackfillJob {
+            did: "did:plc:target".to_owned(),
+            retry_count: 0,
+            priority: false,
+        };
+        let job2 = BackfillJob {
+            did: "did:plc:other".to_owned(),
+            retry_count: 0,
+            priority: false,
+        };
+        let job3 = BackfillJob {
+            did: "did:plc:target".to_owned(),
+            retry_count: 1,
+            priority: true,
+        };
+
+        storage.enqueue_backfill(&job1).unwrap();
+        storage.enqueue_backfill(&job2).unwrap();
+        storage.enqueue_backfill_priority(&job3).unwrap();
+
+        assert_eq!(storage.repo_backfill_len().unwrap(), 3);
+
+        // Remove all entries for target DID
+        let removed = storage.remove_backfill_by_did("did:plc:target").unwrap();
+        assert_eq!(removed, 2, "should remove both entries for target");
+
+        // Only other DID should remain
+        assert_eq!(storage.repo_backfill_len().unwrap(), 1);
+        let (_, remaining) = storage.dequeue_backfill().unwrap().unwrap();
+        assert_eq!(remaining.did, "did:plc:other");
+    }
+
+    #[test]
+    fn test_remove_backfill_by_did_not_found() {
+        let (storage, _dir) = setup_test_storage();
+
+        let job = BackfillJob {
+            did: "did:plc:existing".to_owned(),
+            retry_count: 0,
+            priority: false,
+        };
+        storage.enqueue_backfill(&job).unwrap();
+
+        let removed = storage
+            .remove_backfill_by_did("did:plc:nonexistent")
+            .unwrap();
+        assert_eq!(removed, 0, "should return 0 when DID not found");
+        assert_eq!(storage.repo_backfill_len().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_clear_repo_backfill() {
+        let (storage, _dir) = setup_test_storage();
+
+        // Enqueue several items
+        for i in 0..10 {
+            let job = BackfillJob {
+                did: format!("did:plc:test{i}"),
+                retry_count: 0,
+                priority: i % 2 == 0,
+            };
+            if i % 2 == 0 {
+                storage.enqueue_backfill_priority(&job).unwrap();
+            } else {
+                storage.enqueue_backfill(&job).unwrap();
+            }
+        }
+
+        assert_eq!(storage.repo_backfill_len().unwrap(), 10);
+
+        storage.clear_repo_backfill().unwrap();
+
+        assert_eq!(storage.repo_backfill_len().unwrap(), 0);
+        assert!(storage.dequeue_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_clear_empty_repo_backfill() {
+        let (storage, _dir) = setup_test_storage();
+
+        assert_eq!(storage.repo_backfill_len().unwrap(), 0);
+        storage.clear_repo_backfill().unwrap();
+        assert_eq!(storage.repo_backfill_len().unwrap(), 0);
     }
 }

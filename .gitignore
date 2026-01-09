@@ -165,6 +165,7 @@ dist
 wintermute_db
 backfill_cache
 rsky-wintermute/*.md
+rsky-wintermute/*.json
 !rsky-wintermute/README.md
 CLAUDE.md
 .claude
