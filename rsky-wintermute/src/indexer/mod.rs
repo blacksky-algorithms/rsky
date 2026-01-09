@@ -1411,6 +1411,22 @@ impl IndexerManager {
             )
             .await?;
 
+        // sortAt is the earlier of indexedAt and createdAt
+        let sort_at = if indexed_at < created_at {
+            indexed_at
+        } else {
+            created_at
+        };
+
+        client
+            .execute(
+                "INSERT INTO feed_item (type, uri, cid, \"postUri\", \"originatorDid\", \"sortAt\")
+                 VALUES ('post', $1, $2, $1, $3, $4)
+                 ON CONFLICT DO NOTHING",
+                &[&uri, &cid, &did, &sort_at],
+            )
+            .await?;
+
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"postsCount\")
@@ -1433,6 +1449,9 @@ impl IndexerManager {
         let uri = uri_obj.to_string();
         client
             .execute("DELETE FROM post WHERE uri = $1", &[&uri])
+            .await?;
+        client
+            .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
         Ok(())
     }
@@ -1626,6 +1645,23 @@ impl IndexerManager {
             )
             .await?;
 
+        // sortAt is the earlier of indexedAt and createdAt
+        let sort_at = if indexed_at < created_at {
+            indexed_at
+        } else {
+            created_at
+        };
+
+        // feed_item for repost: postUri is the subject (reposted post)
+        client
+            .execute(
+                "INSERT INTO feed_item (type, uri, cid, \"postUri\", \"originatorDid\", \"sortAt\")
+                 VALUES ('repost', $1, $2, $3, $4, $5)
+                 ON CONFLICT DO NOTHING",
+                &[&uri, &cid, &subject, &did, &sort_at],
+            )
+            .await?;
+
         if row_count > 0 && !subject.is_empty() {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
@@ -1665,6 +1701,9 @@ impl IndexerManager {
         let uri = uri_obj.to_string();
         client
             .execute("DELETE FROM repost WHERE uri = $1", &[&uri])
+            .await?;
+        client
+            .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
         Ok(())
     }
