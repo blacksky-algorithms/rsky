@@ -992,14 +992,20 @@ impl IndexerManager {
         uri: &str,
         rev: &str,
     ) -> Result<bool, WintermuteError> {
+        // Delete the record from the record table (matching TypeScript dataplane behavior)
+        // Only delete if the record's rev is <= the delete operation's rev
         let result = client
             .query_opt(
-                "UPDATE record
-                 SET rev = $2, json = '', cid = ''
+                "DELETE FROM record
                  WHERE uri = $1 AND rev <= $2
                  RETURNING uri",
                 &[&uri, &rev],
             )
+            .await?;
+
+        // Also delete from duplicate_record table
+        client
+            .execute("DELETE FROM duplicate_record WHERE uri = $1", &[&uri])
             .await?;
 
         Ok(result.is_some())
