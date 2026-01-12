@@ -494,6 +494,8 @@ impl IndexerManager {
         batch_size: usize,
         processed_count: Arc<std::sync::atomic::AtomicU64>,
     ) {
+        use std::time::Instant;
+
         tracing::debug!("firehose_backfill worker {} started", worker_id);
 
         loop {
@@ -503,6 +505,7 @@ impl IndexerManager {
             }
 
             // Dequeue a batch of jobs
+            let dequeue_start = Instant::now();
             let jobs = match storage.dequeue_firehose_backfill_batch(batch_size) {
                 Ok(jobs) => jobs,
                 Err(e) => {
@@ -523,6 +526,7 @@ impl IndexerManager {
                     continue;
                 }
             };
+            let dequeue_ms = dequeue_start.elapsed().as_millis();
 
             if jobs.is_empty() {
                 // No jobs available, wait briefly before retrying
@@ -533,9 +537,12 @@ impl IndexerManager {
             let batch_len = jobs.len();
 
             // Process the entire batch with batch INSERT statements
+            let process_start = Instant::now();
             let results = Self::process_jobs_batch(&pool, &jobs).await;
+            let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue
+            let remove_start = Instant::now();
             for (key, result) in results {
                 if let Err(e) = &result {
                     tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
@@ -555,6 +562,16 @@ impl IndexerManager {
                     );
                 }
             }
+            let remove_ms = remove_start.elapsed().as_millis();
+
+            tracing::info!(
+                "worker {}: dequeue={}ms, process={}ms, remove={}ms, batch={}",
+                worker_id,
+                dequeue_ms,
+                process_ms,
+                remove_ms,
+                batch_len
+            );
 
             processed_count.fetch_add(batch_len as u64, Ordering::Relaxed);
         }
@@ -1431,11 +1448,14 @@ impl IndexerManager {
         jobs: &[&(Vec<u8>, IndexJob)],
     ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
         use crate::metrics;
+        use std::time::Instant;
 
+        let batch_start = Instant::now();
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
         // Parse all URIs and collect data
+        let parse_start = Instant::now();
         let mut parsed_jobs: Vec<ParsedJob<'_>> = Vec::with_capacity(jobs.len());
 
         for (key, job) in jobs {
@@ -1461,12 +1481,14 @@ impl IndexerManager {
                 }
             }
         }
+        let parse_ms = parse_start.elapsed().as_millis();
 
         if parsed_jobs.is_empty() {
             return results;
         }
 
         // Batch 1: Ensure all actors exist using COPY
+        let actors_start = Instant::now();
         let unique_dids: Vec<&str> = parsed_jobs
             .iter()
             .map(|p| p.did.as_str())
@@ -1478,8 +1500,10 @@ impl IndexerManager {
             tracing::error!("COPY actor insert failed: {e}");
             // Continue anyway, individual records may still work
         }
+        let actors_ms = actors_start.elapsed().as_millis();
 
         // Batch 2: Insert all records into the record table using COPY
+        let records_start = Instant::now();
         let record_data: Vec<_> = parsed_jobs
             .iter()
             .map(|pj| {
@@ -1505,6 +1529,7 @@ impl IndexerManager {
                 vec![false; parsed_jobs.len()]
             }
         };
+        let records_ms = records_start.elapsed().as_millis();
 
         // Track which jobs were applied (not stale)
         let mut applied_jobs: Vec<&ParsedJob<'_>> = Vec::new();
@@ -1518,6 +1543,7 @@ impl IndexerManager {
 
         // Batch 3: Insert collection-specific records using COPY
         // Group by collection type
+        let collections_start = Instant::now();
         let mut by_collection: HashMap<&str, Vec<&ParsedJob<'_>>> = HashMap::new();
         for job in &applied_jobs {
             by_collection
@@ -1526,9 +1552,14 @@ impl IndexerManager {
                 .push(job);
         }
 
+        // Track per-collection timings
+        let mut collection_timings: Vec<(String, u128, usize)> = Vec::new();
+
         // Process each collection type using COPY protocol
         #[allow(clippy::iter_over_hash_type)]
         for (collection, collection_jobs) in by_collection {
+            let col_start = Instant::now();
+            let col_count = collection_jobs.len();
             let batch_result = match collection {
                 "app.bsky.feed.post" => {
                     Self::copy_batch_insert_posts(client, &collection_jobs).await
@@ -1574,17 +1605,45 @@ impl IndexerManager {
                     Ok(())
                 }
             };
+            collection_timings.push((
+                (*collection).to_owned(),
+                col_start.elapsed().as_millis(),
+                col_count,
+            ));
 
             if let Err(e) = batch_result {
                 tracing::error!("COPY batch insert for {collection} failed: {e}");
             }
         }
+        let collections_ms = collections_start.elapsed().as_millis();
 
         // All creates succeeded (or were stale)
         for pj in &parsed_jobs {
             metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
             results.push(((*pj.key).clone(), Ok(())));
         }
+
+        let total_ms = batch_start.elapsed().as_millis();
+        let applied_count = applied_jobs.len();
+
+        // Log timing breakdown
+        let col_breakdown: String = collection_timings
+            .iter()
+            .map(|(c, ms, n)| format!("{}={}ms({})", c.rsplit('.').next().unwrap_or(c), ms, n))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        tracing::info!(
+            "batch timing: total={}ms, parse={}ms, actors={}ms, records={}ms, collections={}ms [{}] | jobs={}, applied={}",
+            total_ms,
+            parse_ms,
+            actors_ms,
+            records_ms,
+            collections_ms,
+            col_breakdown,
+            jobs.len(),
+            applied_count
+        );
 
         results
     }
