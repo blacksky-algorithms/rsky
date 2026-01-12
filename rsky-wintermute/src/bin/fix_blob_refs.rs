@@ -6,9 +6,9 @@ use clap::Parser;
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use lexicon_cid::Cid;
 use serde_json::Value;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_postgres::NoTls;
 
 #[derive(Parser)]
@@ -56,9 +56,9 @@ fn convert_record_to_ipld(value: &Value) -> Value {
         }
         Value::Array(arr) => {
             // Check if this is a byte array (potential CID)
-            let is_byte_array = arr
-                .iter()
-                .all(|v| matches!(v, Value::Number(n) if n.as_u64().is_some_and(|num| num <= 255)));
+            let is_byte_array = arr.iter().all(|v| {
+                matches!(v, Value::Number(n) if n.as_u64().is_some_and(|num| num <= 255))
+            });
 
             if is_byte_array && !arr.is_empty() {
                 let bytes: Vec<u8> = arr
@@ -83,9 +83,9 @@ fn has_corrupted_blob_refs(value: &Value) -> bool {
         Value::Object(map) => map.values().any(has_corrupted_blob_refs),
         Value::Array(arr) => {
             // Check if this array itself is a byte array
-            let is_byte_array = arr
-                .iter()
-                .all(|v| matches!(v, Value::Number(n) if n.as_u64().is_some_and(|num| num <= 255)));
+            let is_byte_array = arr.iter().all(|v| {
+                matches!(v, Value::Number(n) if n.as_u64().is_some_and(|num| num <= 255))
+            });
 
             if is_byte_array && !arr.is_empty() {
                 let bytes: Vec<u8> = arr
@@ -144,10 +144,7 @@ impl Stats {
     }
 }
 
-async fn create_pool(
-    database_url: &str,
-    pool_size: usize,
-) -> Result<Pool, Box<dyn std::error::Error>> {
+async fn create_pool(database_url: &str, pool_size: usize) -> Result<Pool, Box<dyn std::error::Error>> {
     let mut cfg = Config::new();
     cfg.url = Some(database_url.to_string());
     cfg.manager = Some(ManagerConfig {
@@ -276,10 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Fix Blob Refs Migration Tool");
     println!("============================");
-    println!(
-        "Database: {}",
-        args.database_url.split('@').last().unwrap_or("*****")
-    );
+    println!("Database: {}", args.database_url.split('@').last().unwrap_or("*****"));
     println!("Batch size: {}", args.batch_size);
     println!("Workers: {}", args.workers);
     println!("Dry run: {}", args.dry_run);
@@ -315,13 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(args.workers));
 
     loop {
-        let uris = get_affected_uris(
-            &pool,
-            last_uri.as_deref(),
-            args.batch_size,
-            args.filter.as_deref(),
-        )
-        .await?;
+        let uris = get_affected_uris(&pool, last_uri.as_deref(), args.batch_size, args.filter.as_deref()).await?;
 
         if uris.is_empty() {
             break;
