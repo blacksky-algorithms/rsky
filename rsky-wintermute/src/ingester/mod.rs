@@ -557,7 +557,9 @@ impl IngesterManager {
             }
         };
 
-        let indexed_at = chrono::Utc::now().to_rfc3339();
+        let indexed_at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
 
         // Convert each operation to an IndexJob
         for op in &commit.ops {
@@ -650,7 +652,9 @@ impl IngesterManager {
             }
         };
 
-        let indexed_at = chrono::Utc::now().to_rfc3339();
+        let indexed_at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
 
         // Convert each operation to an IndexJob
         for op in &commit.ops {

@@ -205,7 +205,9 @@ impl IndexerManager {
             batch_count += 1;
             let batch_size = dids_to_resolve.len();
 
-            let timestamp = chrono::Utc::now().to_rfc3339();
+            let timestamp = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
             let id_resolver = Arc::clone(&self.id_resolver);
             let pool = self.pool_labels.clone();
 

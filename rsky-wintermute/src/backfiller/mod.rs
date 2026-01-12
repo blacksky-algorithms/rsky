@@ -315,7 +315,9 @@ impl BackfillerManager {
         };
 
         let rev = repo.commit.rev.clone();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
 
         for entry in &leaves {
             let uri_string = format!("at://{did}/{}", entry.key);
