@@ -505,6 +505,15 @@ impl IndexerManager {
             let jobs = match storage.dequeue_firehose_backfill_batch(batch_size) {
                 Ok(jobs) => jobs,
                 Err(e) => {
+                    // Check if Fjall is poisoned - trigger shutdown for recovery
+                    if e.is_storage_corrupted() {
+                        tracing::error!(
+                            "worker {}: Fjall storage corrupted, triggering shutdown for recovery: {e}",
+                            worker_id
+                        );
+                        SHUTDOWN.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     tracing::error!(
                         "worker {}: failed to dequeue firehose_backfill jobs: {e}",
                         worker_id
@@ -531,6 +540,14 @@ impl IndexerManager {
                     tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
                 }
                 if let Err(e) = storage.remove_firehose_backfill(&key) {
+                    if e.is_storage_corrupted() {
+                        tracing::error!(
+                            "worker {}: Fjall storage corrupted during remove, triggering shutdown: {e}",
+                            worker_id
+                        );
+                        SHUTDOWN.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     tracing::error!(
                         "worker {}: failed to remove firehose_backfill job: {e}",
                         worker_id
