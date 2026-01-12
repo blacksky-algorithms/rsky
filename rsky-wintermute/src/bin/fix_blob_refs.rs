@@ -8,7 +8,7 @@ use lexicon_cid::Cid;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio_postgres::NoTls;
 
 #[derive(Parser)]
@@ -239,7 +239,10 @@ async fn process_uri(
         return Ok(());
     };
 
-    let json: Value = row.get(0);
+    let json_text: String = row.get(0);
+    let json: Value = serde_json::from_str(&json_text).map_err(|e| {
+        format!("Failed to parse JSON for {uri}: {e}")
+    })?;
 
     // Check if it actually needs fixing
     if !has_corrupted_blob_refs(&json) {
@@ -255,10 +258,11 @@ async fn process_uri(
     }
 
     if !dry_run {
+        let fixed_json_text = serde_json::to_string(&fixed_json)?;
         client
             .execute(
                 "UPDATE bsky.record SET json = $1 WHERE uri = $2",
-                &[&fixed_json, &uri],
+                &[&fixed_json_text, &uri],
             )
             .await?;
     }
