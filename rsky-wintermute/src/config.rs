@@ -41,6 +41,16 @@ pub static INDEXER_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(1000) // Default: 1000 records per batch
 });
 
+// Number of parallel batch processors for backfill indexing
+// Each worker dequeues and processes batches independently
+// Should be tuned based on DB pool size (e.g., pool_size / 2)
+pub static INDEXER_BATCH_WORKERS: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("INDEXER_BATCH_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4) // Default: 4 parallel batch workers
+});
+
 // Maximum concurrent indexer tasks for backfill processing
 // Higher values can increase throughput but also increase DB connection contention
 // Should be tuned based on DB pool size and available resources

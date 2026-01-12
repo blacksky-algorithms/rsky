@@ -1,12 +1,12 @@
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
     DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, WORKERS_INDEXER,
 };
+use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
@@ -415,56 +415,107 @@ impl IndexerManager {
     }
 
     async fn process_firehose_backfill_loop(&self) {
-        // Use configurable batch size for batch inserts (env: INDEXER_BATCH_SIZE)
+        use std::sync::atomic::AtomicU64;
+
         let batch_size = *INDEXER_BATCH_SIZE;
+        let num_workers = *INDEXER_BATCH_WORKERS;
 
         tracing::info!(
-            "firehose_backfill processor started (batch size: {})",
+            "firehose_backfill processor started (workers: {}, batch size: {})",
+            num_workers,
             batch_size
         );
-        let mut processed_count = 0u64;
-        let mut last_processed_count = 0u64;
-        let mut last_log = std::time::Instant::now();
 
-        let mut loop_count = 0u64;
-        loop {
-            loop_count += 1;
+        // Shared counter for aggregate statistics across all workers
+        let processed_total = Arc::new(AtomicU64::new(0));
 
-            // Log startup debug info
-            if loop_count == 1 {
-                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+        // Spawn worker tasks
+        let mut worker_handles = Vec::with_capacity(num_workers);
+        for worker_id in 0..num_workers {
+            let storage = Arc::clone(&self.storage);
+            let pool = self.pool_backfill.clone();
+            let processed = Arc::clone(&processed_total);
+
+            let handle = tokio::spawn(async move {
+                Self::backfill_worker_loop(worker_id, storage, pool, batch_size, processed).await;
+            });
+            worker_handles.push(handle);
+        }
+
+        // Logging task - reports aggregate progress
+        let storage_for_logging = Arc::clone(&self.storage);
+        let processed_for_logging = Arc::clone(&processed_total);
+        let logging_handle = tokio::spawn(async move {
+            let mut last_count = 0u64;
+            let mut last_log = std::time::Instant::now();
+
+            loop {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(5)).await;
+
+                let current = processed_for_logging.load(Ordering::Relaxed);
+                let elapsed_secs = last_log.elapsed().as_secs_f64();
+                #[allow(clippy::cast_precision_loss)]
+                let rate = (current - last_count) as f64 / elapsed_secs;
+                let queue_len = storage_for_logging.firehose_backfill_len().unwrap_or(0);
+
                 tracing::info!(
-                    "firehose_backfill: first loop iteration, queue_len={}",
+                    "firehose_backfill: {} indexed ({:.1}/s), {} queued",
+                    current - last_count,
+                    rate,
                     queue_len
                 );
-            }
 
+                last_count = current;
+                last_log = std::time::Instant::now();
+            }
+        });
+
+        // Wait for shutdown
+        for handle in worker_handles {
+            let _result = handle.await;
+        }
+        logging_handle.abort();
+
+        tracing::info!(
+            "firehose_backfill processor stopped, total processed: {}",
+            processed_total.load(Ordering::Relaxed)
+        );
+    }
+
+    async fn backfill_worker_loop(
+        worker_id: usize,
+        storage: Arc<Storage>,
+        pool: Pool,
+        batch_size: usize,
+        processed_count: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        tracing::debug!("firehose_backfill worker {} started", worker_id);
+
+        loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for firehose_backfill processor");
+                tracing::debug!("firehose_backfill worker {} shutting down", worker_id);
                 break;
             }
 
             // Dequeue a batch of jobs
-            let jobs = match self.storage.dequeue_firehose_backfill_batch(batch_size) {
+            let jobs = match storage.dequeue_firehose_backfill_batch(batch_size) {
                 Ok(jobs) => jobs,
                 Err(e) => {
-                    tracing::error!("failed to batch dequeue firehose_backfill jobs: {e}");
+                    tracing::error!(
+                        "worker {}: failed to dequeue firehose_backfill jobs: {e}",
+                        worker_id
+                    );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             };
 
             if jobs.is_empty() {
-                // No jobs available, wait briefly
-                if last_log.elapsed() > Duration::from_secs(10) {
-                    let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
-                    if queue_len > 0 {
-                        tracing::warn!(
-                            "firehose_backfill: dequeue returned 0 but queue_len={}",
-                            queue_len
-                        );
-                    }
-                }
+                // No jobs available, wait briefly before retrying
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
@@ -472,36 +523,22 @@ impl IndexerManager {
             let batch_len = jobs.len();
 
             // Process the entire batch with batch INSERT statements
-            let results = Self::process_jobs_batch(&self.pool_backfill, &jobs).await;
+            let results = Self::process_jobs_batch(&pool, &jobs).await;
 
-            // Handle results - remove successful jobs from queue
+            // Handle results - remove jobs from queue
             for (key, result) in results {
                 if let Err(e) = &result {
-                    tracing::error!("firehose_backfill job failed: {e}");
+                    tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
                 }
-                // Acknowledge the job (remove from queue)
-                if let Err(e) = self.storage.remove_firehose_backfill(&key) {
-                    tracing::error!("failed to remove firehose_backfill job: {e}");
+                if let Err(e) = storage.remove_firehose_backfill(&key) {
+                    tracing::error!(
+                        "worker {}: failed to remove firehose_backfill job: {e}",
+                        worker_id
+                    );
                 }
             }
 
-            processed_count += batch_len as u64;
-
-            // Log progress periodically
-            if last_log.elapsed() > Duration::from_secs(5) {
-                let elapsed_secs = last_log.elapsed().as_secs_f64();
-                #[allow(clippy::cast_precision_loss)]
-                let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
-                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
-                tracing::info!(
-                    "firehose_backfill: {} indexed ({:.1}/s), {} queued",
-                    processed_count - last_processed_count,
-                    rate,
-                    queue_len
-                );
-                last_processed_count = processed_count;
-                last_log = std::time::Instant::now();
-            }
+            processed_count.fetch_add(batch_len as u64, Ordering::Relaxed);
         }
     }
 
