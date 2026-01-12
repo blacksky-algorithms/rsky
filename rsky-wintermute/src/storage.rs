@@ -41,9 +41,15 @@ impl Storage {
     }
 
     fn open_db(path: &PathBuf) -> Result<Self, WintermuteError> {
+        tracing::info!(
+            "opening Fjall with cache={}GB, write_buffer={}GB, memtable={}MB",
+            *CACHE_SIZE / (1024 * 1024 * 1024),
+            *WRITE_BUFFER_SIZE / (1024 * 1024 * 1024),
+            MEMTABLE_SIZE / (1024 * 1024)
+        );
         let db = Config::new(path)
-            .cache_size(CACHE_SIZE)
-            .max_write_buffer_size(WRITE_BUFFER_SIZE)
+            .cache_size(*CACHE_SIZE)
+            .max_write_buffer_size(*WRITE_BUFFER_SIZE)
             .fsync_ms(FSYNC_MS)
             .open()
             .map_err(|e| {

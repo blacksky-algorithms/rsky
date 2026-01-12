@@ -7,10 +7,25 @@ pub const CAPACITY_INDEX: usize = 1 << 14;
 
 pub const WORKERS_INGESTER: usize = 4;
 
-pub const CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
-pub const WRITE_BUFFER_SIZE: u64 = 512 * 1024 * 1024;
+// Fjall storage config - tunable via environment variables
+// On high-memory servers (200GB+ RAM), these should be increased significantly
+// Rule of thumb: CACHE_SIZE = 20-25% of RAM, WRITE_BUFFER_SIZE = 1-2% of RAM
+pub static CACHE_SIZE: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("FJALL_CACHE_SIZE_GB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(32 * 1024 * 1024 * 1024, |gb| gb * 1024 * 1024 * 1024) // Default: 32GB
+});
+
+pub static WRITE_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("FJALL_WRITE_BUFFER_SIZE_GB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(2 * 1024 * 1024 * 1024, |gb| gb * 1024 * 1024 * 1024) // Default: 2GB
+});
+
 pub const FSYNC_MS: Option<u16> = Some(1000);
-pub const MEMTABLE_SIZE: u32 = 64 * 1024 * 1024;
+pub const MEMTABLE_SIZE: u32 = 256 * 1024 * 1024; // 256MB (up from 64MB)
 pub const BLOCK_SIZE: u32 = 64 * 1024;
 
 pub const FIREHOSE_PING_INTERVAL: Duration = Duration::from_secs(30);
