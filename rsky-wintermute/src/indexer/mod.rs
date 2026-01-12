@@ -1,12 +1,11 @@
 mod tests;
 
 use crate::SHUTDOWN;
-#[cfg(test)]
 use crate::config::INDEXER_BATCH_SIZE;
 use crate::config::{
     DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
-    IDENTITY_RESOLVER_TIMEOUT, INDEXER_MAX_CONCURRENT, WORKERS_INDEXER,
+    IDENTITY_RESOLVER_TIMEOUT, WORKERS_INDEXER,
 };
 use crate::storage::Storage;
 #[cfg(test)]
@@ -18,6 +17,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -60,6 +60,16 @@ pub struct IndexerManager {
     #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<Mutex<IdResolver>>,
+}
+
+/// Parsed job data for batch processing
+struct ParsedJob<'a> {
+    key: &'a Vec<u8>,
+    job: &'a IndexJob,
+    uri: AtUri,
+    did: String,
+    collection: String,
+    rkey: String,
 }
 
 impl IndexerManager {
@@ -405,15 +415,13 @@ impl IndexerManager {
     }
 
     async fn process_firehose_backfill_loop(&self) {
-        // Use configurable concurrency for backfill (env: INDEXER_MAX_CONCURRENT)
-        // Higher values increase throughput but also DB connection contention
-        let max_concurrent = *INDEXER_MAX_CONCURRENT;
+        // Use configurable batch size for batch inserts (env: INDEXER_BATCH_SIZE)
+        let batch_size = *INDEXER_BATCH_SIZE;
 
         tracing::info!(
-            "firehose_backfill processor started (max concurrent: {})",
-            max_concurrent
+            "firehose_backfill processor started (batch size: {})",
+            batch_size
         );
-        let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -432,102 +440,63 @@ impl IndexerManager {
             }
 
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!(
-                    "shutdown requested for firehose_backfill processor, draining {} in-flight tasks",
-                    in_flight.len()
-                );
-                // Drain with timeout to avoid hanging forever
-                let drain_start = std::time::Instant::now();
-                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
-                    tokio::select! {
-                        Some(result) = in_flight.next() => {
-                            self.handle_single_job_result(result);
-                        }
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    }
-                }
-                if !in_flight.is_empty() {
-                    tracing::warn!(
-                        "firehose_backfill: {} tasks still in-flight after drain timeout",
-                        in_flight.len()
-                    );
-                }
+                tracing::info!("shutdown requested for firehose_backfill processor");
                 break;
             }
 
-            // First, drain all completed tasks (non-blocking)
-            while let Some(result) = in_flight.next().now_or_never().flatten() {
-                self.handle_single_job_result(result);
-                processed_count += 1;
-            }
-
-            // Batch dequeue jobs to reduce Fjall lock contention
-            // Dequeue up to (max_concurrent - in_flight) jobs at once
-            let slots_available = max_concurrent.saturating_sub(in_flight.len());
-            let dequeued_this_batch = if slots_available > 0 && !SHUTDOWN.load(Ordering::Relaxed) {
-                match self
-                    .storage
-                    .dequeue_firehose_backfill_batch(slots_available)
-                {
-                    Ok(jobs) => {
-                        let count = jobs.len();
-                        for (key, job) in jobs {
-                            let pool = self.pool_backfill.clone();
-                            let task = tokio::spawn(async move {
-                                let result = Self::process_job(&pool, &job).await;
-                                (key, QueueSource::FirehoseBackfill, result)
-                            });
-                            in_flight.push(task);
-                        }
-                        count
-                    }
-                    Err(e) => {
-                        tracing::error!("failed to batch dequeue firehose_backfill jobs: {e}");
-                        0
-                    }
+            // Dequeue a batch of jobs
+            let jobs = match self.storage.dequeue_firehose_backfill_batch(batch_size) {
+                Ok(jobs) => jobs,
+                Err(e) => {
+                    tracing::error!("failed to batch dequeue firehose_backfill jobs: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
-            } else {
-                0
             };
 
-            // Log when queue appears empty
-            if dequeued_this_batch == 0
-                && in_flight.is_empty()
-                && last_log.elapsed() > Duration::from_secs(10)
-            {
-                let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
-                if queue_len > 0 {
-                    tracing::warn!(
-                        "firehose_backfill: dequeue returned 0 but queue_len={}",
-                        queue_len
-                    );
+            if jobs.is_empty() {
+                // No jobs available, wait briefly
+                if last_log.elapsed() > Duration::from_secs(10) {
+                    let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
+                    if queue_len > 0 {
+                        tracing::warn!(
+                            "firehose_backfill: dequeue returned 0 but queue_len={}",
+                            queue_len
+                        );
+                    }
                 }
-            }
-
-            // Wait for at least one task to complete before next iteration
-            if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= max_concurrent {
-                // At capacity - wait for one to complete
-                if let Some(result) = in_flight.next().await {
-                    self.handle_single_job_result(result);
-                    processed_count += 1;
-                }
-            } else {
-                tokio::task::yield_now().await;
+                continue;
             }
 
-            // Log progress periodically - always log to show backfill is running
+            let batch_len = jobs.len();
+
+            // Process the entire batch with batch INSERT statements
+            let results = Self::process_jobs_batch(&self.pool_backfill, &jobs).await;
+
+            // Handle results - remove successful jobs from queue
+            for (key, result) in results {
+                if let Err(e) = &result {
+                    tracing::error!("firehose_backfill job failed: {e}");
+                }
+                // Acknowledge the job (remove from queue)
+                if let Err(e) = self.storage.remove_firehose_backfill(&key) {
+                    tracing::error!("failed to remove firehose_backfill job: {e}");
+                }
+            }
+
+            processed_count += batch_len as u64;
+
+            // Log progress periodically
             if last_log.elapsed() > Duration::from_secs(5) {
                 let elapsed_secs = last_log.elapsed().as_secs_f64();
                 #[allow(clippy::cast_precision_loss)]
                 let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
                 let queue_len = self.storage.firehose_backfill_len().unwrap_or(0);
                 tracing::info!(
-                    "firehose_backfill: {} indexed ({:.1}/s), {} in_flight, {} queued",
+                    "firehose_backfill: {} indexed ({:.1}/s), {} queued",
                     processed_count - last_processed_count,
                     rate,
-                    in_flight.len(),
                     queue_len
                 );
                 last_processed_count = processed_count;
@@ -1342,6 +1311,702 @@ impl IndexerManager {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    /// Process a batch of jobs efficiently using batch INSERT statements.
+    /// This dramatically improves throughput by reducing database round-trips.
+    pub async fn process_jobs_batch(
+        pool: &Pool,
+        jobs: &[(Vec<u8>, IndexJob)],
+    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
+            Vec::with_capacity(jobs.len());
+
+        // Get a client for the batch
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                // If we can't get a client, fail all jobs
+                let err_msg = format!("pool error: {e}");
+                for (key, _) in jobs {
+                    results.push((key.clone(), Err(WintermuteError::Other(err_msg.clone()))));
+                }
+                return results;
+            }
+        };
+
+        // Separate creates/updates from deletes
+        let mut creates: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
+        let mut deletes: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
+
+        for job_tuple in jobs {
+            match job_tuple.1.action {
+                WriteAction::Create | WriteAction::Update => creates.push(job_tuple),
+                WriteAction::Delete => deletes.push(job_tuple),
+            }
+        }
+
+        // Process creates in batch
+        if !creates.is_empty() {
+            let batch_results = Self::batch_insert_records(&client, &creates).await;
+            results.extend(batch_results);
+        }
+
+        // Process deletes individually (they're less common and more complex)
+        for (key, job) in deletes {
+            let result = Self::process_job(pool, job).await;
+            metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
+            results.push((key.clone(), result));
+        }
+
+        results
+    }
+
+    /// Batch insert records using efficient multi-value INSERT statements.
+    async fn batch_insert_records(
+        client: &deadpool_postgres::Client,
+        jobs: &[&(Vec<u8>, IndexJob)],
+    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+        use crate::metrics;
+
+        let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
+            Vec::with_capacity(jobs.len());
+
+        // Parse all URIs and collect data
+        let mut parsed_jobs: Vec<ParsedJob<'_>> = Vec::with_capacity(jobs.len());
+
+        for (key, job) in jobs {
+            match AtUri::new(job.uri.clone(), None) {
+                Ok(uri) => {
+                    let did = uri.get_hostname().clone();
+                    let collection = uri.get_collection().clone();
+                    let rkey = uri.get_rkey().clone();
+                    parsed_jobs.push(ParsedJob {
+                        key,
+                        job,
+                        uri,
+                        did,
+                        collection,
+                        rkey,
+                    });
+                }
+                Err(e) => {
+                    results.push((
+                        (*key).clone(),
+                        Err(WintermuteError::Other(format!("invalid uri: {e}"))),
+                    ));
+                }
+            }
+        }
+
+        if parsed_jobs.is_empty() {
+            return results;
+        }
+
+        // Batch 1: Ensure all actors exist
+        let unique_dids: Vec<&str> = parsed_jobs
+            .iter()
+            .map(|p| p.did.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if let Err(e) = Self::batch_ensure_actors(client, &unique_dids).await {
+            tracing::error!("batch actor insert failed: {e}");
+            // Continue anyway, individual records may still work
+        }
+
+        // Batch 2: Insert all records into the record table
+        let record_results = Self::batch_insert_record_table(client, &parsed_jobs).await;
+
+        // Track which jobs were applied (not stale)
+        let mut applied_jobs: Vec<&ParsedJob<'_>> = Vec::new();
+        for (i, applied) in record_results.iter().enumerate() {
+            if *applied {
+                applied_jobs.push(&parsed_jobs[i]);
+            } else {
+                metrics::INDEXER_STALE_WRITES_SKIPPED_TOTAL.inc();
+            }
+        }
+
+        // Batch 3: Insert collection-specific records
+        // Group by collection type
+        let mut by_collection: HashMap<&str, Vec<&ParsedJob<'_>>> = HashMap::new();
+        for job in &applied_jobs {
+            by_collection
+                .entry(job.collection.as_str())
+                .or_default()
+                .push(job);
+        }
+
+        // Process each collection type (order doesn't matter for correctness)
+        #[allow(clippy::iter_over_hash_type)]
+        for (collection, collection_jobs) in by_collection {
+            let batch_result = match collection {
+                "app.bsky.feed.post" => Self::batch_insert_posts(client, &collection_jobs).await,
+                "app.bsky.feed.like" => Self::batch_insert_likes(client, &collection_jobs).await,
+                "app.bsky.graph.follow" => {
+                    Self::batch_insert_follows(client, &collection_jobs).await
+                }
+                "app.bsky.feed.repost" => {
+                    Self::batch_insert_reposts(client, &collection_jobs).await
+                }
+                "app.bsky.graph.block" => Self::batch_insert_blocks(client, &collection_jobs).await,
+                "app.bsky.actor.profile" => {
+                    Self::batch_insert_profiles(client, &collection_jobs).await
+                }
+                _ => {
+                    // For other types, process individually
+                    for pj in &collection_jobs {
+                        if let Some(record) = &pj.job.record {
+                            if let Err(e) = Self::process_collection_specific(
+                                client,
+                                &pj.collection,
+                                &pj.did,
+                                &pj.rkey,
+                                record,
+                                &pj.job.cid,
+                                &pj.job.indexed_at,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "process_collection_specific failed for {}: {e}",
+                                    pj.job.uri
+                                );
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+            };
+
+            if let Err(e) = batch_result {
+                tracing::error!("batch insert for {collection} failed: {e}");
+            }
+        }
+
+        // All creates succeeded (or were stale)
+        for pj in &parsed_jobs {
+            metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
+            results.push(((*pj.key).clone(), Ok(())));
+        }
+
+        results
+    }
+
+    async fn batch_ensure_actors(
+        client: &deadpool_postgres::Client,
+        dids: &[&str],
+    ) -> Result<(), WintermuteError> {
+        if dids.is_empty() {
+            return Ok(());
+        }
+
+        let epoch = "1970-01-01T00:00:00Z";
+        let dids_vec: Vec<String> = dids.iter().map(|s| (*s).to_owned()).collect();
+
+        client
+            .execute(
+                "INSERT INTO actor (did, \"indexedAt\")
+                 SELECT unnest($1::text[]), $2
+                 ON CONFLICT (did) DO NOTHING",
+                &[&dids_vec, &epoch],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_record_table(
+        client: &deadpool_postgres::Client,
+        jobs: &[ParsedJob<'_>],
+    ) -> Vec<bool> {
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+
+        // Build arrays for unnest
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut dids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut jsons: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut revs: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            uris.push(pj.job.uri.clone());
+            cids.push(pj.job.cid.clone());
+            dids.push(pj.did.clone());
+            jsons.push(
+                pj.job
+                    .record
+                    .as_ref()
+                    .map(|r| serde_json::to_string(r).unwrap_or_default())
+                    .unwrap_or_default(),
+            );
+            revs.push(pj.job.rev.clone());
+            indexed_ats.push(pj.job.indexed_at.clone());
+        }
+
+        // Use INSERT with ON CONFLICT and track which rows were applied
+        // We return the uri of rows that were actually inserted/updated
+        let result = client
+            .query(
+                "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                 ON CONFLICT (uri) DO UPDATE SET
+                   rev = EXCLUDED.rev,
+                   cid = EXCLUDED.cid,
+                   json = EXCLUDED.json,
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"
+                 WHERE record.rev <= EXCLUDED.rev
+                 RETURNING uri",
+                &[&uris, &cids, &dids, &jsons, &revs, &indexed_ats],
+            )
+            .await;
+
+        match result {
+            Ok(rows) => {
+                let applied_uris: std::collections::HashSet<String> =
+                    rows.iter().map(|r| r.get::<_, String>(0)).collect();
+                jobs.iter()
+                    .map(|pj| applied_uris.contains(&pj.job.uri))
+                    .collect()
+            }
+            Err(e) => {
+                tracing::error!("batch record insert failed: {e}");
+                // Assume all failed
+                vec![false; jobs.len()]
+            }
+        }
+    }
+
+    async fn process_collection_specific(
+        client: &deadpool_postgres::Client,
+        collection: &str,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        match collection {
+            "app.bsky.feed.generator" => {
+                Self::index_feed_generator(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.graph.list" => {
+                Self::index_list(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.graph.listitem" => {
+                Self::index_list_item(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.graph.listblock" => {
+                Self::index_list_block(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.graph.starterpack" => {
+                Self::index_starter_pack(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.labeler.service" => {
+                Self::index_labeler(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.feed.threadgate" => {
+                Self::index_threadgate(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.feed.postgate" => {
+                Self::index_postgate(client, did, rkey, record, cid, indexed_at).await
+            }
+            "chat.bsky.actor.declaration" => {
+                Self::index_chat_declaration(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.notification.declaration" => {
+                Self::index_notif_declaration(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.actor.status" => {
+                Self::index_status(client, did, rkey, record, cid, indexed_at).await
+            }
+            "app.bsky.verification.proof" => {
+                Self::index_verification(client, did, rkey, record, cid, indexed_at).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn batch_insert_posts(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut texts: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        // For feed_item table
+        let mut item_post_uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut item_cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut item_originator_dids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut sort_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let text = sanitize_text(record.get("text").and_then(|v| v.as_str()).unwrap_or(""));
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at)
+                    .to_owned();
+                let sort_at = if pj.job.indexed_at < created_at {
+                    pj.job.indexed_at.clone()
+                } else {
+                    created_at.clone()
+                };
+
+                uris.push(uri.clone());
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                texts.push(text);
+                created_ats.push(created_at);
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                item_post_uris.push(uri);
+                item_cids.push(pj.job.cid.clone());
+                item_originator_dids.push(pj.did.clone());
+                sort_ats.push(sort_at);
+
+                metrics::INDEXER_POST_EVENTS_TOTAL.inc();
+            }
+        }
+
+        // Batch insert posts
+        client
+            .execute(
+                "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &texts, &created_ats, &indexed_ats],
+            )
+            .await?;
+
+        // Batch insert feed_items
+        client
+            .execute(
+                "INSERT INTO feed_item (type, uri, cid, \"postUri\", \"originatorDid\", \"sortAt\")
+                 SELECT 'post', uri, cid, uri, did, sort_at
+                 FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS t(uri, cid, did, sort_at)
+                 ON CONFLICT DO NOTHING",
+                &[&item_post_uris, &item_cids, &item_originator_dids, &sort_ats],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_likes(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subjects: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subject_cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject_obj = record.get("subject");
+                let subject_uri = subject_obj
+                    .and_then(|s| s.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let subject_cid = subject_obj
+                    .and_then(|s| s.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                uris.push(uri);
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                subjects.push(subject_uri.to_owned());
+                subject_cids.push(subject_cid.to_owned());
+                created_ats.push(created_at.to_owned());
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                metrics::INDEXER_LIKE_EVENTS_TOTAL.inc();
+            }
+        }
+
+        client
+            .execute(
+                "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &subjects, &subject_cids, &created_ats, &indexed_ats],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_follows(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subjects: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                uris.push(uri);
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                subjects.push(subject.to_owned());
+                created_ats.push(created_at.to_owned());
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                metrics::INDEXER_FOLLOW_EVENTS_TOTAL.inc();
+            }
+        }
+
+        client
+            .execute(
+                "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &subjects, &created_ats, &indexed_ats],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_reposts(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subjects: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subject_cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        // For feed_item table
+        let mut item_uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut item_cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut item_post_uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut item_originator_dids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut sort_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject_obj = record.get("subject");
+                let subject_uri = subject_obj
+                    .and_then(|s| s.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let subject_cid = subject_obj
+                    .and_then(|s| s.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at)
+                    .to_owned();
+                let sort_at = if pj.job.indexed_at < created_at {
+                    pj.job.indexed_at.clone()
+                } else {
+                    created_at.clone()
+                };
+
+                uris.push(uri.clone());
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                subjects.push(subject_uri.to_owned());
+                subject_cids.push(subject_cid.to_owned());
+                created_ats.push(created_at.clone());
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                item_uris.push(uri);
+                item_cids.push(pj.job.cid.clone());
+                item_post_uris.push(subject_uri.to_owned());
+                item_originator_dids.push(pj.did.clone());
+                sort_ats.push(sort_at);
+
+                metrics::INDEXER_REPOST_EVENTS_TOTAL.inc();
+            }
+        }
+
+        // Batch insert reposts
+        client
+            .execute(
+                "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &subjects, &subject_cids, &created_ats, &indexed_ats],
+            )
+            .await?;
+
+        // Batch insert feed_items
+        client
+            .execute(
+                "INSERT INTO feed_item (type, uri, cid, \"postUri\", \"originatorDid\", \"sortAt\")
+                 SELECT 'repost', uri, cid, post_uri, did, sort_at
+                 FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[]) AS t(uri, cid, post_uri, did, sort_at)
+                 ON CONFLICT DO NOTHING",
+                &[&item_uris, &item_cids, &item_post_uris, &item_originator_dids, &sort_ats],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_blocks(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut subjects: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                uris.push(uri);
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                subjects.push(subject.to_owned());
+                created_ats.push(created_at.to_owned());
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                metrics::INDEXER_BLOCK_EVENTS_TOTAL.inc();
+            }
+        }
+
+        client
+            .execute(
+                "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &subjects, &created_ats, &indexed_ats],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn batch_insert_profiles(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
+        let mut display_names: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut descriptions: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let display_name = sanitize_opt(record.get("displayName").and_then(|v| v.as_str()));
+                let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
+
+                uris.push(uri);
+                cids.push(pj.job.cid.clone());
+                creators.push(pj.did.clone());
+                display_names.push(display_name);
+                descriptions.push(description);
+                indexed_ats.push(pj.job.indexed_at.clone());
+
+                metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
+            }
+        }
+
+        client
+            .execute(
+                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                 ON CONFLICT DO NOTHING",
+                &[&uris, &cids, &creators, &display_names, &descriptions, &indexed_ats],
+            )
+            .await?;
 
         Ok(())
     }
