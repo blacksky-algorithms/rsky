@@ -368,31 +368,29 @@ impl Storage {
         }
 
         // Handle legacy items with "1:" prefix (from before partitioning was added)
-        // Worker 0 handles all legacy items to avoid contention
-        if worker_id == 0 {
-            let legacy_start = b"1:".to_vec();
-            let legacy_end = b"1;".to_vec(); // ";" is after ":" in ASCII
+        // All workers help drain the legacy queue for faster processing
+        let legacy_start = b"1:".to_vec();
+        let legacy_end = b"1;".to_vec(); // ";" is after ":" in ASCII
 
-            for entry in self.firehose_backfill.range(legacy_start..legacy_end) {
-                if results.len() >= limit {
-                    break;
-                }
-                let (key, value) = entry?;
-                let key_vec = key.to_vec();
-                let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
-                    WintermuteError::Serialization(format!("failed to deserialize: {e}"))
-                })?;
-                results.push((key_vec, job));
-            }
-
-            // If we got enough items, return early
+        for entry in self.firehose_backfill.range(legacy_start..legacy_end) {
             if results.len() >= limit {
-                for (key, _) in &results {
-                    self.firehose_backfill.remove(key)?;
-                    crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
-                }
-                return Ok(results);
+                break;
             }
+            let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+            })?;
+            results.push((key_vec, job));
+        }
+
+        // If we got enough items from legacy queue, return early
+        if results.len() >= limit {
+            for (key, _) in &results {
+                self.firehose_backfill.remove(key)?;
+                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+            }
+            return Ok(results);
         }
 
         // Calculate this worker's partition range (prefixes 0x10 to 0xff = 240 values)
