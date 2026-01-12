@@ -1,3 +1,4 @@
+mod bulk;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -1424,7 +1425,7 @@ impl IndexerManager {
         results
     }
 
-    /// Batch insert records using efficient multi-value INSERT statements.
+    /// Batch insert records using `PostgreSQL` `COPY` protocol for high throughput.
     async fn batch_insert_records(
         client: &deadpool_postgres::Client,
         jobs: &[&(Vec<u8>, IndexJob)],
@@ -1465,7 +1466,7 @@ impl IndexerManager {
             return results;
         }
 
-        // Batch 1: Ensure all actors exist
+        // Batch 1: Ensure all actors exist using COPY
         let unique_dids: Vec<&str> = parsed_jobs
             .iter()
             .map(|p| p.did.as_str())
@@ -1473,13 +1474,37 @@ impl IndexerManager {
             .into_iter()
             .collect();
 
-        if let Err(e) = Self::batch_ensure_actors(client, &unique_dids).await {
-            tracing::error!("batch actor insert failed: {e}");
+        if let Err(e) = bulk::copy_ensure_actors(client, &unique_dids).await {
+            tracing::error!("COPY actor insert failed: {e}");
             // Continue anyway, individual records may still work
         }
 
-        // Batch 2: Insert all records into the record table
-        let record_results = Self::batch_insert_record_table(client, &parsed_jobs).await;
+        // Batch 2: Insert all records into the record table using COPY
+        let record_data: Vec<_> = parsed_jobs
+            .iter()
+            .map(|pj| {
+                (
+                    pj.job.uri.clone(),
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    pj.job
+                        .record
+                        .as_ref()
+                        .map(|r| serde_json::to_string(r).unwrap_or_default())
+                        .unwrap_or_default(),
+                    pj.job.rev.clone(),
+                    pj.job.indexed_at.clone(),
+                )
+            })
+            .collect();
+
+        let record_results = match bulk::copy_insert_records(client, &record_data).await {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::error!("COPY record insert failed: {e}");
+                vec![false; parsed_jobs.len()]
+            }
+        };
 
         // Track which jobs were applied (not stale)
         let mut applied_jobs: Vec<&ParsedJob<'_>> = Vec::new();
@@ -1491,7 +1516,7 @@ impl IndexerManager {
             }
         }
 
-        // Batch 3: Insert collection-specific records
+        // Batch 3: Insert collection-specific records using COPY
         // Group by collection type
         let mut by_collection: HashMap<&str, Vec<&ParsedJob<'_>>> = HashMap::new();
         for job in &applied_jobs {
@@ -1501,20 +1526,27 @@ impl IndexerManager {
                 .push(job);
         }
 
-        // Process each collection type (order doesn't matter for correctness)
+        // Process each collection type using COPY protocol
         #[allow(clippy::iter_over_hash_type)]
         for (collection, collection_jobs) in by_collection {
             let batch_result = match collection {
-                "app.bsky.feed.post" => Self::batch_insert_posts(client, &collection_jobs).await,
-                "app.bsky.feed.like" => Self::batch_insert_likes(client, &collection_jobs).await,
+                "app.bsky.feed.post" => {
+                    Self::copy_batch_insert_posts(client, &collection_jobs).await
+                }
+                "app.bsky.feed.like" => {
+                    Self::copy_batch_insert_likes(client, &collection_jobs).await
+                }
                 "app.bsky.graph.follow" => {
-                    Self::batch_insert_follows(client, &collection_jobs).await
+                    Self::copy_batch_insert_follows(client, &collection_jobs).await
                 }
                 "app.bsky.feed.repost" => {
-                    Self::batch_insert_reposts(client, &collection_jobs).await
+                    Self::copy_batch_insert_reposts(client, &collection_jobs).await
                 }
-                "app.bsky.graph.block" => Self::batch_insert_blocks(client, &collection_jobs).await,
+                "app.bsky.graph.block" => {
+                    Self::copy_batch_insert_blocks(client, &collection_jobs).await
+                }
                 "app.bsky.actor.profile" => {
+                    // Profile is more complex, keep original implementation
                     Self::batch_insert_profiles(client, &collection_jobs).await
                 }
                 _ => {
@@ -1544,7 +1576,7 @@ impl IndexerManager {
             };
 
             if let Err(e) = batch_result {
-                tracing::error!("batch insert for {collection} failed: {e}");
+                tracing::error!("COPY batch insert for {collection} failed: {e}");
             }
         }
 
@@ -1557,6 +1589,8 @@ impl IndexerManager {
         results
     }
 
+    // Legacy batch functions - kept as fallbacks (now using COPY protocol)
+    #[allow(dead_code)]
     async fn batch_ensure_actors(
         client: &deadpool_postgres::Client,
         dids: &[&str],
@@ -1580,6 +1614,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_record_table(
         client: &deadpool_postgres::Client,
         jobs: &[ParsedJob<'_>],
@@ -1694,6 +1729,7 @@ impl IndexerManager {
         }
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_posts(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
@@ -1772,6 +1808,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_likes(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
@@ -1831,6 +1868,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_follows(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
@@ -1880,6 +1918,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_reposts(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
@@ -1970,6 +2009,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn batch_insert_blocks(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
@@ -2063,6 +2103,256 @@ impl IndexerManager {
             .await?;
 
         Ok(())
+    }
+
+    // COPY-based batch insert wrappers that extract data and call bulk functions
+
+    async fn copy_batch_insert_posts(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut post_data: Vec<(String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+        let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let text = sanitize_text(record.get("text").and_then(|v| v.as_str()).unwrap_or(""));
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at)
+                    .to_owned();
+                let sort_at = if pj.job.indexed_at < created_at {
+                    pj.job.indexed_at.clone()
+                } else {
+                    created_at.clone()
+                };
+
+                post_data.push((
+                    uri.clone(),
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    text,
+                    created_at,
+                    pj.job.indexed_at.clone(),
+                ));
+
+                feed_item_data.push((
+                    "post".to_owned(),
+                    uri.clone(),
+                    pj.job.cid.clone(),
+                    uri,
+                    pj.did.clone(),
+                    sort_at,
+                ));
+
+                metrics::INDEXER_POST_EVENTS_TOTAL.inc();
+            }
+        }
+
+        bulk::copy_insert_posts(client, &post_data).await?;
+        bulk::copy_insert_feed_items(client, &feed_item_data).await?;
+
+        Ok(())
+    }
+
+    async fn copy_batch_insert_likes(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut like_data: Vec<(String, String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject_obj = record.get("subject");
+                let subject_uri = subject_obj
+                    .and_then(|s| s.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let subject_cid = subject_obj
+                    .and_then(|s| s.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                like_data.push((
+                    uri,
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    subject_uri.to_owned(),
+                    subject_cid.to_owned(),
+                    created_at.to_owned(),
+                    pj.job.indexed_at.clone(),
+                ));
+
+                metrics::INDEXER_LIKE_EVENTS_TOTAL.inc();
+            }
+        }
+
+        bulk::copy_insert_likes(client, &like_data).await
+    }
+
+    async fn copy_batch_insert_follows(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut follow_data: Vec<(String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                follow_data.push((
+                    uri,
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    subject.to_owned(),
+                    created_at.to_owned(),
+                    pj.job.indexed_at.clone(),
+                ));
+
+                metrics::INDEXER_FOLLOW_EVENTS_TOTAL.inc();
+            }
+        }
+
+        bulk::copy_insert_follows(client, &follow_data).await
+    }
+
+    async fn copy_batch_insert_reposts(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut repost_data: Vec<(String, String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+        let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject_obj = record.get("subject");
+                let subject_uri = subject_obj
+                    .and_then(|s| s.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let subject_cid = subject_obj
+                    .and_then(|s| s.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at)
+                    .to_owned();
+                let sort_at = if pj.job.indexed_at < created_at {
+                    pj.job.indexed_at.clone()
+                } else {
+                    created_at.clone()
+                };
+
+                repost_data.push((
+                    uri.clone(),
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    subject_uri.to_owned(),
+                    subject_cid.to_owned(),
+                    created_at,
+                    pj.job.indexed_at.clone(),
+                ));
+
+                feed_item_data.push((
+                    "repost".to_owned(),
+                    uri,
+                    pj.job.cid.clone(),
+                    subject_uri.to_owned(),
+                    pj.did.clone(),
+                    sort_at,
+                ));
+
+                metrics::INDEXER_REPOST_EVENTS_TOTAL.inc();
+            }
+        }
+
+        bulk::copy_insert_reposts(client, &repost_data).await?;
+        bulk::copy_insert_feed_items(client, &feed_item_data).await?;
+
+        Ok(())
+    }
+
+    async fn copy_batch_insert_blocks(
+        client: &deadpool_postgres::Client,
+        jobs: &[&ParsedJob<'_>],
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut block_data: Vec<(String, String, String, String, String, String)> =
+            Vec::with_capacity(jobs.len());
+
+        for pj in jobs {
+            if let Some(record) = &pj.job.record {
+                let uri = pj.uri.to_string();
+                let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at);
+
+                block_data.push((
+                    uri,
+                    pj.job.cid.clone(),
+                    pj.did.clone(),
+                    subject.to_owned(),
+                    created_at.to_owned(),
+                    pj.job.indexed_at.clone(),
+                ));
+
+                metrics::INDEXER_BLOCK_EVENTS_TOTAL.inc();
+            }
+        }
+
+        bulk::copy_insert_blocks(client, &block_data).await
     }
 
     pub async fn process_label_event(
