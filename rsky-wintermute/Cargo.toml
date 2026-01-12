@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "queue_backfill"
 path = "src/bin/queue_backfill.rs"
 
+[[bin]]
+name = "fix_blob_refs"
+path = "src/bin/fix_blob_refs.rs"
+
 [dependencies]
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
