@@ -1,11 +1,11 @@
 use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFER_SIZE};
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
-use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use fjall::{Batch, Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct Storage {
-    _db: Arc<Keyspace>,
+    db: Arc<Keyspace>,
     firehose_events: PartitionHandle,
     repo_backfill: PartitionHandle,
     firehose_live: PartitionHandle,
@@ -95,7 +95,7 @@ impl Storage {
         let cursors = db.open_partition("cursors", PartitionCreateOptions::default())?;
 
         Ok(Self {
-            _db: db,
+            db,
             firehose_events,
             repo_backfill,
             firehose_live,
@@ -313,10 +313,15 @@ impl Storage {
             results.push((key_vec, job));
         }
 
-        // Remove all dequeued items
-        for (key, _) in &results {
-            self.firehose_backfill.remove(key)?;
-            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+        // Remove all dequeued items in a single batched operation
+        if !results.is_empty() {
+            let mut batch = Batch::with_capacity((*self.db).clone(), results.len());
+            for (key, _) in &results {
+                batch.remove(&self.firehose_backfill, key);
+            }
+            batch.commit()?;
+            #[allow(clippy::cast_possible_wrap)]
+            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.sub(results.len() as i64);
         }
 
         Ok(results)
@@ -358,12 +363,9 @@ impl Storage {
             results.push((key_vec, job));
         }
 
-        // If we got enough priority items, return early
+        // If we got enough priority items, batch remove and return early
         if results.len() >= limit {
-            for (key, _) in &results {
-                self.firehose_backfill.remove(key)?;
-                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
-            }
+            self.batch_remove_firehose_backfill(&results)?;
             return Ok(results);
         }
 
@@ -384,12 +386,9 @@ impl Storage {
             results.push((key_vec, job));
         }
 
-        // If we got enough items from legacy queue, return early
+        // If we got enough items from legacy queue, batch remove and return early
         if results.len() >= limit {
-            for (key, _) in &results {
-                self.firehose_backfill.remove(key)?;
-                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
-            }
+            self.batch_remove_firehose_backfill(&results)?;
             return Ok(results);
         }
 
@@ -430,13 +429,28 @@ impl Storage {
             results.push((key_vec, job));
         }
 
-        // Remove all dequeued items
-        for (key, _) in &results {
-            self.firehose_backfill.remove(key)?;
-            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
-        }
+        // Batch remove all dequeued items
+        self.batch_remove_firehose_backfill(&results)?;
 
         Ok(results)
+    }
+
+    /// Helper to batch remove items from `firehose_backfill` queue
+    fn batch_remove_firehose_backfill(
+        &self,
+        items: &[(Vec<u8>, IndexJob)],
+    ) -> Result<(), WintermuteError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut batch = Batch::with_capacity((*self.db).clone(), items.len());
+        for (key, _) in items {
+            batch.remove(&self.firehose_backfill, key);
+        }
+        batch.commit()?;
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.sub(items.len() as i64);
+        Ok(())
     }
 
     #[allow(clippy::missing_const_for_fn)]
