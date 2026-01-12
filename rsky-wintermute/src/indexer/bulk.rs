@@ -18,11 +18,16 @@ pub async fn copy_insert_records(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, did, json, rev, indexed_at
 ) -> Result<Vec<bool>, WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_record (
@@ -39,8 +44,10 @@ pub async fn copy_insert_records(
 
     // Truncate in case of reuse
     client.execute("TRUNCATE _bulk_record", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data into temp table
+    // Phase 2: COPY data into temp table
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_record (uri, cid, did, json, rev, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
@@ -62,8 +69,10 @@ pub async fn copy_insert_records(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp to real table with conflict handling
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     let rows = client
         .query(
             "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
@@ -79,6 +88,20 @@ pub async fn copy_insert_records(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW record bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     let applied_uris: std::collections::HashSet<String> =
         rows.iter().map(|r| r.get::<_, String>(0)).collect();
@@ -94,11 +117,16 @@ pub async fn copy_ensure_actors(
     client: &deadpool_postgres::Client,
     dids: &[&str],
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if dids.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = dids.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_actor (
@@ -109,8 +137,10 @@ pub async fn copy_ensure_actors(
         .await?;
 
     client.execute("TRUNCATE _bulk_actor", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY dids
+    // Phase 2: COPY dids
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_actor (did) FROM STDIN WITH (FORMAT text)")
         .await?;
@@ -126,8 +156,10 @@ pub async fn copy_ensure_actors(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert with conflict handling
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO actor (did, \"indexedAt\")
@@ -137,6 +169,20 @@ pub async fn copy_ensure_actors(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW actor bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -146,11 +192,16 @@ pub async fn copy_insert_posts(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, text, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post (
@@ -166,8 +217,10 @@ pub async fn copy_insert_posts(
         .await?;
 
     client.execute("TRUNCATE _bulk_post", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data (no NULL clause - text column is NOT NULL so empty string must be preserved)
+    // Phase 2: COPY data (no NULL clause - text column is NOT NULL so empty string must be preserved)
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_post (uri, cid, creator, text, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
@@ -193,8 +246,10 @@ pub async fn copy_insert_posts(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
@@ -204,6 +259,20 @@ pub async fn copy_insert_posts(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW post bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -213,11 +282,16 @@ pub async fn copy_insert_feed_items(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // type, uri, cid, post_uri, originator_did, sort_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_feed_item (
@@ -233,8 +307,10 @@ pub async fn copy_insert_feed_items(
         .await?;
 
     client.execute("TRUNCATE _bulk_feed_item", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_feed_item (type, uri, cid, post_uri, originator_did, sort_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
@@ -253,8 +329,10 @@ pub async fn copy_insert_feed_items(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO feed_item (type, uri, cid, \"postUri\", \"originatorDid\", \"sortAt\")
@@ -264,6 +342,20 @@ pub async fn copy_insert_feed_items(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW feed_item bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -273,11 +365,16 @@ pub async fn copy_insert_likes(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_like (
@@ -294,8 +391,10 @@ pub async fn copy_insert_likes(
         .await?;
 
     client.execute("TRUNCATE _bulk_like", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
@@ -314,8 +413,10 @@ pub async fn copy_insert_likes(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
@@ -325,6 +426,20 @@ pub async fn copy_insert_likes(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW like bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -334,11 +449,16 @@ pub async fn copy_insert_follows(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_follow (
@@ -354,8 +474,10 @@ pub async fn copy_insert_follows(
         .await?;
 
     client.execute("TRUNCATE _bulk_follow", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_follow (uri, cid, creator, subject_did, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
@@ -374,8 +496,10 @@ pub async fn copy_insert_follows(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -385,6 +509,20 @@ pub async fn copy_insert_follows(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW follow bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -394,11 +532,16 @@ pub async fn copy_insert_reposts(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_repost (
@@ -415,8 +558,10 @@ pub async fn copy_insert_reposts(
         .await?;
 
     client.execute("TRUNCATE _bulk_repost", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
@@ -435,8 +580,10 @@ pub async fn copy_insert_reposts(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
@@ -446,6 +593,20 @@ pub async fn copy_insert_reposts(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW repost bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
@@ -455,11 +616,16 @@ pub async fn copy_insert_blocks(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     if data.is_empty() {
         return Ok(());
     }
 
-    // Create temp table (persists for session, TRUNCATE clears it between batches)
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_block (
@@ -475,8 +641,10 @@ pub async fn copy_insert_blocks(
         .await?;
 
     client.execute("TRUNCATE _bulk_block", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
-    // COPY data
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
     let copy_stmt = client
         .copy_in("COPY _bulk_block (uri, cid, creator, subject, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
@@ -495,8 +663,10 @@ pub async fn copy_insert_blocks(
 
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
 
-    // Insert from temp
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
     client
         .execute(
             "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -506,6 +676,20 @@ pub async fn copy_insert_blocks(
             &[],
         )
         .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW block bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
 
     Ok(())
 }
