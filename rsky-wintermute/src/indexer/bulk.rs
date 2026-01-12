@@ -167,9 +167,9 @@ pub async fn copy_insert_posts(
 
     client.execute("TRUNCATE _bulk_post", &[]).await?;
 
-    // COPY data
+    // COPY data (no NULL clause - text column is NOT NULL so empty string must be preserved)
     let copy_stmt = client
-        .copy_in("COPY _bulk_post (uri, cid, creator, text, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_post (uri, cid, creator, text, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
