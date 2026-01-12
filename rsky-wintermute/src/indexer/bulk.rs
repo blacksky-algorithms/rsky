@@ -22,7 +22,7 @@ pub async fn copy_insert_records(
         return Ok(Vec::new());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_record (
@@ -32,7 +32,7 @@ pub async fn copy_insert_records(
                 json text,
                 rev text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -98,12 +98,12 @@ pub async fn copy_ensure_actors(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_actor (
                 did text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -150,7 +150,7 @@ pub async fn copy_insert_posts(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post (
@@ -160,7 +160,7 @@ pub async fn copy_insert_posts(
                 text text,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -217,7 +217,7 @@ pub async fn copy_insert_feed_items(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_feed_item (
@@ -227,7 +227,7 @@ pub async fn copy_insert_feed_items(
                 post_uri text NOT NULL,
                 originator_did text NOT NULL,
                 sort_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -277,7 +277,7 @@ pub async fn copy_insert_likes(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_like (
@@ -288,7 +288,7 @@ pub async fn copy_insert_likes(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -338,7 +338,7 @@ pub async fn copy_insert_follows(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_follow (
@@ -348,7 +348,7 @@ pub async fn copy_insert_follows(
                 subject_did text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -398,7 +398,7 @@ pub async fn copy_insert_reposts(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_repost (
@@ -409,7 +409,7 @@ pub async fn copy_insert_reposts(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -459,7 +459,7 @@ pub async fn copy_insert_blocks(
         return Ok(());
     }
 
-    // Create temp table
+    // Create temp table (persists for session, TRUNCATE clears it between batches)
     client
         .execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_block (
@@ -469,7 +469,7 @@ pub async fn copy_insert_blocks(
                 subject text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            ) ON COMMIT DROP",
+            )",
             &[],
         )
         .await?;
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn test_escape_tsv() {
         let text = "hello\tworld\nnewline";
-        let escaped = text.replace('\t', " ").replace('\n', " ");
+        let escaped = text.replace(['\t', '\n'], " ");
         assert_eq!(escaped, "hello world newline");
     }
 }

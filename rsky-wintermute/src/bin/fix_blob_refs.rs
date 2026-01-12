@@ -281,7 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================");
     println!(
         "Database: {}",
-        args.database_url.split('@').last().unwrap_or("*****")
+        args.database_url.split('@').next_back().unwrap_or("*****")
     );
     println!("Batch size: {}", args.batch_size);
     println!("Workers: {}", args.workers);
