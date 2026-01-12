@@ -45,6 +45,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "
 tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
 prometheus = { version = "0.13", features = ["process"] }
+rand = "0.8"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

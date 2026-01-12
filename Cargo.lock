@@ -8132,6 +8132,7 @@ dependencies = [
  "mimalloc",
  "mockito",
  "prometheus",
+ "rand 0.8.5",
  "reqwest 0.12.23",
  "rsky-common",
  "rsky-crypto",

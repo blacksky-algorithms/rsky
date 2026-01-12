@@ -227,11 +227,20 @@ impl Storage {
     }
 
     // Firehose backfill queue (from backfiller)
-    /// Enqueue a firehose backfill job with normal priority (prefix "1:")
+    // Uses key-prefix partitioning for fast parallel dequeue:
+    // - Priority items: prefix "0:" (processed first by all workers)
+    // - Normal items: prefix "{XX}:" where XX is random hex in range 10-ff
+    // Workers claim partitions of the key space for contention-free dequeue
+
+    /// Enqueue a firehose backfill job with normal priority (random prefix 10-ff)
+    /// The random prefix enables partitioned dequeue where each worker owns a key range
     pub fn enqueue_firehose_backfill(&self, job: &IndexJob) -> Result<(), WintermuteError> {
-        // Key format: "1:{timestamp}:{uri}" - "1:" prefix for normal priority
+        // Key format: "{XX}:{timestamp}:{uri}" where XX is random hex in range 10-ff
+        // This distributes items across 240 buckets for parallel dequeue
+        let prefix: u8 = rand::random::<u8>().saturating_add(16).max(16); // 16-255 (0x10-0xff)
         let key = format!(
-            "1:{}:{}",
+            "{:02x}:{}:{}",
+            prefix,
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             job.uri
         );
@@ -251,6 +260,7 @@ impl Storage {
         job: &IndexJob,
     ) -> Result<(), WintermuteError> {
         // Key format: "0:{timestamp}:{uri}" - "0:" prefix for high priority
+        // "0:" sorts before "10:" so priority items are always first
         let key = format!(
             "0:{}:{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
@@ -296,6 +306,125 @@ impl Storage {
                 break;
             };
             let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+            })?;
+            results.push((key_vec, job));
+        }
+
+        // Remove all dequeued items
+        for (key, _) in &results {
+            self.firehose_backfill.remove(key)?;
+            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+        }
+
+        Ok(results)
+    }
+
+    /// Partitioned dequeue for parallel workers - each worker owns a slice of the key space
+    ///
+    /// Key space partitioning:
+    /// - Priority items (prefix "0:") are checked first by ALL workers
+    /// - Normal items (prefix "10"-"ff") are partitioned among workers
+    ///
+    /// With N workers, worker i owns prefixes in range [start, end) where:
+    /// - start = 0x10 + (i * 240 / N)
+    /// - end = 0x10 + ((i + 1) * 240 / N)
+    ///
+    /// This eliminates contention since each worker reads from its own partition.
+    pub fn dequeue_firehose_backfill_partitioned(
+        &self,
+        worker_id: usize,
+        num_workers: usize,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let mut results = Vec::with_capacity(limit);
+
+        // First, check for priority items (all workers can grab these)
+        // Priority prefix "0:" sorts before "10:"
+        let priority_start = b"0:".to_vec();
+        let priority_end = b"0;".to_vec(); // ";" is after ":" in ASCII
+
+        for entry in self.firehose_backfill.range(priority_start..priority_end) {
+            if results.len() >= limit {
+                break;
+            }
+            let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+            })?;
+            results.push((key_vec, job));
+        }
+
+        // If we got enough priority items, return early
+        if results.len() >= limit {
+            for (key, _) in &results {
+                self.firehose_backfill.remove(key)?;
+                crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+            }
+            return Ok(results);
+        }
+
+        // Handle legacy items with "1:" prefix (from before partitioning was added)
+        // Worker 0 handles all legacy items to avoid contention
+        if worker_id == 0 {
+            let legacy_start = b"1:".to_vec();
+            let legacy_end = b"1;".to_vec(); // ";" is after ":" in ASCII
+
+            for entry in self.firehose_backfill.range(legacy_start..legacy_end) {
+                if results.len() >= limit {
+                    break;
+                }
+                let (key, value) = entry?;
+                let key_vec = key.to_vec();
+                let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                    WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+                })?;
+                results.push((key_vec, job));
+            }
+
+            // If we got enough items, return early
+            if results.len() >= limit {
+                for (key, _) in &results {
+                    self.firehose_backfill.remove(key)?;
+                    crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
+                }
+                return Ok(results);
+            }
+        }
+
+        // Calculate this worker's partition range (prefixes 0x10 to 0xff = 240 values)
+        let partition_size = 240 / num_workers;
+        let start_prefix = 0x10 + (worker_id * partition_size);
+        let end_prefix = if worker_id == num_workers - 1 {
+            0x100 // Last worker gets remainder
+        } else {
+            0x10 + ((worker_id + 1) * partition_size)
+        };
+
+        // Build range keys
+        let start_key = format!("{start_prefix:02x}:");
+        let end_key_bytes = format!("{end_prefix:02x}:").into_bytes();
+        let is_last_worker = worker_id == num_workers - 1;
+
+        // Iterate over this worker's partition
+        // Start from start_key and iterate forward, stopping when we reach end_key
+        for entry in self
+            .firehose_backfill
+            .range(start_key.as_bytes().to_vec()..)
+        {
+            if results.len() >= limit {
+                break;
+            }
+            let (key, value) = entry?;
+
+            // For non-last workers, check if we've gone past our partition
+            if !is_last_worker && key.as_ref() >= end_key_bytes.as_slice() {
+                break;
+            }
+
             let key_vec = key.to_vec();
             let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
                 WintermuteError::Serialization(format!("failed to deserialize: {e}"))
@@ -730,6 +859,108 @@ mod tests {
 
         // Regular dequeue should also return None
         assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_firehose_backfill_partitioned_dequeue() {
+        let (storage, _dir) = setup_test_storage();
+
+        // Enqueue 20 jobs with random prefixes
+        for i in 0..20 {
+            let job = IndexJob {
+                uri: format!("at://did:plc:test/app.bsky.feed.post/part{i}"),
+                cid: format!("bafypart{i}"),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"index": i})),
+                indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+                rev: format!("rev{i}"),
+            };
+            storage.enqueue_firehose_backfill(&job).unwrap();
+        }
+
+        // Use 2 workers to partition the key space
+        let num_workers = 2;
+
+        // Worker 0 dequeues from its partition
+        let worker0_batch1 = storage
+            .dequeue_firehose_backfill_partitioned(0, num_workers, 10)
+            .unwrap();
+
+        // Worker 1 dequeues from its partition
+        let worker1_batch1 = storage
+            .dequeue_firehose_backfill_partitioned(1, num_workers, 10)
+            .unwrap();
+
+        // Both workers should get items (unless distribution is very unlucky)
+        // With 20 items across 240 buckets, expect at least some items per partition
+        let total_first_round = worker0_batch1.len() + worker1_batch1.len();
+
+        // Continue dequeuing until empty
+        let worker0_batch2 = storage
+            .dequeue_firehose_backfill_partitioned(0, num_workers, 10)
+            .unwrap();
+        let worker1_batch2 = storage
+            .dequeue_firehose_backfill_partitioned(1, num_workers, 10)
+            .unwrap();
+
+        let total_second_round = worker0_batch2.len() + worker1_batch2.len();
+
+        // All 20 items should have been dequeued
+        assert_eq!(
+            total_first_round + total_second_round,
+            20,
+            "all 20 items should be dequeued across partitions"
+        );
+
+        // Queue should now be empty
+        assert!(storage.dequeue_firehose_backfill().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_firehose_backfill_partitioned_priority() {
+        let (storage, _dir) = setup_test_storage();
+
+        // Enqueue normal items
+        for i in 0..5 {
+            let job = IndexJob {
+                uri: format!("at://did:plc:normal/app.bsky.feed.post/{i}"),
+                cid: format!("bafynorm{i}"),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"type": "normal"})),
+                indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+                rev: format!("rev{i}"),
+            };
+            storage.enqueue_firehose_backfill(&job).unwrap();
+        }
+
+        // Enqueue priority items
+        for i in 0..3 {
+            let job = IndexJob {
+                uri: format!("at://did:plc:priority/app.bsky.feed.post/{i}"),
+                cid: format!("bafypri{i}"),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"type": "priority"})),
+                indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+                rev: format!("rev_pri{i}"),
+            };
+            storage.enqueue_firehose_backfill_priority(&job).unwrap();
+        }
+
+        // Worker 0 should get priority items first
+        let batch = storage
+            .dequeue_firehose_backfill_partitioned(0, 2, 10)
+            .unwrap();
+
+        // Priority items should come first (they all have "priority" in the URI)
+        let priority_count = batch
+            .iter()
+            .take(3)
+            .filter(|(_, job)| job.uri.contains("priority"))
+            .count();
+        assert_eq!(
+            priority_count, 3,
+            "all 3 priority items should be at the start"
+        );
     }
 
     #[test]

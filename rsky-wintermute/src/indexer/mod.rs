@@ -438,7 +438,15 @@ impl IndexerManager {
             let processed = Arc::clone(&processed_total);
 
             let handle = tokio::spawn(async move {
-                Self::backfill_worker_loop(worker_id, storage, pool, batch_size, processed).await;
+                Self::backfill_worker_loop(
+                    worker_id,
+                    num_workers,
+                    storage,
+                    pool,
+                    batch_size,
+                    processed,
+                )
+                .await;
             });
             worker_handles.push(handle);
         }
@@ -489,6 +497,7 @@ impl IndexerManager {
 
     async fn backfill_worker_loop(
         worker_id: usize,
+        num_workers: usize,
         storage: Arc<Storage>,
         pool: Pool,
         batch_size: usize,
@@ -504,9 +513,13 @@ impl IndexerManager {
                 break;
             }
 
-            // Dequeue a batch of jobs
+            // Dequeue a batch of jobs from this worker's partition
             let dequeue_start = Instant::now();
-            let jobs = match storage.dequeue_firehose_backfill_batch(batch_size) {
+            let jobs = match storage.dequeue_firehose_backfill_partitioned(
+                worker_id,
+                num_workers,
+                batch_size,
+            ) {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     // Check if Fjall is poisoned - trigger shutdown for recovery

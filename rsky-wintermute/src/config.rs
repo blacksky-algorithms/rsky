@@ -135,3 +135,19 @@ pub static DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(20) // Default: 20 connections per pool (80 total across 4 pools)
 });
+
+// Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
+// This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
+pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("BACKFILLER_DIRECT_WRITE")
+        .ok()
+        .is_none_or(|s| s == "true" || s == "1") // Default: enabled (bypass Fjall)
+});
+
+// Backfiller DB pool size - separate from main pool for direct write mode
+pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("BACKFILLER_DB_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32) // Default: 32 connections for backfiller (matches worker count)
+});
