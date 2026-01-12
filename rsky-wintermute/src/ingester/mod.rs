@@ -5,6 +5,7 @@ pub mod labels;
 mod tests;
 
 use crate::SHUTDOWN;
+use crate::backfiller::convert_record_to_ipld;
 use crate::config::{
     CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY,
     WORKERS_INGESTER,
@@ -581,7 +582,7 @@ impl IngesterManager {
                 match lexicon_cid::Cid::try_from(cid_value.as_str()) {
                     Ok(cid) => match get_and_parse_record(blocks, cid) {
                         Ok(parsed) => match serde_json::to_value(&parsed.record) {
-                            Ok(record_json) => Some(record_json),
+                            Ok(record_json) => Some(convert_record_to_ipld(&record_json)),
                             Err(e) => {
                                 tracing::warn!("failed to serialize record for {uri}: {e}");
                                 None
@@ -674,7 +675,7 @@ impl IngesterManager {
                 match lexicon_cid::Cid::try_from(cid_value.as_str()) {
                     Ok(cid) => match get_and_parse_record(blocks, cid) {
                         Ok(parsed) => match serde_json::to_value(&parsed.record) {
-                            Ok(record_json) => Some(record_json),
+                            Ok(record_json) => Some(convert_record_to_ipld(&record_json)),
                             Err(e) => {
                                 tracing::warn!("failed to serialize record for {uri}: {e}");
                                 None
