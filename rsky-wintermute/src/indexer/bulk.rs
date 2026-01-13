@@ -58,8 +58,16 @@ pub async fn copy_insert_records(
     // Build tab-separated data
     let mut buffer = Vec::with_capacity(data.len() * 200);
     for (uri, cid, did, json, rev, indexed_at) in data {
-        // Escape tabs and newlines in json
-        let escaped_json = json.replace('\t', "\\t").replace('\n', "\\n");
+        // Escape for PostgreSQL COPY text format:
+        // - Backslash first (\ -> \\) so we don't double-escape other escapes
+        // - Tab (0x09 -> \t)
+        // - Newline (0x0a -> \n)
+        // - Carriage return (0x0d -> \r)
+        let escaped_json = json
+            .replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
         writeln!(
             buffer,
             "{uri}\t{cid}\t{did}\t{escaped_json}\t{rev}\t{indexed_at}"
