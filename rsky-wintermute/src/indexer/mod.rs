@@ -2854,10 +2854,12 @@ impl IndexerManager {
         let avatar_cid = record
             .get("avatar")
             .and_then(|v| v.get("ref"))
+            .and_then(|v| v.get("$link"))
             .and_then(|v| v.as_str());
         let banner_cid = record
             .get("banner")
             .and_then(|v| v.get("ref"))
+            .and_then(|v| v.get("$link"))
             .and_then(|v| v.as_str());
         let joined_via_uri = record
             .get("joinedViaStarterPack")
@@ -2929,6 +2931,7 @@ impl IndexerManager {
         let avatar_cid = record
             .get("avatar")
             .and_then(|v| v.get("ref"))
+            .and_then(|v| v.get("$link"))
             .and_then(|v| v.as_str());
         let created_at = record
             .get("createdAt")
@@ -2981,6 +2984,7 @@ impl IndexerManager {
         let avatar_cid = record
             .get("avatar")
             .and_then(|v| v.get("ref"))
+            .and_then(|v| v.get("$link"))
             .and_then(|v| v.as_str());
         let created_at = record
             .get("createdAt")
