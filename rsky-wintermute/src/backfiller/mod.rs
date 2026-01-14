@@ -1,10 +1,7 @@
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{
-    BACKFILLER_BATCH_SIZE, BACKFILLER_OUTPUT_HIGH_WATER_MARK, WORKERS_BACKFILLER,
-    backfiller_timeout,
-};
+use crate::config::{BACKFILLER_BATCH_SIZE, WORKERS_BACKFILLER, backfiller_timeout};
 use crate::storage::Storage;
 use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
 use iroh_car::CarReader;
@@ -38,10 +35,9 @@ impl BackfillerManager {
             .build()?;
 
         tracing::info!(
-            "backfiller config: workers={}, batch_size={}, high_water_mark={}, timeout={:?}",
+            "backfiller config: workers={}, batch_size={}, timeout={:?}",
             workers,
             *BACKFILLER_BATCH_SIZE,
-            *BACKFILLER_OUTPUT_HIGH_WATER_MARK,
             backfiller_timeout()
         );
 
@@ -126,27 +122,18 @@ impl BackfillerManager {
     }
 
     fn update_metrics(&self) {
-        if let Ok(queue_len) = self.storage.repo_backfill_len() {
-            crate::metrics::BACKFILLER_REPOS_WAITING
-                .set(i64::try_from(queue_len).unwrap_or(i64::MAX));
-        }
+        // Use the existing metric counter instead of expensive len() call
+        // INGESTER_REPO_BACKFILL_LENGTH is already maintained via inc/dec on enqueue/dequeue
+        let queue_len = crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.get();
+        crate::metrics::BACKFILLER_REPOS_WAITING.set(queue_len);
+
+        let output_len = crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.get();
+        crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH.set(output_len);
     }
 
     async fn check_backpressure(&self) -> bool {
-        let high_water_mark = *BACKFILLER_OUTPUT_HIGH_WATER_MARK;
-        if let Ok(output_len) = self.storage.firehose_backfill_len() {
-            crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH
-                .set(i64::try_from(output_len).unwrap_or(i64::MAX));
-
-            if output_len >= high_water_mark {
-                crate::metrics::BACKFILLER_BACKPRESSURE_EVENTS_TOTAL.inc();
-                tracing::warn!(
-                    "backpressure: output stream at {output_len}, pausing (high water mark: {high_water_mark})"
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                return true;
-            }
-        }
+        // Backpressure disabled - Fjall stores items on disk so there's no OOM risk
+        // Per CLAUDE.md: "Backpressure isn't needed if things are stored on disk in a fast db like Fjall"
         false
     }
 
