@@ -1,17 +1,26 @@
 use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFER_SIZE};
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
-use fjall::{Batch, Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use heed::types::Bytes;
+use heed::{Database as HeedDatabase, Env, EnvOpenOptions};
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// LMDB max map size: 1TB for `firehose_backfill` queue
+const LMDB_MAP_SIZE: usize = 1024 * 1024 * 1024 * 1024;
+
 pub struct Storage {
+    #[allow(dead_code)] // Kept for Fjall keyspace - partitions reference it internally
     db: Arc<Keyspace>,
     firehose_events: PartitionHandle,
     repo_backfill: PartitionHandle,
     firehose_live: PartitionHandle,
-    firehose_backfill: PartitionHandle,
     label_live: PartitionHandle,
     cursors: PartitionHandle,
+    // LMDB for firehose_backfill - eliminates L0 compaction stalls
+    lmdb_env: Env,
+    firehose_backfill_db: HeedDatabase<Bytes, Bytes>,
 }
 
 impl Storage {
@@ -84,13 +93,6 @@ impl Storage {
                 .block_size(BLOCK_SIZE),
         )?;
 
-        let firehose_backfill = db.open_partition(
-            "firehose_backfill",
-            PartitionCreateOptions::default()
-                .max_memtable_size(MEMTABLE_SIZE)
-                .block_size(BLOCK_SIZE),
-        )?;
-
         let label_live = db.open_partition(
             "label_live",
             PartitionCreateOptions::default()
@@ -100,14 +102,43 @@ impl Storage {
 
         let cursors = db.open_partition("cursors", PartitionCreateOptions::default())?;
 
+        // Open LMDB for firehose_backfill - B+ tree eliminates LSM compaction stalls
+        let lmdb_path = path.join("firehose_backfill_lmdb");
+        std::fs::create_dir_all(&lmdb_path)
+            .map_err(|e| WintermuteError::Other(format!("failed to create LMDB directory: {e}")))?;
+
+        tracing::info!(
+            "opening LMDB for firehose_backfill at {} with map_size={}GB",
+            lmdb_path.display(),
+            LMDB_MAP_SIZE / (1024 * 1024 * 1024)
+        );
+
+        let lmdb_env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(LMDB_MAP_SIZE)
+                .max_dbs(1)
+                .open(&lmdb_path)
+                .map_err(|e| WintermuteError::Other(format!("failed to open LMDB: {e}")))?
+        };
+
+        let mut wtxn = lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+        let firehose_backfill_db: HeedDatabase<Bytes, Bytes> = lmdb_env
+            .create_database(&mut wtxn, Some("firehose_backfill"))
+            .map_err(|e| WintermuteError::Other(format!("LMDB create database failed: {e}")))?;
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
         Ok(Self {
             db,
             firehose_events,
             repo_backfill,
             firehose_live,
-            firehose_backfill,
             label_live,
             cursors,
+            lmdb_env,
+            firehose_backfill_db,
         })
     }
 
@@ -232,7 +263,7 @@ impl Storage {
         Ok(())
     }
 
-    // Firehose backfill queue (from backfiller)
+    // Firehose backfill queue (from backfiller) - uses LMDB for consistent sub-ms iteration
     // Uses key-prefix partitioning for fast parallel dequeue:
     // - Priority items: prefix "0:" (processed first by all workers)
     // - Normal items: prefix "{XX}:" where XX is random hex in range 10-ff
@@ -253,9 +284,57 @@ impl Storage {
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
-        self.firehose_backfill
-            .insert(key.as_bytes(), value.as_slice())?;
+
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+        self.firehose_backfill_db
+            .put(&mut wtxn, key.as_bytes(), &value)
+            .map_err(|e| WintermuteError::Other(format!("LMDB put failed: {e}")))?;
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
+    /// Batch enqueue multiple firehose backfill jobs in a single transaction
+    pub fn enqueue_firehose_backfill_batch(
+        &self,
+        jobs: &[IndexJob],
+    ) -> Result<(), WintermuteError> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+
+        for job in jobs {
+            let prefix: u8 = rand::random::<u8>().saturating_add(16).max(16);
+            let key = format!(
+                "{:02x}:{}:{}",
+                prefix,
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                job.uri
+            );
+            let mut value = Vec::new();
+            ciborium::into_writer(job, &mut value).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to serialize job: {e}"))
+            })?;
+            self.firehose_backfill_db
+                .put(&mut wtxn, key.as_bytes(), &value)
+                .map_err(|e| WintermuteError::Other(format!("LMDB put failed: {e}")))?;
+        }
+
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.add(jobs.len() as i64);
         Ok(())
     }
 
@@ -275,8 +354,17 @@ impl Storage {
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
-        self.firehose_backfill
-            .insert(key.as_bytes(), value.as_slice())?;
+
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+        self.firehose_backfill_db
+            .put(&mut wtxn, key.as_bytes(), &value)
+            .map_err(|e| WintermuteError::Other(format!("LMDB put failed: {e}")))?;
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.inc();
         Ok(())
     }
@@ -284,48 +372,88 @@ impl Storage {
     pub fn dequeue_firehose_backfill(
         &self,
     ) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {
-        let mut iter = self.firehose_backfill.iter();
+        let rtxn = self
+            .lmdb_env
+            .read_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB read txn failed: {e}")))?;
+
+        let mut iter = self
+            .firehose_backfill_db
+            .iter(&rtxn)
+            .map_err(|e| WintermuteError::Other(format!("LMDB iter failed: {e}")))?;
+
         let Some(entry) = iter.next() else {
             return Ok(None);
         };
-        let (key, value) = entry?;
+
+        let (key, value) =
+            entry.map_err(|e| WintermuteError::Other(format!("LMDB iter error: {e}")))?;
         let key_vec = key.to_vec();
-        let job = ciborium::from_reader(value.as_ref())
+        let job: IndexJob = ciborium::from_reader(value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
-        // Remove immediately to prevent re-dequeue race condition
-        self.firehose_backfill.remove(&key_vec)?;
+
+        drop(iter);
+        drop(rtxn);
+
+        // Remove the item
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+        self.firehose_backfill_db
+            .delete(&mut wtxn, &key_vec)
+            .map_err(|e| WintermuteError::Other(format!("LMDB delete failed: {e}")))?;
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.dec();
         Ok(Some((key_vec, job)))
     }
 
     /// Batch dequeue up to `limit` jobs from `firehose_backfill` in a single iteration
-    /// This reduces Fjall lock contention compared to calling `dequeue_firehose_backfill()` N times
+    /// LMDB provides consistent sub-ms latency regardless of queue size
     pub fn dequeue_firehose_backfill_batch(
         &self,
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
         let mut results = Vec::with_capacity(limit);
-        let mut iter = self.firehose_backfill.iter();
 
-        for _ in 0..limit {
-            let Some(entry) = iter.next() else {
-                break;
-            };
-            let (key, value) = entry?;
+        let rtxn = self
+            .lmdb_env
+            .read_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB read txn failed: {e}")))?;
+
+        let iter = self
+            .firehose_backfill_db
+            .iter(&rtxn)
+            .map_err(|e| WintermuteError::Other(format!("LMDB iter failed: {e}")))?;
+
+        for entry in iter.take(limit) {
+            let (key, value) =
+                entry.map_err(|e| WintermuteError::Other(format!("LMDB iter error: {e}")))?;
             let key_vec = key.to_vec();
-            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+            let job: IndexJob = ciborium::from_reader(value).map_err(|e| {
                 WintermuteError::Serialization(format!("failed to deserialize: {e}"))
             })?;
             results.push((key_vec, job));
         }
 
-        // Remove all dequeued items in a single batched operation
+        drop(rtxn);
+
+        // Remove all dequeued items in a single transaction
         if !results.is_empty() {
-            let mut batch = Batch::with_capacity((*self.db).clone(), results.len());
+            let mut wtxn = self
+                .lmdb_env
+                .write_txn()
+                .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
             for (key, _) in &results {
-                batch.remove(&self.firehose_backfill, key);
+                self.firehose_backfill_db
+                    .delete(&mut wtxn, key)
+                    .map_err(|e| WintermuteError::Other(format!("LMDB delete failed: {e}")))?;
             }
-            batch.commit()?;
+            wtxn.commit()
+                .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
             #[allow(clippy::cast_possible_wrap)]
             crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.sub(results.len() as i64);
         }
@@ -344,6 +472,7 @@ impl Storage {
     /// - end = 0x10 + ((i + 1) * 240 / N)
     ///
     /// This eliminates contention since each worker reads from its own partition.
+    /// LMDB provides consistent sub-ms latency for all range scans.
     pub fn dequeue_firehose_backfill_partitioned(
         &self,
         worker_id: usize,
@@ -352,18 +481,32 @@ impl Storage {
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
         let mut results = Vec::with_capacity(limit);
 
+        let rtxn = self
+            .lmdb_env
+            .read_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB read txn failed: {e}")))?;
+
         // First, check for priority items (all workers can grab these)
         // Priority prefix "0:" sorts before "10:"
-        let priority_start = b"0:".to_vec();
-        let priority_end = b"0;".to_vec(); // ";" is after ":" in ASCII
+        let priority_start: &[u8] = b"0:";
+        let priority_end: &[u8] = b"0;";
+        let priority_bounds = (
+            Bound::Included(priority_start),
+            Bound::Excluded(priority_end),
+        );
+        let priority_range = self
+            .firehose_backfill_db
+            .range(&rtxn, &priority_bounds)
+            .map_err(|e| WintermuteError::Other(format!("LMDB range failed: {e}")))?;
 
-        for entry in self.firehose_backfill.range(priority_start..priority_end) {
+        for entry in priority_range {
             if results.len() >= limit {
                 break;
             }
-            let (key, value) = entry?;
+            let (key, value) =
+                entry.map_err(|e| WintermuteError::Other(format!("LMDB iter error: {e}")))?;
             let key_vec = key.to_vec();
-            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+            let job: IndexJob = ciborium::from_reader(value).map_err(|e| {
                 WintermuteError::Serialization(format!("failed to deserialize: {e}"))
             })?;
             results.push((key_vec, job));
@@ -371,22 +514,28 @@ impl Storage {
 
         // If we got enough priority items, batch remove and return early
         if results.len() >= limit {
+            drop(rtxn);
             self.batch_remove_firehose_backfill(&results)?;
             return Ok(results);
         }
 
         // Handle legacy items with "1:" prefix (from before partitioning was added)
-        // All workers help drain the legacy queue for faster processing
-        let legacy_start = b"1:".to_vec();
-        let legacy_end = b"1;".to_vec(); // ";" is after ":" in ASCII
+        let legacy_start: &[u8] = b"1:";
+        let legacy_end: &[u8] = b"1;";
+        let legacy_bounds = (Bound::Included(legacy_start), Bound::Excluded(legacy_end));
+        let legacy_range = self
+            .firehose_backfill_db
+            .range(&rtxn, &legacy_bounds)
+            .map_err(|e| WintermuteError::Other(format!("LMDB range failed: {e}")))?;
 
-        for entry in self.firehose_backfill.range(legacy_start..legacy_end) {
+        for entry in legacy_range {
             if results.len() >= limit {
                 break;
             }
-            let (key, value) = entry?;
+            let (key, value) =
+                entry.map_err(|e| WintermuteError::Other(format!("LMDB iter error: {e}")))?;
             let key_vec = key.to_vec();
-            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+            let job: IndexJob = ciborium::from_reader(value).map_err(|e| {
                 WintermuteError::Serialization(format!("failed to deserialize: {e}"))
             })?;
             results.push((key_vec, job));
@@ -394,6 +543,7 @@ impl Storage {
 
         // If we got enough items from legacy queue, batch remove and return early
         if results.len() >= limit {
+            drop(rtxn);
             self.batch_remove_firehose_backfill(&results)?;
             return Ok(results);
         }
@@ -409,31 +559,39 @@ impl Storage {
 
         // Build range keys
         let start_key = format!("{start_prefix:02x}:");
-        let end_key_bytes = format!("{end_prefix:02x}:").into_bytes();
-        let is_last_worker = worker_id == num_workers - 1;
+        let end_key_string;
+        let end_key: &[u8] = if worker_id == num_workers - 1 {
+            // Last worker reads to end of keyspace
+            &[0xff, 0xff]
+        } else {
+            end_key_string = format!("{end_prefix:02x}:");
+            end_key_string.as_bytes()
+        };
 
-        // Iterate over this worker's partition
-        // Start from start_key and iterate forward, stopping when we reach end_key
-        for entry in self
-            .firehose_backfill
-            .range(start_key.as_bytes().to_vec()..)
-        {
+        // Iterate over this worker's partition using LMDB range
+        let partition_bounds = (
+            Bound::Included(start_key.as_bytes()),
+            Bound::Excluded(end_key),
+        );
+        let partition_range = self
+            .firehose_backfill_db
+            .range(&rtxn, &partition_bounds)
+            .map_err(|e| WintermuteError::Other(format!("LMDB range failed: {e}")))?;
+
+        for entry in partition_range {
             if results.len() >= limit {
                 break;
             }
-            let (key, value) = entry?;
-
-            // For non-last workers, check if we've gone past our partition
-            if !is_last_worker && key.as_ref() >= end_key_bytes.as_slice() {
-                break;
-            }
-
+            let (key, value) =
+                entry.map_err(|e| WintermuteError::Other(format!("LMDB iter error: {e}")))?;
             let key_vec = key.to_vec();
-            let job: IndexJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+            let job: IndexJob = ciborium::from_reader(value).map_err(|e| {
                 WintermuteError::Serialization(format!("failed to deserialize: {e}"))
             })?;
             results.push((key_vec, job));
         }
+
+        drop(rtxn);
 
         // Batch remove all dequeued items
         self.batch_remove_firehose_backfill(&results)?;
@@ -441,7 +599,7 @@ impl Storage {
         Ok(results)
     }
 
-    /// Helper to batch remove items from `firehose_backfill` queue
+    /// Helper to batch remove items from `firehose_backfill` queue using LMDB
     fn batch_remove_firehose_backfill(
         &self,
         items: &[(Vec<u8>, IndexJob)],
@@ -449,11 +607,21 @@ impl Storage {
         if items.is_empty() {
             return Ok(());
         }
-        let mut batch = Batch::with_capacity((*self.db).clone(), items.len());
+
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+
         for (key, _) in items {
-            batch.remove(&self.firehose_backfill, key);
+            self.firehose_backfill_db
+                .delete(&mut wtxn, key)
+                .map_err(|e| WintermuteError::Other(format!("LMDB delete failed: {e}")))?;
         }
-        batch.commit()?;
+
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
         #[allow(clippy::cast_possible_wrap)]
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.sub(items.len() as i64);
         Ok(())
@@ -533,7 +701,16 @@ impl Storage {
     }
 
     pub fn firehose_backfill_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.firehose_backfill.len()?)
+        let rtxn = self
+            .lmdb_env
+            .read_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB read txn failed: {e}")))?;
+        let len = self
+            .firehose_backfill_db
+            .len(&rtxn)
+            .map_err(|e| WintermuteError::Other(format!("LMDB len failed: {e}")))?;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(len as usize)
     }
 
     pub fn label_live_len(&self) -> Result<usize, WintermuteError> {

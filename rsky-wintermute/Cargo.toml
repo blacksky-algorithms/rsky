@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 derive_more = { version = "2", features = ["full"] }
 fjall = "2"
+heed = "0.20"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 iroh-car = "0.5.1"
 mimalloc = "0.1"
