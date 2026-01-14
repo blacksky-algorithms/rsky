@@ -321,7 +321,7 @@ mod backfiller_tests {
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
         // No jobs in output stream, should return false
-        let has_backpressure = manager.check_backpressure().await;
+        let has_backpressure = manager.check_backpressure();
         assert!(
             !has_backpressure,
             "should not have backpressure with empty output stream"
@@ -329,32 +329,18 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
-    async fn test_check_backpressure_with_backpressure() {
-        use crate::config::BACKFILLER_OUTPUT_HIGH_WATER_MARK;
-        use crate::types::IndexJob;
-        use crate::types::WriteAction;
-
+    async fn test_check_backpressure_always_false() {
+        // Backpressure is intentionally disabled - Fjall stores items on disk
+        // so there's no OOM risk. Per CLAUDE.md: "Backpressure isn't needed
+        // if things are stored on disk in a fast db like Fjall"
         let (storage, _dir) = setup_test_storage();
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 
-        // Fill output stream beyond high water mark
-        for i in 0..*BACKFILLER_OUTPUT_HIGH_WATER_MARK + 10 {
-            let job = IndexJob {
-                uri: format!("at://did:plc:test/app.bsky.feed.post/test{i}"),
-                cid: "bafytest".to_owned(),
-                action: WriteAction::Create,
-                record: Some(json!({"text": "test"})),
-                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
-                rev: "test".to_owned(),
-            };
-            manager.storage.enqueue_firehose_backfill(&job).unwrap();
-        }
-
-        // Should detect backpressure
-        let has_backpressure = manager.check_backpressure().await;
+        // Even with items in queue, backpressure should return false
+        let has_backpressure = manager.check_backpressure();
         assert!(
-            has_backpressure,
-            "should detect backpressure when output stream exceeds high water mark"
+            !has_backpressure,
+            "backpressure should always be disabled (returns false)"
         );
     }
 

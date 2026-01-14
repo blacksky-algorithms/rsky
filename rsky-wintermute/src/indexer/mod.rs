@@ -18,7 +18,6 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -1393,6 +1392,7 @@ impl IndexerManager {
 
     /// Process a batch of jobs efficiently using batch INSERT statements.
     /// This dramatically improves throughput by reducing database round-trips.
+    /// Uses parallel COPY operations for different collection types.
     pub async fn process_jobs_batch(
         pool: &Pool,
         jobs: &[(Vec<u8>, IndexJob)],
@@ -1406,19 +1406,6 @@ impl IndexerManager {
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
-        // Get a client for the batch
-        let client = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                // If we can't get a client, fail all jobs
-                let err_msg = format!("pool error: {e}");
-                for (key, _) in jobs {
-                    results.push((key.clone(), Err(WintermuteError::Other(err_msg.clone()))));
-                }
-                return results;
-            }
-        };
-
         // Separate creates/updates from deletes
         let mut creates: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
         let mut deletes: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
@@ -1430,9 +1417,9 @@ impl IndexerManager {
             }
         }
 
-        // Process creates in batch
+        // Process creates in batch (uses parallel COPY for different collection types)
         if !creates.is_empty() {
-            let batch_results = Self::batch_insert_records(&client, &creates).await;
+            let batch_results = Self::batch_insert_records(pool, &creates).await;
             results.extend(batch_results);
         }
 
@@ -1447,8 +1434,9 @@ impl IndexerManager {
     }
 
     /// Batch insert records using `PostgreSQL` `COPY` protocol for high throughput.
+    /// Uses parallel COPY operations for different collection types to maximize throughput.
     async fn batch_insert_records(
-        client: &deadpool_postgres::Client,
+        pool: &Pool,
         jobs: &[&(Vec<u8>, IndexJob)],
     ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
         use crate::metrics;
@@ -1457,6 +1445,18 @@ impl IndexerManager {
         let batch_start = Instant::now();
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
+
+        // Get a client for the initial actor/record operations
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("pool error: {e}");
+                for (key, _) in jobs {
+                    results.push(((*key).clone(), Err(WintermuteError::Other(err_msg.clone()))));
+                }
+                return results;
+            }
+        };
 
         // Parse all URIs and collect data
         let parse_start = Instant::now();
@@ -1500,7 +1500,7 @@ impl IndexerManager {
             .into_iter()
             .collect();
 
-        if let Err(e) = bulk::copy_ensure_actors(client, &unique_dids).await {
+        if let Err(e) = bulk::copy_ensure_actors(&client, &unique_dids).await {
             tracing::error!("COPY actor insert failed: {e}");
             // Continue anyway, individual records may still work
         }
@@ -1526,7 +1526,7 @@ impl IndexerManager {
             })
             .collect();
 
-        let record_results = match bulk::copy_insert_records(client, &record_data).await {
+        let record_results = match bulk::copy_insert_records(&client, &record_data).await {
             Ok(results) => results,
             Err(e) => {
                 tracing::error!("COPY record insert failed: {e}");
@@ -1545,79 +1545,126 @@ impl IndexerManager {
             }
         }
 
-        // Batch 3: Insert collection-specific records using COPY
-        // Group by collection type
+        // Batch 3: Insert collection-specific records using PARALLEL COPY
+        // Pre-separate jobs by collection type for parallel processing
         let collections_start = Instant::now();
-        let mut by_collection: HashMap<&str, Vec<&ParsedJob<'_>>> = HashMap::new();
+        let mut posts: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut likes: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut follows: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut reposts: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut blocks: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut profiles: Vec<&ParsedJob<'_>> = Vec::new();
+        let mut others: Vec<&ParsedJob<'_>> = Vec::new();
+
         for job in &applied_jobs {
-            by_collection
-                .entry(job.collection.as_str())
-                .or_default()
-                .push(job);
+            match job.collection.as_str() {
+                "app.bsky.feed.post" => posts.push(job),
+                "app.bsky.feed.like" => likes.push(job),
+                "app.bsky.graph.follow" => follows.push(job),
+                "app.bsky.feed.repost" => reposts.push(job),
+                "app.bsky.graph.block" => blocks.push(job),
+                "app.bsky.actor.profile" => profiles.push(job),
+                _ => others.push(job),
+            }
         }
 
-        // Track per-collection timings
+        // Run COPY operations in PARALLEL using separate connections
+        // Each collection type writes to different tables, so no lock contention
+        let (
+            posts_result,
+            likes_result,
+            follows_result,
+            reposts_result,
+            blocks_result,
+            profiles_result,
+        ) = tokio::join!(
+            Self::parallel_copy_posts(pool, &posts),
+            Self::parallel_copy_likes(pool, &likes),
+            Self::parallel_copy_follows(pool, &follows),
+            Self::parallel_copy_reposts(pool, &reposts),
+            Self::parallel_copy_blocks(pool, &blocks),
+            Self::parallel_copy_profiles(pool, &profiles),
+        );
+
+        // Collect timing results (only include non-empty collections)
         let mut collection_timings: Vec<(String, u128, usize)> = Vec::new();
 
-        // Process each collection type using COPY protocol
-        #[allow(clippy::iter_over_hash_type)]
-        for (collection, collection_jobs) in by_collection {
-            let col_start = Instant::now();
-            let col_count = collection_jobs.len();
-            let batch_result = match collection {
-                "app.bsky.feed.post" => {
-                    Self::copy_batch_insert_posts(client, &collection_jobs).await
-                }
-                "app.bsky.feed.like" => {
-                    Self::copy_batch_insert_likes(client, &collection_jobs).await
-                }
-                "app.bsky.graph.follow" => {
-                    Self::copy_batch_insert_follows(client, &collection_jobs).await
-                }
-                "app.bsky.feed.repost" => {
-                    Self::copy_batch_insert_reposts(client, &collection_jobs).await
-                }
-                "app.bsky.graph.block" => {
-                    Self::copy_batch_insert_blocks(client, &collection_jobs).await
-                }
-                "app.bsky.actor.profile" => {
-                    // Profile is more complex, keep original implementation
-                    Self::batch_insert_profiles(client, &collection_jobs).await
-                }
-                _ => {
-                    // For other types, process individually
-                    for pj in &collection_jobs {
-                        if let Some(record) = &pj.job.record {
-                            if let Err(e) = Self::process_collection_specific(
-                                client,
-                                &pj.collection,
-                                &pj.did,
-                                &pj.rkey,
-                                record,
-                                &pj.job.cid,
-                                &pj.job.indexed_at,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "process_collection_specific failed for {}: {e}",
-                                    pj.job.uri
-                                );
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-            };
-            collection_timings.push((
-                (*collection).to_owned(),
-                col_start.elapsed().as_millis(),
-                col_count,
-            ));
+        let (ms, count, err) = posts_result;
+        if count > 0 {
+            collection_timings.push(("post".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for posts failed: {e}");
+        }
 
-            if let Err(e) = batch_result {
-                tracing::error!("COPY batch insert for {collection} failed: {e}");
+        let (ms, count, err) = likes_result;
+        if count > 0 {
+            collection_timings.push(("like".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for likes failed: {e}");
+        }
+
+        let (ms, count, err) = follows_result;
+        if count > 0 {
+            collection_timings.push(("follow".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for follows failed: {e}");
+        }
+
+        let (ms, count, err) = reposts_result;
+        if count > 0 {
+            collection_timings.push(("repost".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for reposts failed: {e}");
+        }
+
+        let (ms, count, err) = blocks_result;
+        if count > 0 {
+            collection_timings.push(("block".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for blocks failed: {e}");
+        }
+
+        let (ms, count, err) = profiles_result;
+        if count > 0 {
+            collection_timings.push(("profile".to_owned(), ms, count));
+        }
+        if let Some(e) = err {
+            tracing::error!("COPY batch insert for profiles failed: {e}");
+        }
+
+        // Process "other" collection types sequentially (less common)
+        if !others.is_empty() {
+            let other_start = Instant::now();
+            for pj in &others {
+                if let Some(record) = &pj.job.record {
+                    if let Err(e) = Self::process_collection_specific(
+                        &client,
+                        &pj.collection,
+                        &pj.did,
+                        &pj.rkey,
+                        record,
+                        &pj.job.cid,
+                        &pj.job.indexed_at,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "process_collection_specific failed for {}: {e}",
+                            pj.job.uri
+                        );
+                    }
+                }
             }
+            collection_timings.push((
+                "other".to_owned(),
+                other_start.elapsed().as_millis(),
+                others.len(),
+            ));
         }
         let collections_ms = collections_start.elapsed().as_millis();
 
@@ -2166,6 +2213,111 @@ impl IndexerManager {
             .await?;
 
         Ok(())
+    }
+
+    // Parallel COPY helper functions - each gets its own connection from pool
+    // Returns (timing_ms, count, Option<error>) for logging
+
+    async fn parallel_copy_posts(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::copy_batch_insert_posts(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
+    }
+
+    async fn parallel_copy_likes(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::copy_batch_insert_likes(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
+    }
+
+    async fn parallel_copy_follows(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::copy_batch_insert_follows(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
+    }
+
+    async fn parallel_copy_reposts(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::copy_batch_insert_reposts(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
+    }
+
+    async fn parallel_copy_blocks(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::copy_batch_insert_blocks(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
+    }
+
+    async fn parallel_copy_profiles(
+        pool: &Pool,
+        jobs: &[&ParsedJob<'_>],
+    ) -> (u128, usize, Option<WintermuteError>) {
+        let count = jobs.len();
+        if count == 0 {
+            return (0, 0, None);
+        }
+        let start = std::time::Instant::now();
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
+        };
+        let err = Self::batch_insert_profiles(&client, jobs).await.err();
+        (start.elapsed().as_millis(), count, err)
     }
 
     // COPY-based batch insert wrappers that extract data and call bulk functions
