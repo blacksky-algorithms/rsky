@@ -143,7 +143,14 @@ fn queue_from_csv(storage: &Storage, path: &PathBuf, priority: bool) -> Result<(
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
-        let did = line.trim();
+
+        // Handle CSV with multiple columns - extract first column and strip quotes
+        let did = line
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"');
 
         // Skip empty lines and header
         if did.is_empty() || did == "did" {
