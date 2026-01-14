@@ -79,7 +79,7 @@ impl BackfillerManager {
             loop_count += 1;
 
             if loop_count % 100 == 1 {
-                tracing::debug!(
+                tracing::info!(
                     "backfiller loop iteration {}, backoff={}ms",
                     loop_count,
                     empty_backoff_ms
@@ -91,32 +91,37 @@ impl BackfillerManager {
                 break;
             }
 
+            tracing::debug!("backfiller: calling update_metrics");
             self.update_metrics();
 
+            tracing::debug!("backfiller: calling check_backpressure");
             if self.check_backpressure().await {
+                tracing::debug!("backfiller: backpressure active, continuing");
                 continue;
             }
 
+            tracing::debug!("backfiller: calling dequeue_batch");
             let jobs = self.dequeue_batch();
             if jobs.is_empty() {
-                if loop_count % 100 == 1 {
-                    tracing::debug!(
-                        "backfiller dequeue_batch returned empty, sleeping {}ms",
-                        empty_backoff_ms
-                    );
-                }
+                tracing::debug!(
+                    "backfiller: dequeue_batch returned empty, sleeping {}ms",
+                    empty_backoff_ms
+                );
                 tokio::time::sleep(Duration::from_millis(empty_backoff_ms)).await;
                 empty_backoff_ms = (empty_backoff_ms * 2).min(MAX_EMPTY_BACKOFF_MS);
                 continue;
             }
 
-            tracing::debug!("backfiller dequeued {} jobs", jobs.len());
+            tracing::info!("backfiller: dequeued {} jobs", jobs.len());
 
             // Reset backoff when we have work
             empty_backoff_ms = 100;
 
+            tracing::debug!("backfiller: spawning job tasks");
             let tasks = self.spawn_job_tasks(jobs).await;
+            tracing::debug!("backfiller: handling task results");
             self.handle_task_results(tasks).await;
+            tracing::debug!("backfiller: loop iteration complete");
         }
     }
 
