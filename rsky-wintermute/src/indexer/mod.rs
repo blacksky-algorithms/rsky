@@ -24,6 +24,13 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_postgres::NoTls;
 
+// Global semaphore to serialize like inserts across all workers.
+// The like table has a 133GB index that causes severe contention when
+// multiple workers hit it simultaneously. Serializing like access prevents
+// 10+ second delays from index cache misses.
+static LIKE_INSERT_SEMAPHORE: std::sync::LazyLock<Semaphore> =
+    std::sync::LazyLock::new(|| Semaphore::new(1));
+
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub enum QueueSource {
@@ -2244,6 +2251,12 @@ impl IndexerManager {
             return (0, 0, None);
         }
         let start = std::time::Instant::now();
+
+        // Acquire semaphore to serialize like inserts across workers.
+        // The like table's 133GB index causes severe contention when
+        // multiple workers hit it simultaneously.
+        let _permit = LIKE_INSERT_SEMAPHORE.acquire().await;
+
         let client = match pool.get().await {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
