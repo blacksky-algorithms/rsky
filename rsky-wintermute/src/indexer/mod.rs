@@ -2548,6 +2548,111 @@ impl IndexerManager {
                         .await?;
                 }
             }
+
+            // Update replyCount for parent post
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"replyCount\")
+                     SELECT $1::varchar, COUNT(*) FROM post
+                     WHERE \"replyParent\" = $1
+                       AND (\"violatesThreadGate\" IS NULL OR \"violatesThreadGate\" = false)
+                     ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = EXCLUDED.\"replyCount\"",
+                    &[&parent_uri_str],
+                )
+                .await?;
+        }
+
+        // Handle embed.record (quote posts)
+        if let Some(embed) = record.get("embed") {
+            Self::handle_post_embeds(client, embed, &uri, cid, did, created_at, indexed_at).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_post_embeds(
+        client: &deadpool_postgres::Client,
+        embed: &serde_json::Value,
+        post_uri: &str,
+        post_cid: &str,
+        creator: &str,
+        created_at: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        // Handle app.bsky.embed.record (quote post)
+        if let Some(record) = embed.get("record") {
+            Self::handle_embed_record(
+                client, record, post_uri, post_cid, creator, created_at, indexed_at,
+            )
+            .await?;
+        }
+
+        // Handle app.bsky.embed.recordWithMedia (quote post with media)
+        if let Some(record) = embed.get("record").and_then(|r| r.get("record")) {
+            Self::handle_embed_record(
+                client, record, post_uri, post_cid, creator, created_at, indexed_at,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_embed_record(
+        client: &deadpool_postgres::Client,
+        record: &serde_json::Value,
+        post_uri: &str,
+        post_cid: &str,
+        creator: &str,
+        created_at: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let embed_uri = record.get("uri").and_then(|v| v.as_str());
+        let embed_cid = record.get("cid").and_then(|v| v.as_str());
+
+        if let (Some(embed_uri), Some(embed_cid)) = (embed_uri, embed_cid) {
+            // Only process if it's a post being quoted
+            if embed_uri.contains("/app.bsky.feed.post/") {
+                // Insert into quote table
+                client
+                    .execute(
+                        "INSERT INTO quote (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT DO NOTHING",
+                        &[&post_uri, &post_cid, &creator, &embed_uri, &embed_cid, &created_at, &indexed_at],
+                    )
+                    .await?;
+
+                // Update quoteCount for quoted post
+                client
+                    .execute(
+                        "INSERT INTO post_agg (uri, \"quoteCount\")
+                         SELECT $1::varchar, COUNT(*) FROM quote WHERE \"subjectCid\" = $2
+                         ON CONFLICT (uri) DO UPDATE SET \"quoteCount\" = EXCLUDED.\"quoteCount\"",
+                        &[&embed_uri, &embed_cid],
+                    )
+                    .await?;
+
+                // Generate quote notification
+                if let Ok(quoted_uri) = AtUri::new(embed_uri.to_owned(), None) {
+                    let quoted_author = quoted_uri.get_hostname();
+                    if quoted_author != creator {
+                        let sort_at = if indexed_at < created_at {
+                            indexed_at
+                        } else {
+                            created_at
+                        };
+                        client
+                            .execute(
+                                "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                 ON CONFLICT DO NOTHING",
+                                &[&quoted_author, &creator, &post_uri, &post_cid, &"quote", &Some(embed_uri), &sort_at],
+                            )
+                            .await?;
+                    }
+                }
+            }
         }
 
         Ok(())
