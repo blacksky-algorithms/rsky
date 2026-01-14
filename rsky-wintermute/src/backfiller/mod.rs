@@ -71,8 +71,21 @@ impl BackfillerManager {
         // Exponential backoff for empty queue: 100ms -> 200ms -> 400ms -> ... -> 5s max
         const MAX_EMPTY_BACKOFF_MS: u64 = 5000;
         let mut empty_backoff_ms = 100u64;
+        let mut loop_count = 0u64;
+
+        tracing::info!("backfiller process_loop starting");
 
         loop {
+            loop_count += 1;
+
+            if loop_count % 100 == 1 {
+                tracing::debug!(
+                    "backfiller loop iteration {}, backoff={}ms",
+                    loop_count,
+                    empty_backoff_ms
+                );
+            }
+
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for backfiller");
                 break;
@@ -86,10 +99,18 @@ impl BackfillerManager {
 
             let jobs = self.dequeue_batch();
             if jobs.is_empty() {
+                if loop_count % 100 == 1 {
+                    tracing::debug!(
+                        "backfiller dequeue_batch returned empty, sleeping {}ms",
+                        empty_backoff_ms
+                    );
+                }
                 tokio::time::sleep(Duration::from_millis(empty_backoff_ms)).await;
                 empty_backoff_ms = (empty_backoff_ms * 2).min(MAX_EMPTY_BACKOFF_MS);
                 continue;
             }
+
+            tracing::debug!("backfiller dequeued {} jobs", jobs.len());
 
             // Reset backoff when we have work
             empty_backoff_ms = 100;
