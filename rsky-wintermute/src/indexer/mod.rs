@@ -512,11 +512,14 @@ impl IndexerManager {
                 break;
             }
 
-            // Dequeue a batch of jobs
-            // Note: Using batch dequeue for now until legacy "1:" prefix items are drained.
-            // Once queue has new random-prefix items, can switch to partitioned dequeue.
+            // Dequeue a batch of jobs using partitioned dequeue for faster access
             let dequeue_start = Instant::now();
-            let jobs = match storage.dequeue_firehose_backfill_batch(batch_size) {
+            let num_workers = *INDEXER_BATCH_WORKERS;
+            let jobs = match storage.dequeue_firehose_backfill_partitioned(
+                worker_id,
+                num_workers,
+                batch_size,
+            ) {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     // Check if Fjall is poisoned - trigger shutdown for recovery
