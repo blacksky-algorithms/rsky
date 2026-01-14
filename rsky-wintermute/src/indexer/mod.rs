@@ -2480,12 +2480,31 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        // Extract reply info
+        let reply = record.get("reply");
+        let reply_root = reply
+            .and_then(|r| r.get("root"))
+            .and_then(|r| r.get("uri"))
+            .and_then(|v| v.as_str());
+        let reply_root_cid = reply
+            .and_then(|r| r.get("root"))
+            .and_then(|r| r.get("cid"))
+            .and_then(|v| v.as_str());
+        let reply_parent = reply
+            .and_then(|r| r.get("parent"))
+            .and_then(|r| r.get("uri"))
+            .and_then(|v| v.as_str());
+        let reply_parent_cid = reply
+            .and_then(|r| r.get("parent"))
+            .and_then(|r| r.get("cid"))
+            .and_then(|v| v.as_str());
+
         client
             .execute(
-                "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                "INSERT INTO post (uri, cid, creator, text, \"replyRoot\", \"replyRootCid\", \"replyParent\", \"replyParentCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT DO NOTHING",
-                &[&uri, &cid, &did, &text, &created_at, &indexed_at],
+                &[&uri, &cid, &did, &text, &reply_root, &reply_root_cid, &reply_parent, &reply_parent_cid, &created_at, &indexed_at],
             )
             .await?;
 
@@ -2513,6 +2532,23 @@ impl IndexerManager {
                 &[&did],
             )
             .await?;
+
+        // Generate reply notification for parent post author
+        if let Some(parent_uri_str) = reply_parent {
+            if let Ok(parent_uri) = AtUri::new(parent_uri_str.to_owned(), None) {
+                let parent_author = parent_uri.get_hostname();
+                if parent_author != did {
+                    client
+                        .execute(
+                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT DO NOTHING",
+                            &[&parent_author, &did, &uri, &cid, &"reply", &Some(parent_uri_str), &sort_at],
+                        )
+                        .await?;
+                }
+            }
+        }
 
         Ok(())
     }
