@@ -51,6 +51,9 @@ enum Command {
         /// Queue with normal priority instead of high priority
         #[arg(long, default_value = "false")]
         normal_priority: bool,
+        /// Queue with immediate priority (processed first, before all other items)
+        #[arg(long, default_value = "false")]
+        immediate: bool,
     },
     /// Show current queue status
     Status,
@@ -120,7 +123,8 @@ fn main() -> Result<()> {
         Command::Dids {
             dids,
             normal_priority,
-        } => queue_dids(&storage, &dids, !normal_priority), // DIDs use priority by default
+            immediate,
+        } => queue_dids(&storage, &dids, !normal_priority, immediate),
         Command::Status => show_status(&storage),
         Command::Peek { count } => peek_queue(&storage, count),
         Command::Search { did, limit } => search_queue(&storage, &did, limit),
@@ -276,11 +280,17 @@ async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result
     Ok(())
 }
 
-fn queue_dids(storage: &Storage, dids: &[String], priority: bool) -> Result<()> {
+fn queue_dids(storage: &Storage, dids: &[String], priority: bool, immediate: bool) -> Result<()> {
     let mut queued = 0;
     let mut skipped = 0;
 
-    let priority_str = if priority { "HIGH PRIORITY" } else { "normal" };
+    let priority_str = if immediate {
+        "IMMEDIATE"
+    } else if priority {
+        "HIGH PRIORITY"
+    } else {
+        "normal"
+    };
     println!("Queuing DIDs with {priority_str} priority");
 
     for did_arg in dids {
@@ -301,10 +311,12 @@ fn queue_dids(storage: &Storage, dids: &[String], priority: bool) -> Result<()> 
             let job = BackfillJob {
                 did: did.to_string(),
                 retry_count: 0,
-                priority,
+                priority: priority || immediate,
             };
 
-            if priority {
+            if immediate {
+                storage.enqueue_backfill_immediate(&job)?;
+            } else if priority {
                 storage.enqueue_backfill_priority(&job)?;
             } else {
                 storage.enqueue_backfill(&job)?;
