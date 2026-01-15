@@ -13,11 +13,11 @@ members = [
   "rsky-repo",
   "rsky-satnav",
   "rsky-syntax",
+  "rsky-wintermute",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-cargo = { version = "0.84.0",features = ["vendored-openssl"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_derive = "^1.0"
 serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
@@ -26,6 +26,7 @@ ipld-core = "0.4.2"
 serde_cbor = "0.11.2"
 serde_bytes = "0.11.15"
 tokio = { version = "1.28.2",features = ["full"] }
+tokio-util = "0.7"
 sha2 = "0.10.8"
 rand = "0.8.5"
 rand_core = "0.6.4"

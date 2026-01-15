@@ -1,9 +1,7 @@
 use crate::types::HandleResolverOpts;
 use anyhow::Result;
 use hickory_resolver::config::*;
-use hickory_resolver::error::ResolveResult;
-use hickory_resolver::lookup_ip::LookupIp;
-use hickory_resolver::Resolver;
+use hickory_resolver::TokioAsyncResolver;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use url::Url;
@@ -28,21 +26,24 @@ impl HandleResolver {
     }
 
     pub async fn resolve(&mut self, handle: &String) -> Result<Option<String>> {
-        let dns_future = self.resolve_dns(handle);
-        let http_future = self.resolve_http(handle);
-
-        match dns_future.await {
-            Ok(dns_res) => Ok(dns_res),
-            Err(_) => match http_future.await {
-                Ok(http_res) => Ok(http_res),
-                Err(_) => self.resolve_backup_dns(handle).await,
-            },
+        // Try DNS first
+        if let Ok(Some(did)) = self.resolve_dns(handle).await {
+            return Ok(Some(did));
         }
+
+        // Fall back to HTTP (/.well-known/atproto-did)
+        if let Ok(Some(did)) = self.resolve_http(handle).await {
+            return Ok(Some(did));
+        }
+
+        // Last resort: backup DNS nameservers
+        self.resolve_backup_dns(handle).await
     }
 
     pub async fn resolve_dns(&self, handle: &String) -> Result<Option<String>> {
-        let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
-        let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")) {
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")).await {
             Ok(res) => res,
             Err(_) => return Ok(None),
         };
@@ -97,9 +98,9 @@ impl HandleResolver {
                     })
                     .collect::<Vec<()>>();
 
-                let resolver = Resolver::new(config, ResolverOpts::default())?;
+                let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
 
-                let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")) {
+                let results = match resolver.txt_lookup(format!("{SUBDOMAIN}.{handle}")).await {
                     Ok(res) => res,
                     Err(_) => return Ok(None),
                 };
@@ -132,21 +133,22 @@ impl HandleResolver {
             None => return Ok(None),
             Some(backup_nameservers) => {
                 if self.backup_nameserver_ips.is_none() {
-                    let resolver =
-                        Resolver::new(ResolverConfig::default(), ResolverOpts::default())?;
-                    let responses: Vec<LookupIp> = backup_nameservers
-                        .iter()
-                        .map(|h| resolver.lookup_ip(h))
-                        .collect::<ResolveResult<Vec<LookupIp>>>()?;
+                    let resolver = TokioAsyncResolver::tokio(
+                        ResolverConfig::default(),
+                        ResolverOpts::default(),
+                    );
 
-                    for response in responses {
-                        let mut backup_nameserver_ips = match &self.backup_nameserver_ips {
-                            None => vec![],
-                            Some(backup_nameserver_ips) => backup_nameserver_ips.clone(),
-                        };
-                        backup_nameserver_ips
-                            .append(&mut response.iter().map(|ip| ip).collect::<Vec<IpAddr>>());
-                        self.backup_nameserver_ips = Some(backup_nameserver_ips);
+                    // Look up all backup nameservers
+                    for h in backup_nameservers {
+                        if let Ok(response) = resolver.lookup_ip(h.as_str()).await {
+                            let mut backup_nameserver_ips = match &self.backup_nameserver_ips {
+                                None => vec![],
+                                Some(backup_nameserver_ips) => backup_nameserver_ips.clone(),
+                            };
+                            backup_nameserver_ips
+                                .append(&mut response.iter().map(|ip| ip).collect::<Vec<IpAddr>>());
+                            self.backup_nameserver_ips = Some(backup_nameserver_ips);
+                        }
                     }
                 }
             }

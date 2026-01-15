@@ -96,7 +96,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
         env::var("FEEDGEN_SUBSCRIPTION_PATH").unwrap_or("wss://bsky.network".into());
 
     match rsky_firehose::firehose::read(&message) {
-        Ok((_header, body)) => {
+        Ok(Some((_header, body))) => {
             let mut posts_to_delete = Vec::new();
             let mut posts_to_create = Vec::new();
             let mut likes_to_delete = Vec::new();

@@ -161,3 +161,11 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+wintermute_db
+backfill_cache
+rsky-wintermute/*.md
+rsky-wintermute/*.json
+!rsky-wintermute/README.md
+CLAUDE.md
+.claude
