@@ -331,8 +331,7 @@ mod backfiller_tests {
     #[tokio::test]
     async fn test_check_backpressure_always_false() {
         // Backpressure is intentionally disabled - Fjall stores items on disk
-        // so there's no OOM risk. Per CLAUDE.md: "Backpressure isn't needed
-        // if things are stored on disk in a fast db like Fjall"
+        // so there's no OOM risk
         let (storage, _dir) = setup_test_storage();
         let manager = BackfillerManager::new(std::sync::Arc::new(storage)).unwrap();
 

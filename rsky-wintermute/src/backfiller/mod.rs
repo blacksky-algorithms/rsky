@@ -137,7 +137,6 @@ impl BackfillerManager {
     #[allow(clippy::unused_self)]
     const fn check_backpressure(&self) -> bool {
         // Backpressure disabled - Fjall stores items on disk so there's no OOM risk
-        // Per CLAUDE.md: "Backpressure isn't needed if things are stored on disk in a fast db like Fjall"
         false
     }
 
