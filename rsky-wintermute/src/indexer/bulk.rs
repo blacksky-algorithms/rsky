@@ -269,15 +269,30 @@ pub async fn copy_insert_posts(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
+    // Phase 4: Update profile_agg postsCount for affected creators
+    let agg_start = Instant::now();
+    client
+        .execute(
+            "INSERT INTO profile_agg (did, \"postsCount\")
+             SELECT creator, COUNT(*) FROM post
+             WHERE creator IN (SELECT DISTINCT creator FROM _bulk_post)
+             GROUP BY creator
+             ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
+            &[],
+        )
+        .await?;
+    let agg_ms = agg_start.elapsed().as_millis();
+
     // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms;
+    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW post bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW post bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
             total_ms,
             setup_ms,
             copy_ms,
             insert_ms,
+            agg_ms,
             count
         );
     }
@@ -519,15 +534,42 @@ pub async fn copy_insert_follows(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
+    // Phase 4: Update profile_agg followsCount and followersCount
+    let agg_start = Instant::now();
+    // Update followsCount for creators (those who are following)
+    client
+        .execute(
+            "INSERT INTO profile_agg (did, \"followsCount\")
+             SELECT creator, COUNT(*) FROM follow
+             WHERE creator IN (SELECT DISTINCT creator FROM _bulk_follow)
+             GROUP BY creator
+             ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
+            &[],
+        )
+        .await?;
+    // Update followersCount for subjects (those who are followed)
+    client
+        .execute(
+            "INSERT INTO profile_agg (did, \"followersCount\")
+             SELECT \"subjectDid\", COUNT(*) FROM follow
+             WHERE \"subjectDid\" IN (SELECT DISTINCT subject_did FROM _bulk_follow)
+             GROUP BY \"subjectDid\"
+             ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
+            &[],
+        )
+        .await?;
+    let agg_ms = agg_start.elapsed().as_millis();
+
     // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms;
+    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW follow bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW follow bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
             total_ms,
             setup_ms,
             copy_ms,
             insert_ms,
+            agg_ms,
             count
         );
     }
