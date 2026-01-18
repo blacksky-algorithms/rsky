@@ -2352,6 +2352,8 @@ impl IndexerManager {
             Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
+        let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -2381,10 +2383,20 @@ impl IndexerManager {
                     "post".to_owned(),
                     uri.clone(),
                     pj.job.cid.clone(),
-                    uri,
+                    uri.clone(),
                     pj.did.clone(),
                     sort_at,
                 ));
+
+                // Extract embed data for images and videos
+                if let Some(embed) = record.get("embed") {
+                    Self::extract_embed_data(
+                        embed,
+                        &uri,
+                        &mut embed_image_data,
+                        &mut embed_video_data,
+                    );
+                }
 
                 metrics::INDEXER_POST_EVENTS_TOTAL.inc();
             }
@@ -2392,8 +2404,89 @@ impl IndexerManager {
 
         bulk::copy_insert_posts(client, &post_data).await?;
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
+        bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
+        bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
 
         Ok(())
+    }
+
+    /// Extract embed data (images and videos) from a post's embed field
+    fn extract_embed_data(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_image_data: &mut Vec<(String, String, String, String)>,
+        embed_video_data: &mut Vec<(String, String, Option<String>)>,
+    ) {
+        let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Handle app.bsky.embed.images
+        if embed_type == "app.bsky.embed.images" {
+            Self::extract_images(embed, post_uri, embed_image_data);
+        }
+
+        // Handle app.bsky.embed.video
+        if embed_type == "app.bsky.embed.video" {
+            Self::extract_video(embed, post_uri, embed_video_data);
+        }
+
+        // Handle app.bsky.embed.recordWithMedia (has nested media)
+        if embed_type == "app.bsky.embed.recordWithMedia" {
+            if let Some(media) = embed.get("media") {
+                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                if media_type == "app.bsky.embed.images" {
+                    Self::extract_images(media, post_uri, embed_image_data);
+                } else if media_type == "app.bsky.embed.video" {
+                    Self::extract_video(media, post_uri, embed_video_data);
+                }
+            }
+        }
+    }
+
+    fn extract_images(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_image_data: &mut Vec<(String, String, String, String)>,
+    ) {
+        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
+            for (position, image) in images.iter().enumerate() {
+                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = image.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                });
+
+                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+
+                if let Some(image_cid) = image_cid {
+                    embed_image_data.push((
+                        post_uri.to_owned(),
+                        position.to_string(),
+                        image_cid.to_owned(),
+                        alt.to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn extract_video(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_video_data: &mut Vec<(String, String, Option<String>)>,
+    ) {
+        // Get the video CID - can be in video.ref.$link (CBOR decoded) or video.ref (string)
+        let video_cid = embed.get("video").and_then(|vid| {
+            vid.get("ref")
+                .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
+        });
+
+        let alt = embed.get("alt").and_then(|a| a.as_str()).map(|s| s.to_owned());
+
+        if let Some(video_cid) = video_cid {
+            embed_video_data.push((post_uri.to_owned(), video_cid.to_owned(), alt));
+        }
     }
 
     async fn copy_batch_insert_likes(
@@ -2747,22 +2840,112 @@ impl IndexerManager {
         created_at: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Handle app.bsky.embed.images
+        if embed_type == "app.bsky.embed.images" {
+            Self::handle_embed_images(client, embed, post_uri).await?;
+        }
+
+        // Handle app.bsky.embed.video
+        if embed_type == "app.bsky.embed.video" {
+            Self::handle_embed_video(client, embed, post_uri).await?;
+        }
+
         // Handle app.bsky.embed.record (quote post)
-        if let Some(record) = embed.get("record") {
-            Self::handle_embed_record(
-                client, record, post_uri, post_cid, creator, created_at, indexed_at,
-            )
-            .await?;
+        if embed_type == "app.bsky.embed.record" {
+            if let Some(record) = embed.get("record") {
+                Self::handle_embed_record(
+                    client, record, post_uri, post_cid, creator, created_at, indexed_at,
+                )
+                .await?;
+            }
         }
 
         // Handle app.bsky.embed.recordWithMedia (quote post with media)
-        if let Some(record) = embed.get("record").and_then(|r| r.get("record")) {
-            Self::handle_embed_record(
-                client, record, post_uri, post_cid, creator, created_at, indexed_at,
-            )
-            .await?;
+        if embed_type == "app.bsky.embed.recordWithMedia" {
+            // Handle the record part (quote)
+            if let Some(record) = embed.get("record").and_then(|r| r.get("record")) {
+                Self::handle_embed_record(
+                    client, record, post_uri, post_cid, creator, created_at, indexed_at,
+                )
+                .await?;
+            }
+
+            // Handle the media part (images or video)
+            if let Some(media) = embed.get("media") {
+                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                if media_type == "app.bsky.embed.images" {
+                    Self::handle_embed_images(client, media, post_uri).await?;
+                } else if media_type == "app.bsky.embed.video" {
+                    Self::handle_embed_video(client, media, post_uri).await?;
+                }
+            }
         }
 
+        Ok(())
+    }
+
+    async fn handle_embed_images(
+        client: &deadpool_postgres::Client,
+        embed: &serde_json::Value,
+        post_uri: &str,
+    ) -> Result<(), WintermuteError> {
+        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
+            for (position, image) in images.iter().enumerate() {
+                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = image
+                    .get("image")
+                    .and_then(|img| {
+                        img.get("ref")
+                            .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                            .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                    });
+
+                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+
+                if let Some(image_cid) = image_cid {
+                    let position_str = position.to_string();
+                    client
+                        .execute(
+                            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
+                             VALUES ($1, $2, $3, $4)
+                             ON CONFLICT DO NOTHING",
+                            &[&post_uri, &position_str, &image_cid, &alt],
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_embed_video(
+        client: &deadpool_postgres::Client,
+        embed: &serde_json::Value,
+        post_uri: &str,
+    ) -> Result<(), WintermuteError> {
+        // Get the video CID - can be in video.ref.$link (CBOR decoded) or video.ref (string)
+        let video_cid = embed
+            .get("video")
+            .and_then(|vid| {
+                vid.get("ref")
+                    .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                    .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
+            });
+
+        let alt = embed.get("alt").and_then(|a| a.as_str());
+
+        if let Some(video_cid) = video_cid {
+            client
+                .execute(
+                    "INSERT INTO post_embed_video (\"postUri\", \"videoCid\", alt)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT DO NOTHING",
+                    &[&post_uri, &video_cid, &alt],
+                )
+                .await?;
+        }
         Ok(())
     }
 

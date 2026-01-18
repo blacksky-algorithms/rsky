@@ -744,6 +744,183 @@ pub async fn copy_insert_blocks(
     Ok(())
 }
 
+/// Bulk insert `post_embed_image` records using `COPY` protocol.
+pub async fn copy_insert_post_embed_images(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, String, String)], // post_uri, position, image_cid, alt
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
+    client
+        .execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_image (
+                post_uri text NOT NULL,
+                position text NOT NULL,
+                image_cid text NOT NULL,
+                alt text NOT NULL
+            )",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute("TRUNCATE _bulk_post_embed_image", &[])
+        .await?;
+    let setup_ms = setup_start.elapsed().as_millis();
+
+    // Phase 2: COPY data
+    let copy_start = Instant::now();
+    let copy_stmt = client
+        .copy_in("COPY _bulk_post_embed_image (post_uri, position, image_cid, alt) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
+        .await?;
+
+    let sink = copy_stmt;
+    pin_mut!(sink);
+
+    let mut buffer = Vec::with_capacity(data.len() * 150);
+    for (post_uri, position, image_cid, alt) in data {
+        // Escape alt text for tabs/newlines
+        let escaped_alt: String = alt
+            .chars()
+            .map(|c| match c {
+                '\t' | '\n' | '\r' => ' ',
+                _ => c,
+            })
+            .collect();
+        writeln!(buffer, "{post_uri}\t{position}\t{image_cid}\t{escaped_alt}")
+            .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+    }
+
+    sink.send(bytes::Bytes::from(buffer)).await?;
+    sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
+
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
+    client
+        .execute(
+            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
+             SELECT post_uri, position, image_cid, alt
+             FROM _bulk_post_embed_image
+             ON CONFLICT DO NOTHING",
+            &[],
+        )
+        .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW post_embed_image bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
+/// Bulk insert `post_embed_video` records using `COPY` protocol.
+pub async fn copy_insert_post_embed_videos(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, Option<String>)], // post_uri, video_cid, alt
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
+    client
+        .execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_video (
+                post_uri text NOT NULL,
+                video_cid text NOT NULL,
+                alt text
+            )",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute("TRUNCATE _bulk_post_embed_video", &[])
+        .await?;
+    let setup_ms = setup_start.elapsed().as_millis();
+
+    // Phase 2: COPY data (with NULL handling for alt)
+    let copy_start = Instant::now();
+    let copy_stmt = client
+        .copy_in("COPY _bulk_post_embed_video (post_uri, video_cid, alt) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')")
+        .await?;
+
+    let sink = copy_stmt;
+    pin_mut!(sink);
+
+    let mut buffer = Vec::with_capacity(data.len() * 150);
+    for (post_uri, video_cid, alt) in data {
+        let escaped_alt = match alt {
+            Some(a) => a
+                .chars()
+                .map(|c| match c {
+                    '\t' | '\n' | '\r' => ' ',
+                    _ => c,
+                })
+                .collect::<String>(),
+            None => "\\N".to_owned(), // PostgreSQL NULL marker
+        };
+        writeln!(buffer, "{post_uri}\t{video_cid}\t{escaped_alt}")
+            .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+    }
+
+    sink.send(bytes::Bytes::from(buffer)).await?;
+    sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
+
+    // Phase 3: INSERT...ON CONFLICT
+    let insert_start = Instant::now();
+    client
+        .execute(
+            "INSERT INTO post_embed_video (\"postUri\", \"videoCid\", alt)
+             SELECT post_uri, video_cid, alt
+             FROM _bulk_post_embed_video
+             ON CONFLICT DO NOTHING",
+            &[],
+        )
+        .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW post_embed_video bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
