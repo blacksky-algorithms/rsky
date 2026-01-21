@@ -1,0 +1,58 @@
+[package]
+name = "rsky-video"
+version = "0.1.0"
+edition = "2024"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Blacksky video service - handles video uploads, transcoding via Bunny Stream, and playback"
+
+[[bin]]
+name = "video-service"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# Web framework
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# HTTP client for Bunny API
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "stream"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Database
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+deadpool-postgres = "0.13"
+
+# Auth / crypto
+jsonwebtoken = "9"
+base64 = "0.22"
+
+# Utilities
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+color-eyre = "0.6"
+url = "2"
+bytes = "1"
+urlencoding = "2"
+
+# Logging/tracing
+tracing = { version = "0.1", features = ["release_max_level_debug"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Metrics
+prometheus = { version = "0.13", features = ["process"] }
+
+# rsky crates
+rsky-syntax = { workspace = true }
+
+[dev-dependencies]
+mockito = "1.7.0"
+tempfile = "3"
