@@ -874,16 +874,17 @@ pub async fn copy_insert_post_embed_videos(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, video_cid, alt) in data {
-        let escaped_alt = match alt {
-            Some(a) => a
-                .chars()
-                .map(|c| match c {
-                    '\t' | '\n' | '\r' => ' ',
-                    _ => c,
-                })
-                .collect::<String>(),
-            None => "\\N".to_owned(), // PostgreSQL NULL marker
-        };
+        let escaped_alt = alt.as_ref().map_or_else(
+            || "\\N".to_owned(), // PostgreSQL NULL marker
+            |a| {
+                a.chars()
+                    .map(|c| match c {
+                        '\t' | '\n' | '\r' => ' ',
+                        _ => c,
+                    })
+                    .collect::<String>()
+            },
+        );
         writeln!(buffer, "{post_uri}\t{video_cid}\t{escaped_alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }

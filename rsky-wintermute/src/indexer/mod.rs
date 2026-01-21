@@ -2482,7 +2482,10 @@ impl IndexerManager {
                 .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
         });
 
-        let alt = embed.get("alt").and_then(|a| a.as_str()).map(|s| s.to_owned());
+        let alt = embed
+            .get("alt")
+            .and_then(|a| a.as_str())
+            .map(ToOwned::to_owned);
 
         if let Some(video_cid) = video_cid {
             embed_video_data.push((post_uri.to_owned(), video_cid.to_owned(), alt));
@@ -2894,13 +2897,11 @@ impl IndexerManager {
         if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
             for (position, image) in images.iter().enumerate() {
                 // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
-                let image_cid = image
-                    .get("image")
-                    .and_then(|img| {
-                        img.get("ref")
-                            .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                            .or_else(|| img.get("ref").and_then(|r| r.as_str()))
-                    });
+                let image_cid = image.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                });
 
                 let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
 
@@ -2926,13 +2927,11 @@ impl IndexerManager {
         post_uri: &str,
     ) -> Result<(), WintermuteError> {
         // Get the video CID - can be in video.ref.$link (CBOR decoded) or video.ref (string)
-        let video_cid = embed
-            .get("video")
-            .and_then(|vid| {
-                vid.get("ref")
-                    .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                    .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
-            });
+        let video_cid = embed.get("video").and_then(|vid| {
+            vid.get("ref")
+                .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
+        });
 
         let alt = embed.get("alt").and_then(|a| a.as_str());
 
@@ -3074,7 +3073,8 @@ impl IndexerManager {
                     client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
                         )
                         .await?;
@@ -3145,7 +3145,8 @@ impl IndexerManager {
             client
                 .execute(
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT DO NOTHING",
                     &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
                 )
                 .await?;
@@ -3245,7 +3246,8 @@ impl IndexerManager {
                     client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
                         )
                         .await?;
@@ -3384,7 +3386,8 @@ impl IndexerManager {
                     client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT DO NOTHING",
                             &[&starter_pack_author, &did, &uri, &cid, &"starterpack-joined", &Some(starter_pack_uri_str), &indexed_at],
                         )
                         .await?;
