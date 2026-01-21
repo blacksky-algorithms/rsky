@@ -129,7 +129,7 @@ pub async fn upload_video(
     headers: HeaderMap,
     Query(params): Query<UploadVideoParams>,
     body: Bytes,
-) -> Result<Json<UploadVideoResponse>> {
+) -> Result<Json<JobStatus>> {
     // Validate service auth
     let auth_header = headers
         .get(header::AUTHORIZATION)
@@ -222,16 +222,15 @@ pub async fn upload_video(
         job_id, bunny_video_id
     );
 
-    Ok(Json(UploadVideoResponse {
-        job_status: JobStatus {
-            job_id: job_id.to_string(),
-            did: user_did.to_string(),
-            state: job_state::PROCESSING.to_string(),
-            progress: Some(0),
-            blob: None,
-            error: None,
-            message: Some("Video is being processed".to_string()),
-        },
+    // Return flat JobStatus (not wrapped) - client expects this format
+    Ok(Json(JobStatus {
+        job_id: job_id.to_string(),
+        did: user_did.to_string(),
+        state: job_state::PROCESSING.to_string(),
+        progress: Some(0),
+        blob: None,
+        error: None,
+        message: Some("Video is being processed".to_string()),
     }))
 }
 
