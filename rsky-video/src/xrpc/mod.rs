@@ -140,7 +140,7 @@ pub async fn upload_video(
     let claims = auth::validate_service_auth(&token, &state.config.service_did, None)?;
 
     // Verify the DID matches
-    if claims.sub != params.did {
+    if claims.user_did() != params.did {
         return Err(Error::Forbidden(
             "Token subject does not match upload DID".to_string(),
         ));

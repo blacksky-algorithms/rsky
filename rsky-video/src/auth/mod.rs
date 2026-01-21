@@ -13,18 +13,27 @@ use crate::error::{Error, Result};
 /// Decoded service auth token claims
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServiceAuthClaims {
-    /// Issuer (the PDS DID)
+    /// Issuer (the user's DID when PDS signs on user's behalf)
     pub iss: String,
     /// Audience (should be the video service DID)
     pub aud: String,
-    /// Subject (the user's DID)
-    pub sub: String,
+    /// Subject (the user's DID) - optional, may use iss instead
+    pub sub: Option<String>,
     /// Lexicon method being authorized
     pub lxm: Option<String>,
     /// Expiration time (Unix timestamp)
     pub exp: i64,
     /// Issued at time (Unix timestamp)
     pub iat: Option<i64>,
+    /// JWT ID
+    pub jti: Option<String>,
+}
+
+impl ServiceAuthClaims {
+    /// Get the user DID - uses sub if present, otherwise iss
+    pub fn user_did(&self) -> &str {
+        self.sub.as_deref().unwrap_or(&self.iss)
+    }
 }
 
 /// Extract and validate the Authorization header
@@ -71,8 +80,8 @@ pub fn validate_service_auth(
         .map_err(|e| Error::Unauthorized(format!("Failed to parse JWT claims: {}", e)))?;
 
     debug!(
-        "Service auth: iss={}, sub={}, aud={}, lxm={:?}",
-        claims.iss, claims.sub, claims.aud, claims.lxm
+        "Service auth: iss={}, sub={:?}, aud={}, lxm={:?}, user_did={}",
+        claims.iss, claims.sub, claims.aud, claims.lxm, claims.user_did()
     );
 
     // Check expiration
@@ -105,7 +114,7 @@ pub fn validate_service_auth(
 pub fn get_user_did(auth_header: Option<&str>, service_did: &str) -> Result<String> {
     let token = extract_auth_header(auth_header)?;
     let claims = validate_service_auth(&token, service_did, None)?;
-    Ok(claims.sub)
+    Ok(claims.user_did().to_string())
 }
 
 #[cfg(test)]
