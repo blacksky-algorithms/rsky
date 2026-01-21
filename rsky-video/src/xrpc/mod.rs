@@ -263,7 +263,7 @@ pub async fn get_job_status(
 
     // If job is still processing, check Bunny status
     let (state_str, progress) = if job.state == job_state::PROCESSING {
-        if let Some(ref bunny_id) = job.bunny_video_id {
+        if let Some(bunny_id) = &job.bunny_video_id {
             match state.bunny_client.get_video(bunny_id).await {
                 Ok(video_info) => {
                     if video_info.is_encoding_complete() {
