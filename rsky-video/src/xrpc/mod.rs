@@ -390,17 +390,22 @@ pub async fn proxy_playlist(
 
     debug!("Proxy playlist: did={}, cid={}", did, cid);
 
-    // Look up the bunny video ID
-    let bunny_video_id = db::get_bunny_video_id(&state.db_pool, &did, &cid)
-        .await?
-        .ok_or_else(|| Error::NotFound("Video not found".to_string()))?;
-
-    // Redirect to Bunny CDN
-    let bunny_url = state.bunny_client.get_playlist_url(&bunny_video_id);
+    // Look up the bunny video ID in our database
+    let redirect_url = match db::get_bunny_video_id(&state.db_pool, &did, &cid).await? {
+        Some(bunny_video_id) => {
+            // Video is in our system - redirect to Bunny CDN
+            state.bunny_client.get_playlist_url(&bunny_video_id)
+        }
+        None => {
+            // Video not in our system - fallback to Bluesky's video CDN
+            debug!("Video not in our DB, falling back to Bluesky CDN: did={}, cid={}", did, cid);
+            format!("https://video.bsky.app/watch/{}/{}/playlist.m3u8", did, cid)
+        }
+    };
 
     Ok(Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
-        .header(header::LOCATION, bunny_url)
+        .header(header::LOCATION, redirect_url)
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .body(Body::empty())
         .unwrap())
@@ -418,17 +423,22 @@ pub async fn proxy_thumbnail(
 
     debug!("Proxy thumbnail: did={}, cid={}", did, cid);
 
-    // Look up the bunny video ID
-    let bunny_video_id = db::get_bunny_video_id(&state.db_pool, &did, &cid)
-        .await?
-        .ok_or_else(|| Error::NotFound("Video not found".to_string()))?;
-
-    // Redirect to Bunny CDN
-    let bunny_url = state.bunny_client.get_thumbnail_url(&bunny_video_id);
+    // Look up the bunny video ID in our database
+    let redirect_url = match db::get_bunny_video_id(&state.db_pool, &did, &cid).await? {
+        Some(bunny_video_id) => {
+            // Video is in our system - redirect to Bunny CDN
+            state.bunny_client.get_thumbnail_url(&bunny_video_id)
+        }
+        None => {
+            // Video not in our system - fallback to Bluesky's video CDN
+            debug!("Video not in our DB, falling back to Bluesky CDN: did={}, cid={}", did, cid);
+            format!("https://video.bsky.app/watch/{}/{}/thumbnail.jpg", did, cid)
+        }
+    };
 
     Ok(Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
-        .header(header::LOCATION, bunny_url)
+        .header(header::LOCATION, redirect_url)
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::empty())
         .unwrap())
