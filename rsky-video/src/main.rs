@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 use deadpool_postgres::{Config as PgConfig, Runtime};
@@ -94,7 +95,10 @@ async fn main() -> color_eyre::Result<()> {
             "/xrpc/app.bsky.video.getUploadLimits",
             get(xrpc::get_upload_limits),
         )
-        .route("/xrpc/app.bsky.video.uploadVideo", post(xrpc::upload_video))
+        .route(
+            "/xrpc/app.bsky.video.uploadVideo",
+            post(xrpc::upload_video),
+        )
         .route(
             "/xrpc/app.bsky.video.getJobStatus",
             get(xrpc::get_job_status),
@@ -111,6 +115,7 @@ async fn main() -> color_eyre::Result<()> {
         .route("/health", get(health_check))
         .route("/_health", get(health_check))
         // Add middleware
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB for video uploads
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
