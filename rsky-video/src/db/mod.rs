@@ -16,6 +16,7 @@ pub struct VideoJob {
     pub job_id: Uuid,
     pub did: String,
     pub bunny_video_id: Option<String>,
+    pub video_cid: Option<String>,
     pub state: String,
     pub progress: i32,
     pub blob_ref: Option<JsonValue>,
@@ -58,6 +59,7 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
                 job_id UUID NOT NULL UNIQUE,
                 did TEXT NOT NULL,
                 bunny_video_id TEXT,
+                video_cid TEXT,
                 state TEXT NOT NULL DEFAULT 'JOB_STATE_CREATED',
                 progress INTEGER DEFAULT 0,
                 blob_ref JSONB,
@@ -69,6 +71,14 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
             "#,
+            &[],
+        )
+        .await?;
+
+    // Add video_cid column if it doesn't exist (migration for existing tables)
+    client
+        .execute(
+            "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS video_cid TEXT",
             &[],
         )
         .await?;
@@ -157,7 +167,7 @@ pub async fn create_job(
             r#"
             INSERT INTO video_jobs (job_id, did, original_filename, file_size)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, job_id, did, bunny_video_id, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            RETURNING id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             "#,
             &[&job_id, &did, &filename, &file_size],
         )
@@ -173,7 +183,7 @@ pub async fn get_job(pool: &Pool, job_id: Uuid) -> Result<Option<VideoJob>> {
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM video_jobs
             WHERE job_id = $1
             "#,
@@ -191,7 +201,7 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM video_jobs
             WHERE bunny_video_id = $1
             "#,
@@ -202,18 +212,18 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
     Ok(row.map(|r| row_to_job(&r)))
 }
 
-/// Update job with bunny video ID
-pub async fn set_bunny_video_id(pool: &Pool, job_id: Uuid, bunny_video_id: &str) -> Result<()> {
+/// Update job with bunny video ID and content CID
+pub async fn set_bunny_video_id(pool: &Pool, job_id: Uuid, bunny_video_id: &str, video_cid: &str) -> Result<()> {
     let client = pool.get().await?;
 
     client
         .execute(
             r#"
             UPDATE video_jobs
-            SET bunny_video_id = $2, state = 'JOB_STATE_UPLOADING', updated_at = NOW()
+            SET bunny_video_id = $2, video_cid = $3, state = 'JOB_STATE_UPLOADING', updated_at = NOW()
             WHERE job_id = $1
             "#,
-            &[&job_id, &bunny_video_id],
+            &[&job_id, &bunny_video_id, &video_cid],
         )
         .await?;
 
@@ -389,14 +399,15 @@ fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
         job_id: row.get(1),
         did: row.get(2),
         bunny_video_id: row.get(3),
-        state: row.get(4),
-        progress: row.get(5),
-        blob_ref: row.get(6),
-        error: row.get(7),
-        message: row.get(8),
-        original_filename: row.get(9),
-        file_size: row.get(10),
-        created_at: row.get(11),
-        updated_at: row.get(12),
+        video_cid: row.get(4),
+        state: row.get(5),
+        progress: row.get(6),
+        blob_ref: row.get(7),
+        error: row.get(8),
+        message: row.get(9),
+        original_filename: row.get(10),
+        file_size: row.get(11),
+        created_at: row.get(12),
+        updated_at: row.get(13),
     }
 }

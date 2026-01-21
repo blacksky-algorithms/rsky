@@ -7,9 +7,11 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use bytes::Bytes;
+use cid::Cid;
+use multihash_codetable::{Code, MultihashDigest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tracing::{debug, error, info, warn};
@@ -21,6 +23,19 @@ use crate::{
     db::{self, job_state},
     error::{Error, Result},
 };
+
+/// Generate a CIDv1 (raw codec, SHA-256) from video bytes
+/// Returns base32-encoded CID string starting with 'b' (e.g., bafkreibjfgx...)
+fn generate_video_cid(data: &[u8]) -> String {
+    // Create a multihash using SHA2-256 (code 0x12)
+    let mh = Code::Sha2_256.digest(data);
+
+    // Create CIDv1 with raw codec (0x55)
+    let cid = Cid::new_v1(0x55, mh);
+
+    // Encode as base32lower (multibase 'b' prefix)
+    cid.to_string()
+}
 
 /// Query parameters for getUploadLimits
 #[derive(Debug, Deserialize)]
@@ -190,6 +205,10 @@ pub async fn upload_video(
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
 
+    // Generate CID from video content (before upload consumes the bytes)
+    let video_cid = generate_video_cid(&body);
+    info!("Generated video CID: {}", video_cid);
+
     // Create video in Bunny Stream
     let title = format!("{}_{}", user_did, params.name);
     let bunny_video = match state.bunny_client.create_video(&title).await {
@@ -202,7 +221,7 @@ pub async fn upload_video(
     };
 
     let bunny_video_id = bunny_video.guid.clone();
-    db::set_bunny_video_id(&state.db_pool, job_id, &bunny_video_id).await?;
+    db::set_bunny_video_id(&state.db_pool, job_id, &bunny_video_id, &video_cid).await?;
 
     // Upload video to Bunny
     if let Err(e) = state.bunny_client.upload_video(&bunny_video_id, body).await {
@@ -324,27 +343,29 @@ pub async fn bunny_webhook(
         // Video encoding is complete
         info!("Video encoding complete: job={}", job.job_id);
 
-        // Get video info from Bunny
+        // Get the content CID from the job (generated during upload)
+        let video_cid = job.video_cid.ok_or_else(|| {
+            Error::Internal("Job missing video CID".to_string())
+        })?;
+
+        // Get video info from Bunny for file size
         let video_info = state.bunny_client.get_video(&payload.video_guid).await?;
 
-        // Create a blob ref that points to the video
-        // In a full implementation, we'd upload to the user's PDS here
-        // For MVP, we create a synthetic blob ref
+        // Create a blob ref with the proper content-addressed CID
         let blob_ref = json!({
             "$type": "blob",
             "ref": {
-                "$link": payload.video_guid
+                "$link": video_cid
             },
             "mimeType": "video/mp4",
             "size": video_info.storage_size
         });
 
-        // Save the mapping for URL proxy
-        // The CID is the bunny video ID for now
+        // Save the mapping for URL proxy: (did, cid) -> bunny_video_id
         db::save_video_mapping(
             &state.db_pool,
             &job.did,
-            &payload.video_guid,
+            &video_cid,
             &payload.video_guid,
         )
         .await?;
@@ -352,7 +373,7 @@ pub async fn bunny_webhook(
         // Mark job as complete
         db::complete_job(&state.db_pool, job.job_id, blob_ref).await?;
 
-        info!("Job completed: {}", job.job_id);
+        info!("Job completed: job={}, cid={}", job.job_id, video_cid);
     } else if payload.is_failed() {
         // Video encoding failed
         error!("Video encoding failed: job={}", job.job_id);
