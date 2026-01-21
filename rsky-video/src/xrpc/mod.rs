@@ -252,7 +252,7 @@ pub struct GetJobStatusResponse {
 pub async fn get_job_status(
     State(state): State<Arc<AppState>>,
     Query(params): Query<GetJobStatusParams>,
-) -> Result<Json<JobStatus>> {
+) -> Result<Json<GetJobStatusResponse>> {
     let job_id = Uuid::parse_str(&params.job_id)
         .map_err(|_| Error::BadRequest("Invalid job ID format".to_string()))?;
 
@@ -285,15 +285,17 @@ pub async fn get_job_status(
         (job.state.clone(), job.progress)
     };
 
-    // Return flat JobStatus (not wrapped) - client expects this format
-    Ok(Json(JobStatus {
-        job_id: job.job_id.to_string(),
-        did: job.did,
-        state: state_str,
-        progress: Some(progress),
-        blob: job.blob_ref,
-        error: job.error,
-        message: job.message,
+    // Return wrapped format - SDK expects response.data.jobStatus
+    Ok(Json(GetJobStatusResponse {
+        job_status: JobStatus {
+            job_id: job.job_id.to_string(),
+            did: job.did,
+            state: state_str,
+            progress: Some(progress),
+            blob: job.blob_ref,
+            error: job.error,
+            message: job.message,
+        },
     }))
 }
 
