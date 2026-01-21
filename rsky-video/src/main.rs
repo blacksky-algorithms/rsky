@@ -14,7 +14,8 @@ use deadpool_postgres::{Config as PgConfig, Runtime};
 use tokio_postgres::NoTls;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{Level, info};
+use rustls::crypto::aws_lc_rs::default_provider;
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod auth;
@@ -38,6 +39,9 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+
+    // Initialize TLS crypto provider
+    default_provider().install_default().unwrap();
 
     // Initialize tracing
     tracing_subscriber::registry()
