@@ -5,10 +5,6 @@
 //! blobs on behalf of users.
 
 use atrium_api::types::{BlobRef, TypedBlobRef};
-use atrium_xrpc::{HttpClient, XrpcClient};
-use atrium_xrpc::http::{Request, Response};
-use atrium_xrpc::types::AuthorizationToken;
-use atrium_xrpc_client::reqwest::ReqwestClient;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use serde::Deserialize;
@@ -48,40 +44,6 @@ struct DidService {
     #[serde(rename = "type")]
     service_type: String,
     service_endpoint: String,
-}
-
-/// Wrapper XRPC client that uses a bearer token for auth
-struct AuthenticatedClient {
-    token: String,
-    inner: ReqwestClient,
-}
-
-impl AuthenticatedClient {
-    fn new(base_uri: &str, token: String) -> Self {
-        Self {
-            token,
-            inner: ReqwestClient::new(base_uri),
-        }
-    }
-}
-
-impl HttpClient for AuthenticatedClient {
-    async fn send_http(
-        &self,
-        request: Request<Vec<u8>>,
-    ) -> std::result::Result<Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync + 'static>> {
-        self.inner.send_http(request).await
-    }
-}
-
-impl XrpcClient for AuthenticatedClient {
-    fn base_uri(&self) -> String {
-        self.inner.base_uri()
-    }
-
-    async fn authorization_token(&self, _is_refresh: bool) -> Option<AuthorizationToken> {
-        Some(AuthorizationToken::Bearer(self.token.clone()))
-    }
 }
 
 /// Client for interacting with PDS instances
@@ -217,7 +179,6 @@ impl PdsClient {
         signer: &ServiceAuthSigner,
         user_did: &str,
         data: Bytes,
-        #[allow(unused_variables)]
         mime_type: &str,
     ) -> Result<BlobRef> {
         // Resolve user's PDS endpoint from their DID
@@ -231,26 +192,70 @@ impl PdsClient {
         let token = signer.create_pds_upload_token(&pds_did, user_did, None)?;
         debug!("Created service auth token for PDS upload");
 
-        // Create authenticated client
-        let client = AuthenticatedClient::new(&pds_endpoint, token);
-        let service = atrium_api::client::AtpServiceClient::new(client);
-
-        // Upload blob
+        // Upload blob via direct HTTP request (not using atrium client)
+        // atrium's client has issues with the auth header for this use case
+        let upload_url = format!("{}/xrpc/com.atproto.repo.uploadBlob", pds_endpoint);
         let size = data.len();
-        debug!("Uploading {} bytes to {}", size, pds_endpoint);
+        debug!("Uploading {} bytes to {}", size, upload_url);
 
-        let output = service
-            .service
-            .com
-            .atproto
-            .repo
-            .upload_blob(data.to_vec())
+        let response = self.http_client
+            .post(&upload_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", mime_type)
+            .body(data.to_vec())
+            .send()
             .await
-            .map_err(|e| Error::Internal(format!("PDS upload failed: {}", e)))?;
+            .map_err(|e| Error::Internal(format!("PDS upload request failed: {}", e)))?;
 
-        info!("Blob uploaded to PDS: size={}", size);
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Internal(format!(
+                "PDS upload failed: {} - {}",
+                status, body
+            )));
+        }
 
-        Ok(output.data.blob)
+        // Parse response
+        #[derive(Deserialize)]
+        struct UploadBlobResponse {
+            blob: BlobRefResponse,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BlobRefResponse {
+            #[serde(rename = "$type")]
+            blob_type: Option<String>,
+            #[serde(rename = "ref")]
+            cid_ref: CidRef,
+            mime_type: String,
+            size: u64,
+        }
+
+        #[derive(Deserialize)]
+        struct CidRef {
+            #[serde(rename = "$link")]
+            link: String,
+        }
+
+        let upload_response: UploadBlobResponse = response.json().await
+            .map_err(|e| Error::Internal(format!("Failed to parse PDS response: {}", e)))?;
+
+        info!("Blob uploaded to PDS: size={}, cid={}", size, upload_response.blob.cid_ref.link);
+
+        // Convert to atrium BlobRef format
+        // We need to construct the proper BlobRef type
+        let blob_ref = BlobRef::Typed(TypedBlobRef::Blob(atrium_api::types::Blob {
+            r#ref: atrium_api::types::CidLink(
+                cid::Cid::try_from(upload_response.blob.cid_ref.link.as_str())
+                    .map_err(|e| Error::Internal(format!("Invalid CID from PDS: {}", e)))?
+            ),
+            mime_type: upload_response.blob.mime_type,
+            size: upload_response.blob.size as usize,
+        }));
+
+        Ok(blob_ref)
     }
 
     /// Convert an endpoint URL to a did:web
