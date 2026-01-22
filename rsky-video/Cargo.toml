@@ -34,6 +34,9 @@ deadpool-postgres = "0.13"
 jsonwebtoken = "9"
 base64 = { version = "0.22", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+k256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+sec1 = { version = "0.7", features = ["pem"] }
+rand = "0.8"
 
 # Utilities
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }

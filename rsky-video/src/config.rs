@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub service_did: String,
     /// Public URL of this service
     pub public_url: String,
+    /// Path to the signing key PEM file
+    pub signing_key_path: Option<String>,
 
     /// Maximum video file size in bytes (default: 100MB)
     pub max_video_size: u64,
@@ -54,6 +56,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "did:web:video.blacksky.community".to_string()),
             public_url: env::var("VIDEO_PUBLIC_URL")
                 .unwrap_or_else(|_| "https://video.blacksky.community".to_string()),
+            signing_key_path: env::var("SIGNING_KEY_PATH").ok(),
 
             max_video_size: env::var("MAX_VIDEO_SIZE")
                 .ok()

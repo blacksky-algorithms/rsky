@@ -25,6 +25,7 @@ mod config;
 mod db;
 mod error;
 mod pds;
+mod signing;
 mod xrpc;
 
 pub use config::AppConfig;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub bunny_client: bunny::BunnyClient,
     pub pds_client: pds::PdsClient,
     pub http_client: reqwest::Client,
+    pub signer: Option<signing::ServiceAuthSigner>,
 }
 
 #[tokio::main]
@@ -85,6 +87,26 @@ async fn main() -> color_eyre::Result<()> {
     // Initialize PDS client
     let pds_client = pds::PdsClient::new(http_client.clone());
 
+    // Initialize service auth signer if key is configured
+    let signer = match &config.signing_key_path {
+        Some(path) => {
+            match signing::ServiceAuthSigner::from_pem_file(path, config.service_did.clone()) {
+                Ok(s) => {
+                    info!("Service auth signing enabled");
+                    Some(s)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load signing key, PDS uploads will not work: {}", e);
+                    None
+                }
+            }
+        }
+        None => {
+            tracing::warn!("No signing key configured (SIGNING_KEY_PATH), PDS uploads will not work");
+            None
+        }
+    };
+
     // Create shared state
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -92,6 +114,7 @@ async fn main() -> color_eyre::Result<()> {
         bunny_client,
         pds_client,
         http_client,
+        signer,
     });
 
     // Build router

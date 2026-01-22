@@ -1,8 +1,8 @@
 //! PDS (Personal Data Server) client for uploading blobs
 //!
-//! Handles uploading video blobs to users' PDS instances using the service auth token
-//! provided by the client. The token contains the PDS DID as the audience, which allows
-//! the video service to forward the token when uploading to the PDS.
+//! Handles uploading video blobs to users' PDS instances. The video service
+//! creates its own service auth tokens (signed with its private key) to upload
+//! blobs on behalf of users.
 
 use atrium_api::types::{BlobRef, TypedBlobRef};
 use atrium_xrpc::{HttpClient, XrpcClient};
@@ -16,6 +16,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
+use crate::signing::ServiceAuthSigner;
 
 /// JWT claims from service auth token
 #[derive(Debug, Deserialize)]
@@ -196,13 +197,16 @@ impl PdsClient {
         )))
     }
 
-    /// Upload a blob to a PDS using the provided service auth token
+    /// Upload a blob to a PDS using a service auth token created by the video service
     ///
-    /// The token's `aud` claim must be the PDS DID. The PDS will validate
-    /// the token signature before accepting the upload.
+    /// The video service creates its own service auth token with:
+    /// - iss: video service DID
+    /// - aud: user's PDS DID
+    /// - sub: user's DID
     ///
     /// # Arguments
-    /// * `token` - Service auth token with PDS DID as audience
+    /// * `signer` - The service auth signer
+    /// * `user_did` - The user's DID
     /// * `data` - The blob data to upload
     /// * `mime_type` - MIME type of the blob
     ///
@@ -210,25 +214,30 @@ impl PdsClient {
     /// The blob reference from the PDS (with valid CID)
     pub async fn upload_blob(
         &self,
-        token: &str,
+        signer: &ServiceAuthSigner,
+        user_did: &str,
         data: Bytes,
+        #[allow(unused_variables)]
         mime_type: &str,
     ) -> Result<BlobRef> {
-        // Extract PDS DID from token
-        let pds_did = Self::extract_pds_did(token)?;
-        info!("Uploading blob to PDS: {}", pds_did);
+        // Resolve user's PDS endpoint from their DID
+        let pds_endpoint = self.resolve_pds_endpoint(user_did).await?;
 
-        // Resolve PDS endpoint
-        let pds_endpoint = self.resolve_pds_endpoint(&pds_did).await?;
-        debug!("PDS endpoint: {}", pds_endpoint);
+        // Derive PDS DID from endpoint (e.g., https://blacksky.app -> did:web:blacksky.app)
+        let pds_did = self.endpoint_to_did(&pds_endpoint)?;
+        info!("Uploading blob to PDS: {} ({})", pds_did, pds_endpoint);
+
+        // Create service auth token for this PDS
+        let token = signer.create_pds_upload_token(&pds_did, user_did, None)?;
+        debug!("Created service auth token for PDS upload");
 
         // Create authenticated client
-        let client = AuthenticatedClient::new(&pds_endpoint, token.to_string());
+        let client = AuthenticatedClient::new(&pds_endpoint, token);
         let service = atrium_api::client::AtpServiceClient::new(client);
 
         // Upload blob
         let size = data.len();
-        debug!("Uploading {} bytes ({}) to {}", size, mime_type, pds_endpoint);
+        debug!("Uploading {} bytes to {}", size, pds_endpoint);
 
         let output = service
             .service
@@ -242,6 +251,17 @@ impl PdsClient {
         info!("Blob uploaded to PDS: size={}", size);
 
         Ok(output.data.blob)
+    }
+
+    /// Convert an endpoint URL to a did:web
+    fn endpoint_to_did(&self, endpoint: &str) -> Result<String> {
+        let url = url::Url::parse(endpoint)
+            .map_err(|e| Error::Internal(format!("Invalid endpoint URL: {}", e)))?;
+
+        let host = url.host_str()
+            .ok_or_else(|| Error::Internal("Endpoint has no host".to_string()))?;
+
+        Ok(format!("did:web:{}", host))
     }
 }
 
