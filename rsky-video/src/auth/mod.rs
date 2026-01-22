@@ -55,7 +55,7 @@ pub fn extract_auth_header(auth_header: Option<&str>) -> Result<String> {
 /// For MVP, this does:
 /// - Decode the JWT payload
 /// - Check expiration
-/// - Validate audience matches our service DID
+/// - Optionally validate audience matches expected DID
 ///
 /// Full implementation would also:
 /// - Resolve the issuer's signing key from their PDS
@@ -105,6 +105,38 @@ pub fn validate_service_auth(
             warn!("Invalid lxm: expected {}, got {:?}", expected, claims.lxm);
             return Err(Error::Unauthorized("Invalid token scope".to_string()));
         }
+    }
+
+    Ok(claims)
+}
+
+/// Decode service auth JWT without audience validation
+/// Used for uploadVideo where the token's audience is the user's PDS DID,
+/// not the video service DID. The video service forwards this token to the PDS.
+pub fn decode_service_auth(token: &str) -> Result<ServiceAuthClaims> {
+    // Split JWT into parts
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(Error::Unauthorized("Invalid JWT format".to_string()));
+    }
+
+    // Decode the payload (middle part)
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT payload: {}", e)))?;
+
+    let claims: ServiceAuthClaims = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| Error::Unauthorized(format!("Failed to parse JWT claims: {}", e)))?;
+
+    debug!(
+        "Service auth (no aud check): iss={}, sub={:?}, aud={}, lxm={:?}, user_did={}",
+        claims.iss, claims.sub, claims.aud, claims.lxm, claims.user_did()
+    );
+
+    // Check expiration
+    let now = chrono::Utc::now().timestamp();
+    if claims.exp < now {
+        return Err(Error::Unauthorized("Token has expired".to_string()));
     }
 
     Ok(claims)

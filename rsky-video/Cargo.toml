@@ -30,9 +30,9 @@ serde_json = { workspace = true }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = "0.13"
 
-# Auth / crypto / TLS
+# Auth / crypto / TLS / encoding
 jsonwebtoken = "9"
-base64 = "0.22"
+base64 = { version = "0.22", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # Utilities
@@ -47,6 +47,11 @@ urlencoding = "2"
 # CID generation
 cid = "0.11"
 multihash-codetable = { version = "0.1", features = ["sha2"] }
+
+# AT Protocol client (local atrium)
+atrium-api = { path = "/Users/rudyfraser/Projects/atrium/atrium-api", features = ["agent"] }
+atrium-xrpc = { path = "/Users/rudyfraser/Projects/atrium/atrium-xrpc" }
+atrium-xrpc-client = { path = "/Users/rudyfraser/Projects/atrium/atrium-xrpc-client" }
 
 # Logging/tracing
 tracing = { version = "0.1", features = ["release_max_level_debug"] }

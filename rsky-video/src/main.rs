@@ -24,6 +24,7 @@ mod bunny;
 mod config;
 mod db;
 mod error;
+mod pds;
 mod xrpc;
 
 pub use config::AppConfig;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub db_pool: deadpool_postgres::Pool,
     pub bunny_client: bunny::BunnyClient,
+    pub pds_client: pds::PdsClient,
     pub http_client: reqwest::Client,
 }
 
@@ -80,11 +82,15 @@ async fn main() -> color_eyre::Result<()> {
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
+    // Initialize PDS client
+    let pds_client = pds::PdsClient::new(http_client.clone());
+
     // Create shared state
     let state = Arc::new(AppState {
         config: config.clone(),
         db_pool,
         bunny_client,
+        pds_client,
         http_client,
     });
 

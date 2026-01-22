@@ -10,10 +10,8 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use cid::Cid;
-use multihash_codetable::{Code, MultihashDigest};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -22,20 +20,8 @@ use crate::{
     bunny::WebhookPayload,
     db::{self, job_state},
     error::{Error, Result},
+    pds,
 };
-
-/// Generate a CIDv1 (raw codec, SHA-256) from video bytes
-/// Returns base32-encoded CID string starting with 'b' (e.g., bafkreibjfgx...)
-fn generate_video_cid(data: &[u8]) -> String {
-    // Create a multihash using SHA2-256 (code 0x12)
-    let mh = Code::Sha2_256.digest(data);
-
-    // Create CIDv1 with raw codec (0x55)
-    let cid = Cid::new_v1(0x55, mh);
-
-    // Encode as base32lower (multibase 'b' prefix)
-    cid.to_string()
-}
 
 /// Query parameters for getUploadLimits
 #[derive(Debug, Deserialize)]
@@ -145,14 +131,16 @@ pub async fn upload_video(
     Query(params): Query<UploadVideoParams>,
     body: Bytes,
 ) -> Result<Json<JobStatus>> {
-    // Validate service auth
+    // Extract service auth token
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    // The token should be for com.atproto.repo.uploadBlob
+    // The token should be for com.atproto.repo.uploadBlob with aud: user's PDS DID
+    // We don't validate audience here since the token is meant for the PDS, not us.
+    // We forward this token to the PDS for blob upload.
     let token = auth::extract_auth_header(auth_header)?;
-    let claims = auth::validate_service_auth(&token, &state.config.service_did, None)?;
+    let claims = auth::decode_service_auth(&token)?;
 
     // Verify the DID matches
     if claims.user_did() != params.did {
@@ -205,10 +193,36 @@ pub async fn upload_video(
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
 
-    // Generate CID from video content (before upload consumes the bytes)
-    let video_cid = generate_video_cid(&body);
-    info!("Generated video CID: {}", video_cid);
+    // STEP 1: Upload blob to user's PDS FIRST
+    // The token's `aud` claim contains the PDS DID, and the PDS will validate
+    // the token signature. This gives us a real, content-addressed blob reference.
+    info!("Uploading blob to PDS for user {}", user_did);
+    let pds_blob_ref = match state
+        .pds_client
+        .upload_blob(&token, body.clone(), "video/mp4")
+        .await
+    {
+        Ok(blob) => blob,
+        Err(e) => {
+            error!("Failed to upload blob to PDS: {}", e);
+            db::fail_job(&state.db_pool, job_id, &format!("PDS upload failed: {}", e)).await?;
+            return Err(e);
+        }
+    };
 
+    // Extract the CID from the PDS blob_ref - this is the real content-addressed CID
+    let video_cid = pds::extract_cid(&pds_blob_ref).ok_or_else(|| {
+        Error::Internal("PDS returned invalid blob reference".to_string())
+    })?;
+    info!("PDS returned blob with CID: {}", video_cid);
+
+    // Convert to JSON for storage
+    let pds_blob_json = pds::blob_ref_to_json(&pds_blob_ref);
+
+    // Store the PDS blob_ref in database
+    db::set_pds_blob_ref(&state.db_pool, job_id, pds_blob_json.clone(), &video_cid).await?;
+
+    // STEP 2: Upload to Bunny Stream for transcoding
     // Create video in Bunny Stream
     let title = format!("{}_{}", user_did, params.name);
     let bunny_video = match state.bunny_client.create_video(&title).await {
@@ -223,7 +237,7 @@ pub async fn upload_video(
     let bunny_video_id = bunny_video.guid.clone();
     db::set_bunny_video_id(&state.db_pool, job_id, &bunny_video_id, &video_cid).await?;
 
-    // Upload video to Bunny
+    // Upload video to Bunny for transcoding
     if let Err(e) = state.bunny_client.upload_video(&bunny_video_id, body).await {
         error!("Failed to upload to Bunny: {}", e);
         db::fail_job(&state.db_pool, job_id, &e.to_string()).await?;
@@ -237,8 +251,8 @@ pub async fn upload_video(
     db::increment_quota(&state.db_pool, user_did, file_size).await?;
 
     info!(
-        "Video uploaded to Bunny: job={}, bunny_id={}",
-        job_id, bunny_video_id
+        "Video uploaded: job={}, cid={}, bunny_id={}",
+        job_id, video_cid, bunny_video_id
     );
 
     // Return flat JobStatus (not wrapped) - client expects this format
@@ -343,23 +357,16 @@ pub async fn bunny_webhook(
         // Video encoding is complete
         info!("Video encoding complete: job={}", job.job_id);
 
-        // Get the content CID from the job (generated during upload)
+        // Get the content CID from the job (from PDS upload)
         let video_cid = job.video_cid.ok_or_else(|| {
             Error::Internal("Job missing video CID".to_string())
         })?;
 
-        // Get video info from Bunny for file size
-        let video_info = state.bunny_client.get_video(&payload.video_guid).await?;
-
-        // Create a blob ref with the proper content-addressed CID
-        let blob_ref = json!({
-            "$type": "blob",
-            "ref": {
-                "$link": video_cid
-            },
-            "mimeType": "video/mp4",
-            "size": video_info.storage_size
-        });
+        // Use the PDS blob_ref that was stored during upload
+        // This is the real blob reference from the user's PDS
+        let blob_ref = job.pds_blob_ref.ok_or_else(|| {
+            Error::Internal("Job missing PDS blob reference".to_string())
+        })?;
 
         // Save the mapping for URL proxy: (did, cid) -> bunny_video_id
         db::save_video_mapping(
@@ -370,7 +377,7 @@ pub async fn bunny_webhook(
         )
         .await?;
 
-        // Mark job as complete
+        // Mark job as complete with the PDS blob_ref
         db::complete_job(&state.db_pool, job.job_id, blob_ref).await?;
 
         info!("Job completed: job={}, cid={}", job.job_id, video_cid);

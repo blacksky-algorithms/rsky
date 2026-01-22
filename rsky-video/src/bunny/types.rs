@@ -1,6 +1,6 @@
 //! Bunny Stream API types
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Response from creating a new video
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +70,7 @@ impl VideoInfo {
 #[serde(rename_all = "PascalCase")]
 pub struct WebhookPayload {
     /// Video library ID
+    #[allow(dead_code)]
     pub video_library_id: i64,
     /// Video GUID
     pub video_guid: String,
@@ -118,6 +119,7 @@ impl WebhookPayload {
 }
 
 /// Bunny encoding status codes
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum BunnyStatus {

@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Video job record
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +17,7 @@ pub struct VideoJob {
     pub did: String,
     pub bunny_video_id: Option<String>,
     pub video_cid: Option<String>,
+    pub pds_blob_ref: Option<JsonValue>,
     pub state: String,
     pub progress: i32,
     pub blob_ref: Option<JsonValue>,
@@ -29,6 +30,7 @@ pub struct VideoJob {
 }
 
 /// Job state constants
+#[allow(dead_code)]
 pub mod job_state {
     pub const CREATED: &str = "JOB_STATE_CREATED";
     pub const UPLOADING: &str = "JOB_STATE_UPLOADING";
@@ -38,6 +40,7 @@ pub mod job_state {
 }
 
 /// Upload quota record
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UploadQuota {
     pub did: String,
@@ -79,6 +82,14 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
     client
         .execute(
             "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS video_cid TEXT",
+            &[],
+        )
+        .await?;
+
+    // Add pds_blob_ref column to store the real blob reference from the PDS
+    client
+        .execute(
+            "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS pds_blob_ref JSONB",
             &[],
         )
         .await?;
@@ -167,7 +178,7 @@ pub async fn create_job(
             r#"
             INSERT INTO video_jobs (job_id, did, original_filename, file_size)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             "#,
             &[&job_id, &did, &filename, &file_size],
         )
@@ -183,7 +194,7 @@ pub async fn get_job(pool: &Pool, job_id: Uuid) -> Result<Option<VideoJob>> {
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM video_jobs
             WHERE job_id = $1
             "#,
@@ -201,7 +212,7 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM video_jobs
             WHERE bunny_video_id = $1
             "#,
@@ -224,6 +235,24 @@ pub async fn set_bunny_video_id(pool: &Pool, job_id: Uuid, bunny_video_id: &str,
             WHERE job_id = $1
             "#,
             &[&job_id, &bunny_video_id, &video_cid],
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// Store the PDS blob reference (from com.atproto.repo.uploadBlob)
+pub async fn set_pds_blob_ref(pool: &Pool, job_id: Uuid, pds_blob_ref: JsonValue, video_cid: &str) -> Result<()> {
+    let client = pool.get().await?;
+
+    client
+        .execute(
+            r#"
+            UPDATE video_jobs
+            SET pds_blob_ref = $2, video_cid = $3, updated_at = NOW()
+            WHERE job_id = $1
+            "#,
+            &[&job_id, &pds_blob_ref, &video_cid],
         )
         .await?;
 
@@ -400,14 +429,15 @@ fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
         did: row.get(2),
         bunny_video_id: row.get(3),
         video_cid: row.get(4),
-        state: row.get(5),
-        progress: row.get(6),
-        blob_ref: row.get(7),
-        error: row.get(8),
-        message: row.get(9),
-        original_filename: row.get(10),
-        file_size: row.get(11),
-        created_at: row.get(12),
-        updated_at: row.get(13),
+        pds_blob_ref: row.get(5),
+        state: row.get(6),
+        progress: row.get(7),
+        blob_ref: row.get(8),
+        error: row.get(9),
+        message: row.get(10),
+        original_filename: row.get(11),
+        file_size: row.get(12),
+        created_at: row.get(13),
+        updated_at: row.get(14),
     }
 }

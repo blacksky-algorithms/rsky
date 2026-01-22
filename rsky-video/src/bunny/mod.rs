@@ -174,4 +174,35 @@ impl BunnyClient {
     pub fn pull_zone(&self) -> &str {
         &self.pull_zone
     }
+
+    /// Download the original video file from Bunny CDN
+    /// Returns the video bytes
+    pub async fn download_video(&self, video_id: &str) -> Result<bytes::Bytes> {
+        // The original video is available at the CDN URL with /play.mp4 suffix
+        let url = format!(
+            "https://{}.b-cdn.net/{}/original",
+            self.pull_zone, video_id
+        );
+
+        debug!("Downloading video from Bunny: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::BunnyApi(format!(
+                "Failed to download video: {} - {}",
+                status, body
+            )));
+        }
+
+        let bytes = response.bytes().await?;
+        info!("Downloaded {} bytes from Bunny", bytes.len());
+        Ok(bytes)
+    }
 }
