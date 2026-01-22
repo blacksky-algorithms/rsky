@@ -48,10 +48,10 @@ urlencoding = "2"
 cid = "0.11"
 multihash-codetable = { version = "0.1", features = ["sha2"] }
 
-# AT Protocol client (local atrium)
-atrium-api = { path = "/Users/rudyfraser/Projects/atrium/atrium-api", features = ["agent"] }
-atrium-xrpc = { path = "/Users/rudyfraser/Projects/atrium/atrium-xrpc" }
-atrium-xrpc-client = { path = "/Users/rudyfraser/Projects/atrium/atrium-xrpc-client" }
+# AT Protocol client (atrium from crates.io)
+atrium-api = { version = "0.25", features = ["agent"] }
+atrium-xrpc = "0.12"
+atrium-xrpc-client = "0.5"
 
 # Logging/tracing
 tracing = { version = "0.1", features = ["release_max_level_debug"] }
