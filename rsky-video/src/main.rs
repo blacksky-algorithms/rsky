@@ -144,7 +144,7 @@ async fn main() -> color_eyre::Result<()> {
         .route("/health", get(health_check))
         .route("/_health", get(health_check))
         // Add middleware
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB for video uploads
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024 * 1024)) // 5GB for video uploads
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
