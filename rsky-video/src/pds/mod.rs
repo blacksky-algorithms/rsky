@@ -12,7 +12,6 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
-use crate::signing::ServiceAuthSigner;
 
 /// JWT claims from service auth token
 #[derive(Debug, Deserialize)]
@@ -159,24 +158,26 @@ impl PdsClient {
         )))
     }
 
-    /// Upload a blob to a PDS using a service auth token created by the video service
+    /// Upload a blob to a PDS by forwarding the client's service auth token
     ///
-    /// The video service creates its own service auth token with:
-    /// - iss: video service DID
+    /// The client provides a service auth token from their PDS with:
+    /// - iss: user's DID
     /// - aud: user's PDS DID
-    /// - sub: user's DID
+    /// - lxm: com.atproto.repo.uploadBlob
+    ///
+    /// We forward this token to the PDS, which verifies it against the user's DID document.
     ///
     /// # Arguments
-    /// * `signer` - The service auth signer
+    /// * `client_token` - The service auth token from the client
     /// * `user_did` - The user's DID
     /// * `data` - The blob data to upload
     /// * `mime_type` - MIME type of the blob
     ///
     /// # Returns
     /// The blob reference from the PDS (with valid CID)
-    pub async fn upload_blob(
+    pub async fn upload_blob_with_token(
         &self,
-        signer: &ServiceAuthSigner,
+        client_token: &str,
         user_did: &str,
         data: Bytes,
         mime_type: &str,
@@ -184,13 +185,8 @@ impl PdsClient {
         // Resolve user's PDS endpoint from their DID
         let pds_endpoint = self.resolve_pds_endpoint(user_did).await?;
 
-        // Derive PDS DID from endpoint (e.g., https://blacksky.app -> did:web:blacksky.app)
-        let pds_did = self.endpoint_to_did(&pds_endpoint)?;
-        info!("Uploading blob to PDS: {} ({})", pds_did, pds_endpoint);
-
-        // Create service auth token for this PDS
-        let token = signer.create_pds_upload_token(&pds_did, user_did, None)?;
-        debug!("Created service auth token for PDS upload");
+        info!("Uploading blob to PDS: {} using client token", pds_endpoint);
+        let token = client_token;
 
         // Upload blob via direct HTTP request (not using atrium client)
         // atrium's client has issues with the auth header for this use case

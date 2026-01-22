@@ -194,17 +194,13 @@ pub async fn upload_video(
     info!("Created job: {}", job_id);
 
     // STEP 1: Upload blob to user's PDS FIRST
-    // We create our own service auth token (signed by video service) to upload
-    // to the user's PDS on their behalf.
-    info!("Uploading blob to PDS for user {}", user_did);
-
-    let signer = state.signer.as_ref().ok_or_else(|| {
-        Error::Internal("Video service signing key not configured".to_string())
-    })?;
+    // Forward the client's service auth token to the PDS.
+    // The token should have aud: user's PDS DID (not video service).
+    info!("Uploading blob to PDS for user {} using client token", user_did);
 
     let pds_blob_ref = match state
         .pds_client
-        .upload_blob(signer, user_did, body.clone(), "video/mp4")
+        .upload_blob_with_token(&token, user_did, body.clone(), "video/mp4")
         .await
     {
         Ok(blob) => blob,
