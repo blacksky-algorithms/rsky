@@ -3334,7 +3334,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (creator, \"subjectDid\") DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
             )
             .await?;
