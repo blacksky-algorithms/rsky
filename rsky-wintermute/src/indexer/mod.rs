@@ -2194,6 +2194,8 @@ impl IndexerManager {
         let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
         let mut display_names: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut descriptions: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut avatar_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut banner_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
 
         for pj in jobs {
@@ -2201,12 +2203,26 @@ impl IndexerManager {
                 let uri = pj.uri.to_string();
                 let display_name = sanitize_opt(record.get("displayName").and_then(|v| v.as_str()));
                 let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
+                let avatar_cid = record
+                    .get("avatar")
+                    .and_then(|v| v.get("ref"))
+                    .and_then(|v| v.get("$link"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let banner_cid = record
+                    .get("banner")
+                    .and_then(|v| v.get("ref"))
+                    .and_then(|v| v.get("$link"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 uris.push(uri);
                 cids.push(pj.job.cid.clone());
                 creators.push(pj.did.clone());
                 display_names.push(display_name);
                 descriptions.push(description);
+                avatar_cids.push(avatar_cid);
+                banner_cids.push(banner_cid);
                 indexed_ats.push(pj.job.indexed_at.clone());
 
                 metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
@@ -2215,10 +2231,16 @@ impl IndexerManager {
 
         client
             .execute(
-                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"indexedAt\")
-                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-                 ON CONFLICT DO NOTHING",
-                &[&uris, &cids, &creators, &display_names, &descriptions, &indexed_ats],
+                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"bannerCid\" = EXCLUDED.\"bannerCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                &[&uris, &cids, &creators, &display_names, &descriptions, &avatar_cids, &banner_cids, &indexed_ats],
             )
             .await?;
 
@@ -3374,7 +3396,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"joinedViaStarterPackUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"bannerCid\" = EXCLUDED.\"bannerCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &display_name, &description, &avatar_cid, &banner_cid, &joined_via_uri, &created_at, &indexed_at],
             )
             .await?;
@@ -3443,7 +3471,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO feed_generator (uri, cid, creator, \"feedDid\", \"displayName\", description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"descriptionFacets\" = EXCLUDED.\"descriptionFacets\",
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &feed_did, &display_name, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -3496,7 +3530,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO list (uri, cid, creator, name, purpose, description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   name = EXCLUDED.name,
+                   description = EXCLUDED.description,
+                   \"descriptionFacets\" = EXCLUDED.\"descriptionFacets\",
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &name, &purpose, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -3636,7 +3676,10 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO starter_pack (uri, cid, creator, name, \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   name = EXCLUDED.name,
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &name, &created_at, &indexed_at],
             )
             .await?;
