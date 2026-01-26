@@ -929,7 +929,7 @@ impl IngesterManager {
         let client = pool.get().await?;
         let result = client
             .execute(
-                "UPDATE actor SET handle = $1, indexed_at = $2 WHERE did = $3",
+                "UPDATE actor SET handle = $1, \"indexedAt\" = $2 WHERE did = $3",
                 &[&handle, &timestamp, &did],
             )
             .await?;
@@ -986,7 +986,7 @@ impl IngesterManager {
         let client = pool.get().await?;
         let result = client
             .execute(
-                "UPDATE actor SET upstream_status = $1 WHERE did = $2",
+                "UPDATE actor SET \"upstreamStatus\" = $1 WHERE did = $2",
                 &[&upstream_status, &did],
             )
             .await?;
