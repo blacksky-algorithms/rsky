@@ -2828,7 +2828,7 @@ impl IndexerManager {
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                             ON CONFLICT DO NOTHING",
                             &[&parent_author, &did, &uri, &cid, &"reply", &Some(parent_uri_str), &sort_at],
                         )
                         .await?;
@@ -3024,7 +3024,7 @@ impl IndexerManager {
                             .execute(
                                 "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                 ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                 ON CONFLICT DO NOTHING",
                                 &[&quoted_author, &creator, &post_uri, &post_cid, &"quote", &Some(embed_uri), &sort_at],
                             )
                             .await?;
@@ -3096,7 +3096,7 @@ impl IndexerManager {
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                             ON CONFLICT DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
                         )
                         .await?;
@@ -3168,7 +3168,7 @@ impl IndexerManager {
                 .execute(
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                     ON CONFLICT DO NOTHING",
                     &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
                 )
                 .await?;
@@ -3269,7 +3269,7 @@ impl IndexerManager {
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                             ON CONFLICT DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
                         )
                         .await?;
@@ -3415,7 +3415,7 @@ impl IndexerManager {
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                             ON CONFLICT DO NOTHING",
                             &[&starter_pack_author, &did, &uri, &cid, &"starterpack-joined", &Some(starter_pack_uri_str), &indexed_at],
                         )
                         .await?;
