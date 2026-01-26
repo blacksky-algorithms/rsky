@@ -822,6 +822,8 @@ mod tests {
                 ops: vec![],
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         storage.write_firehose_event(12345, &event).unwrap();

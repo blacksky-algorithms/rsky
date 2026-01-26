@@ -263,6 +263,8 @@ mod ingester_tests {
                 ops: vec![],
                 blocks: vec![10, 20, 30],
             }),
+            identity: None,
+            account: None,
         };
 
         storage.write_firehose_event(event.seq, &event).unwrap();
@@ -384,6 +386,8 @@ mod ingester_tests {
                     ops: vec![],
                     blocks: vec![],
                 }),
+                identity: None,
+                account: None,
             },
             FirehoseEvent {
                 seq: 2,
@@ -395,6 +399,8 @@ mod ingester_tests {
                     ops: vec![],
                     blocks: vec![],
                 }),
+                identity: None,
+                account: None,
             },
             FirehoseEvent {
                 seq: 3,
@@ -406,6 +412,8 @@ mod ingester_tests {
                     ops: vec![],
                     blocks: vec![],
                 }),
+                identity: None,
+                account: None,
             },
         ];
 
@@ -798,6 +806,8 @@ mod ingester_tests {
                 ],
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         // Queue should be empty initially
@@ -874,6 +884,8 @@ mod ingester_tests {
                 ops: vec![], // No operations
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         // Should succeed but not enqueue anything
@@ -895,6 +907,8 @@ mod ingester_tests {
             time: "2024-01-01T00:00:00Z".to_owned(),
             kind: "identity".to_owned(),
             commit: None, // No commit data
+            identity: None,
+            account: None,
         };
 
         // Should succeed but not enqueue anything

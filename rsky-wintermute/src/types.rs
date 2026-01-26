@@ -51,6 +51,19 @@ pub struct FirehoseEvent {
     pub time: String,
     pub kind: String,
     pub commit: Option<CommitData>,
+    pub identity: Option<IdentityData>,
+    pub account: Option<AccountData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityData {
+    pub handle: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountData {
+    pub active: bool,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

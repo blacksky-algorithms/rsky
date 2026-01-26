@@ -1065,6 +1065,8 @@ mod indexer_tests {
                 ],
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         // Step 2: Simulate ingester processing event (enqueue to firehose_live)

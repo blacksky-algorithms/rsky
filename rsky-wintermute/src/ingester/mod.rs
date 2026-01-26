@@ -33,6 +33,7 @@ enum ConnectionResult {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ParseResult {
     Event(FirehoseEvent),
     Skip,
@@ -376,6 +377,84 @@ impl IngesterManager {
                     .with_label_values(&["firehose_live"])
                     .inc();
 
+                // Handle identity events separately (handle changes, key rotations)
+                if event.kind == "identity" {
+                    let pool_clone = Arc::clone(pool);
+                    let event_did = event.did.clone();
+                    let event_time = event.time.clone();
+                    let event_handle = event.identity.as_ref().and_then(|i| i.handle.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::process_identity_event(
+                            &pool_clone,
+                            &event_did,
+                            &event_time,
+                            event_handle.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "identity event processing failed for {}: {e}",
+                                event_did
+                            );
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["identity_failed"])
+                                .inc();
+                        }
+                    });
+                    last_seq.store(event.seq, Ordering::Relaxed);
+                    continue;
+                }
+
+                // Handle account events (takedown, suspension, deletion, reactivation)
+                if event.kind == "account" {
+                    if let Some(ref account) = event.account {
+                        let pool_clone = Arc::clone(pool);
+                        let event_did = event.did.clone();
+                        let active = account.active;
+                        let status = account.status.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = Self::process_account_event(
+                                &pool_clone,
+                                &event_did,
+                                active,
+                                status.as_deref(),
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    "account event processing failed for {}: {e}",
+                                    event_did
+                                );
+                                metrics::INGESTER_ERRORS_TOTAL
+                                    .with_label_values(&["account_failed"])
+                                    .inc();
+                            }
+                        });
+                    }
+                    last_seq.store(event.seq, Ordering::Relaxed);
+                    continue;
+                }
+
+                // Handle sync events (repo recovery - refresh handle like identity events)
+                if event.kind == "sync" {
+                    let pool_clone = Arc::clone(pool);
+                    let event_did = event.did.clone();
+                    let event_time = event.time.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            Self::process_identity_event(&pool_clone, &event_did, &event_time, None)
+                                .await
+                        {
+                            tracing::error!("sync event processing failed for {}: {e}", event_did);
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["sync_failed"])
+                                .inc();
+                        }
+                    });
+                    last_seq.store(event.seq, Ordering::Relaxed);
+                    continue;
+                }
+
                 // Process inline: parse event and spawn indexing tasks directly (skip Fjall queue)
                 match Self::parse_event_to_jobs(&event).await {
                     Ok(jobs) => {
@@ -483,7 +562,73 @@ impl IngesterManager {
             return Ok(ParseResult::Skip);
         }
 
-        // Only process #commit messages
+        // Handle #identity events (handle changes, key rotations, etc)
+        if header.type_ == "#identity" {
+            let body: rsky_lexicon::com::atproto::sync::SubscribeReposIdentity =
+                serde_ipld_dagcbor::from_reader(&mut cursor).map_err(|e| {
+                    WintermuteError::Serialization(format!("failed to parse identity body: {e}"))
+                })?;
+
+            let event = FirehoseEvent {
+                seq: body.seq,
+                did: body.did,
+                time: body.time.to_rfc3339(),
+                kind: "identity".to_owned(),
+                commit: None,
+                identity: Some(crate::types::IdentityData {
+                    handle: body.handle,
+                }),
+                account: None,
+            };
+
+            return Ok(ParseResult::Event(event));
+        }
+
+        // Handle #account events (takedown, suspension, deletion, etc.)
+        if header.type_ == "#account" {
+            let body: rsky_lexicon::com::atproto::sync::SubscribeReposAccount =
+                serde_ipld_dagcbor::from_reader(&mut cursor).map_err(|e| {
+                    WintermuteError::Serialization(format!("failed to parse account body: {e}"))
+                })?;
+
+            let event = FirehoseEvent {
+                seq: body.seq,
+                did: body.did,
+                time: body.time.to_rfc3339(),
+                kind: "account".to_owned(),
+                commit: None,
+                identity: None,
+                account: Some(crate::types::AccountData {
+                    active: body.active,
+                    status: body.status.map(|s| s.to_string().to_lowercase()),
+                }),
+            };
+
+            return Ok(ParseResult::Event(event));
+        }
+
+        // Handle #sync events (repo state recovery/updates)
+        if header.type_ == "#sync" {
+            let body: rsky_lexicon::com::atproto::sync::SubscribeReposSync =
+                serde_ipld_dagcbor::from_reader(&mut cursor).map_err(|e| {
+                    WintermuteError::Serialization(format!("failed to parse sync body: {e}"))
+                })?;
+
+            // Treat sync like identity - refresh the handle
+            let event = FirehoseEvent {
+                seq: body.seq,
+                did: body.did,
+                time: body.time.to_rfc3339(),
+                kind: "sync".to_owned(),
+                commit: None,
+                identity: None,
+                account: None,
+            };
+
+            return Ok(ParseResult::Event(event));
+        }
+
+        // Only process #commit messages beyond this point
         if header.type_ != "#commit" {
             return Ok(ParseResult::Skip);
         }
@@ -515,6 +660,8 @@ impl IngesterManager {
                 ops,
                 blocks: body.blocks,
             }),
+            identity: None,
+            account: None,
         };
 
         Ok(ParseResult::Event(event))
@@ -709,6 +856,149 @@ impl IngesterManager {
             };
 
             storage.enqueue_firehose_live(&job)?;
+        }
+
+        Ok(())
+    }
+
+    /// Process an identity event by resolving the DID and updating the actor table
+    async fn process_identity_event(
+        pool: &Pool,
+        did: &str,
+        timestamp: &str,
+        handle_hint: Option<&str>,
+    ) -> Result<(), WintermuteError> {
+        use rsky_identity::IdResolver;
+        use rsky_identity::types::IdentityResolverOpts;
+
+        tracing::debug!("processing identity event for {}", did);
+
+        // If the event includes the handle, we can use it directly
+        // Otherwise, resolve the DID to get the current handle from the DID document
+        let handle = if let Some(h) = handle_hint {
+            Some(h.to_lowercase())
+        } else {
+            // Resolve DID to get current handle from DID document
+            let mut resolver = IdResolver::new(IdentityResolverOpts {
+                timeout: Some(std::time::Duration::from_secs(5)),
+                plc_url: None,
+                did_cache: None,
+                backup_nameservers: None,
+            });
+
+            match resolver.did.resolve(did.to_owned(), None).await {
+                Ok(Some(doc)) => {
+                    // Extract handle from alsoKnownAs (at:// URIs)
+                    let handle = doc.also_known_as.as_ref().and_then(|akas| {
+                        akas.iter()
+                            .find(|aka| aka.starts_with("at://"))
+                            .map(|aka| aka.strip_prefix("at://").unwrap_or(aka).to_lowercase())
+                    });
+
+                    if let Some(ref h) = handle {
+                        // Verify handle resolves back to this DID
+                        match resolver.handle.resolve(h).await {
+                            Ok(Some(resolved_did)) if resolved_did == did => {
+                                tracing::info!("identity event: verified handle {} for {}", h, did);
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "handle {} does not resolve back to {} - setting handle to null",
+                                    h,
+                                    did
+                                );
+                                return Ok(()); // Don't update if handle doesn't verify
+                            }
+                        }
+                    }
+
+                    handle
+                }
+                Ok(None) => {
+                    tracing::warn!("DID {} not found", did);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("failed to resolve DID {}: {}", did, e);
+                    return Ok(()); // Don't fail on resolution errors, just skip
+                }
+            }
+        };
+
+        // Update actor table
+        let client = pool.get().await?;
+        let result = client
+            .execute(
+                "UPDATE actor SET handle = $1, indexed_at = $2 WHERE did = $3",
+                &[&handle, &timestamp, &did],
+            )
+            .await?;
+
+        if result > 0 {
+            tracing::info!(
+                "updated handle for {} to {:?}",
+                did,
+                handle.as_deref().unwrap_or("null")
+            );
+        } else {
+            tracing::debug!("no actor found to update for {}", did);
+        }
+
+        Ok(())
+    }
+
+    /// Process an account event by updating the actor's upstream status
+    async fn process_account_event(
+        pool: &Pool,
+        did: &str,
+        active: bool,
+        status: Option<&str>,
+    ) -> Result<(), WintermuteError> {
+        tracing::debug!(
+            "processing account event for {}: active={}, status={:?}",
+            did,
+            active,
+            status
+        );
+
+        // Determine upstream_status based on active flag and status
+        let upstream_status: Option<&str> = if active {
+            // Active accounts have no upstream status
+            None
+        } else {
+            // Inactive accounts: check for recognized statuses
+            match status {
+                Some(s) if ["deactivated", "suspended", "takendown", "deleted"].contains(&s) => {
+                    Some(s)
+                }
+                Some(s) => {
+                    tracing::warn!("unrecognized account status '{}' for {}", s, did);
+                    Some(s) // Still store it, just log a warning
+                }
+                None => {
+                    tracing::warn!("inactive account {} has no status", did);
+                    None
+                }
+            }
+        };
+
+        // Update actor table
+        let client = pool.get().await?;
+        let result = client
+            .execute(
+                "UPDATE actor SET upstream_status = $1 WHERE did = $2",
+                &[&upstream_status, &did],
+            )
+            .await?;
+
+        if result > 0 {
+            tracing::info!(
+                "updated upstream_status for {} to {:?}",
+                did,
+                upstream_status.unwrap_or("null")
+            );
+        } else {
+            tracing::debug!("no actor found to update status for {}", did);
         }
 
         Ok(())
