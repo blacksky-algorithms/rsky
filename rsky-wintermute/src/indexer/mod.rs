@@ -2819,38 +2819,142 @@ impl IndexerManager {
             )
             .await?;
 
-        // Generate reply notifications for thread participants
-        // Notify the parent post author
+        // Generate mention notifications from facets
+        if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
+            for facet in facets {
+                if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
+                    for feature in features {
+                        let feature_type =
+                            feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                        if feature_type == "app.bsky.richtext.facet#mention" {
+                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
+                                if mention_did != did {
+                                    client
+                                        .execute(
+                                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
+                                             VALUES ($1, $2, $3, $4, $5, $6)
+                                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                            &[
+                                                &mention_did, &did, &uri, &cid, &"mention",
+                                                &sort_at,
+                                            ],
+                                        )
+                                        .await?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reply notifications: walk ancestor chain up to REPLY_NOTIF_DEPTH
+        // Matches official Bluesky behavior from post.ts notifsForInsert
         if let Some(parent_uri_str) = reply_parent {
-            if let Ok(parent_uri) = AtUri::new(parent_uri_str.to_owned(), None) {
-                let parent_author = parent_uri.get_hostname();
-                if parent_author != did {
-                    client
-                        .execute(
-                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&parent_author, &did, &uri, &cid, &"reply", &Some(parent_uri_str), &sort_at],
-                        )
-                        .await?;
+            const REPLY_NOTIF_DEPTH: i32 = 5;
+
+            // Query ancestors using recursive CTE
+            // Height 0 = self, 1 = parent, 2 = grandparent, etc.
+            let ancestors = client
+                .query(
+                    "WITH RECURSIVE ancestor(uri, ancestor_uri, height) AS (
+                        SELECT p.uri, p.\"replyParent\", 0
+                        FROM post p
+                        WHERE p.uri = $1
+                      UNION ALL
+                        SELECT p.uri, p.\"replyParent\", a.height + 1
+                        FROM post p
+                        INNER JOIN ancestor a ON a.ancestor_uri = p.uri
+                        WHERE a.height < $2
+                    )
+                    SELECT uri, height FROM ancestor",
+                    &[&uri, &REPLY_NOTIF_DEPTH],
+                )
+                .await?;
+
+            // Notify each ancestor author (skip self at height 0)
+            for row in &ancestors {
+                let height: i32 = row.get(1);
+                if height == 0 || height >= REPLY_NOTIF_DEPTH {
+                    continue;
+                }
+                let ancestor_uri_str: String = row.get(0);
+                if let Ok(ancestor_uri) = AtUri::new(ancestor_uri_str.clone(), None) {
+                    let ancestor_author = ancestor_uri.get_hostname();
+                    if ancestor_author != did {
+                        client
+                            .execute(
+                                "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                 ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                &[
+                                    &ancestor_author,
+                                    &did,
+                                    &uri,
+                                    &cid,
+                                    &"reply",
+                                    &ancestor_uri_str,
+                                    &sort_at,
+                                ],
+                            )
+                            .await?;
+                    }
                 }
             }
 
-            // Also notify the root post author if different from parent
-            // This ensures users get notified for replies anywhere in their thread
-            if let Some(root_uri_str) = reply_root {
-                if root_uri_str != parent_uri_str {
-                    if let Ok(root_uri) = AtUri::new(root_uri_str.to_owned(), None) {
-                        let root_author = root_uri.get_hostname();
-                        if root_author != did {
-                            client
-                                .execute(
-                                    "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                     ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                    &[&root_author, &did, &uri, &cid, &"reply", &Some(root_uri_str), &sort_at],
-                                )
-                                .await?;
+            // Descendant notifications for out-of-order indexing
+            // When a post in the middle of a thread is indexed after its replies,
+            // we notify ancestors about existing descendant replies
+            let descendants = client
+                .query(
+                    "WITH RECURSIVE descendent(uri, depth) AS (
+                        SELECT p.uri, 1
+                        FROM post p
+                        WHERE p.\"replyParent\" = $1 AND 1 <= $2
+                      UNION ALL
+                        SELECT p.uri, d.depth + 1
+                        FROM post p
+                        INNER JOIN descendent d ON d.uri = p.\"replyParent\"
+                        WHERE d.depth < $2
+                    )
+                    SELECT d.uri, d.depth, p.cid, p.creator, p.\"sortAt\"
+                    FROM descendent d
+                    INNER JOIN post p ON p.uri = d.uri",
+                    &[&uri, &REPLY_NOTIF_DEPTH],
+                )
+                .await?;
+
+            for desc_row in &descendants {
+                let desc_uri: String = desc_row.get(0);
+                let desc_depth: i32 = desc_row.get(1);
+                let desc_cid: String = desc_row.get(2);
+                let desc_creator: String = desc_row.get(3);
+                let desc_sort_at: String = desc_row.get(4);
+
+                for anc_row in &ancestors {
+                    let anc_height: i32 = anc_row.get(1);
+                    if desc_depth + anc_height < REPLY_NOTIF_DEPTH {
+                        let anc_uri: String = anc_row.get(0);
+                        if let Ok(anc_uri_parsed) = AtUri::new(anc_uri.clone(), None) {
+                            let anc_author = anc_uri_parsed.get_hostname();
+                            if anc_author != &desc_creator {
+                                client
+                                    .execute(
+                                        "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                         ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                        &[
+                                            &anc_author,
+                                            &desc_creator,
+                                            &desc_uri,
+                                            &desc_cid,
+                                            &"reply",
+                                            &anc_uri,
+                                            &desc_sort_at,
+                                        ],
+                                    )
+                                    .await?;
+                            }
                         }
                     }
                 }
