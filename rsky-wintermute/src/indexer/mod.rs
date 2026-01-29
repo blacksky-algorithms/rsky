@@ -2819,7 +2819,8 @@ impl IndexerManager {
             )
             .await?;
 
-        // Generate reply notification for parent post author
+        // Generate reply notifications for thread participants
+        // Notify the parent post author
         if let Some(parent_uri_str) = reply_parent {
             if let Ok(parent_uri) = AtUri::new(parent_uri_str.to_owned(), None) {
                 let parent_author = parent_uri.get_hostname();
@@ -2832,6 +2833,26 @@ impl IndexerManager {
                             &[&parent_author, &did, &uri, &cid, &"reply", &Some(parent_uri_str), &sort_at],
                         )
                         .await?;
+                }
+            }
+
+            // Also notify the root post author if different from parent
+            // This ensures users get notified for replies anywhere in their thread
+            if let Some(root_uri_str) = reply_root {
+                if root_uri_str != parent_uri_str {
+                    if let Ok(root_uri) = AtUri::new(root_uri_str.to_owned(), None) {
+                        let root_author = root_uri.get_hostname();
+                        if root_author != did {
+                            client
+                                .execute(
+                                    "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                     ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                    &[&root_author, &did, &uri, &cid, &"reply", &Some(root_uri_str), &sort_at],
+                                )
+                                .await?;
+                        }
+                    }
                 }
             }
 
