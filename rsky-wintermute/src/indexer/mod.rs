@@ -2829,7 +2829,11 @@ impl IndexerManager {
                         if feature_type == "app.bsky.richtext.facet#mention" {
                             if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
                                 if mention_did != did {
-                                    client
+                                    tracing::info!(
+                                        "inserting mention notification: recipient={}, author={}, uri={}",
+                                        mention_did, did, uri
+                                    );
+                                    let rows = client
                                         .execute(
                                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
                                              VALUES ($1, $2, $3, $4, $5, $6)
@@ -2840,12 +2844,20 @@ impl IndexerManager {
                                             ],
                                         )
                                         .await?;
+                                    tracing::info!(
+                                        "mention notification result: rows_affected={}, recipient={}, uri={}",
+                                        rows, mention_did, uri
+                                    );
+                                } else {
+                                    tracing::debug!("skipping self-mention for {}", did);
                                 }
                             }
                         }
                     }
                 }
             }
+        } else {
+            tracing::debug!("no facets found for post {}", uri);
         }
 
         // Reply notifications: walk ancestor chain up to REPLY_NOTIF_DEPTH
