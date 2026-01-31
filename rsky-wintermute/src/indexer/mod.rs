@@ -1315,7 +1315,7 @@ impl IndexerManager {
                         )
                         .await?;
                     }
-                    "app.bsky.verification.proof" => {
+                    "app.bsky.graph.verification" => {
                         Self::index_verification(
                             &client,
                             did.as_str(),
@@ -1389,7 +1389,7 @@ impl IndexerManager {
                     "app.bsky.actor.status" => {
                         Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
                     }
-                    "app.bsky.verification.proof" => {
+                    "app.bsky.graph.verification" => {
                         Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
@@ -1842,7 +1842,7 @@ impl IndexerManager {
             "app.bsky.actor.status" => {
                 Self::index_status(client, did, rkey, record, cid, indexed_at).await
             }
-            "app.bsky.verification.proof" => {
+            "app.bsky.graph.verification" => {
                 Self::index_verification(client, did, rkey, record, cid, indexed_at).await
             }
             _ => Ok(()),
@@ -4121,7 +4121,7 @@ impl IndexerManager {
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
         let uri_obj = AtUri::new(
-            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            format!("at://{did}/app.bsky.graph.verification/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
@@ -4159,7 +4159,7 @@ impl IndexerManager {
         rkey: &str,
     ) -> Result<(), WintermuteError> {
         let uri_obj = AtUri::new(
-            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            format!("at://{did}/app.bsky.graph.verification/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;

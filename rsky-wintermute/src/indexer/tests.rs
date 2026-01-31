@@ -1708,7 +1708,7 @@ mod indexer_tests {
         // Test newer collection types that were previously untested
         let test_collections = vec![
             (
-                "app.bsky.verification.proof",
+                "app.bsky.graph.verification",
                 json!({
                     "subject": "did:plc:verified",
                     "handle": "verified.test",
