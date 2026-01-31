@@ -5,10 +5,10 @@ use clap::Parser;
 use color_eyre::Result;
 use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use iroh_car::CarReader;
-use rsky_identity::types::IdentityResolverOpts;
 use rsky_identity::IdResolver;
-use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
+use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::readable_repo::ReadableRepo;
+use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_syntax::aturi::AtUri;
 use tokio_postgres::NoTls;
 
@@ -240,7 +240,7 @@ async fn process_did(
     client
         .execute(
             "INSERT INTO profile_agg (did, \"postsCount\")
-             SELECT $1, COUNT(*) FROM post WHERE creator = $1
+             SELECT $1::varchar, COUNT(*) FROM post WHERE creator = $1::varchar
              ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
             &[&did],
         )
@@ -249,7 +249,7 @@ async fn process_did(
     client
         .execute(
             "INSERT INTO profile_agg (did, \"followsCount\")
-             SELECT $1, COUNT(*) FROM follow WHERE creator = $1
+             SELECT $1::varchar, COUNT(*) FROM follow WHERE creator = $1::varchar
              ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
             &[&did],
         )
@@ -258,7 +258,7 @@ async fn process_did(
     client
         .execute(
             "INSERT INTO profile_agg (did, \"followersCount\")
-             SELECT $1, COUNT(*) FROM follow WHERE \"subjectDid\" = $1
+             SELECT $1::varchar, COUNT(*) FROM follow WHERE \"subjectDid\" = $1::varchar
              ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
             &[&did],
         )

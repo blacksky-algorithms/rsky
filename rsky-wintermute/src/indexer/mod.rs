@@ -2716,32 +2716,50 @@ impl IndexerManager {
 
         // Process each label in the event
         for label in &label_event.labels {
-            // Insert or update the label
-            // Note: Using empty string for cid since label messages don't include it
-            // The primary key is (src, uri, cid, val), so we use "" as cid
+            let cid = label.cid.as_deref().unwrap_or("");
+            let exp: Option<&str> = label.exp.as_deref();
+
             let result = client
                 .execute(
-                    "INSERT INTO label (src, uri, cid, val, cts, neg)
-                     VALUES ($1, $2, $3, $4, $5, false)
+                    "INSERT INTO label (src, uri, cid, val, neg, cts, exp)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (src, uri, cid, val) DO UPDATE SET
-                       cts = EXCLUDED.cts",
-                    &[&label.src, &label.uri, &"", &label.val, &label.cts],
+                       neg = EXCLUDED.neg,
+                       cts = EXCLUDED.cts,
+                       exp = EXCLUDED.exp",
+                    &[
+                        &label.src, &label.uri, &cid, &label.val, &label.neg, &label.cts, &exp,
+                    ],
                 )
                 .await;
 
             match result {
                 Ok(_) => {
-                    tracing::debug!(
-                        "indexed label: src={} uri={} val={}",
-                        label.src,
-                        label.uri,
-                        label.val
-                    );
+                    if label.neg {
+                        tracing::info!(
+                            "negated label: src={} uri={} val={}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    } else {
+                        tracing::debug!(
+                            "indexed label: src={} uri={} val={}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    }
                 }
                 Err(e) => {
-                    tracing::error!("failed to insert label: {e}");
+                    tracing::error!(
+                        "failed to insert label: src={} uri={} val={} neg={}: {e}",
+                        label.src,
+                        label.uri,
+                        label.val,
+                        label.neg
+                    );
                     metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                    // Continue processing other labels even if one fails
                 }
             }
         }
@@ -2828,10 +2846,14 @@ impl IndexerManager {
                             feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
                         if feature_type == "app.bsky.richtext.facet#mention" {
                             if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
-                                if mention_did != did {
+                                if mention_did == did {
+                                    tracing::debug!("skipping self-mention for {}", did);
+                                } else {
                                     tracing::info!(
                                         "inserting mention notification: recipient={}, author={}, uri={}",
-                                        mention_did, did, uri
+                                        mention_did,
+                                        did,
+                                        uri
                                     );
                                     let rows = client
                                         .execute(
@@ -2846,10 +2868,10 @@ impl IndexerManager {
                                         .await?;
                                     tracing::info!(
                                         "mention notification result: rows_affected={}, recipient={}, uri={}",
-                                        rows, mention_did, uri
+                                        rows,
+                                        mention_did,
+                                        uri
                                     );
-                                } else {
-                                    tracing::debug!("skipping self-mention for {}", did);
                                 }
                             }
                         }

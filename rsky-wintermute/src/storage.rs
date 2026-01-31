@@ -1183,8 +1183,11 @@ mod tests {
             labels: vec![Label {
                 src: "did:plc:labeler".to_owned(),
                 uri: "at://did:plc:test/app.bsky.feed.post/123".to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-01T00:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 

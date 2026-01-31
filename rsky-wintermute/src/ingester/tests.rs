@@ -461,6 +461,19 @@ mod ingester_tests {
         seq: i64,
         labels: Vec<(&str, &str, &str, &str)>, // (src, uri, val, cts)
     ) -> Vec<u8> {
+        create_label_message_with_neg(
+            seq,
+            labels
+                .into_iter()
+                .map(|(src, uri, val, cts)| (src, uri, val, cts, false))
+                .collect(),
+        )
+    }
+
+    fn create_label_message_with_neg(
+        seq: i64,
+        labels: Vec<(&str, &str, &str, &str, bool)>, // (src, uri, val, cts, neg)
+    ) -> Vec<u8> {
         #[derive(serde::Serialize)]
         struct Header {
             t: String,
@@ -473,6 +486,8 @@ mod ingester_tests {
             uri: String,
             val: String,
             cts: String,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            neg: bool,
         }
 
         #[derive(serde::Serialize)]
@@ -490,11 +505,12 @@ mod ingester_tests {
             seq,
             labels: labels
                 .into_iter()
-                .map(|(src, uri, val, cts)| RawLabel {
+                .map(|(src, uri, val, cts, neg)| RawLabel {
                     src: src.to_owned(),
                     uri: uri.to_owned(),
                     val: val.to_owned(),
                     cts: cts.to_owned(),
+                    neg,
                 })
                 .collect(),
         };
@@ -529,6 +545,32 @@ mod ingester_tests {
         assert_eq!(label.uri, "at://did:plc:user456/app.bsky.feed.post/abc123");
         assert_eq!(label.val, "spam");
         assert_eq!(label.cts, "2025-01-20T10:30:00Z");
+        assert!(!label.neg, "default neg should be false");
+    }
+
+    #[test]
+    fn test_parse_label_message_with_negation() {
+        let msg_bytes = create_label_message_with_neg(
+            99999,
+            vec![(
+                "did:plc:ar7c4by46qjdydhdevvrndac",
+                "did:plc:user123",
+                "!takedown",
+                "2025-11-27T06:20:00Z",
+                true,
+            )],
+        );
+
+        let result = crate::ingester::labels::parse_label_message(&msg_bytes).unwrap();
+        assert!(result.is_some());
+        let label_event = result.unwrap();
+        assert_eq!(label_event.labels.len(), 1);
+
+        let label = &label_event.labels[0];
+        assert_eq!(label.src, "did:plc:ar7c4by46qjdydhdevvrndac");
+        assert_eq!(label.uri, "did:plc:user123");
+        assert_eq!(label.val, "!takedown");
+        assert!(label.neg, "neg should be true for negation labels");
     }
 
     #[test]
@@ -603,14 +645,20 @@ mod ingester_tests {
                 crate::types::Label {
                     src: "did:plc:labeler".to_owned(),
                     uri: "at://did:plc:user/app.bsky.feed.post/abc".to_owned(),
+                    cid: None,
                     val: "spam".to_owned(),
+                    neg: false,
                     cts: "2025-01-20T10:00:00Z".to_owned(),
+                    exp: None,
                 },
                 crate::types::Label {
                     src: "did:plc:labeler".to_owned(),
                     uri: "at://did:plc:user/app.bsky.feed.post/def".to_owned(),
+                    cid: None,
                     val: "nsfw".to_owned(),
+                    neg: false,
                     cts: "2025-01-20T10:01:00Z".to_owned(),
+                    exp: None,
                 },
             ],
         };

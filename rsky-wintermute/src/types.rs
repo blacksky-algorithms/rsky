@@ -115,6 +115,9 @@ pub struct LabelEvent {
 pub struct Label {
     pub src: String,
     pub uri: String,
+    pub cid: Option<String>,
     pub val: String,
+    pub neg: bool,
     pub cts: String,
+    pub exp: Option<String>,
 }

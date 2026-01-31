@@ -418,6 +418,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "atrium-api"
+version = "0.25.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f182d9437cd447ed87eca75540151653e332d6753a2a4749d72c0f15aa1f179"
+dependencies = [
+ "atrium-common",
+ "atrium-xrpc",
+ "chrono",
+ "http 1.3.1",
+ "ipld-core",
+ "langtag",
+ "regex",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "trait-variant",
+]
+
+[[package]]
+name = "atrium-common"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eff94b4ce3e9ba11d8bda83674e75ccaca281d5251ec3816d03e6bb23583ff4f"
+dependencies = [
+ "dashmap 6.1.0",
+ "lru 0.12.5",
+ "moka",
+ "thiserror 1.0.69",
+ "tokio",
+ "trait-variant",
+ "web-time",
+]
+
+[[package]]
 name = "atrium-xrpc"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8065,7 +8101,7 @@ name = "rsky-labeler"
 version = "0.1.3"
 dependencies = [
  "anyhow",
- "atrium-api",
+ "atrium-api 0.24.10",
  "atrium-xrpc-client",
  "chrono",
  "ciborium",
@@ -8118,7 +8154,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-event-emitter",
- "atrium-api",
+ "atrium-api 0.24.10",
  "atrium-xrpc-client",
  "aws-config",
  "aws-sdk-s3",
@@ -8305,6 +8341,9 @@ dependencies = [
 name = "rsky-video"
 version = "0.1.0"
 dependencies = [
+ "atrium-api 0.25.7",
+ "atrium-xrpc",
+ "atrium-xrpc-client",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -8314,12 +8353,15 @@ dependencies = [
  "deadpool-postgres",
  "futures",
  "jsonwebtoken",
+ "k256",
  "mockito",
  "multihash-codetable",
  "prometheus",
+ "rand 0.8.5",
  "reqwest 0.12.23",
  "rsky-syntax",
  "rustls 0.23.31",
+ "sec1 0.7.3",
  "serde",
  "serde_json",
  "tempfile",

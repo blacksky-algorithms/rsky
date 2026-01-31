@@ -235,11 +235,14 @@ pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, Wintermute
     struct RawLabel {
         src: String,
         uri: String,
-        val: String,
-        #[allow(dead_code)]
         #[serde(default)]
         cid: Option<String>,
+        val: String,
+        #[serde(default)]
+        neg: Option<bool>,
         cts: String,
+        #[serde(default)]
+        exp: Option<String>,
     }
 
     let mut cursor = std::io::Cursor::new(data);
@@ -262,8 +265,11 @@ pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, Wintermute
         .map(|raw| Label {
             src: raw.src,
             uri: raw.uri,
+            cid: raw.cid,
             val: raw.val,
+            neg: raw.neg.unwrap_or(false),
             cts: raw.cts,
+            exp: raw.exp,
         })
         .collect();
 
