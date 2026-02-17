@@ -12,10 +12,10 @@ use axum::{
     routing::{get, post},
 };
 use deadpool_postgres::{Config as PgConfig, Runtime};
+use rustls::crypto::aws_lc_rs::default_provider;
 use tokio_postgres::NoTls;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use rustls::crypto::aws_lc_rs::default_provider;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -96,13 +96,18 @@ async fn main() -> color_eyre::Result<()> {
                     Some(s)
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to load signing key, PDS uploads will not work: {}", e);
+                    tracing::warn!(
+                        "Failed to load signing key, PDS uploads will not work: {}",
+                        e
+                    );
                     None
                 }
             }
         }
         None => {
-            tracing::warn!("No signing key configured (SIGNING_KEY_PATH), PDS uploads will not work");
+            tracing::warn!(
+                "No signing key configured (SIGNING_KEY_PATH), PDS uploads will not work"
+            );
             None
         }
     };
@@ -124,10 +129,7 @@ async fn main() -> color_eyre::Result<()> {
             "/xrpc/app.bsky.video.getUploadLimits",
             get(xrpc::get_upload_limits),
         )
-        .route(
-            "/xrpc/app.bsky.video.uploadVideo",
-            post(xrpc::upload_video),
-        )
+        .route("/xrpc/app.bsky.video.uploadVideo", post(xrpc::upload_video))
         .route(
             "/xrpc/app.bsky.video.getJobStatus",
             get(xrpc::get_job_status),

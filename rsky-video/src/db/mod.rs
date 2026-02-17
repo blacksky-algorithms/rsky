@@ -53,11 +53,14 @@ pub struct UploadQuota {
 pub async fn run_migrations(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
 
-    // Create video_jobs table
+    client
+        .execute("CREATE SCHEMA IF NOT EXISTS videos", &[])
+        .await?;
+
     client
         .execute(
             r#"
-            CREATE TABLE IF NOT EXISTS video_jobs (
+            CREATE TABLE IF NOT EXISTS videos.video_jobs (
                 id BIGSERIAL PRIMARY KEY,
                 job_id UUID NOT NULL UNIQUE,
                 did TEXT NOT NULL,
@@ -78,51 +81,45 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    // Add video_cid column if it doesn't exist (migration for existing tables)
     client
         .execute(
-            "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS video_cid TEXT",
+            "ALTER TABLE videos.video_jobs ADD COLUMN IF NOT EXISTS video_cid TEXT",
             &[],
         )
         .await?;
 
-    // Add pds_blob_ref column to store the real blob reference from the PDS
     client
         .execute(
-            "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS pds_blob_ref JSONB",
+            "ALTER TABLE videos.video_jobs ADD COLUMN IF NOT EXISTS pds_blob_ref JSONB",
             &[],
         )
         .await?;
 
-    // Create index on job_id
     client
         .execute(
-            "CREATE INDEX IF NOT EXISTS idx_video_jobs_job_id ON video_jobs (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_job_id ON videos.video_jobs (job_id)",
             &[],
         )
         .await?;
 
-    // Create index on bunny_video_id for webhook lookups
     client
         .execute(
-            "CREATE INDEX IF NOT EXISTS idx_video_jobs_bunny_video_id ON video_jobs (bunny_video_id)",
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_bunny_video_id ON videos.video_jobs (bunny_video_id)",
             &[],
         )
         .await?;
 
-    // Create index on did for quota lookups
     client
         .execute(
-            "CREATE INDEX IF NOT EXISTS idx_video_jobs_did ON video_jobs (did)",
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_did ON videos.video_jobs (did)",
             &[],
         )
         .await?;
 
-    // Create upload_quotas table
     client
         .execute(
             r#"
-            CREATE TABLE IF NOT EXISTS upload_quotas (
+            CREATE TABLE IF NOT EXISTS videos.upload_quotas (
                 did TEXT PRIMARY KEY,
                 daily_videos_used INTEGER DEFAULT 0,
                 daily_bytes_used BIGINT DEFAULT 0,
@@ -134,11 +131,10 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    // Create video_mappings table for did/cid -> bunny_video_id mapping
     client
         .execute(
             r#"
-            CREATE TABLE IF NOT EXISTS video_mappings (
+            CREATE TABLE IF NOT EXISTS videos.video_mappings (
                 id BIGSERIAL PRIMARY KEY,
                 did TEXT NOT NULL,
                 cid TEXT NOT NULL,
@@ -151,10 +147,9 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    // Create index for video mapping lookups
     client
         .execute(
-            "CREATE INDEX IF NOT EXISTS idx_video_mappings_did_cid ON video_mappings (did, cid)",
+            "CREATE INDEX IF NOT EXISTS idx_video_mappings_did_cid ON videos.video_mappings (did, cid)",
             &[],
         )
         .await?;
@@ -176,7 +171,7 @@ pub async fn create_job(
     let row = client
         .query_one(
             r#"
-            INSERT INTO video_jobs (job_id, did, original_filename, file_size)
+            INSERT INTO videos.video_jobs (job_id, did, original_filename, file_size)
             VALUES ($1, $2, $3, $4)
             RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             "#,
@@ -195,7 +190,7 @@ pub async fn get_job(pool: &Pool, job_id: Uuid) -> Result<Option<VideoJob>> {
         .query_opt(
             r#"
             SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
-            FROM video_jobs
+            FROM videos.video_jobs
             WHERE job_id = $1
             "#,
             &[&job_id],
@@ -213,7 +208,7 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
         .query_opt(
             r#"
             SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
-            FROM video_jobs
+            FROM videos.video_jobs
             WHERE bunny_video_id = $1
             "#,
             &[&bunny_video_id],
@@ -224,13 +219,18 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
 }
 
 /// Update job with bunny video ID and content CID
-pub async fn set_bunny_video_id(pool: &Pool, job_id: Uuid, bunny_video_id: &str, video_cid: &str) -> Result<()> {
+pub async fn set_bunny_video_id(
+    pool: &Pool,
+    job_id: Uuid,
+    bunny_video_id: &str,
+    video_cid: &str,
+) -> Result<()> {
     let client = pool.get().await?;
 
     client
         .execute(
             r#"
-            UPDATE video_jobs
+            UPDATE videos.video_jobs
             SET bunny_video_id = $2, video_cid = $3, state = 'JOB_STATE_UPLOADING', updated_at = NOW()
             WHERE job_id = $1
             "#,
@@ -242,13 +242,18 @@ pub async fn set_bunny_video_id(pool: &Pool, job_id: Uuid, bunny_video_id: &str,
 }
 
 /// Store the PDS blob reference (from com.atproto.repo.uploadBlob)
-pub async fn set_pds_blob_ref(pool: &Pool, job_id: Uuid, pds_blob_ref: JsonValue, video_cid: &str) -> Result<()> {
+pub async fn set_pds_blob_ref(
+    pool: &Pool,
+    job_id: Uuid,
+    pds_blob_ref: JsonValue,
+    video_cid: &str,
+) -> Result<()> {
     let client = pool.get().await?;
 
     client
         .execute(
             r#"
-            UPDATE video_jobs
+            UPDATE videos.video_jobs
             SET pds_blob_ref = $2, video_cid = $3, updated_at = NOW()
             WHERE job_id = $1
             "#,
@@ -266,7 +271,7 @@ pub async fn update_job_state(pool: &Pool, job_id: Uuid, state: &str, progress: 
     client
         .execute(
             r#"
-            UPDATE video_jobs
+            UPDATE videos.video_jobs
             SET state = $2, progress = $3, updated_at = NOW()
             WHERE job_id = $1
             "#,
@@ -284,7 +289,7 @@ pub async fn complete_job(pool: &Pool, job_id: Uuid, blob_ref: JsonValue) -> Res
     client
         .execute(
             r#"
-            UPDATE video_jobs
+            UPDATE videos.video_jobs
             SET state = 'JOB_STATE_COMPLETED', progress = 100, blob_ref = $2, updated_at = NOW()
             WHERE job_id = $1
             "#,
@@ -302,7 +307,7 @@ pub async fn fail_job(pool: &Pool, job_id: Uuid, error: &str) -> Result<()> {
     client
         .execute(
             r#"
-            UPDATE video_jobs
+            UPDATE videos.video_jobs
             SET state = 'JOB_STATE_FAILED', error = $2, updated_at = NOW()
             WHERE job_id = $1
             "#,
@@ -318,10 +323,9 @@ pub async fn get_or_create_quota(pool: &Pool, did: &str) -> Result<UploadQuota> 
     let client = pool.get().await?;
     let now = Utc::now();
 
-    // Try to get existing quota
     let row = client
         .query_opt(
-            "SELECT did, daily_videos_used, daily_bytes_used, quota_reset_at FROM upload_quotas WHERE did = $1",
+            "SELECT did, daily_videos_used, daily_bytes_used, quota_reset_at FROM videos.upload_quotas WHERE did = $1",
             &[&did],
         )
         .await?;
@@ -329,12 +333,10 @@ pub async fn get_or_create_quota(pool: &Pool, did: &str) -> Result<UploadQuota> 
     if let Some(row) = row {
         let quota_reset_at: DateTime<Utc> = row.get(3);
 
-        // Check if quota should be reset (new day)
         if now.date_naive() > quota_reset_at.date_naive() {
-            // Reset quota
             client
                 .execute(
-                    "UPDATE upload_quotas SET daily_videos_used = 0, daily_bytes_used = 0, quota_reset_at = $2 WHERE did = $1",
+                    "UPDATE videos.upload_quotas SET daily_videos_used = 0, daily_bytes_used = 0, quota_reset_at = $2 WHERE did = $1",
                     &[&did, &now],
                 )
                 .await?;
@@ -355,10 +357,9 @@ pub async fn get_or_create_quota(pool: &Pool, did: &str) -> Result<UploadQuota> 
         });
     }
 
-    // Create new quota record
     client
         .execute(
-            "INSERT INTO upload_quotas (did, quota_reset_at) VALUES ($1, $2) ON CONFLICT (did) DO NOTHING",
+            "INSERT INTO videos.upload_quotas (did, quota_reset_at) VALUES ($1, $2) ON CONFLICT (did) DO NOTHING",
             &[&did, &now],
         )
         .await?;
@@ -377,7 +378,7 @@ pub async fn increment_quota(pool: &Pool, did: &str, bytes: i64) -> Result<()> {
 
     client
         .execute(
-            "UPDATE upload_quotas SET daily_videos_used = daily_videos_used + 1, daily_bytes_used = daily_bytes_used + $2 WHERE did = $1",
+            "UPDATE videos.upload_quotas SET daily_videos_used = daily_videos_used + 1, daily_bytes_used = daily_bytes_used + $2 WHERE did = $1",
             &[&did, &bytes],
         )
         .await?;
@@ -397,7 +398,7 @@ pub async fn save_video_mapping(
     client
         .execute(
             r#"
-            INSERT INTO video_mappings (did, cid, bunny_video_id)
+            INSERT INTO videos.video_mappings (did, cid, bunny_video_id)
             VALUES ($1, $2, $3)
             ON CONFLICT (did, cid) DO UPDATE SET bunny_video_id = $3
             "#,
@@ -414,7 +415,7 @@ pub async fn get_bunny_video_id(pool: &Pool, did: &str, cid: &str) -> Result<Opt
 
     let row = client
         .query_opt(
-            "SELECT bunny_video_id FROM video_mappings WHERE did = $1 AND cid = $2",
+            "SELECT bunny_video_id FROM videos.video_mappings WHERE did = $1 AND cid = $2",
             &[&did, &cid],
         )
         .await?;

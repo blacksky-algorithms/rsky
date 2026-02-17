@@ -81,7 +81,11 @@ pub fn validate_service_auth(
 
     debug!(
         "Service auth: iss={}, sub={:?}, aud={}, lxm={:?}, user_did={}",
-        claims.iss, claims.sub, claims.aud, claims.lxm, claims.user_did()
+        claims.iss,
+        claims.sub,
+        claims.aud,
+        claims.lxm,
+        claims.user_did()
     );
 
     // Check expiration
@@ -130,7 +134,11 @@ pub fn decode_service_auth(token: &str) -> Result<ServiceAuthClaims> {
 
     debug!(
         "Service auth (no aud check): iss={}, sub={:?}, aud={}, lxm={:?}, user_did={}",
-        claims.iss, claims.sub, claims.aud, claims.lxm, claims.user_did()
+        claims.iss,
+        claims.sub,
+        claims.aud,
+        claims.lxm,
+        claims.user_did()
     );
 
     // Check expiration

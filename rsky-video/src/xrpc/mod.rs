@@ -196,7 +196,10 @@ pub async fn upload_video(
     // STEP 1: Upload blob to user's PDS FIRST
     // Forward the client's service auth token to the PDS.
     // The token should have aud: user's PDS DID (not video service).
-    info!("Uploading blob to PDS for user {} using client token", user_did);
+    info!(
+        "Uploading blob to PDS for user {} using client token",
+        user_did
+    );
 
     let pds_blob_ref = match state
         .pds_client
@@ -212,9 +215,8 @@ pub async fn upload_video(
     };
 
     // Extract the CID from the PDS blob_ref - this is the real content-addressed CID
-    let video_cid = pds::extract_cid(&pds_blob_ref).ok_or_else(|| {
-        Error::Internal("PDS returned invalid blob reference".to_string())
-    })?;
+    let video_cid = pds::extract_cid(&pds_blob_ref)
+        .ok_or_else(|| Error::Internal("PDS returned invalid blob reference".to_string()))?;
     info!("PDS returned blob with CID: {}", video_cid);
 
     // Convert to JSON for storage
@@ -359,24 +361,18 @@ pub async fn bunny_webhook(
         info!("Video encoding complete: job={}", job.job_id);
 
         // Get the content CID from the job (from PDS upload)
-        let video_cid = job.video_cid.ok_or_else(|| {
-            Error::Internal("Job missing video CID".to_string())
-        })?;
+        let video_cid = job
+            .video_cid
+            .ok_or_else(|| Error::Internal("Job missing video CID".to_string()))?;
 
         // Use the PDS blob_ref that was stored during upload
         // This is the real blob reference from the user's PDS
-        let blob_ref = job.pds_blob_ref.ok_or_else(|| {
-            Error::Internal("Job missing PDS blob reference".to_string())
-        })?;
+        let blob_ref = job
+            .pds_blob_ref
+            .ok_or_else(|| Error::Internal("Job missing PDS blob reference".to_string()))?;
 
         // Save the mapping for URL proxy: (did, cid) -> bunny_video_id
-        db::save_video_mapping(
-            &state.db_pool,
-            &job.did,
-            &video_cid,
-            &payload.video_guid,
-        )
-        .await?;
+        db::save_video_mapping(&state.db_pool, &job.did, &video_cid, &payload.video_guid).await?;
 
         // Mark job as complete with the PDS blob_ref
         db::complete_job(&state.db_pool, job.job_id, blob_ref).await?;
@@ -427,7 +423,10 @@ pub async fn proxy_playlist(
         }
         None => {
             // Video not in our system - fallback to Bluesky's video CDN
-            debug!("Video not in our DB, falling back to Bluesky CDN: did={}, cid={}", did, cid);
+            debug!(
+                "Video not in our DB, falling back to Bluesky CDN: did={}, cid={}",
+                did, cid
+            );
             format!("https://video.bsky.app/watch/{}/{}/playlist.m3u8", did, cid)
         }
     };
@@ -460,7 +459,10 @@ pub async fn proxy_thumbnail(
         }
         None => {
             // Video not in our system - fallback to Bluesky's video CDN
-            debug!("Video not in our DB, falling back to Bluesky CDN: did={}, cid={}", did, cid);
+            debug!(
+                "Video not in our DB, falling back to Bluesky CDN: did={}, cid={}",
+                did, cid
+            );
             format!("https://video.bsky.app/watch/{}/{}/thumbnail.jpg", did, cid)
         }
     };

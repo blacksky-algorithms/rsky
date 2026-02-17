@@ -111,7 +111,10 @@ impl PdsClient {
                 }
                 _ => {
                     // DID document not found or invalid - use direct endpoint
-                    debug!("No DID document found for {}, using direct endpoint: {}", did, endpoint);
+                    debug!(
+                        "No DID document found for {}, using direct endpoint: {}",
+                        did, endpoint
+                    );
                 }
             }
 
@@ -194,7 +197,8 @@ impl PdsClient {
         let size = data.len();
         debug!("Uploading {} bytes to {}", size, upload_url);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&upload_url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", mime_type)
@@ -235,17 +239,22 @@ impl PdsClient {
             link: String,
         }
 
-        let upload_response: UploadBlobResponse = response.json().await
+        let upload_response: UploadBlobResponse = response
+            .json()
+            .await
             .map_err(|e| Error::Internal(format!("Failed to parse PDS response: {}", e)))?;
 
-        info!("Blob uploaded to PDS: size={}, cid={}", size, upload_response.blob.cid_ref.link);
+        info!(
+            "Blob uploaded to PDS: size={}, cid={}",
+            size, upload_response.blob.cid_ref.link
+        );
 
         // Convert to atrium BlobRef format
         // We need to construct the proper BlobRef type
         let blob_ref = BlobRef::Typed(TypedBlobRef::Blob(atrium_api::types::Blob {
             r#ref: atrium_api::types::CidLink(
                 cid::Cid::try_from(upload_response.blob.cid_ref.link.as_str())
-                    .map_err(|e| Error::Internal(format!("Invalid CID from PDS: {}", e)))?
+                    .map_err(|e| Error::Internal(format!("Invalid CID from PDS: {}", e)))?,
             ),
             mime_type: upload_response.blob.mime_type,
             size: upload_response.blob.size as usize,
@@ -259,7 +268,8 @@ impl PdsClient {
         let url = url::Url::parse(endpoint)
             .map_err(|e| Error::Internal(format!("Invalid endpoint URL: {}", e)))?;
 
-        let host = url.host_str()
+        let host = url
+            .host_str()
             .ok_or_else(|| Error::Internal("Endpoint has no host".to_string()))?;
 
         Ok(format!("did:web:{}", host))

@@ -179,18 +179,11 @@ impl BunnyClient {
     /// Returns the video bytes
     pub async fn download_video(&self, video_id: &str) -> Result<bytes::Bytes> {
         // The original video is available at the CDN URL with /play.mp4 suffix
-        let url = format!(
-            "https://{}.b-cdn.net/{}/original",
-            self.pull_zone, video_id
-        );
+        let url = format!("https://{}.b-cdn.net/{}/original", self.pull_zone, video_id);
 
         debug!("Downloading video from Bunny: {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await?;
+        let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();

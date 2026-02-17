@@ -5,7 +5,7 @@
 //! and creating properly signed JWTs.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use k256::ecdsa::{SigningKey, Signature, signature::Signer};
+use k256::ecdsa::{Signature, SigningKey, signature::Signer};
 use k256::pkcs8::DecodePrivateKey;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -58,8 +58,7 @@ impl ServiceAuthSigner {
             .or_else(|_| {
                 // Try SEC1 format (EC PRIVATE KEY)
                 use k256::SecretKey;
-                SecretKey::from_sec1_pem(&pem_content)
-                    .map(|sk| SigningKey::from(sk))
+                SecretKey::from_sec1_pem(&pem_content).map(|sk| SigningKey::from(sk))
             })
             .map_err(|e| Error::Internal(format!("Failed to parse signing key: {}", e)))?;
 
