@@ -268,6 +268,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
                 };
             }
         }
+        Ok(None) => (),
         Err(error) => eprintln!(
             "@LOG: Error unwrapping message and header: {}",
             error.to_string()
