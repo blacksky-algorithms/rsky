@@ -1326,6 +1326,16 @@ impl IndexerManager {
                         )
                         .await?;
                     }
+                    "community.blacksky.feed.post" => {
+                        Self::index_community_post_stub(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
                     _ => {}
                 }
             }
@@ -1391,6 +1401,9 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.verification" => {
                         Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "community.blacksky.feed.post" => {
+                        Self::delete_community_post(&client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
                 }
@@ -1844,6 +1857,9 @@ impl IndexerManager {
             }
             "app.bsky.graph.verification" => {
                 Self::index_verification(client, did, rkey, record, cid, indexed_at).await
+            }
+            "community.blacksky.feed.post" => {
+                Self::index_community_post_stub(client, did, rkey, cid, indexed_at).await
             }
             _ => Ok(()),
         }
@@ -2855,7 +2871,7 @@ impl IndexerManager {
                                         did,
                                         uri
                                     );
-                                    let rows = client
+                                    match client
                                         .execute(
                                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
                                              VALUES ($1, $2, $3, $4, $5, $6)
@@ -2865,13 +2881,16 @@ impl IndexerManager {
                                                 &sort_at,
                                             ],
                                         )
-                                        .await?;
-                                    tracing::info!(
-                                        "mention notification result: rows_affected={}, recipient={}, uri={}",
-                                        rows,
-                                        mention_did,
-                                        uri
-                                    );
+                                        .await
+                                    {
+                                        Ok(rows) => tracing::info!(
+                                            "mention notification result: rows_affected={}, recipient={}, uri={}",
+                                            rows,
+                                            mention_did,
+                                            uri
+                                        ),
+                                        Err(e) => tracing::warn!("failed to insert mention notification for {uri}: {e}"),
+                                    }
                                 }
                             }
                         }
@@ -2916,7 +2935,7 @@ impl IndexerManager {
                 if let Ok(ancestor_uri) = AtUri::new(ancestor_uri_str.clone(), None) {
                     let ancestor_author = ancestor_uri.get_hostname();
                     if ancestor_author != did {
-                        client
+                        if let Err(e) = client
                             .execute(
                                 "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                  VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -2931,7 +2950,10 @@ impl IndexerManager {
                                     &sort_at,
                                 ],
                             )
-                            .await?;
+                            .await
+                        {
+                            tracing::warn!("failed to insert reply notification for {uri}: {e}");
+                        }
                     }
                 }
             }
@@ -2972,7 +2994,7 @@ impl IndexerManager {
                         if let Ok(anc_uri_parsed) = AtUri::new(anc_uri.clone(), None) {
                             let anc_author = anc_uri_parsed.get_hostname();
                             if anc_author != &desc_creator {
-                                client
+                                if let Err(e) = client
                                     .execute(
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -2987,7 +3009,10 @@ impl IndexerManager {
                                             &desc_sort_at,
                                         ],
                                     )
-                                    .await?;
+                                    .await
+                                {
+                                    tracing::warn!("failed to insert reply notification for {desc_uri}: {e}");
+                                }
                             }
                         }
                     }
@@ -3179,14 +3204,17 @@ impl IndexerManager {
                         } else {
                             created_at
                         };
-                        client
+                        if let Err(e) = client
                             .execute(
                                 "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                  VALUES ($1, $2, $3, $4, $5, $6, $7)
                                  ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                                 &[&quoted_author, &creator, &post_uri, &post_cid, &"quote", &Some(embed_uri), &sort_at],
                             )
-                            .await?;
+                            .await
+                        {
+                            tracing::warn!("failed to insert quote notification for {post_uri}: {e}");
+                        }
                     }
                 }
             }
@@ -3209,6 +3237,50 @@ impl IndexerManager {
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
+        Ok(())
+    }
+
+    /// Index a community post stub arriving from the firehose.
+    /// The full content was already stored via community.blacksky.feed.submitPost XRPC.
+    /// This just updates the CID on the existing `community_post` row.
+    async fn index_community_post_stub(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+
+        let rows = client
+            .execute(
+                "UPDATE community_post SET cid = $1, \"indexedAt\" = $2 WHERE uri = $3",
+                &[&cid, &indexed_at, &uri],
+            )
+            .await?;
+
+        if rows == 0 {
+            tracing::debug!(
+                "community post stub for {} not found in community_post table (content not yet submitted)",
+                uri
+            );
+        } else {
+            tracing::info!("updated community post stub cid for {}", uri);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_community_post(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+        client
+            .execute("DELETE FROM community_post WHERE uri = $1", &[&uri])
+            .await?;
+        tracing::info!("deleted community post {}", uri);
         Ok(())
     }
 
@@ -3251,14 +3323,17 @@ impl IndexerManager {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert like notification for {uri}: {e}");
+                    }
                 }
             }
         }
@@ -3323,14 +3398,17 @@ impl IndexerManager {
             .await?;
 
         if row_count > 0 {
-            client
+            if let Err(e) = client
                 .execute(
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                     &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
                 )
-                .await?;
+                .await
+            {
+                tracing::warn!("failed to insert follow notification for {uri}: {e}");
+            }
         }
 
         client
@@ -3424,14 +3502,17 @@ impl IndexerManager {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert repost notification for {uri}: {e}");
+                    }
                 }
             }
         }
@@ -3570,14 +3651,17 @@ impl IndexerManager {
             if let Some(starter_pack_uri_str) = joined_via_uri {
                 if let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None) {
                     let starter_pack_author = starter_pack_uri.get_hostname();
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&starter_pack_author, &did, &uri, &cid, &"starterpack-joined", &Some(starter_pack_uri_str), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert starterpack-joined notification for {uri}: {e}");
+                    }
                 }
             }
         }
