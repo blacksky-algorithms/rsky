@@ -8387,6 +8387,7 @@ dependencies = [
  "cid 0.11.1",
  "clap",
  "color-eyre",
+ "dashmap 6.1.0",
  "deadpool-postgres",
  "derive_more 2.0.1",
  "fjall",

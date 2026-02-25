@@ -5,13 +5,14 @@ use crate::SHUTDOWN;
 use crate::config::{
     DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
-    IDENTITY_RESOLVER_TIMEOUT, WORKERS_INDEXER,
+    IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
 use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
+use dashmap::DashMap;
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -30,6 +31,12 @@ use tokio_postgres::NoTls;
 // 10+ second delays from index cache misses.
 static LIKE_INSERT_SEMAPHORE: std::sync::LazyLock<Semaphore> =
     std::sync::LazyLock::new(|| Semaphore::new(1));
+
+// Cache of actor DIDs known to exist in the DB, avoiding redundant INSERT ON CONFLICT DO NOTHING.
+// Bounded to 2M entries to prevent unbounded memory growth.
+static ACTOR_CACHE: std::sync::LazyLock<DashMap<String, ()>> =
+    std::sync::LazyLock::new(DashMap::new);
+const ACTOR_CACHE_MAX_SIZE: usize = 2_000_000;
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -328,9 +335,9 @@ impl IndexerManager {
     }
 
     async fn process_firehose_live_loop(&self) {
-        const MAX_CONCURRENT: usize = 100;
+        let max_concurrent = *INLINE_CONCURRENCY;
 
-        tracing::info!("firehose_live processor started (unbounded concurrency)");
+        tracing::info!(max_concurrent, "firehose_live processor started");
         let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
@@ -370,7 +377,7 @@ impl IndexerManager {
             }
 
             // Dequeue jobs up to max concurrent limit (matches pool capacity)
-            while in_flight.len() < MAX_CONCURRENT {
+            while in_flight.len() < max_concurrent {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
@@ -394,7 +401,7 @@ impl IndexerManager {
             // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= MAX_CONCURRENT {
+            } else if in_flight.len() >= max_concurrent {
                 // At capacity - wait for one to complete
                 if let Some(result) = in_flight.next().await {
                     self.handle_single_job_result(result);
@@ -591,9 +598,9 @@ impl IndexerManager {
     }
 
     async fn process_labels_loop(&self) {
-        const MAX_CONCURRENT: usize = 100;
+        let max_concurrent = *INLINE_CONCURRENCY;
 
-        tracing::info!("label_live processor started (unbounded concurrency)");
+        tracing::info!(max_concurrent, "label_live processor started");
         let mut in_flight: FuturesUnordered<LabelTaskHandle> = FuturesUnordered::new();
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
@@ -631,7 +638,7 @@ impl IndexerManager {
             }
 
             // Dequeue jobs up to max concurrent limit (matches pool capacity)
-            while in_flight.len() < MAX_CONCURRENT {
+            while in_flight.len() < max_concurrent {
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
@@ -655,7 +662,7 @@ impl IndexerManager {
             // Wait for at least one task to complete before next iteration
             if in_flight.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= MAX_CONCURRENT {
+            } else if in_flight.len() >= max_concurrent {
                 // At capacity - wait for one to complete
                 if let Some(result) = in_flight.next().await {
                     self.handle_single_label_result(result);
@@ -1093,8 +1100,13 @@ impl IndexerManager {
             WriteAction::Create | WriteAction::Update => {
                 tracing::debug!("processing create/update action");
 
-                // Ensure actor row exists for this DID
-                Self::ensure_actor_exists(&client, did.as_str(), &job.indexed_at).await?;
+                // Ensure actor row exists for this DID (cached to avoid redundant DB calls)
+                if !ACTOR_CACHE.contains_key(did.as_str()) {
+                    Self::ensure_actor_exists(&client, did.as_str(), &job.indexed_at).await?;
+                    if ACTOR_CACHE.len() < ACTOR_CACHE_MAX_SIZE {
+                        ACTOR_CACHE.insert(did.clone(), ());
+                    }
+                }
 
                 let record_json = job.record.as_ref().ok_or_else(|| {
                     WintermuteError::Other("missing record for create/update".into())
@@ -2847,8 +2859,8 @@ impl IndexerManager {
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"postsCount\")
-                 SELECT $1::varchar, COUNT(*) FROM post WHERE creator = $1
-                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
+                 VALUES ($1, 1)
+                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = profile_agg.\"postsCount\" + 1",
                 &[&did],
             )
             .await?;
@@ -2865,7 +2877,7 @@ impl IndexerManager {
                                 if mention_did == did {
                                     tracing::debug!("skipping self-mention for {}", did);
                                 } else {
-                                    tracing::info!(
+                                    tracing::debug!(
                                         "inserting mention notification: recipient={}, author={}, uri={}",
                                         mention_did,
                                         did,
@@ -2883,7 +2895,7 @@ impl IndexerManager {
                                         )
                                         .await
                                     {
-                                        Ok(rows) => tracing::info!(
+                                        Ok(rows) => tracing::debug!(
                                             "mention notification result: rows_affected={}, recipient={}, uri={}",
                                             rows,
                                             mention_did,
@@ -3023,10 +3035,8 @@ impl IndexerManager {
             client
                 .execute(
                     "INSERT INTO post_agg (uri, \"replyCount\")
-                     SELECT $1::varchar, COUNT(*) FROM post
-                     WHERE \"replyParent\" = $1
-                       AND (\"violatesThreadGate\" IS NULL OR \"violatesThreadGate\" = false)
-                     ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = EXCLUDED.\"replyCount\"",
+                     VALUES ($1, 1)
+                     ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = post_agg.\"replyCount\" + 1",
                     &[&parent_uri_str],
                 )
                 .await?;
@@ -3189,9 +3199,9 @@ impl IndexerManager {
                 client
                     .execute(
                         "INSERT INTO post_agg (uri, \"quoteCount\")
-                         SELECT $1::varchar, COUNT(*) FROM quote WHERE \"subjectCid\" = $2
-                         ON CONFLICT (uri) DO UPDATE SET \"quoteCount\" = EXCLUDED.\"quoteCount\"",
-                        &[&embed_uri, &embed_cid],
+                         VALUES ($1, 1)
+                         ON CONFLICT (uri) DO UPDATE SET \"quoteCount\" = post_agg.\"quoteCount\" + 1",
+                        &[&embed_uri],
                     )
                     .await?;
 
@@ -3231,12 +3241,46 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.post/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
+
+        // Fetch creator and replyParent before deleting so we can decrement aggregates
+        let row = client
+            .query_opt(
+                "SELECT creator, \"replyParent\" FROM post WHERE uri = $1",
+                &[&uri],
+            )
+            .await?;
+
         client
             .execute("DELETE FROM post WHERE uri = $1", &[&uri])
             .await?;
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
+
+        // Decrement aggregate counts based on the deleted post's data
+        if let Some(row) = row {
+            let creator: Option<String> = row.get("creator");
+            let reply_parent: Option<String> = row.get("replyParent");
+
+            if let Some(creator) = creator {
+                client
+                    .execute(
+                        "UPDATE profile_agg SET \"postsCount\" = GREATEST(\"postsCount\" - 1, 0) WHERE did = $1",
+                        &[&creator],
+                    )
+                    .await?;
+            }
+
+            if let Some(parent_uri) = reply_parent {
+                client
+                    .execute(
+                        "UPDATE post_agg SET \"replyCount\" = GREATEST(\"replyCount\" - 1, 0) WHERE uri = $1",
+                        &[&parent_uri],
+                    )
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -3342,8 +3386,8 @@ impl IndexerManager {
             client
                 .execute(
                     "INSERT INTO post_agg (uri, \"likeCount\")
-                     SELECT $1::varchar, COUNT(*) FROM \"like\" WHERE subject = $1
-                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = EXCLUDED.\"likeCount\"",
+                     VALUES ($1, 1)
+                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = post_agg.\"likeCount\" + 1",
                     &[&subject],
                 )
                 .await?;
@@ -3360,9 +3404,28 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.like/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
+
+        // Fetch subject before deleting so we can decrement likeCount
+        let row = client
+            .query_opt("SELECT subject FROM \"like\" WHERE uri = $1", &[&uri])
+            .await?;
+
         client
             .execute("DELETE FROM \"like\" WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(row) = row {
+            let subject: String = row.get("subject");
+            if !subject.is_empty() {
+                client
+                    .execute(
+                        "UPDATE post_agg SET \"likeCount\" = GREATEST(\"likeCount\" - 1, 0) WHERE uri = $1",
+                        &[&subject],
+                    )
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -3383,9 +3446,12 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        // Ensure the follow subject also has an actor row
-        if !subject.is_empty() {
+        // Ensure the follow subject also has an actor row (cached)
+        if !subject.is_empty() && !ACTOR_CACHE.contains_key(subject) {
             Self::ensure_actor_exists(client, subject, indexed_at).await?;
+            if ACTOR_CACHE.len() < ACTOR_CACHE_MAX_SIZE {
+                ACTOR_CACHE.insert(subject.to_owned(), ());
+            }
         }
 
         let row_count = client
@@ -3414,8 +3480,8 @@ impl IndexerManager {
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followersCount\")
-                 SELECT $1::varchar, COUNT(*) FROM follow WHERE \"subjectDid\" = $1
-                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
+                 VALUES ($1, 1)
+                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = profile_agg.\"followersCount\" + 1",
                 &[&subject],
             )
             .await?;
@@ -3423,8 +3489,8 @@ impl IndexerManager {
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followsCount\")
-                 SELECT $1::varchar, COUNT(*) FROM follow WHERE creator = $1
-                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
+                 VALUES ($1, 1)
+                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = profile_agg.\"followsCount\" + 1",
                 &[&did],
             )
             .await?;
@@ -3440,9 +3506,38 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.graph.follow/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
+
+        // Fetch creator and subjectDid before deleting so we can decrement aggregate counts
+        let row = client
+            .query_opt(
+                "SELECT creator, \"subjectDid\" FROM follow WHERE uri = $1",
+                &[&uri],
+            )
+            .await?;
+
         client
             .execute("DELETE FROM follow WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(row) = row {
+            let creator: String = row.get("creator");
+            let subject_did: String = row.get("subjectDid");
+
+            client
+                .execute(
+                    "UPDATE profile_agg SET \"followsCount\" = GREATEST(\"followsCount\" - 1, 0) WHERE did = $1",
+                    &[&creator],
+                )
+                .await?;
+
+            client
+                .execute(
+                    "UPDATE profile_agg SET \"followersCount\" = GREATEST(\"followersCount\" - 1, 0) WHERE did = $1",
+                    &[&subject_did],
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -3521,8 +3616,8 @@ impl IndexerManager {
             client
                 .execute(
                     "INSERT INTO post_agg (uri, \"repostCount\")
-                     SELECT $1::varchar, COUNT(*) FROM repost WHERE subject = $1
-                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = EXCLUDED.\"repostCount\"",
+                     VALUES ($1, 1)
+                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = post_agg.\"repostCount\" + 1",
                     &[&subject],
                 )
                 .await?;
@@ -3539,12 +3634,31 @@ impl IndexerManager {
         let uri_obj = AtUri::new(format!("at://{did}/app.bsky.feed.repost/{rkey}"), None)
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
+
+        // Fetch subject before deleting so we can decrement repostCount
+        let row = client
+            .query_opt("SELECT subject FROM repost WHERE uri = $1", &[&uri])
+            .await?;
+
         client
             .execute("DELETE FROM repost WHERE uri = $1", &[&uri])
             .await?;
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(row) = row {
+            let subject: String = row.get("subject");
+            if !subject.is_empty() {
+                client
+                    .execute(
+                        "UPDATE post_agg SET \"repostCount\" = GREATEST(\"repostCount\" - 1, 0) WHERE uri = $1",
+                        &[&subject],
+                    )
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -3565,9 +3679,12 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        // Ensure the block subject also has an actor row
-        if !subject.is_empty() {
+        // Ensure the block subject also has an actor row (cached)
+        if !subject.is_empty() && !ACTOR_CACHE.contains_key(subject) {
             Self::ensure_actor_exists(client, subject, indexed_at).await?;
+            if ACTOR_CACHE.len() < ACTOR_CACHE_MAX_SIZE {
+                ACTOR_CACHE.insert(subject.to_owned(), ());
+            }
         }
 
         client
