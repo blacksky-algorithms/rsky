@@ -380,10 +380,10 @@ impl IngesterManager {
                 () = tokio::time::sleep(Duration::from_millis(100)) => continue,
             };
 
-            // Reset idle timer on any message received
-            last_message_time = std::time::Instant::now();
-
             if let Message::Binary(data) = msg {
+                // Reset idle timer on data messages only (not ping/pong frames
+                // which can succeed on zombie connections where no data flows)
+                last_message_time = std::time::Instant::now();
                 let event = match Self::parse_message(&data) {
                     Ok(ParseResult::Event(e)) => e,
                     Ok(ParseResult::Skip) => continue,
