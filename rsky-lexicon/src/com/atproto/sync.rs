@@ -113,6 +113,7 @@ pub struct SubscribeReposIdentity {
 pub struct SubscribeReposSync {
     pub seq: i64,
     pub did: String,
+    #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
     pub rev: String,
     pub time: DateTime<Utc>,

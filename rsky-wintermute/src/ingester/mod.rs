@@ -158,10 +158,15 @@ impl IngesterManager {
                 break;
             }
 
+            let connect_start = std::time::Instant::now();
             match Self::connect_and_stream(&storage, &hostname, &pool, &semaphore).await {
                 ConnectionResult::Closed => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
+                    }
+                    // Reset backoff if connection was healthy for a while
+                    if connect_start.elapsed() > Duration::from_secs(30) {
+                        backoff_secs = 1;
                     }
                     tracing::warn!(
                         "connection closed for {hostname}, reconnecting in {backoff_secs}s"
@@ -172,6 +177,10 @@ impl IngesterManager {
                 ConnectionResult::Error(e) => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
+                    }
+                    // Reset backoff if connection was healthy for a while
+                    if connect_start.elapsed() > Duration::from_secs(30) {
+                        backoff_secs = 1;
                     }
                     tracing::error!(
                         "connection error for {hostname}: {e}, retrying in {backoff_secs}s"
@@ -262,6 +271,11 @@ impl IngesterManager {
             .inc();
         let (mut write, mut read) = ws_stream.split();
 
+        // Idle timeout: if no messages received in 30s, assume connection is dead.
+        // The firehose sends ~1000 events/sec so 30s of silence is abnormal.
+        let idle_timeout = Duration::from_secs(30);
+        let mut last_message_time = std::time::Instant::now();
+
         let ping_task = tokio::spawn(async move {
             let mut ping_interval = interval(FIREHOSE_PING_INTERVAL);
             loop {
@@ -322,6 +336,27 @@ impl IngesterManager {
                 return ConnectionResult::Closed;
             }
 
+            // Detect zombie connections: if no messages in idle_timeout, force reconnect
+            if last_message_time.elapsed() > idle_timeout {
+                tracing::warn!(
+                    "no messages received in {}s for {hostname}, assuming connection dead",
+                    idle_timeout.as_secs()
+                );
+                let final_seq = last_seq.load(Ordering::Relaxed);
+                if final_seq > 0 {
+                    drop(set_cursor_in_postgres(pool, &cursor_key, final_seq).await);
+                }
+                metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                    .with_label_values(&["firehose"])
+                    .dec();
+                ping_task.abort();
+                cursor_saver_task.abort();
+                return ConnectionResult::Error(WintermuteError::Other(format!(
+                    "idle timeout: no messages in {}s",
+                    idle_timeout.as_secs()
+                )));
+            }
+
             let msg = tokio::select! {
                 msg = read.next() => {
                     match msg {
@@ -344,6 +379,9 @@ impl IngesterManager {
                 }
                 () = tokio::time::sleep(Duration::from_millis(100)) => continue,
             };
+
+            // Reset idle timer on any message received
+            last_message_time = std::time::Instant::now();
 
             if let Message::Binary(data) = msg {
                 let event = match Self::parse_message(&data) {
