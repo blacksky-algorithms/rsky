@@ -1,0 +1,303 @@
+use crate::config::{DB_POOL_SIZE, INLINE_CONCURRENCY};
+use crate::indexer::IndexerManager;
+use crate::types::{Label, LabelEvent, WintermuteError};
+use crate::{SHUTDOWN, metrics, storage::Storage};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures::SinkExt;
+use futures::stream::StreamExt;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::time::interval;
+use tokio_postgres::NoTls;
+use tokio_tungstenite::tungstenite::Message;
+
+pub async fn subscribe_labels(
+    storage: Arc<Storage>,
+    labeler_host: String,
+    database_url: String,
+) -> Result<(), WintermuteError> {
+    // Create postgres pool for cursor storage
+    let pool_size = *DB_POOL_SIZE;
+    tracing::info!("label DB pool size: {pool_size}");
+    let mut pg_config = Config::new();
+    pg_config.url = Some(database_url);
+    pg_config.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+    pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
+
+    let pool = Arc::new(
+        pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .map_err(|e| WintermuteError::Other(format!("label pool creation failed: {e}")))?,
+    );
+
+    // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
+    let semaphore = Arc::new(Semaphore::new(*INLINE_CONCURRENCY));
+
+    loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            tracing::info!("shutdown requested for label subscriber {labeler_host}");
+            break;
+        }
+
+        match connect_and_stream(&storage, &labeler_host, &pool, &semaphore).await {
+            Ok(()) => {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                tracing::warn!("label connection closed for {labeler_host}, reconnecting in 5s");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                tracing::error!("label connection error for {labeler_host}: {e}, retrying in 5s");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn connect_and_stream(
+    _storage: &Storage,
+    labeler_host: &str,
+    pool: &Arc<Pool>,
+    semaphore: &Arc<Semaphore>,
+) -> Result<(), WintermuteError> {
+    let cursor_key = format!("labels:{labeler_host}");
+
+    // Get cursor from postgres sub_state table
+    let cursor = get_cursor_from_postgres(pool, &cursor_key).await?;
+
+    let clean_hostname = labeler_host
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+
+    let mut url = url::Url::parse(&format!(
+        "wss://{clean_hostname}/xrpc/com.atproto.label.subscribeLabels"
+    ))
+    .map_err(|e| WintermuteError::Other(format!("invalid url: {e}")))?;
+
+    // Always pass cursor - if 0, starts from beginning (replays all historical labels)
+    url.query_pairs_mut()
+        .append_pair("cursor", &cursor.to_string());
+
+    if cursor > 0 {
+        tracing::info!("connecting to label stream at {url} resuming from cursor {cursor}");
+    } else {
+        tracing::info!(
+            "connecting to label stream at {url} starting from cursor 0 (replaying historical labels)"
+        );
+    }
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
+    let (mut write, mut read) = ws_stream.split();
+
+    // Track active connection
+    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+        .with_label_values(&["labels"])
+        .inc();
+
+    let ping_task = tokio::spawn(async move {
+        let mut ping_interval = interval(Duration::from_secs(30));
+        loop {
+            ping_interval.tick().await;
+            if write.send(Message::Ping(vec![])).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut events_since_cursor_update = 0u64;
+
+    loop {
+        // Check shutdown with timeout to avoid blocking forever on websocket read
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            tracing::info!("shutdown requested, closing label connection to {labeler_host}");
+            metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                .with_label_values(&["labels"])
+                .dec();
+            ping_task.abort();
+            return Ok(());
+        }
+
+        let msg = tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => {
+                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                            .with_label_values(&["labels"])
+                            .dec();
+                        ping_task.abort();
+                        return Err(e.into());
+                    }
+                    None => break,
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => continue,
+        };
+
+        if let Message::Binary(data) = msg {
+            match parse_label_message(&data) {
+                Ok(Some(label_event)) => {
+                    // Process inline: spawn task to index labels directly (skip Fjall queue)
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                        tracing::error!("semaphore closed during label processing");
+                        break;
+                    };
+                    let pool_clone = Arc::clone(pool);
+                    let label_event_clone = label_event.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            IndexerManager::process_label_event(&pool_clone, &label_event_clone)
+                                .await
+                        {
+                            tracing::error!("inline label indexing failed: {e}");
+                            metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                        }
+                        drop(permit);
+                    });
+
+                    // Update cursor in postgres every 20 events (like rsky-firehose)
+                    events_since_cursor_update += 1;
+                    if events_since_cursor_update % 20 == 0 {
+                        if let Err(e) =
+                            set_cursor_in_postgres(pool, &cursor_key, label_event.seq).await
+                        {
+                            tracing::error!("failed to set label cursor: {e}");
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["label_cursor"])
+                                .inc();
+                        }
+                    }
+
+                    // Update metrics
+                    metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
+                        .with_label_values(&["label_live"])
+                        .inc();
+
+                    tracing::debug!(
+                        "processed label event seq={} with {} labels inline",
+                        label_event.seq,
+                        label_event.labels.len()
+                    );
+                }
+                Ok(None) => {
+                    // Not a label message, skip
+                }
+                Err(e) => {
+                    tracing::error!("failed to parse label message: {e}");
+                    metrics::INGESTER_ERRORS_TOTAL
+                        .with_label_values(&["label_parse"])
+                        .inc();
+                }
+            }
+        }
+    }
+
+    ping_task.abort();
+
+    // Track connection closed
+    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+        .with_label_values(&["labels"])
+        .dec();
+
+    Ok(())
+}
+
+pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, WintermuteError> {
+    // AT Protocol sends two concatenated CBOR messages:
+    // 1. Header (parsed with ciborium): {t: "#labels", op: 1}
+    // 2. Body (parsed with serde_ipld_dagcbor): {seq: N, labels: [...]}
+
+    #[derive(serde::Deserialize)]
+    struct Header {
+        #[serde(rename = "t")]
+        type_: String,
+        #[serde(rename = "op")]
+        _operation: u8,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SubscribeLabels {
+        seq: i64,
+        labels: Vec<RawLabel>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        src: String,
+        uri: String,
+        val: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        cid: Option<String>,
+        cts: String,
+    }
+
+    let mut cursor = std::io::Cursor::new(data);
+
+    // Parse header with ciborium
+    let header: Header = ciborium::from_reader(&mut cursor)
+        .map_err(|e| WintermuteError::Serialization(format!("failed to parse header: {e}")))?;
+
+    if header.type_ != "#labels" {
+        return Ok(None);
+    }
+
+    // Parse body with serde_ipld_dagcbor
+    let body: SubscribeLabels = serde_ipld_dagcbor::from_reader(&mut cursor)
+        .map_err(|e| WintermuteError::Serialization(format!("failed to parse body: {e}")))?;
+
+    let labels = body
+        .labels
+        .into_iter()
+        .map(|raw| Label {
+            src: raw.src,
+            uri: raw.uri,
+            val: raw.val,
+            cts: raw.cts,
+        })
+        .collect();
+
+    Ok(Some(LabelEvent {
+        seq: body.seq,
+        labels,
+    }))
+}
+
+async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, WintermuteError> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT cursor FROM sub_state WHERE service = $1",
+            &[&service],
+        )
+        .await?;
+
+    Ok(row.map_or(0, |r| r.get::<_, i64>("cursor")))
+}
+
+async fn set_cursor_in_postgres(
+    pool: &Pool,
+    service: &str,
+    cursor: i64,
+) -> Result<(), WintermuteError> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO sub_state (service, cursor)
+             VALUES ($1, $2)
+             ON CONFLICT (service) DO UPDATE SET cursor = EXCLUDED.cursor",
+            &[&service, &cursor],
+        )
+        .await?;
+    Ok(())
+}

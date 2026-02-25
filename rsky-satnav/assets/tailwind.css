@@ -10,8 +10,6 @@
     --color-indigo-50: oklch(0.962 0.018 272.314);
     --color-indigo-600: oklch(0.511 0.262 276.966);
     --color-indigo-700: oklch(0.457 0.24 277.023);
-    --color-purple-500: oklch(0.627 0.265 303.9);
-    --color-purple-700: oklch(0.496 0.265 301.924);
     --color-gray-100: oklch(0.967 0.003 264.542);
     --color-gray-700: oklch(0.373 0.034 259.733);
     --color-gray-900: oklch(0.21 0.034 264.665);
@@ -297,10 +295,6 @@
   .rounded-lg {
     border-radius: var(--radius-lg);
   }
-  .border {
-    border-style: var(--tw-border-style);
-    border-width: 1px;
-  }
   .bg-gray-100 {
     background-color: var(--color-gray-100);
   }
@@ -310,17 +304,11 @@
   .bg-indigo-600 {
     background-color: var(--color-indigo-600);
   }
-  .bg-purple-500 {
-    background-color: var(--color-purple-500);
-  }
   .bg-white {
     background-color: var(--color-white);
   }
   .p-2 {
     padding: calc(var(--spacing) * 2);
-  }
-  .p-4 {
-    padding: calc(var(--spacing) * 4);
   }
   .px-4 {
     padding-inline: calc(var(--spacing) * 4);
@@ -405,13 +393,6 @@
       }
     }
   }
-  .hover\:bg-purple-700 {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--color-purple-700);
-      }
-    }
-  }
   .sm\:px-8 {
     @media (width >= 40rem) {
       padding-inline: calc(var(--spacing) * 8);
@@ -459,11 +440,6 @@
   syntax: "*";
   inherits: false;
   initial-value: 0;
-}
-@property --tw-border-style {
-  syntax: "*";
-  inherits: false;
-  initial-value: solid;
 }
 @property --tw-leading {
   syntax: "*";

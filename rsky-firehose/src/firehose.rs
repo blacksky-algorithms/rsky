@@ -30,26 +30,65 @@ impl From<serde_ipld_dagcbor::DecodeError<std::io::Error>> for Error {
     }
 }
 
-pub fn read(data: &[u8]) -> Result<(Header, SubscribeRepos)> {
+pub fn read(data: &[u8]) -> Result<Option<(Header, SubscribeRepos)>> {
     let mut reader = Cursor::new(data);
 
     let header = ciborium::de::from_reader::<Header, _>(&mut reader)?;
     let body = match header.type_.as_str() {
-        "#commit" => SubscribeRepos::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        "#handle" => SubscribeRepos::Handle(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        "#tombstone" => SubscribeRepos::Tombstone(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        "#account" => SubscribeRepos::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
-        "#identity" => SubscribeRepos::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
+        "#commit" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(commit) => SubscribeRepos::Commit(commit),
+            Err(e) => {
+                eprintln!("Failed to decode #commit message: {:?}", e);
+                return Ok(None);
+            }
+        },
+        "#handle" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(handle) => SubscribeRepos::Handle(handle),
+            Err(e) => {
+                eprintln!("Failed to decode #handle message: {:?}", e);
+                return Ok(None);
+            }
+        },
+        "#tombstone" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(tombstone) => SubscribeRepos::Tombstone(tombstone),
+            Err(e) => {
+                eprintln!("Failed to decode #tombstone message: {:?}", e);
+                return Ok(None);
+            }
+        },
+        "#account" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(account) => SubscribeRepos::Account(account),
+            Err(e) => {
+                eprintln!("Failed to decode #account message: {:?}", e);
+                return Ok(None);
+            }
+        },
+        "#identity" => match serde_ipld_dagcbor::from_reader(&mut reader) {
+            Ok(identity) => SubscribeRepos::Identity(identity),
+            Err(e) => {
+                eprintln!("Failed to decode #identity message: {:?}", e);
+                return Ok(None);
+            }
+        },
+        "#sync" => {
+            // Sync messages declare current repo state (AT Protocol Sync v1.1)
+            // For now we ignore these - a full implementation would check if
+            // resynchronization is needed and fetch via com.atproto.sync.getRepo
+            // See: https://github.com/bluesky-social/atproto/blob/main/specs/0006-sync.md
+            return Ok(None);
+        }
+        "#info" => {
+            // Info messages are informational and can be safely ignored
+            return Ok(None);
+        }
         _ => {
             eprintln!("Received unknown header {:?}", header.type_.as_str());
-            bail!(format!(
-                "Received unknown header {:?}",
-                header.type_.as_str()
-            ))
+            // Skip unknown message types instead of failing
+            return Ok(None);
         }
     };
 
-    Ok((header, body))
+    Ok(Some((header, body)))
 }
 
 pub fn read_labels(data: &[u8]) -> Result<(Header, SubscribeLabels)> {
