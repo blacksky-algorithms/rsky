@@ -23,6 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
+dashmap = "6"
 derive_more = { version = "2", features = ["full"] }
 fjall = "2"
 heed = "0.20"
