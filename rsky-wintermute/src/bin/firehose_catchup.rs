@@ -44,6 +44,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider before any TLS operations
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
