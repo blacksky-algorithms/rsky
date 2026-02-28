@@ -11,7 +11,7 @@ NOTE.md
 Rocket.toml
 *.pem
 **/data/
-db/
+/db/
 *.db
 *.db-shm
 *.db-wal
@@ -169,3 +169,4 @@ rsky-wintermute/*.json
 !rsky-wintermute/README.md
 CLAUDE.md
 .claude
+docs

@@ -205,6 +205,20 @@ impl Storage {
         Ok(())
     }
 
+    /// Enqueue a backfill job with IMMEDIATE priority (timestamp 0)
+    /// These items are processed FIRST, before all other priority items
+    pub fn enqueue_backfill_immediate(&self, job: &BackfillJob) -> Result<(), WintermuteError> {
+        // Key format: "0:0:{did}" - timestamp 0 ensures it sorts first
+        let key = format!("0:0:{}", job.did);
+        let mut value = Vec::new();
+        ciborium::into_writer(job, &mut value)
+            .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        self.repo_backfill
+            .insert(key.as_bytes(), value.as_slice())?;
+        crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
     pub fn dequeue_backfill(&self) -> Result<Option<(Vec<u8>, BackfillJob)>, WintermuteError> {
         let mut iter = self.repo_backfill.iter();
         let Some(entry) = iter.next() else {
@@ -808,6 +822,8 @@ mod tests {
                 ops: vec![],
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         storage.write_firehose_event(12345, &event).unwrap();
@@ -1167,8 +1183,11 @@ mod tests {
             labels: vec![Label {
                 src: "did:plc:labeler".to_owned(),
                 uri: "at://did:plc:test/app.bsky.feed.post/123".to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-01T00:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 

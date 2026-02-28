@@ -1327,12 +1327,22 @@ impl IndexerManager {
                         )
                         .await?;
                     }
-                    "app.bsky.verification.proof" => {
+                    "app.bsky.graph.verification" => {
                         Self::index_verification(
                             &client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "community.blacksky.feed.post" => {
+                        Self::index_community_post_stub(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
                             &job.cid,
                             &job.indexed_at,
                         )
@@ -1401,8 +1411,11 @@ impl IndexerManager {
                     "app.bsky.actor.status" => {
                         Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
                     }
-                    "app.bsky.verification.proof" => {
+                    "app.bsky.graph.verification" => {
                         Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "community.blacksky.feed.post" => {
+                        Self::delete_community_post(&client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
                 }
@@ -1854,8 +1867,11 @@ impl IndexerManager {
             "app.bsky.actor.status" => {
                 Self::index_status(client, did, rkey, record, cid, indexed_at).await
             }
-            "app.bsky.verification.proof" => {
+            "app.bsky.graph.verification" => {
                 Self::index_verification(client, did, rkey, record, cid, indexed_at).await
+            }
+            "community.blacksky.feed.post" => {
+                Self::index_community_post_stub(client, did, rkey, cid, indexed_at).await
             }
             _ => Ok(()),
         }
@@ -2206,6 +2222,8 @@ impl IndexerManager {
         let mut creators: Vec<String> = Vec::with_capacity(jobs.len());
         let mut display_names: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut descriptions: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut avatar_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut banner_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
 
         for pj in jobs {
@@ -2213,12 +2231,26 @@ impl IndexerManager {
                 let uri = pj.uri.to_string();
                 let display_name = sanitize_opt(record.get("displayName").and_then(|v| v.as_str()));
                 let description = sanitize_opt(record.get("description").and_then(|v| v.as_str()));
+                let avatar_cid = record
+                    .get("avatar")
+                    .and_then(|v| v.get("ref"))
+                    .and_then(|v| v.get("$link"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let banner_cid = record
+                    .get("banner")
+                    .and_then(|v| v.get("ref"))
+                    .and_then(|v| v.get("$link"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 uris.push(uri);
                 cids.push(pj.job.cid.clone());
                 creators.push(pj.did.clone());
                 display_names.push(display_name);
                 descriptions.push(description);
+                avatar_cids.push(avatar_cid);
+                banner_cids.push(banner_cid);
                 indexed_ats.push(pj.job.indexed_at.clone());
 
                 metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
@@ -2227,10 +2259,16 @@ impl IndexerManager {
 
         client
             .execute(
-                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"indexedAt\")
-                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-                 ON CONFLICT DO NOTHING",
-                &[&uris, &cids, &creators, &display_names, &descriptions, &indexed_ats],
+                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"bannerCid\" = EXCLUDED.\"bannerCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                &[&uris, &cids, &creators, &display_names, &descriptions, &avatar_cids, &banner_cids, &indexed_ats],
             )
             .await?;
 
@@ -2364,6 +2402,8 @@ impl IndexerManager {
             Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
+        let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -2393,10 +2433,20 @@ impl IndexerManager {
                     "post".to_owned(),
                     uri.clone(),
                     pj.job.cid.clone(),
-                    uri,
+                    uri.clone(),
                     pj.did.clone(),
                     sort_at,
                 ));
+
+                // Extract embed data for images and videos
+                if let Some(embed) = record.get("embed") {
+                    Self::extract_embed_data(
+                        embed,
+                        &uri,
+                        &mut embed_image_data,
+                        &mut embed_video_data,
+                    );
+                }
 
                 metrics::INDEXER_POST_EVENTS_TOTAL.inc();
             }
@@ -2404,8 +2454,92 @@ impl IndexerManager {
 
         bulk::copy_insert_posts(client, &post_data).await?;
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
+        bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
+        bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
 
         Ok(())
+    }
+
+    /// Extract embed data (images and videos) from a post's embed field
+    fn extract_embed_data(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_image_data: &mut Vec<(String, String, String, String)>,
+        embed_video_data: &mut Vec<(String, String, Option<String>)>,
+    ) {
+        let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Handle app.bsky.embed.images
+        if embed_type == "app.bsky.embed.images" {
+            Self::extract_images(embed, post_uri, embed_image_data);
+        }
+
+        // Handle app.bsky.embed.video
+        if embed_type == "app.bsky.embed.video" {
+            Self::extract_video(embed, post_uri, embed_video_data);
+        }
+
+        // Handle app.bsky.embed.recordWithMedia (has nested media)
+        if embed_type == "app.bsky.embed.recordWithMedia" {
+            if let Some(media) = embed.get("media") {
+                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                if media_type == "app.bsky.embed.images" {
+                    Self::extract_images(media, post_uri, embed_image_data);
+                } else if media_type == "app.bsky.embed.video" {
+                    Self::extract_video(media, post_uri, embed_video_data);
+                }
+            }
+        }
+    }
+
+    fn extract_images(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_image_data: &mut Vec<(String, String, String, String)>,
+    ) {
+        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
+            for (position, image) in images.iter().enumerate() {
+                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = image.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                });
+
+                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+
+                if let Some(image_cid) = image_cid {
+                    embed_image_data.push((
+                        post_uri.to_owned(),
+                        position.to_string(),
+                        image_cid.to_owned(),
+                        alt.to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn extract_video(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        embed_video_data: &mut Vec<(String, String, Option<String>)>,
+    ) {
+        // Get the video CID - can be in video.ref.$link (CBOR decoded) or video.ref (string)
+        let video_cid = embed.get("video").and_then(|vid| {
+            vid.get("ref")
+                .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
+        });
+
+        let alt = embed
+            .get("alt")
+            .and_then(|a| a.as_str())
+            .map(ToOwned::to_owned);
+
+        if let Some(video_cid) = video_cid {
+            embed_video_data.push((post_uri.to_owned(), video_cid.to_owned(), alt));
+        }
     }
 
     async fn copy_batch_insert_likes(
@@ -2610,32 +2744,50 @@ impl IndexerManager {
 
         // Process each label in the event
         for label in &label_event.labels {
-            // Insert or update the label
-            // Note: Using empty string for cid since label messages don't include it
-            // The primary key is (src, uri, cid, val), so we use "" as cid
+            let cid = label.cid.as_deref().unwrap_or("");
+            let exp: Option<&str> = label.exp.as_deref();
+
             let result = client
                 .execute(
-                    "INSERT INTO label (src, uri, cid, val, cts, neg)
-                     VALUES ($1, $2, $3, $4, $5, false)
+                    "INSERT INTO label (src, uri, cid, val, neg, cts, exp)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (src, uri, cid, val) DO UPDATE SET
-                       cts = EXCLUDED.cts",
-                    &[&label.src, &label.uri, &"", &label.val, &label.cts],
+                       neg = EXCLUDED.neg,
+                       cts = EXCLUDED.cts,
+                       exp = EXCLUDED.exp",
+                    &[
+                        &label.src, &label.uri, &cid, &label.val, &label.neg, &label.cts, &exp,
+                    ],
                 )
                 .await;
 
             match result {
                 Ok(_) => {
-                    tracing::debug!(
-                        "indexed label: src={} uri={} val={}",
-                        label.src,
-                        label.uri,
-                        label.val
-                    );
+                    if label.neg {
+                        tracing::info!(
+                            "negated label: src={} uri={} val={}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    } else {
+                        tracing::debug!(
+                            "indexed label: src={} uri={} val={}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    }
                 }
                 Err(e) => {
-                    tracing::error!("failed to insert label: {e}");
+                    tracing::error!(
+                        "failed to insert label: src={} uri={} val={} neg={}: {e}",
+                        label.src,
+                        label.uri,
+                        label.val,
+                        label.neg
+                    );
                     metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                    // Continue processing other labels even if one fails
                 }
             }
         }
@@ -2713,19 +2865,169 @@ impl IndexerManager {
             )
             .await?;
 
-        // Generate reply notification for parent post author
+        // Generate mention notifications from facets
+        if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
+            for facet in facets {
+                if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
+                    for feature in features {
+                        let feature_type =
+                            feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                        if feature_type == "app.bsky.richtext.facet#mention" {
+                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
+                                if mention_did == did {
+                                    tracing::debug!("skipping self-mention for {}", did);
+                                } else {
+                                    tracing::info!(
+                                        "inserting mention notification: recipient={}, author={}, uri={}",
+                                        mention_did,
+                                        did,
+                                        uri
+                                    );
+                                    match client
+                                        .execute(
+                                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
+                                             VALUES ($1, $2, $3, $4, $5, $6)
+                                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                            &[
+                                                &mention_did, &did, &uri, &cid, &"mention",
+                                                &sort_at,
+                                            ],
+                                        )
+                                        .await
+                                    {
+                                        Ok(rows) => tracing::info!(
+                                            "mention notification result: rows_affected={}, recipient={}, uri={}",
+                                            rows,
+                                            mention_did,
+                                            uri
+                                        ),
+                                        Err(e) => tracing::warn!("failed to insert mention notification for {uri}: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            tracing::debug!("no facets found for post {}", uri);
+        }
+
+        // Reply notifications: walk ancestor chain up to REPLY_NOTIF_DEPTH
+        // Matches official Bluesky behavior from post.ts notifsForInsert
         if let Some(parent_uri_str) = reply_parent {
-            if let Ok(parent_uri) = AtUri::new(parent_uri_str.to_owned(), None) {
-                let parent_author = parent_uri.get_hostname();
-                if parent_author != did {
-                    client
-                        .execute(
-                            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT DO NOTHING",
-                            &[&parent_author, &did, &uri, &cid, &"reply", &Some(parent_uri_str), &sort_at],
-                        )
-                        .await?;
+            const REPLY_NOTIF_DEPTH: i32 = 5;
+
+            // Query ancestors using recursive CTE
+            // Height 0 = self, 1 = parent, 2 = grandparent, etc.
+            let ancestors = client
+                .query(
+                    "WITH RECURSIVE ancestor(uri, ancestor_uri, height) AS (
+                        SELECT p.uri, p.\"replyParent\", 0
+                        FROM post p
+                        WHERE p.uri = $1
+                      UNION ALL
+                        SELECT p.uri, p.\"replyParent\", a.height + 1
+                        FROM post p
+                        INNER JOIN ancestor a ON a.ancestor_uri = p.uri
+                        WHERE a.height < $2
+                    )
+                    SELECT uri, height FROM ancestor",
+                    &[&uri, &REPLY_NOTIF_DEPTH],
+                )
+                .await?;
+
+            // Notify each ancestor author (skip self at height 0)
+            for row in &ancestors {
+                let height: i32 = row.get(1);
+                if height == 0 || height >= REPLY_NOTIF_DEPTH {
+                    continue;
+                }
+                let ancestor_uri_str: String = row.get(0);
+                if let Ok(ancestor_uri) = AtUri::new(ancestor_uri_str.clone(), None) {
+                    let ancestor_author = ancestor_uri.get_hostname();
+                    if ancestor_author != did {
+                        if let Err(e) = client
+                            .execute(
+                                "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                 ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                &[
+                                    &ancestor_author,
+                                    &did,
+                                    &uri,
+                                    &cid,
+                                    &"reply",
+                                    &ancestor_uri_str,
+                                    &sort_at,
+                                ],
+                            )
+                            .await
+                        {
+                            tracing::warn!("failed to insert reply notification for {uri}: {e}");
+                        }
+                    }
+                }
+            }
+
+            // Descendant notifications for out-of-order indexing
+            // When a post in the middle of a thread is indexed after its replies,
+            // we notify ancestors about existing descendant replies
+            let descendants = client
+                .query(
+                    "WITH RECURSIVE descendent(uri, depth) AS (
+                        SELECT p.uri, 1
+                        FROM post p
+                        WHERE p.\"replyParent\" = $1 AND 1 <= $2
+                      UNION ALL
+                        SELECT p.uri, d.depth + 1
+                        FROM post p
+                        INNER JOIN descendent d ON d.uri = p.\"replyParent\"
+                        WHERE d.depth < $2
+                    )
+                    SELECT d.uri, d.depth, p.cid, p.creator, p.\"sortAt\"
+                    FROM descendent d
+                    INNER JOIN post p ON p.uri = d.uri",
+                    &[&uri, &REPLY_NOTIF_DEPTH],
+                )
+                .await?;
+
+            for desc_row in &descendants {
+                let desc_uri: String = desc_row.get(0);
+                let desc_depth: i32 = desc_row.get(1);
+                let desc_cid: String = desc_row.get(2);
+                let desc_creator: String = desc_row.get(3);
+                let desc_sort_at: String = desc_row.get(4);
+
+                for anc_row in &ancestors {
+                    let anc_height: i32 = anc_row.get(1);
+                    if desc_depth + anc_height < REPLY_NOTIF_DEPTH {
+                        let anc_uri: String = anc_row.get(0);
+                        if let Ok(anc_uri_parsed) = AtUri::new(anc_uri.clone(), None) {
+                            let anc_author = anc_uri_parsed.get_hostname();
+                            if anc_author != &desc_creator {
+                                if let Err(e) = client
+                                    .execute(
+                                        "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                         ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                        &[
+                                            &anc_author,
+                                            &desc_creator,
+                                            &desc_uri,
+                                            &desc_cid,
+                                            &"reply",
+                                            &anc_uri,
+                                            &desc_sort_at,
+                                        ],
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("failed to insert reply notification for {desc_uri}: {e}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2757,22 +3059,108 @@ impl IndexerManager {
         created_at: &str,
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Handle app.bsky.embed.images
+        if embed_type == "app.bsky.embed.images" {
+            Self::handle_embed_images(client, embed, post_uri).await?;
+        }
+
+        // Handle app.bsky.embed.video
+        if embed_type == "app.bsky.embed.video" {
+            Self::handle_embed_video(client, embed, post_uri).await?;
+        }
+
         // Handle app.bsky.embed.record (quote post)
-        if let Some(record) = embed.get("record") {
-            Self::handle_embed_record(
-                client, record, post_uri, post_cid, creator, created_at, indexed_at,
-            )
-            .await?;
+        if embed_type == "app.bsky.embed.record" {
+            if let Some(record) = embed.get("record") {
+                Self::handle_embed_record(
+                    client, record, post_uri, post_cid, creator, created_at, indexed_at,
+                )
+                .await?;
+            }
         }
 
         // Handle app.bsky.embed.recordWithMedia (quote post with media)
-        if let Some(record) = embed.get("record").and_then(|r| r.get("record")) {
-            Self::handle_embed_record(
-                client, record, post_uri, post_cid, creator, created_at, indexed_at,
-            )
-            .await?;
+        if embed_type == "app.bsky.embed.recordWithMedia" {
+            // Handle the record part (quote)
+            if let Some(record) = embed.get("record").and_then(|r| r.get("record")) {
+                Self::handle_embed_record(
+                    client, record, post_uri, post_cid, creator, created_at, indexed_at,
+                )
+                .await?;
+            }
+
+            // Handle the media part (images or video)
+            if let Some(media) = embed.get("media") {
+                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                if media_type == "app.bsky.embed.images" {
+                    Self::handle_embed_images(client, media, post_uri).await?;
+                } else if media_type == "app.bsky.embed.video" {
+                    Self::handle_embed_video(client, media, post_uri).await?;
+                }
+            }
         }
 
+        Ok(())
+    }
+
+    async fn handle_embed_images(
+        client: &deadpool_postgres::Client,
+        embed: &serde_json::Value,
+        post_uri: &str,
+    ) -> Result<(), WintermuteError> {
+        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
+            for (position, image) in images.iter().enumerate() {
+                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = image.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                });
+
+                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+
+                if let Some(image_cid) = image_cid {
+                    let position_str = position.to_string();
+                    client
+                        .execute(
+                            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
+                             VALUES ($1, $2, $3, $4)
+                             ON CONFLICT DO NOTHING",
+                            &[&post_uri, &position_str, &image_cid, &alt],
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_embed_video(
+        client: &deadpool_postgres::Client,
+        embed: &serde_json::Value,
+        post_uri: &str,
+    ) -> Result<(), WintermuteError> {
+        // Get the video CID - can be in video.ref.$link (CBOR decoded) or video.ref (string)
+        let video_cid = embed.get("video").and_then(|vid| {
+            vid.get("ref")
+                .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                .or_else(|| vid.get("ref").and_then(|r| r.as_str()))
+        });
+
+        let alt = embed.get("alt").and_then(|a| a.as_str());
+
+        if let Some(video_cid) = video_cid {
+            client
+                .execute(
+                    "INSERT INTO post_embed_video (\"postUri\", \"videoCid\", alt)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT DO NOTHING",
+                    &[&post_uri, &video_cid, &alt],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2791,13 +3179,19 @@ impl IndexerManager {
         if let (Some(embed_uri), Some(embed_cid)) = (embed_uri, embed_cid) {
             // Only process if it's a post being quoted
             if embed_uri.contains("/app.bsky.feed.post/") {
+                // Calculate sortAt (earlier of indexed_at and created_at)
+                let sort_at_quote = if indexed_at < created_at {
+                    indexed_at
+                } else {
+                    created_at
+                };
                 // Insert into quote table
                 client
                     .execute(
-                        "INSERT INTO quote (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        "INSERT INTO quote (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", \"sortAt\")
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                          ON CONFLICT DO NOTHING",
-                        &[&post_uri, &post_cid, &creator, &embed_uri, &embed_cid, &created_at, &indexed_at],
+                        &[&post_uri, &post_cid, &creator, &embed_uri, &embed_cid, &created_at, &indexed_at, &sort_at_quote],
                     )
                     .await?;
 
@@ -2820,14 +3214,17 @@ impl IndexerManager {
                         } else {
                             created_at
                         };
-                        client
+                        if let Err(e) = client
                             .execute(
                                 "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                 ON CONFLICT DO NOTHING",
+                                 ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                                 &[&quoted_author, &creator, &post_uri, &post_cid, &"quote", &Some(embed_uri), &sort_at],
                             )
-                            .await?;
+                            .await
+                        {
+                            tracing::warn!("failed to insert quote notification for {post_uri}: {e}");
+                        }
                     }
                 }
             }
@@ -2887,6 +3284,50 @@ impl IndexerManager {
         Ok(())
     }
 
+    /// Index a community post stub arriving from the firehose.
+    /// The full content was already stored via community.blacksky.feed.submitPost XRPC.
+    /// This just updates the CID on the existing `community_post` row.
+    async fn index_community_post_stub(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+
+        let rows = client
+            .execute(
+                "UPDATE community_post SET cid = $1, \"indexedAt\" = $2 WHERE uri = $3",
+                &[&cid, &indexed_at, &uri],
+            )
+            .await?;
+
+        if rows == 0 {
+            tracing::debug!(
+                "community post stub for {} not found in community_post table (content not yet submitted)",
+                uri
+            );
+        } else {
+            tracing::info!("updated community post stub cid for {}", uri);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_community_post(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+        client
+            .execute("DELETE FROM community_post WHERE uri = $1", &[&uri])
+            .await?;
+        tracing::info!("deleted community post {}", uri);
+        Ok(())
+    }
+
     async fn index_like(
         client: &deadpool_postgres::Client,
         did: &str,
@@ -2926,13 +3367,17 @@ impl IndexerManager {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert like notification for {uri}: {e}");
+                    }
                 }
             }
         }
@@ -3019,13 +3464,17 @@ impl IndexerManager {
             .await?;
 
         if row_count > 0 {
-            client
+            if let Err(e) = client
                 .execute(
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                     &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
                 )
-                .await?;
+                .await
+            {
+                tracing::warn!("failed to insert follow notification for {uri}: {e}");
+            }
         }
 
         client
@@ -3148,13 +3597,17 @@ impl IndexerManager {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert repost notification for {uri}: {e}");
+                    }
                 }
             }
         }
@@ -3238,7 +3691,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT ON CONSTRAINT actor_block_unique_subject DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
             )
             .await?;
@@ -3300,7 +3753,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"joinedViaStarterPackUri\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"bannerCid\" = EXCLUDED.\"bannerCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &display_name, &description, &avatar_cid, &banner_cid, &joined_via_uri, &created_at, &indexed_at],
             )
             .await?;
@@ -3309,13 +3768,17 @@ impl IndexerManager {
             if let Some(starter_pack_uri_str) = joined_via_uri {
                 if let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None) {
                     let starter_pack_author = starter_pack_uri.get_hostname();
-                    client
+                    if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
                             &[&starter_pack_author, &did, &uri, &cid, &"starterpack-joined", &Some(starter_pack_uri_str), &indexed_at],
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!("failed to insert starterpack-joined notification for {uri}: {e}");
+                    }
                 }
             }
         }
@@ -3368,7 +3831,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO feed_generator (uri, cid, creator, \"feedDid\", \"displayName\", description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   \"displayName\" = EXCLUDED.\"displayName\",
+                   description = EXCLUDED.description,
+                   \"descriptionFacets\" = EXCLUDED.\"descriptionFacets\",
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &feed_did, &display_name, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -3421,7 +3890,13 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO list (uri, cid, creator, name, purpose, description, \"descriptionFacets\", \"avatarCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   name = EXCLUDED.name,
+                   description = EXCLUDED.description,
+                   \"descriptionFacets\" = EXCLUDED.\"descriptionFacets\",
+                   \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &name, &purpose, &description, &description_facets, &avatar_cid, &created_at, &indexed_at],
             )
             .await?;
@@ -3561,7 +4036,10 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO starter_pack (uri, cid, creator, name, \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   name = EXCLUDED.name,
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
                 &[&uri, &cid, &did, &name, &created_at, &indexed_at],
             )
             .await?;
@@ -3844,7 +4322,7 @@ impl IndexerManager {
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
         let uri_obj = AtUri::new(
-            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            format!("at://{did}/app.bsky.graph.verification/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
@@ -3882,7 +4360,7 @@ impl IndexerManager {
         rkey: &str,
     ) -> Result<(), WintermuteError> {
         let uri_obj = AtUri::new(
-            format!("at://{did}/app.bsky.verification.proof/{rkey}"),
+            format!("at://{did}/app.bsky.graph.verification/{rkey}"),
             None,
         )
         .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;

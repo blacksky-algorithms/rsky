@@ -141,6 +141,7 @@ fn rocket() -> _ {
                 Ok(percentile) => percentile,
             },
         },
+        pinned_post_uri: env::var("PINNED_POST_URI").unwrap_or_default(),
     };
 
     rocket::custom(figment)

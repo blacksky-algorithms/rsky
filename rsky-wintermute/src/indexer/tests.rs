@@ -492,8 +492,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -514,7 +517,7 @@ mod indexer_tests {
         // Verify the label data
         let row = client
             .query_one(
-                "SELECT src, uri, val, cts FROM label WHERE src = $1 AND cid = ''",
+                "SELECT src, uri, val, cts, neg FROM label WHERE src = $1 AND cid = ''",
                 &[&test_src],
             )
             .await
@@ -524,11 +527,13 @@ mod indexer_tests {
         let uri: String = row.get(1);
         let val: String = row.get(2);
         let cts: String = row.get(3);
+        let neg: bool = row.get(4);
 
         assert_eq!(src, test_src);
         assert_eq!(uri, test_uri);
         assert_eq!(val, "spam");
         assert_eq!(cts, "2025-01-20T10:00:00Z");
+        assert!(!neg, "expected neg to be false");
 
         cleanup_test_labels(&pool, test_src).await;
     }
@@ -546,20 +551,29 @@ mod indexer_tests {
                 crate::types::Label {
                     src: test_src.to_owned(),
                     uri: "at://did:plc:user1/app.bsky.feed.post/post1".to_owned(),
+                    cid: None,
                     val: "spam".to_owned(),
+                    neg: false,
                     cts: "2025-01-20T10:00:00Z".to_owned(),
+                    exp: None,
                 },
                 crate::types::Label {
                     src: test_src.to_owned(),
                     uri: "at://did:plc:user2/app.bsky.feed.post/post2".to_owned(),
+                    cid: None,
                     val: "nsfw".to_owned(),
+                    neg: false,
                     cts: "2025-01-20T10:01:00Z".to_owned(),
+                    exp: None,
                 },
                 crate::types::Label {
                     src: test_src.to_owned(),
                     uri: "at://did:plc:user3/app.bsky.feed.post/post3".to_owned(),
+                    cid: None,
                     val: "porn".to_owned(),
+                    neg: false,
                     cts: "2025-01-20T10:02:00Z".to_owned(),
+                    exp: None,
                 },
             ],
         };
@@ -626,8 +640,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -651,8 +668,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T11:00:00Z".to_owned(), // Different timestamp
+                exp: None,
             }],
         };
 
@@ -700,8 +720,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src1.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -714,8 +737,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src2.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:01:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -754,8 +780,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -768,8 +797,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: test_uri.to_owned(),
+                cid: None,
                 val: "nsfw".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:01:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -807,8 +839,11 @@ mod indexer_tests {
             labels: vec![crate::types::Label {
                 src: test_src.to_owned(),
                 uri: "at://did:plc:user/app.bsky.feed.post/roundtrip".to_owned(),
+                cid: None,
                 val: "spam".to_owned(),
+                neg: false,
                 cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
             }],
         };
 
@@ -841,6 +876,86 @@ mod indexer_tests {
             .unwrap()
             .get(0);
         assert_eq!(count, 1, "label should be in database");
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
+    async fn test_label_negation() {
+        let pool = setup_test_pool();
+        let test_src = "did:plc:test_labeler_negation";
+        let test_uri = "did:plc:user_negation_test";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // First: apply a takedown label
+        let label_event1 = crate::types::LabelEvent {
+            seq: 8000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                cid: None,
+                val: "!takedown".to_owned(),
+                neg: false,
+                cts: "2025-01-20T10:00:00Z".to_owned(),
+                exp: None,
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event1).await;
+        assert!(result.is_ok());
+
+        // Verify label exists with neg=false
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT neg FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = '!takedown'",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap();
+        let neg: bool = row.get(0);
+        assert!(!neg, "initial label should have neg=false");
+
+        // Second: negate the takedown label
+        let label_event2 = crate::types::LabelEvent {
+            seq: 8001,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                cid: None,
+                val: "!takedown".to_owned(),
+                neg: true,
+                cts: "2025-01-20T11:00:00Z".to_owned(),
+                exp: None,
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event2).await;
+        assert!(result.is_ok());
+
+        // Verify label now has neg=true (upserted, not duplicated)
+        let count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = '!takedown'",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 1, "should still be 1 row after negation");
+
+        let row = client
+            .query_one(
+                "SELECT neg, cts FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = '!takedown'",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap();
+        let neg: bool = row.get(0);
+        let cts: String = row.get(1);
+        assert!(neg, "neg should be true after negation");
+        assert_eq!(cts, "2025-01-20T11:00:00Z", "cts should be updated");
 
         cleanup_test_labels(&pool, test_src).await;
     }
@@ -1065,6 +1180,8 @@ mod indexer_tests {
                 ],
                 blocks: vec![],
             }),
+            identity: None,
+            account: None,
         };
 
         // Step 2: Simulate ingester processing event (enqueue to firehose_live)
@@ -1591,7 +1708,7 @@ mod indexer_tests {
         // Test newer collection types that were previously untested
         let test_collections = vec![
             (
-                "app.bsky.verification.proof",
+                "app.bsky.graph.verification",
                 json!({
                     "subject": "did:plc:verified",
                     "handle": "verified.test",
