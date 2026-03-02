@@ -13,6 +13,7 @@ members = [
   "rsky-repo",
   "rsky-satnav",
   "rsky-syntax",
+  "rsky-video",
   "rsky-wintermute",
 ]
 resolver = "2"
