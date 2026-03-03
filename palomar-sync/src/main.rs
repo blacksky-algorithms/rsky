@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -158,70 +158,71 @@ async fn bulk_update(
     Ok(updates.len())
 }
 
+/// Keyset-paginated followersFuzzy sync. Fetches batch_size rows at a time
+/// ordered by did, using did > $last_did to avoid statement timeouts on large tables.
 async fn sync_followers(config: &Config) -> Result<()> {
     info!("starting followersFuzzy sync from profile_agg to OpenSearch");
 
     let pg = connect_pg(&config.database_url).await?;
     let http = Client::new();
 
-    let rows = pg
-        .query(
-            r#"SELECT did, "followersCount" FROM bsky.profile_agg WHERE "followersCount" > 0"#,
-            &[],
-        )
-        .await
-        .wrap_err("failed to query profile_agg")?;
-
-    let total = rows.len();
-    info!(total, "fetched follower counts from profile_agg");
-
-    let mut batch: Vec<(String, serde_json::Value)> = Vec::with_capacity(config.batch_size);
+    let mut last_did = String::new();
     let mut indexed = 0usize;
+    let page_size: i64 = config.batch_size as i64;
     let start = std::time::Instant::now();
 
-    for row in &rows {
-        let did: &str = row.get(0);
-        let count: i64 = row.get(1);
+    loop {
+        let rows = pg
+            .query(
+                r#"SELECT did, "followersCount" FROM bsky.profile_agg
+                   WHERE "followersCount" > 0 AND did > $1
+                   ORDER BY did
+                   LIMIT $2"#,
+                &[&last_did, &page_size],
+            )
+            .await
+            .wrap_err("failed to query profile_agg")?;
 
-        let update_body = json!({
-            "script": {
-                "source": "ctx._source.followersFuzzy = params.f",
-                "lang": "painless",
-                "params": { "f": count }
-            }
-        });
-
-        batch.push((did.to_string(), update_body));
-
-        if batch.len() >= config.batch_size {
-            let n =
-                bulk_update(&http, &config.opensearch_url, &config.profile_index, &batch).await?;
-            indexed += n;
-            info!(
-                indexed,
-                total,
-                elapsed_secs = start.elapsed().as_secs(),
-                "followersFuzzy sync progress"
-            );
-            batch.clear();
+        if rows.is_empty() {
+            break;
         }
-    }
 
-    // Flush remaining
-    if !batch.is_empty() {
+        let mut batch: Vec<(String, serde_json::Value)> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let did: &str = row.get(0);
+            let count: i64 = row.get(1);
+            last_did = did.to_string();
+
+            let update_body = json!({
+                "script": {
+                    "source": "ctx._source.followersFuzzy = params.f",
+                    "lang": "painless",
+                    "params": { "f": count }
+                }
+            });
+            batch.push((did.to_string(), update_body));
+        }
+
         let n = bulk_update(&http, &config.opensearch_url, &config.profile_index, &batch).await?;
         indexed += n;
+        info!(
+            indexed,
+            last_did,
+            elapsed_secs = start.elapsed().as_secs(),
+            "followersFuzzy sync progress"
+        );
     }
 
     info!(
         indexed,
-        total,
         elapsed_secs = start.elapsed().as_secs(),
         "followersFuzzy sync complete"
     );
     Ok(())
 }
 
+/// Export follow graph and actor list using psql COPY for streaming large tables,
+/// then run the external pagerank binary and index results to OpenSearch.
 async fn sync_pagerank(config: &Config, pagerank_bin: &Path, work_dir: &Path) -> Result<()> {
     info!("starting PageRank pipeline");
 
@@ -229,62 +230,66 @@ async fn sync_pagerank(config: &Config, pagerank_bin: &Path, work_dir: &Path) ->
     let actors_file = work_dir.join("actors.csv");
     let output_file = work_dir.join("pageranks.csv");
 
-    // Step 1: Export follow edges to CSV
-    info!("exporting follow graph to CSV");
-    let pg = connect_pg(&config.database_url).await?;
+    // Parse database URL to extract connection params for psql
+    let db_url = &config.database_url;
 
+    // Step 1: Export follow edges via psql COPY (streams, no memory issues)
+    info!("exporting follow graph to CSV via psql COPY");
     let export_start = std::time::Instant::now();
 
-    let rows = pg
-        .query(r#"SELECT "creator", "subjectDid" FROM bsky.follow"#, &[])
+    let copy_follows_sql =
+        r#"COPY (SELECT "creator", "subjectDid" FROM bsky.follow) TO STDOUT WITH CSV"#;
+
+    let follows_status = tokio::process::Command::new("psql")
+        .arg(db_url)
+        .arg("-c")
+        .arg(copy_follows_sql)
+        .stdout(Stdio::from(
+            std::fs::File::create(&follows_file).wrap_err("failed to create follows CSV")?,
+        ))
+        .stderr(Stdio::inherit())
+        .status()
         .await
-        .wrap_err("failed to query follow table")?;
+        .wrap_err("failed to run psql for follows export")?;
 
-    let follow_count = rows.len();
-    info!(follow_count, "fetched follow edges, writing CSV");
-
-    {
-        let mut file = tokio::fs::File::create(&follows_file)
-            .await
-            .wrap_err("failed to create follows CSV")?;
-        for row in &rows {
-            let creator: &str = row.get(0);
-            let subject: &str = row.get(1);
-            file.write_all(creator.as_bytes()).await?;
-            file.write_all(b",").await?;
-            file.write_all(subject.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-        }
-        file.flush().await?;
+    if !follows_status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "psql follows export failed with status: {}",
+            follows_status
+        ));
     }
 
     info!(
-        follow_count,
         elapsed_secs = export_start.elapsed().as_secs(),
         "follow graph CSV export complete"
     );
 
-    // Step 2: Export actor DIDs to CSV
-    info!("exporting actor DIDs to CSV");
-    let actor_rows = pg
-        .query("SELECT did FROM bsky.actor", &[])
+    // Step 2: Export actor DIDs via psql COPY
+    info!("exporting actor DIDs to CSV via psql COPY");
+
+    let copy_actors_sql = "COPY (SELECT did FROM bsky.actor) TO STDOUT WITH CSV";
+
+    let actors_status = tokio::process::Command::new("psql")
+        .arg(db_url)
+        .arg("-c")
+        .arg(copy_actors_sql)
+        .stdout(Stdio::from(
+            std::fs::File::create(&actors_file).wrap_err("failed to create actors CSV")?,
+        ))
+        .stderr(Stdio::inherit())
+        .status()
         .await
-        .wrap_err("failed to query actor table")?;
+        .wrap_err("failed to run psql for actors export")?;
 
-    let actor_count = actor_rows.len();
-
-    {
-        let mut file = tokio::fs::File::create(&actors_file)
-            .await
-            .wrap_err("failed to create actors CSV")?;
-        for row in &actor_rows {
-            let did: &str = row.get(0);
-            file.write_all(did.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-        }
-        file.flush().await?;
+    if !actors_status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "psql actors export failed with status: {}",
+            actors_status
+        ));
     }
 
+    // Count actors for the pagerank binary
+    let actor_count = count_lines(&actors_file).await?;
     info!(actor_count, "actor CSV export complete");
 
     // Step 3: Run pagerank binary
@@ -316,10 +321,12 @@ async fn sync_pagerank(config: &Config, pagerank_bin: &Path, work_dir: &Path) ->
 
     info!("pagerank computation complete, indexing results");
 
-    // Step 4: Read output CSV and bulk-index to OpenSearch
-    let csv_content = tokio::fs::read_to_string(&output_file)
+    // Step 4: Stream output CSV and bulk-index to OpenSearch
+    let file = tokio::fs::File::open(&output_file)
         .await
-        .wrap_err("failed to read pagerank output CSV")?;
+        .wrap_err("failed to open pagerank output CSV")?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
 
     let http = Client::new();
     let mut batch: Vec<(String, serde_json::Value)> = Vec::with_capacity(config.batch_size);
@@ -327,8 +334,8 @@ async fn sync_pagerank(config: &Config, pagerank_bin: &Path, work_dir: &Path) ->
     let mut line_count = 0usize;
     let index_start = std::time::Instant::now();
 
-    for line in csv_content.lines() {
-        let line = line.trim();
+    while let Some(line) = lines.next_line().await? {
+        let line = line.trim().to_string();
         if line.is_empty() {
             continue;
         }
@@ -393,4 +400,17 @@ async fn sync_pagerank(config: &Config, pagerank_bin: &Path, work_dir: &Path) ->
 
     info!("PageRank pipeline complete");
     Ok(())
+}
+
+async fn count_lines(path: &Path) -> Result<usize> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .wrap_err("failed to open file for line count")?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut count = 0usize;
+    while lines.next_line().await?.is_some() {
+        count += 1;
+    }
+    Ok(count)
 }
