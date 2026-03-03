@@ -92,6 +92,12 @@ async fn connect_pg(database_url: &str) -> Result<tokio_postgres::Client> {
         }
     });
 
+    // Disable statement timeout for bulk operations
+    client
+        .execute("SET statement_timeout = 0", &[])
+        .await
+        .wrap_err("failed to disable statement timeout")?;
+
     Ok(client)
 }
 
