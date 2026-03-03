@@ -190,7 +190,7 @@ async fn sync_followers(config: &Config) -> Result<()> {
         let mut batch: Vec<(String, serde_json::Value)> = Vec::with_capacity(rows.len());
         for row in &rows {
             let did: &str = row.get(0);
-            let count: i64 = row.get(1);
+            let count: i32 = row.get(1);
             last_did = did.to_string();
 
             let update_body = json!({
