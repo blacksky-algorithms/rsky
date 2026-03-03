@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "palomar-sync",
   "rsky-common",
   "rsky-crypto",
   "rsky-feedgen",

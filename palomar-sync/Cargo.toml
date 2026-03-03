@@ -1,0 +1,24 @@
+[package]
+name = "palomar-sync"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Sync followersFuzzy and PageRank from PostgreSQL to OpenSearch for Palomar search"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "palomar-sync"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+color-eyre = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tracing = { version = "0.1", features = ["release_max_level_debug"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
