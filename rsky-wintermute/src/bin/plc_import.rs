@@ -92,6 +92,27 @@ async fn connect_pg(database_url: &str) -> Result<tokio_postgres::Client> {
     Ok(client)
 }
 
+/// Deduplicate a batch of (did, handle) pairs.
+/// For duplicate DIDs, keep the last entry (most recent PLC operation).
+/// For duplicate handles, keep the last entry (most recent claimer).
+fn dedup_batch(data: &[(String, String)]) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+    // Last-write-wins for both did and handle
+    let mut by_did: HashMap<&str, &str> = HashMap::new();
+    for (did, handle) in data {
+        by_did.insert(did.as_str(), handle.as_str());
+    }
+    // Also deduplicate by handle: if two DIDs claim the same handle, keep the last one
+    let mut by_handle: HashMap<&str, &str> = HashMap::new();
+    for (did, handle) in &by_did {
+        by_handle.insert(*handle, *did);
+    }
+    by_handle
+        .into_iter()
+        .map(|(handle, did)| (did.to_owned(), handle.to_owned()))
+        .collect()
+}
+
 /// Bulk-update actor handles using COPY protocol.
 /// Only updates actors with NULL handles if null_only is true.
 /// Returns the number of actors updated.
@@ -103,6 +124,8 @@ async fn copy_update_handles(
     if data.is_empty() {
         return Ok(0);
     }
+
+    let data = dedup_batch(data);
 
     // Create temp table
     client
@@ -142,15 +165,22 @@ async fn copy_update_handles(
         .wrap_err("failed to send COPY data")?;
     sink.close().await.wrap_err("failed to close COPY sink")?;
 
-    // UPDATE actors with handles from temp table
+    // UPDATE actors with handles from temp table.
+    // Exclude handles already assigned to other actors (unique constraint on handle).
     let query = if null_only {
         "UPDATE actor SET handle = p.handle, \"indexedAt\" = $1
          FROM _plc_handles p
-         WHERE actor.did = p.did AND actor.handle IS NULL"
+         WHERE actor.did = p.did AND actor.handle IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM actor a2 WHERE a2.handle = p.handle AND a2.did != p.did
+           )"
     } else {
         "UPDATE actor SET handle = p.handle, \"indexedAt\" = $1
          FROM _plc_handles p
-         WHERE actor.did = p.did"
+         WHERE actor.did = p.did
+           AND NOT EXISTS (
+             SELECT 1 FROM actor a2 WHERE a2.handle = p.handle AND a2.did != p.did
+           )"
     };
 
     let updated = client
