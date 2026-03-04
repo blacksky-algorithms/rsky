@@ -2747,6 +2747,7 @@ impl IndexerManager {
             let cid = label.cid.as_deref().unwrap_or("");
             let exp: Option<&str> = label.exp.as_deref();
 
+            // Upsert the label with its exact (src, uri, cid, val) key
             let result = client
                 .execute(
                     "INSERT INTO label (src, uri, cid, val, neg, cts, exp)
@@ -2788,6 +2789,44 @@ impl IndexerManager {
                         label.neg
                     );
                     metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                }
+            }
+
+            // When a negation arrives, also negate ALL existing labels with
+            // matching (src, uri, val) regardless of CID. The appview hydration
+            // layer skips neg=true labels but does NOT use them to cancel other
+            // rows. If a negation arrives with a different CID than the original
+            // label, the ON CONFLICT upsert above creates a new row instead of
+            // updating the original, leaving the original takedown active.
+            if label.neg {
+                let negated = client
+                    .execute(
+                        "UPDATE label SET neg = true
+                         WHERE src = $1 AND uri = $2 AND val = $3 AND neg = false",
+                        &[&label.src, &label.uri, &label.val],
+                    )
+                    .await;
+
+                match negated {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(
+                            "negated {count} additional label(s) with different CIDs: \
+                             src={} uri={} val={}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to negate labels by (src, uri, val): \
+                             src={} uri={} val={}: {e}",
+                            label.src,
+                            label.uri,
+                            label.val
+                        );
+                    }
                 }
             }
         }

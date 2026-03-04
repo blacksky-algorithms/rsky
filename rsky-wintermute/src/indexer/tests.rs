@@ -961,6 +961,95 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    async fn test_label_negation_cid_mismatch() {
+        // When a negation arrives with a different CID than the original label,
+        // the original should still be negated. This is the scenario that caused
+        // The Green List takedown to persist even after Bluesky restored the list.
+        let pool = setup_test_pool();
+        let test_src = "did:plc:test_labeler_cid_mismatch";
+        let test_uri = "at://did:plc:test_user/app.bsky.graph.list/cid_mismatch_test";
+
+        cleanup_test_labels(&pool, test_src).await;
+
+        // Apply a takedown label with empty CID
+        let label_event1 = crate::types::LabelEvent {
+            seq: 9000,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                cid: None,
+                val: "!takedown".to_owned(),
+                neg: false,
+                cts: "2025-02-05T21:00:00Z".to_owned(),
+                exp: None,
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event1).await;
+        assert!(result.is_ok());
+
+        // Negate with a DIFFERENT CID (this is what Bluesky's moderation does)
+        let label_event2 = crate::types::LabelEvent {
+            seq: 9001,
+            labels: vec![crate::types::Label {
+                src: test_src.to_owned(),
+                uri: test_uri.to_owned(),
+                cid: Some("bafyreidtaceuvwlkvtbrgjeite7jegu3zxwxoqpk7rsnj7ty6jpfnmp7uq".to_owned()),
+                val: "!takedown".to_owned(),
+                neg: true,
+                cts: "2025-02-05T21:28:14.424Z".to_owned(),
+                exp: None,
+            }],
+        };
+
+        let result = IndexerManager::process_label_event(&pool, &label_event2).await;
+        assert!(result.is_ok());
+
+        let client = pool.get().await.unwrap();
+
+        // The original empty-CID label should now be negated
+        let row = client
+            .query_one(
+                "SELECT neg FROM label WHERE src = $1 AND uri = $2 AND cid = '' AND val = '!takedown'",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap();
+        let neg: bool = row.get(0);
+        assert!(
+            neg,
+            "original empty-CID label should be negated when negation arrives with different CID"
+        );
+
+        // The negation row itself should also exist with neg=true
+        let neg_row = client
+            .query_one(
+                "SELECT neg FROM label WHERE src = $1 AND uri = $2 AND cid = 'bafyreidtaceuvwlkvtbrgjeite7jegu3zxwxoqpk7rsnj7ty6jpfnmp7uq' AND val = '!takedown'",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap();
+        let neg2: bool = neg_row.get(0);
+        assert!(neg2, "negation row should have neg=true");
+
+        // Both rows should have neg=true -- no active takedown remains
+        let active_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM label WHERE src = $1 AND uri = $2 AND val = '!takedown' AND neg = false",
+                &[&test_src, &test_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            active_count, 0,
+            "no active (neg=false) takedown labels should remain"
+        );
+
+        cleanup_test_labels(&pool, test_src).await;
+    }
+
+    #[tokio::test]
     async fn test_label_indexing_empty_labels_array() {
         let pool = setup_test_pool();
 
