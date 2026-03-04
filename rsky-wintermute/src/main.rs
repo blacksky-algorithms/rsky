@@ -188,7 +188,7 @@ fn start_metrics_server(port: u16) -> Result<()> {
         let listener = listener.unwrap();
         let addr = SocketAddr::from(([0, 0, 0, 0], bound_port));
 
-        tracing::info!("metrics server listening on http://{addr}/metrics");
+        tracing::info!("metrics server listening on http://{addr} (endpoints: /metrics, /_health)");
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
@@ -211,8 +211,8 @@ fn start_metrics_server(port: u16) -> Result<()> {
 
             tokio::task::spawn(async move {
                 let service = service_fn(move |req: Request<hyper::body::Incoming>| async move {
-                    if req.uri().path() == "/metrics" {
-                        match metrics::encode_metrics() {
+                    match req.uri().path() {
+                        "/metrics" => match metrics::encode_metrics() {
                             Ok(body) => Ok::<_, color_eyre::eyre::Error>(
                                 Response::builder()
                                     .status(200)
@@ -230,14 +230,31 @@ fn start_metrics_server(port: u16) -> Result<()> {
                                 .map_err(|e| {
                                     color_eyre::eyre::eyre!("failed to build response: {e}")
                                 })?),
+                        },
+                        "/_health" => {
+                            let shutting_down = SHUTDOWN.load(Ordering::Relaxed);
+                            if shutting_down {
+                                Ok(Response::builder()
+                                    .status(503)
+                                    .body(Full::new(Bytes::from("shutting_down")))
+                                    .map_err(|e| {
+                                        color_eyre::eyre::eyre!("failed to build response: {e}")
+                                    })?)
+                            } else {
+                                Ok(Response::builder()
+                                    .status(200)
+                                    .body(Full::new(Bytes::from("ok")))
+                                    .map_err(|e| {
+                                        color_eyre::eyre::eyre!("failed to build response: {e}")
+                                    })?)
+                            }
                         }
-                    } else {
-                        Ok(Response::builder()
+                        _ => Ok(Response::builder()
                             .status(404)
                             .body(Full::new(Bytes::from("Not Found")))
                             .map_err(|e| {
                                 color_eyre::eyre::eyre!("failed to build response: {e}")
-                            })?)
+                            })?),
                     }
                 });
 
