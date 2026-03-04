@@ -86,7 +86,7 @@ log "backed up current binary to ${BINARY_PREV}"
 
 # Record pre-deploy metrics snapshot if service is running
 if systemctl is-active --quiet "$SERVICE"; then
-    PRE_EVENTS=$(curl -sf "${METRICS_URL}/metrics" 2>/dev/null | grep '^ingester_firehose_events_total' | awk '{print $2}' || echo "0")
+    PRE_EVENTS=$(curl -sf "${METRICS_URL}/metrics" 2>/dev/null | grep 'ingester_firehose_events_total{stream="firehose_live"}' | awk '{print $2}' || echo "0")
     log "pre-deploy firehose events: ${PRE_EVENTS}"
 fi
 
@@ -132,8 +132,8 @@ while (( elapsed < HEALTH_TIMEOUT )); do
 
     # After METRIC_CHECK_AFTER seconds, verify firehose is processing
     if (( elapsed >= METRIC_CHECK_AFTER )) && [[ "$metrics_checked" == "false" ]]; then
-        POST_EVENTS=$(curl -sf "${METRICS_URL}/metrics" 2>/dev/null | grep '^ingester_firehose_events_total' | awk '{print $2}' || echo "0")
-        if [[ -n "$POST_EVENTS" ]] && (( $(echo "$POST_EVENTS > 0" | bc -l 2>/dev/null || echo 0) )); then
+        POST_EVENTS=$(curl -sf "${METRICS_URL}/metrics" 2>/dev/null | grep 'ingester_firehose_events_total{stream="firehose_live"}' | awk '{print int($2)}' || echo "0")
+        if [[ -n "$POST_EVENTS" ]] && (( POST_EVENTS > 0 )); then
             log "firehose events: ${POST_EVENTS} (processing confirmed)"
             metrics_checked=true
         else
