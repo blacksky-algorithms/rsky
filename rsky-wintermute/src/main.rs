@@ -46,6 +46,11 @@ fn main() -> Result<()> {
 
     color_eyre::install()?;
 
+    // Install rustls crypto provider before any TLS connections are made
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let args = Args::parse();
 
     if args.relay_hosts.is_empty() {
