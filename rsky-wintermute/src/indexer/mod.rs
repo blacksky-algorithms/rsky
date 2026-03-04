@@ -22,7 +22,7 @@ use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio_postgres::NoTls;
 
 // Global semaphore to serialize like inserts across all workers.
@@ -73,7 +73,7 @@ pub struct IndexerManager {
     pool_labels: Pool,
     #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
-    id_resolver: Arc<Mutex<IdResolver>>,
+    id_resolver: Arc<IdResolver>,
 }
 
 /// Parsed job data for batch processing
@@ -122,7 +122,7 @@ impl IndexerManager {
             pool_labels,
             // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
-            id_resolver: Arc::new(Mutex::new(id_resolver)),
+            id_resolver: Arc::new(id_resolver),
         })
     }
 
@@ -229,9 +229,8 @@ impl IndexerManager {
             let mut pending_dids = dids_to_resolve.into_iter();
             let mut resolved_count = 0usize;
 
-            // Helper to create boxed future
             let make_future = |pool: Pool,
-                               id_resolver: Arc<Mutex<IdResolver>>,
+                               id_resolver: Arc<IdResolver>,
                                did: String,
                                timestamp: String|
              -> HandleFuture {
@@ -880,7 +879,7 @@ impl IndexerManager {
     /// Returns true if handle was successfully resolved and stored.
     pub async fn index_handle(
         client: &deadpool_postgres::Client,
-        id_resolver: &Arc<Mutex<IdResolver>>,
+        id_resolver: &Arc<IdResolver>,
         did: &str,
         timestamp: &str,
         force: bool,
@@ -916,8 +915,9 @@ impl IndexerManager {
         }
 
         // Resolve DID document to get handle
+        // Clone the resolver so each task gets its own instance without mutex contention
         let did_doc = {
-            let mut resolver = id_resolver.lock().await;
+            let mut resolver = id_resolver.as_ref().clone();
             match resolver.did.resolve(did.to_owned(), Some(true)).await {
                 Ok(Some(doc)) => doc,
                 Ok(None) => {
@@ -955,7 +955,7 @@ impl IndexerManager {
 
         // Verify bidirectional binding: handle -> DID
         let handle_did = {
-            let mut resolver = id_resolver.lock().await;
+            let mut resolver = id_resolver.as_ref().clone();
             match resolver.handle.resolve(&handle).await {
                 Ok(Some(resolved_did)) => resolved_did,
                 Ok(None) => {

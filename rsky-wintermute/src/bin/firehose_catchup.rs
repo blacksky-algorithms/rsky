@@ -188,8 +188,8 @@ async fn main() -> Result<()> {
             if last_log_time.elapsed() > Duration::from_secs(10) {
                 let current_processed = processed.load(Ordering::Relaxed);
                 let current_seq = last_seq.load(Ordering::Relaxed);
-                let rate =
-                    (current_processed - last_log_count) as f64 / last_log_time.elapsed().as_secs_f64();
+                let rate = (current_processed - last_log_count) as f64
+                    / last_log_time.elapsed().as_secs_f64();
                 let remaining = end_cursor - current_seq;
                 let pct = ((current_seq - args.start_cursor) as f64 / total_events as f64) * 100.0;
                 tracing::info!(

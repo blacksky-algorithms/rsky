@@ -17,6 +17,10 @@ path = "src/bin/queue_backfill.rs"
 name = "fix_blob_refs"
 path = "src/bin/fix_blob_refs.rs"
 
+[[bin]]
+name = "plc_import"
+path = "src/bin/plc_import.rs"
+
 [dependencies]
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
