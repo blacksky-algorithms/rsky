@@ -15,11 +15,11 @@
 #
 set -euo pipefail
 
-# Source cargo environment (installed under ubuntu user)
-export HOME="${HOME:-/home/ubuntu}"
-if [[ -f "$HOME/.cargo/env" ]]; then
+# Source cargo environment (installed under ubuntu user, but sudo sets HOME=/root)
+CARGO_ENV="/home/ubuntu/.cargo/env"
+if [[ -f "$CARGO_ENV" ]]; then
     # shellcheck source=/dev/null
-    source "$HOME/.cargo/env"
+    source "$CARGO_ENV"
 fi
 
 readonly REPO_DIR="/opt/appview/rsky"
