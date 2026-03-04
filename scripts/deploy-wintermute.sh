@@ -15,6 +15,13 @@
 #
 set -euo pipefail
 
+# Source cargo environment (installed under ubuntu user)
+export HOME="${HOME:-/home/ubuntu}"
+if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env"
+fi
+
 readonly REPO_DIR="/opt/appview/rsky"
 readonly BINARY_SRC="${REPO_DIR}/target/release/wintermute"
 readonly BINARY_DST="/usr/local/bin/rsky-wintermute"
