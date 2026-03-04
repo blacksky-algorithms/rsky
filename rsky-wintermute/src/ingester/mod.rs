@@ -73,7 +73,8 @@ impl IngesterManager {
             .map_err(|e| WintermuteError::Other(format!("failed to create runtime: {e}")))?;
 
         rt.block_on(async {
-            let mut tasks = Vec::new();
+            // Long-running tasks that should keep the ingester alive
+            let mut persistent_tasks = Vec::new();
 
             for host in &self.relay_hosts {
                 let storage = Arc::clone(&self.storage);
@@ -83,12 +84,14 @@ impl IngesterManager {
                 let firehose_task = tokio::spawn(async move {
                     Self::run_connection(Arc::clone(&storage), host_clone.clone(), db_url).await;
                 });
-                tasks.push(firehose_task);
+                persistent_tasks.push(firehose_task);
 
+                // Backfill enumeration is a one-shot task -- spawn it independently
+                // so its completion does not affect the ingester's lifetime
                 let backfill_storage = Arc::clone(&self.storage);
                 let backfill_host = host.clone();
                 let backfill_db_url = self.database_url.clone();
-                let backfill_task = tokio::spawn(async move {
+                tokio::spawn(async move {
                     if let Err(e) = backfill_queue::populate_backfill_queue(
                         backfill_storage,
                         backfill_host,
@@ -98,8 +101,8 @@ impl IngesterManager {
                     {
                         tracing::error!("backfill queue population failed: {e}");
                     }
+                    tracing::info!("backfill queue enumeration completed");
                 });
-                tasks.push(backfill_task);
             }
 
             for host in &self.labeler_hosts {
@@ -113,10 +116,13 @@ impl IngesterManager {
                     }
                 });
 
-                tasks.push(task);
+                persistent_tasks.push(task);
             }
 
-            for task in tasks {
+            // Only await persistent tasks (firehose + labels).
+            // The ingester stays alive as long as any persistent task is running.
+            // Backfill enumeration runs independently and its completion is harmless.
+            for task in persistent_tasks {
                 drop(task.await);
             }
         });
