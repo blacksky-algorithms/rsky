@@ -15,12 +15,8 @@
 #
 set -euo pipefail
 
-# Source cargo environment (installed under ubuntu user, but sudo sets HOME=/root)
-CARGO_ENV="/home/ubuntu/.cargo/env"
-if [[ -f "$CARGO_ENV" ]]; then
-    # shellcheck source=/dev/null
-    source "$CARGO_ENV"
-fi
+# Add cargo to PATH (installed under ubuntu user, but sudo sets HOME=/root)
+export PATH="/home/ubuntu/.cargo/bin:${PATH}"
 
 readonly REPO_DIR="/opt/appview/rsky"
 readonly BINARY_SRC="${REPO_DIR}/target/release/wintermute"
