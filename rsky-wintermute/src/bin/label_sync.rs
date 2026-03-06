@@ -125,7 +125,7 @@ async fn sync_labeler(
 
     let mut total_events = 0u64;
     let mut total_negations_applied = 0u64;
-    let mut total_labels_inserted = 0u64;
+    let mut total_skipped = 0u64;
     let mut last_seq = 0i64;
     let start = std::time::Instant::now();
 
@@ -162,7 +162,7 @@ async fn sync_labeler(
                     let permit = semaphore.clone().acquire_owned().await?;
                     let pool_clone = Arc::clone(pool);
                     let event = label_event.clone();
-                    let (neg_count, ins_count) = tokio::spawn(async move {
+                    let (neg_count, skip_count) = tokio::spawn(async move {
                         let result = process_label_event_safe(&pool_clone, &event).await;
                         drop(permit);
                         result.unwrap_or((0, 0))
@@ -170,7 +170,7 @@ async fn sync_labeler(
                     .await?;
 
                     total_negations_applied += neg_count;
-                    total_labels_inserted += ins_count;
+                    total_skipped += skip_count;
 
                     if total_events % 10000 == 0 {
                         let elapsed = start.elapsed().as_secs();
@@ -181,7 +181,7 @@ async fn sync_labeler(
                         };
                         println!(
                             "[{labeler_host}] seq={last_seq} events={total_events} \
-                             negations={total_negations_applied} inserted={total_labels_inserted} \
+                             negations={total_negations_applied} skipped={total_skipped} \
                              rate={rate}/s"
                         );
                     }
@@ -200,7 +200,7 @@ async fn sync_labeler(
         "\n=== {labeler_host} sync complete ===\n\
          Events processed: {total_events}\n\
          Negations applied: {total_negations_applied}\n\
-         Labels inserted: {total_labels_inserted}\n\
+         Skipped (non-negation): {total_skipped}\n\
          Final seq: {last_seq}\n\
          Duration: {:.1}s",
         start.elapsed().as_secs_f64()
@@ -209,68 +209,44 @@ async fn sync_labeler(
     Ok(())
 }
 
-/// Process a label event safely: insert new labels, apply negations to existing.
-/// Returns (negations_applied, labels_inserted).
+/// Process a label event: only apply negations to existing labels.
+/// Skips all positive labels entirely -- never inserts new rows.
+/// Returns (negations_applied, skipped).
 async fn process_label_event_safe(
     pool: &deadpool_postgres::Pool,
     event: &rsky_wintermute::types::LabelEvent,
 ) -> Result<(u64, u64)> {
     let client = pool.get().await?;
     let mut negations = 0u64;
-    let mut inserts = 0u64;
+    let mut skipped = 0u64;
 
     for label in &event.labels {
-        let cid = label.cid.as_deref().unwrap_or("");
-        let exp: Option<&str> = label.exp.as_deref();
+        if !label.neg {
+            skipped += 1;
+            continue;
+        }
 
-        // Insert new labels (ON CONFLICT DO NOTHING to preserve deleted labels)
-        // If label already exists, this is a no-op.
-        let result = client
+        // Apply negation to ALL existing labels with matching (src, uri, val)
+        let negated = client
             .execute(
-                "INSERT INTO label (src, uri, cid, val, neg, cts, exp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (src, uri, cid, val) DO NOTHING",
-                &[
-                    &label.src, &label.uri, &cid, &label.val, &label.neg, &label.cts, &exp,
-                ],
+                "UPDATE label SET neg = true
+                 WHERE src = $1 AND uri = $2 AND val = $3 AND neg = false",
+                &[&label.src, &label.uri, &label.val],
             )
             .await;
 
-        match result {
-            Ok(rows) => {
-                if rows > 0 {
-                    inserts += 1;
-                }
-            }
-            Err(e) => {
-                tracing::debug!("label insert error: {e}");
-            }
-        }
-
-        // When a negation arrives, apply it to ALL existing labels with
-        // matching (src, uri, val) regardless of CID.
-        if label.neg {
-            let negated = client
-                .execute(
-                    "UPDATE label SET neg = true
-                     WHERE src = $1 AND uri = $2 AND val = $3 AND neg = false",
-                    &[&label.src, &label.uri, &label.val],
-                )
-                .await;
-
-            if let Ok(count) = negated {
-                negations += count;
-                if count > 0 {
-                    tracing::info!(
-                        "negated {count} label(s): src={} uri={} val={}",
-                        label.src,
-                        label.uri,
-                        label.val
-                    );
-                }
+        if let Ok(count) = negated {
+            negations += count;
+            if count > 0 {
+                tracing::info!(
+                    "negated {count} label(s): src={} uri={} val={}",
+                    label.src,
+                    label.uri,
+                    label.val
+                );
             }
         }
     }
 
-    Ok((negations, inserts))
+    Ok((negations, skipped))
 }
