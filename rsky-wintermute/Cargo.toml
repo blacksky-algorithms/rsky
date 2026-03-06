@@ -21,6 +21,10 @@ path = "src/bin/fix_blob_refs.rs"
 name = "plc_import"
 path = "src/bin/plc_import.rs"
 
+[[bin]]
+name = "label_sync"
+path = "src/bin/label_sync.rs"
+
 [dependencies]
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
