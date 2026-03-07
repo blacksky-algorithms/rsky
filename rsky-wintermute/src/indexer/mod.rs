@@ -4124,6 +4124,17 @@ impl IndexerManager {
             )
             .await?;
 
+        // Set hasThreadGate flag on the associated post so the hydrator knows
+        // to load threadgate rules when computing viewer.replyDisabled
+        if let Some(post_uri) = post_uri {
+            client
+                .execute(
+                    "UPDATE post SET \"hasThreadGate\" = true WHERE uri = $1",
+                    &[&post_uri],
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -4138,6 +4149,16 @@ impl IndexerManager {
         client
             .execute("DELETE FROM thread_gate WHERE uri = $1", &[&uri])
             .await?;
+
+        // Clear hasThreadGate flag on the associated post
+        let post_uri = format!("at://{did}/app.bsky.feed.post/{rkey}");
+        client
+            .execute(
+                "UPDATE post SET \"hasThreadGate\" = false WHERE uri = $1",
+                &[&post_uri],
+            )
+            .await?;
+
         Ok(())
     }
 
@@ -4167,6 +4188,17 @@ impl IndexerManager {
             )
             .await?;
 
+        // Set hasPostGate flag on the associated post so the hydrator knows
+        // to load postgate rules when computing viewer.embeddingDisabled
+        if let Some(post_uri) = post_uri {
+            client
+                .execute(
+                    "UPDATE post SET \"hasPostGate\" = true WHERE uri = $1",
+                    &[&post_uri],
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -4181,6 +4213,16 @@ impl IndexerManager {
         client
             .execute("DELETE FROM post_gate WHERE uri = $1", &[&uri])
             .await?;
+
+        // Clear hasPostGate flag on the associated post
+        let post_uri = format!("at://{did}/app.bsky.feed.post/{rkey}");
+        client
+            .execute(
+                "UPDATE post SET \"hasPostGate\" = false WHERE uri = $1",
+                &[&post_uri],
+            )
+            .await?;
+
         Ok(())
     }
 
