@@ -1020,6 +1020,21 @@ impl IndexerManager {
         let json_str = serde_json::to_string(json)
             .map_err(|e| WintermuteError::Serialization(format!("json stringify failed: {e}")))?;
 
+        // Strip null bytes (\u0000) which are valid JSON per RFC 8259 but Node.js's
+        // JSON.parse() rejects them, causing dataplane rowToRecord parse errors.
+        let json_str = json_str.replace('\0', "").replace("\\u0000", "");
+
+        // Validate JSON round-trips correctly to prevent corrupted records in the DB.
+        // The record.json column is type text (not jsonb), so PostgreSQL won't reject invalid JSON.
+        if serde_json::from_str::<serde_json::Value>(&json_str).is_err() {
+            tracing::error!(
+                "json validation failed for {uri}: serialized JSON does not round-trip"
+            );
+            return Err(WintermuteError::Serialization(format!(
+                "json validation failed for {uri}: produced invalid JSON"
+            )));
+        }
+
         tracing::debug!("inserting generic record: uri={uri}, rev={rev}, did={did}");
 
         let result = client

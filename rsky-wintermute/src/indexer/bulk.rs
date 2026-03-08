@@ -58,6 +58,17 @@ pub async fn copy_insert_records(
     // Build tab-separated data
     let mut buffer = Vec::with_capacity(data.len() * 200);
     for (uri, cid, did, json, rev, indexed_at) in data {
+        // Strip null bytes which are valid JSON per RFC 8259 but Node.js's
+        // JSON.parse() rejects them, causing dataplane rowToRecord parse errors.
+        let json = json.replace('\0', "").replace("\\u0000", "");
+
+        // Validate JSON before writing to DB. The record.json column is type text
+        // (not jsonb), so PostgreSQL won't reject invalid JSON.
+        if serde_json::from_str::<serde_json::Value>(&json).is_err() {
+            tracing::error!("bulk insert: skipping {uri} - invalid JSON after serialization");
+            continue;
+        }
+
         // Escape for PostgreSQL COPY text format:
         // - Backslash first (\ -> \\) so we don't double-escape other escapes
         // - Tab (0x09 -> \t)
