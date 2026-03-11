@@ -155,7 +155,7 @@ pub async fn index(
             Err(_) => eprintln!("Failed to write anonymous visitor."),
         }
     }
-    match feed {
+    let mut result = match feed {
         _blacksky if _blacksky == BLACKSKY && !is_banned => {
             match crate::apis::get_all_posts(None, limit, cursor, true, connection, config).await {
                 Ok(response) => Ok(Json(response)),
@@ -408,7 +408,22 @@ pub async fn index(
                 Json(internal_error),
             ))
         }
+    };
+
+    // Insert pinned post at position 0 on first load only (no cursor = first page)
+    // Skip for banned users who should only see the banned notice
+    if cursor.is_none() && !is_banned && !config.pinned_post_uri.is_empty() {
+        if let Ok(ref mut response) = result {
+            response.feed.insert(
+                0,
+                crate::models::PostResult {
+                    post: config.pinned_post_uri.clone(),
+                },
+            );
+        }
     }
+
+    result
 }
 
 #[rocket::put("/cursor?<service>&<sequence>")]

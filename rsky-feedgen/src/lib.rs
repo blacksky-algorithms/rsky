@@ -74,6 +74,7 @@ pub struct FeedGenConfig {
     pub sponsored_post_uri: String,
     pub sponsored_post_probability: f64,
     pub trending_percentile_min: f64,
+    pub pinned_post_uri: String,
 }
 
 pub mod apis;

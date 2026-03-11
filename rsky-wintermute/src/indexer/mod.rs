@@ -3369,6 +3369,50 @@ impl IndexerManager {
         Ok(())
     }
 
+    /// Index a community post stub arriving from the firehose.
+    /// The full content was already stored via community.blacksky.feed.submitPost XRPC.
+    /// This just updates the CID on the existing `community_post` row.
+    async fn index_community_post_stub(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+
+        let rows = client
+            .execute(
+                "UPDATE community_post SET cid = $1, \"indexedAt\" = $2 WHERE uri = $3",
+                &[&cid, &indexed_at, &uri],
+            )
+            .await?;
+
+        if rows == 0 {
+            tracing::debug!(
+                "community post stub for {} not found in community_post table (content not yet submitted)",
+                uri
+            );
+        } else {
+            tracing::info!("updated community post stub cid for {}", uri);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_community_post(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
+        client
+            .execute("DELETE FROM community_post WHERE uri = $1", &[&uri])
+            .await?;
+        tracing::info!("deleted community post {}", uri);
+        Ok(())
+    }
+
     async fn index_like(
         client: &deadpool_postgres::Client,
         did: &str,
