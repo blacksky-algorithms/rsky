@@ -145,9 +145,19 @@ impl Resolver {
     }
 
     pub fn request(&mut self, did: &str) {
+        self.request_inner(did, false);
+    }
+
+    /// Force an individual DID lookup from plc.directory, bypassing the export stream.
+    /// Used when a hostname mismatch suggests the user may have migrated.
+    pub fn request_direct(&mut self, did: &str) {
+        self.request_inner(did, true);
+    }
+
+    fn request_inner(&mut self, did: &str, force_direct: bool) {
         self.inflight.insert(did.to_owned());
         if let Some(plc) = did.strip_prefix("did:plc:") {
-            let plc = if *DO_PLC_EXPORT { None } else { Some(plc) };
+            let plc = if *DO_PLC_EXPORT && !force_direct { None } else { Some(plc) };
             self.send_req(None, plc);
         } else if let Some(web) = did.strip_prefix("did:web:") {
             let Ok(web) = urlencoding::decode(web) else {
@@ -238,6 +248,10 @@ impl Resolver {
                 },
                 Err(err) => {
                     tracing::debug!(%err, "fetch error");
+                    // Restore the after cursor on export failure so exports can be retried
+                    if let Query::Export(after) = query {
+                        self.after = Some(after);
+                    }
                 }
             }
         } else if *DO_PLC_EXPORT && self.last.elapsed() > PLC_EXPORT_INTERVAL {

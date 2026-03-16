@@ -129,7 +129,9 @@ impl SubscribeReposCommitOperation {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeReposCommit {
     pub seq: u64,
-    pub rebase: bool,  // NOTE: DEPRECATED
+    #[serde(default)]
+    pub rebase: bool, // NOTE: DEPRECATED
+    #[serde(default)]
     pub too_big: bool, // NOTE: DEPRECATED
     #[serde(rename = "repo")]
     pub did: String,

@@ -261,8 +261,10 @@ impl Manager {
 
             if let Some(pds) = pds {
                 if host != pds {
-                    // expire the identity & queue message in case the user has migrated
-                    self.resolver.expire(did, time);
+                    // PDS mismatch: user may have migrated. Fetch their DID doc directly
+                    // from plc.directory to get the current PDS and signing key.
+                    tracing::debug!(%pds, "hostname pds mismatch, fetching latest DID doc");
+                    self.resolver.request_direct(did);
                     self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
                     self.hosts.insert(host.clone(), (seq, time));
                     continue;
