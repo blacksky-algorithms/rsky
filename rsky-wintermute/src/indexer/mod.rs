@@ -2885,7 +2885,7 @@ impl IndexerManager {
             .and_then(|r| r.get("cid"))
             .and_then(|v| v.as_str());
 
-        client
+        let row_count = client
             .execute(
                 "INSERT INTO post (uri, cid, creator, text, \"replyRoot\", \"replyRootCid\", \"replyParent\", \"replyParentCid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -2910,14 +2910,16 @@ impl IndexerManager {
             )
             .await?;
 
-        client
-            .execute(
-                "INSERT INTO profile_agg (did, \"postsCount\")
-                 VALUES ($1, 1)
-                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = profile_agg.\"postsCount\" + 1",
-                &[&did],
-            )
-            .await?;
+        if row_count > 0 {
+            client
+                .execute(
+                    "INSERT INTO profile_agg (did, \"postsCount\")
+                     VALUES ($1, 1)
+                     ON CONFLICT (did) DO UPDATE SET \"postsCount\" = profile_agg.\"postsCount\" + 1",
+                    &[&did],
+                )
+                .await?;
+        }
 
         // Generate mention notifications from facets
         if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
@@ -3369,50 +3371,6 @@ impl IndexerManager {
         Ok(())
     }
 
-    /// Index a community post stub arriving from the firehose.
-    /// The full content was already stored via community.blacksky.feed.submitPost XRPC.
-    /// This just updates the CID on the existing `community_post` row.
-    async fn index_community_post_stub(
-        client: &deadpool_postgres::Client,
-        did: &str,
-        rkey: &str,
-        cid: &str,
-        indexed_at: &str,
-    ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
-
-        let rows = client
-            .execute(
-                "UPDATE community_post SET cid = $1, \"indexedAt\" = $2 WHERE uri = $3",
-                &[&cid, &indexed_at, &uri],
-            )
-            .await?;
-
-        if rows == 0 {
-            tracing::debug!(
-                "community post stub for {} not found in community_post table (content not yet submitted)",
-                uri
-            );
-        } else {
-            tracing::info!("updated community post stub cid for {}", uri);
-        }
-
-        Ok(())
-    }
-
-    async fn delete_community_post(
-        client: &deadpool_postgres::Client,
-        did: &str,
-        rkey: &str,
-    ) -> Result<(), WintermuteError> {
-        let uri = format!("at://{did}/community.blacksky.feed.post/{rkey}");
-        client
-            .execute("DELETE FROM community_post WHERE uri = $1", &[&uri])
-            .await?;
-        tracing::info!("deleted community post {}", uri);
-        Ok(())
-    }
-
     async fn index_like(
         client: &deadpool_postgres::Client,
         did: &str,
@@ -3543,25 +3501,25 @@ impl IndexerManager {
             {
                 tracing::warn!("failed to insert follow notification for {uri}: {e}");
             }
+
+            client
+                .execute(
+                    "INSERT INTO profile_agg (did, \"followersCount\")
+                     VALUES ($1, 1)
+                     ON CONFLICT (did) DO UPDATE SET \"followersCount\" = profile_agg.\"followersCount\" + 1",
+                    &[&subject],
+                )
+                .await?;
+
+            client
+                .execute(
+                    "INSERT INTO profile_agg (did, \"followsCount\")
+                     VALUES ($1, 1)
+                     ON CONFLICT (did) DO UPDATE SET \"followsCount\" = profile_agg.\"followsCount\" + 1",
+                    &[&did],
+                )
+                .await?;
         }
-
-        client
-            .execute(
-                "INSERT INTO profile_agg (did, \"followersCount\")
-                 VALUES ($1, 1)
-                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = profile_agg.\"followersCount\" + 1",
-                &[&subject],
-            )
-            .await?;
-
-        client
-            .execute(
-                "INSERT INTO profile_agg (did, \"followsCount\")
-                 VALUES ($1, 1)
-                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = profile_agg.\"followsCount\" + 1",
-                &[&did],
-            )
-            .await?;
 
         Ok(())
     }

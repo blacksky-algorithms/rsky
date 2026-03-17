@@ -33,6 +33,9 @@ enum Command {
         /// Queue with high priority (processed before normal items)
         #[arg(long, default_value = "false")]
         priority: bool,
+        /// Queue with immediate priority (processed first, before all other items)
+        #[arg(long, default_value = "false")]
+        immediate: bool,
     },
     /// Queue all repos from a PDS server
     Pds {
@@ -115,7 +118,11 @@ fn main() -> Result<()> {
     let storage = Arc::new(Storage::new(Some(args.db_path))?);
 
     match args.command {
-        Command::Csv { file, priority } => queue_from_csv(&storage, &file, priority),
+        Command::Csv {
+            file,
+            priority,
+            immediate,
+        } => queue_from_csv(&storage, &file, priority, immediate),
         Command::Pds { host, priority } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(queue_from_pds(&storage, &host, priority))
@@ -135,14 +142,25 @@ fn main() -> Result<()> {
     }
 }
 
-fn queue_from_csv(storage: &Storage, path: &PathBuf, priority: bool) -> Result<()> {
+fn queue_from_csv(
+    storage: &Storage,
+    path: &PathBuf,
+    priority: bool,
+    immediate: bool,
+) -> Result<()> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
     let mut queued = 0;
     let mut skipped = 0;
 
-    let priority_str = if priority { "HIGH PRIORITY" } else { "normal" };
+    let priority_str = if immediate {
+        "IMMEDIATE"
+    } else if priority {
+        "HIGH PRIORITY"
+    } else {
+        "normal"
+    };
     println!("Queuing from CSV with {priority_str} priority");
 
     for (line_num, line) in reader.lines().enumerate() {
@@ -176,10 +194,12 @@ fn queue_from_csv(storage: &Storage, path: &PathBuf, priority: bool) -> Result<(
         let job = BackfillJob {
             did: did.to_string(),
             retry_count: 0,
-            priority,
+            priority: priority || immediate,
         };
 
-        if priority {
+        if immediate {
+            storage.enqueue_backfill_immediate(&job)?;
+        } else if priority {
             storage.enqueue_backfill_priority(&job)?;
         } else {
             storage.enqueue_backfill(&job)?;
