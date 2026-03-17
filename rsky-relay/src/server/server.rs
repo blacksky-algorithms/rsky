@@ -95,6 +95,28 @@ impl Drop for ErrorOnDropTcpStream {
     }
 }
 
+fn write_response(
+    stream: &mut ErrorOnDropTcpStream,
+    status: &str,
+    body: &str,
+) -> Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+    #[expect(clippy::unwrap_used)]
+    let mut s = stream.0.take().unwrap();
+    s.write_all(response.as_bytes())?;
+    s.flush()?;
+    s.shutdown()?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Server {
     listener: TcpListener,
@@ -219,28 +241,9 @@ impl Server {
         let path = parser.path.ok_or_else(|| eyre!("path missing"))?;
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
 
-        let body_response = |status, body: &str| -> Vec<u8> {
-            format!(
-                "HTTP/1.1 {status}\r\n\
-                 Content-Type: text/plain; charset=utf-8\r\n\
-                 Content-Length: {}\r\n\
-                 Connection: close\r\n\
-                 \r\n\
-                 {body}",
-                body.len()
-            )
-            .into()
-        };
-
         match (method, url.path()) {
-            ("GET", "/") => {
-                #[expect(clippy::unwrap_used)]
-                let mut stream = stream.0.take().unwrap();
-                stream.write_all(&body_response("200 OK", INDEX_ASCII))?;
-                stream.flush()?;
-                stream.shutdown()?;
-                Ok(())
-            }
+            ("GET", "/_health") => write_response(&mut stream, "200 OK", "ok"),
+            ("GET", "/") => write_response(&mut stream, "200 OK", INDEX_ASCII),
             #[cfg(not(feature = "labeler"))]
             ("GET", PATH_LIST_HOSTS) => {
                 let (status, body) = match self.list_hosts(&url) {
@@ -253,13 +256,7 @@ impl Server {
                         ("400 Bad Request", serde_json::to_string(&error)?)
                     }
                 };
-
-                #[expect(clippy::unwrap_used)]
-                let mut stream = stream.0.take().unwrap();
-                stream.write_all(&body_response(status, &body))?;
-                stream.flush()?;
-                stream.shutdown()?;
-                Ok(())
+                write_response(&mut stream, status, &body)
             }
             #[cfg(not(feature = "labeler"))]
             ("GET", PATH_HOST_STATUS) => {
@@ -273,13 +270,7 @@ impl Server {
                         ("400 Bad Request", serde_json::to_string(&error)?)
                     }
                 };
-
-                #[expect(clippy::unwrap_used)]
-                let mut stream = stream.0.take().unwrap();
-                stream.write_all(&body_response(status, &body))?;
-                stream.flush()?;
-                stream.shutdown()?;
-                Ok(())
+                write_response(&mut stream, status, &body)
             }
             ("GET", PATH_SUBSCRIBE) => {
                 let mut cursor = None;
@@ -302,18 +293,20 @@ impl Server {
                         serde_json::from_reader::<_, RequestCrawl>(&self.buf[offset..len])
                     {
                         self.request_crawl_tx.push(request_crawl)?;
-                        #[expect(clippy::unwrap_used)]
-                        let mut stream = stream.0.take().unwrap();
-                        stream.write_all(b"HTTP/1.1 200 OK\n")?;
-                        stream.flush()?;
-                        stream.shutdown()?;
-                        return Ok(());
+                        return write_response(&mut stream, "200 OK", "");
                     }
                 }
-
-                Err(eyre!("unknown hostname"))
+                write_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    "{\"error\":\"InvalidRequest\",\"message\":\"invalid or missing hostname\"}",
+                )
             }
-            _ => Err(eyre!("unknown request")),
+            _ => write_response(
+                &mut stream,
+                "404 Not Found",
+                "{\"error\":\"NotFound\",\"message\":\"endpoint not found\"}",
+            ),
         }
     }
 
