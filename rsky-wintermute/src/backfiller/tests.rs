@@ -66,7 +66,9 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         match result {
             Ok(()) => {
@@ -127,7 +129,9 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         // Should fail with DID resolution error
         assert!(result.is_err());
@@ -154,7 +158,9 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         // Should fail with HTTP or DID resolution error
         assert!(result.is_err());
@@ -572,7 +578,9 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         assert!(result.is_err());
         match result {
@@ -667,7 +675,9 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         // Should fail with DID resolution error
         assert!(result.is_err());
@@ -687,7 +697,9 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         assert!(result.is_err());
     }

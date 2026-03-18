@@ -123,7 +123,9 @@ mod indexer_tests {
             .unwrap();
 
         tracing::info!("processing backfill job for {test_did}");
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
 
         assert!(result.is_ok(), "backfill job failed: {:?}", result.err());
 
@@ -374,7 +376,9 @@ mod indexer_tests {
             .build()
             .unwrap();
 
-        let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+        let result =
+            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+                .await;
         assert!(result.is_ok());
 
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {

@@ -4,6 +4,7 @@ use crate::SHUTDOWN;
 use crate::config::{BACKFILLER_BATCH_SIZE, WORKERS_BACKFILLER, backfiller_timeout};
 use crate::storage::Storage;
 use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
+use dashmap::DashMap;
 use iroh_car::CarReader;
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
@@ -25,6 +26,7 @@ pub struct BackfillerManager {
     storage: Arc<Storage>,
     http_client: reqwest::Client,
     semaphore: Arc<Semaphore>,
+    pds_cache: Arc<DashMap<String, String>>,
 }
 
 impl BackfillerManager {
@@ -46,6 +48,7 @@ impl BackfillerManager {
             storage,
             http_client,
             semaphore: Arc::new(Semaphore::new(workers)),
+            pds_cache: Arc::new(DashMap::new()),
         })
     }
 
@@ -142,18 +145,13 @@ impl BackfillerManager {
 
     fn dequeue_batch(&self) -> Vec<(Vec<u8>, BackfillJob)> {
         let batch_size = *BACKFILLER_BATCH_SIZE;
-        let mut jobs = Vec::with_capacity(batch_size);
-        for _ in 0..batch_size {
-            match self.storage.dequeue_backfill() {
-                Ok(Some((key, job))) => jobs.push((key, job)),
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::error!("failed to dequeue backfill job: {e}");
-                    break;
-                }
+        match self.storage.dequeue_backfill_batch(batch_size) {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                tracing::error!("failed to dequeue backfill batch: {e}");
+                Vec::new()
             }
         }
-        jobs
     }
 
     async fn spawn_job_tasks(
@@ -168,9 +166,10 @@ impl BackfillerManager {
 
             let storage = Arc::clone(&self.storage);
             let http_client = self.http_client.clone();
+            let pds_cache = Arc::clone(&self.pds_cache);
 
             let task = tokio::spawn(async move {
-                let result = Self::process_job(&storage, &http_client, &job).await;
+                let result = Self::process_job(&storage, &http_client, &pds_cache, &job).await;
                 drop(permit);
                 (key, job, result)
             });
@@ -211,6 +210,7 @@ impl BackfillerManager {
     pub async fn process_job(
         storage: &Storage,
         http_client: &reqwest::Client,
+        pds_cache: &DashMap<String, String>,
         job: &BackfillJob,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
@@ -219,35 +219,44 @@ impl BackfillerManager {
 
         let did = &job.did;
 
-        let resolver_opts = IdentityResolverOpts {
-            timeout: None,
-            plc_url: None,
-            did_cache: None,
-            backup_nameservers: None,
-        };
-        let mut resolver = IdResolver::new(resolver_opts);
-        let Ok(Some(doc)) = resolver.did.resolve(did.to_string(), None).await else {
-            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-            metrics::BACKFILLER_REPOS_RUNNING.dec();
-            return Err(WintermuteError::Other(format!(
-                "did resolution failed for: {did}"
-            )));
-        };
+        // Check PDS endpoint cache first to avoid repeated DID resolution
+        let pds_endpoint = if let Some(cached) = pds_cache.get(did) {
+            cached.value().clone()
+        } else {
+            let resolver_opts = IdentityResolverOpts {
+                timeout: None,
+                plc_url: None,
+                did_cache: None,
+                backup_nameservers: None,
+            };
+            let mut resolver = IdResolver::new(resolver_opts);
+            let Ok(Some(doc)) = resolver.did.resolve(did.to_string(), None).await else {
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_RUNNING.dec();
+                return Err(WintermuteError::Other(format!(
+                    "did resolution failed for: {did}"
+                )));
+            };
 
-        let mut pds_endpoint = None;
-        if let Some(services) = &doc.service {
-            for service in services {
-                if service.r#type == "AtprotoPersonalDataServer" || service.id == "#atproto_pds" {
-                    pds_endpoint = Some(service.service_endpoint.clone());
-                    break;
+            let mut endpoint = None;
+            if let Some(services) = &doc.service {
+                for service in services {
+                    if service.r#type == "AtprotoPersonalDataServer" || service.id == "#atproto_pds"
+                    {
+                        endpoint = Some(service.service_endpoint.clone());
+                        break;
+                    }
                 }
             }
-        }
 
-        let Some(pds_endpoint) = pds_endpoint else {
-            metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-            metrics::BACKFILLER_REPOS_RUNNING.dec();
-            return Err(WintermuteError::Other(format!("no pds found: {did}")));
+            let Some(pds_url) = endpoint else {
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_RUNNING.dec();
+                return Err(WintermuteError::Other(format!("no pds found: {did}")));
+            };
+
+            pds_cache.insert(did.to_owned(), pds_url.clone());
+            pds_url
         };
 
         let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
@@ -335,6 +344,8 @@ impl BackfillerManager {
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
 
+        let mut batch_jobs: Vec<IndexJob> = Vec::with_capacity(leaves.len());
+
         for entry in &leaves {
             let uri_string = format!("at://{did}/{}", entry.key);
             let Ok(uri) = AtUri::new(uri_string, None) else {
@@ -360,20 +371,22 @@ impl BackfillerManager {
                     .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
                 let cid = entry.value.to_string();
 
-                let index_job = IndexJob {
+                batch_jobs.push(IndexJob {
                     uri: uri.to_string(),
                     cid,
                     action: WriteAction::Create,
                     record: Some(record_json),
                     indexed_at: now.clone(),
                     rev: rev.clone(),
-                };
+                });
+            }
+        }
 
-                if job.priority {
-                    storage.enqueue_firehose_backfill_priority(&index_job)?;
-                } else {
-                    storage.enqueue_firehose_backfill(&index_job)?;
-                }
+        if !batch_jobs.is_empty() {
+            if job.priority {
+                storage.enqueue_firehose_backfill_priority_batch(&batch_jobs)?;
+            } else {
+                storage.enqueue_firehose_backfill_batch(&batch_jobs)?;
             }
         }
 

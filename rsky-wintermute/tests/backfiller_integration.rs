@@ -160,7 +160,9 @@ async fn test_backfiller_handles_job_failures_with_retry() {
         .build()
         .unwrap();
 
-    let result = BackfillerManager::process_job(&storage, &http_client, &job).await;
+    let result =
+        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+            .await;
 
     // Should fail
     assert!(result.is_err());
@@ -201,7 +203,9 @@ async fn test_process_job_error_paths() {
         retry_count: 0,
         priority: false,
     };
-    let result1 = BackfillerManager::process_job(&storage, &http_client, &job1).await;
+    let result1 =
+        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job1)
+            .await;
     assert!(result1.is_err());
 
     // Test 2: Invalid DID format
@@ -210,7 +214,9 @@ async fn test_process_job_error_paths() {
         retry_count: 0,
         priority: false,
     };
-    let result2 = BackfillerManager::process_job(&storage, &http_client, &job2).await;
+    let result2 =
+        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job2)
+            .await;
     assert!(result2.is_err());
 }
 

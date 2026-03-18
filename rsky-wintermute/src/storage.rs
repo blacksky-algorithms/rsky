@@ -234,6 +234,32 @@ impl Storage {
         Ok(Some((key_vec, job)))
     }
 
+    /// Bulk dequeue using a single Fjall iterator instead of creating one per item.
+    /// With 24M+ items in the LSM tree, each `iter()` construction requires merging
+    /// across all segments. This was consuming 77% of backfiller CPU.
+    pub fn dequeue_backfill_batch(
+        &self,
+        count: usize,
+    ) -> Result<Vec<(Vec<u8>, BackfillJob)>, WintermuteError> {
+        let mut jobs = Vec::with_capacity(count);
+        let iter = self.repo_backfill.iter();
+        for entry in iter.take(count) {
+            let (key, value) = entry?;
+            let key_vec = key.to_vec();
+            let job: BackfillJob = ciborium::from_reader(value.as_ref()).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to deserialize: {e}"))
+            })?;
+            jobs.push((key_vec, job));
+        }
+        // Remove all dequeued items
+        for (key, _) in &jobs {
+            self.repo_backfill.remove(key)?;
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.sub(jobs.len() as i64);
+        Ok(jobs)
+    }
+
     #[allow(clippy::missing_const_for_fn)]
     pub fn remove_backfill(&self, _key: &[u8]) -> Result<(), WintermuteError> {
         // Item already removed in dequeue - this is now a no-op for compatibility
@@ -380,6 +406,43 @@ impl Storage {
             .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
 
         crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.inc();
+        Ok(())
+    }
+
+    /// Batch enqueue multiple firehose backfill jobs with HIGH priority in a single transaction
+    pub fn enqueue_firehose_backfill_priority_batch(
+        &self,
+        jobs: &[IndexJob],
+    ) -> Result<(), WintermuteError> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut wtxn = self
+            .lmdb_env
+            .write_txn()
+            .map_err(|e| WintermuteError::Other(format!("LMDB write txn failed: {e}")))?;
+
+        for job in jobs {
+            let key = format!(
+                "0:{}:{}",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                job.uri
+            );
+            let mut value = Vec::new();
+            ciborium::into_writer(job, &mut value).map_err(|e| {
+                WintermuteError::Serialization(format!("failed to serialize job: {e}"))
+            })?;
+            self.firehose_backfill_db
+                .put(&mut wtxn, key.as_bytes(), &value)
+                .map_err(|e| WintermuteError::Other(format!("LMDB put failed: {e}")))?;
+        }
+
+        wtxn.commit()
+            .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
+
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.add(jobs.len() as i64);
         Ok(())
     }
 
