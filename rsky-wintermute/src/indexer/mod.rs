@@ -3413,12 +3413,12 @@ impl IndexerManager {
             }
         }
 
-        if !subject.is_empty() {
+        if row_count > 0 && !subject.is_empty() {
             client
                 .execute(
                     "INSERT INTO post_agg (uri, \"likeCount\")
-                     SELECT $1::varchar, COUNT(*) FROM \"like\" WHERE subject = $1
-                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = EXCLUDED.\"likeCount\"",
+                     VALUES ($1, 1)
+                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = post_agg.\"likeCount\" + 1",
                     &[&subject],
                 )
                 .await?;
@@ -3436,9 +3436,26 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
 
+        // Fetch subject before deleting so we can decrement likeCount
+        let row = client
+            .query_opt("SELECT subject FROM \"like\" WHERE uri = $1", &[&uri])
+            .await?;
+
         client
             .execute("DELETE FROM \"like\" WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(row) = row {
+            let subject: String = row.get("subject");
+            if !subject.is_empty() {
+                client
+                    .execute(
+                        "UPDATE post_agg SET \"likeCount\" = GREATEST(\"likeCount\" - 1, 0) WHERE uri = $1",
+                        &[&subject],
+                    )
+                    .await?;
+            }
+        }
 
         Ok(())
     }
@@ -3626,12 +3643,12 @@ impl IndexerManager {
             }
         }
 
-        if !subject.is_empty() {
+        if row_count > 0 && !subject.is_empty() {
             client
                 .execute(
                     "INSERT INTO post_agg (uri, \"repostCount\")
-                     SELECT $1::varchar, COUNT(*) FROM repost WHERE subject = $1
-                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = EXCLUDED.\"repostCount\"",
+                     VALUES ($1, 1)
+                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = post_agg.\"repostCount\" + 1",
                     &[&subject],
                 )
                 .await?;
@@ -3649,12 +3666,29 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
 
+        // Fetch subject before deleting so we can decrement repostCount
+        let row = client
+            .query_opt("SELECT subject FROM repost WHERE uri = $1", &[&uri])
+            .await?;
+
         client
             .execute("DELETE FROM repost WHERE uri = $1", &[&uri])
             .await?;
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(row) = row {
+            let subject: String = row.get("subject");
+            if !subject.is_empty() {
+                client
+                    .execute(
+                        "UPDATE post_agg SET \"repostCount\" = GREATEST(\"repostCount\" - 1, 0) WHERE uri = $1",
+                        &[&subject],
+                    )
+                    .await?;
+            }
+        }
 
         Ok(())
     }
