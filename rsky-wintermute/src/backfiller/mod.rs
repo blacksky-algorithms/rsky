@@ -16,16 +16,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::Semaphore;
-
-// Type alias to reduce complexity
-type BackfillTaskResult = (Vec<u8>, BackfillJob, Result<(), WintermuteError>);
 
 pub struct BackfillerManager {
     workers: usize,
     storage: Arc<Storage>,
     http_client: reqwest::Client,
-    semaphore: Arc<Semaphore>,
     pds_cache: Arc<DashMap<String, String>>,
 }
 
@@ -47,7 +42,6 @@ impl BackfillerManager {
             workers,
             storage,
             http_client,
-            semaphore: Arc::new(Semaphore::new(workers)),
             pds_cache: Arc::new(DashMap::new()),
         })
     }
@@ -66,145 +60,115 @@ impl BackfillerManager {
         Ok(())
     }
 
+    /// Continuous pipeline: a dequeue task feeds jobs into a channel,
+    /// N worker tasks consume from the channel and process repos independently.
+    /// No batch barriers -- each worker immediately picks up the next job when done.
     async fn process_loop(&self) {
-        // Exponential backoff for empty queue: 100ms -> 200ms -> 400ms -> ... -> 5s max
         const MAX_EMPTY_BACKOFF_MS: u64 = 5000;
-        let mut empty_backoff_ms = 100u64;
-        let mut loop_count = 0u64;
+        let (tx, rx) = tokio::sync::mpsc::channel::<(Vec<u8>, BackfillJob)>(*BACKFILLER_BATCH_SIZE);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
-        tracing::info!("backfiller process_loop starting");
+        tracing::info!(
+            "backfiller starting continuous pipeline with {} workers",
+            self.workers
+        );
 
-        loop {
-            loop_count += 1;
-
-            if loop_count % 100 == 1 {
-                tracing::info!(
-                    "backfiller loop iteration {}, backoff={}ms",
-                    loop_count,
-                    empty_backoff_ms
-                );
-            }
-
-            if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for backfiller");
-                break;
-            }
-
-            tracing::debug!("backfiller: calling update_metrics");
-            self.update_metrics();
-
-            tracing::debug!("backfiller: calling check_backpressure");
-            if self.check_backpressure() {
-                tracing::debug!("backfiller: backpressure active, continuing");
-                continue;
-            }
-
-            tracing::debug!("backfiller: calling dequeue_batch");
-            let jobs = self.dequeue_batch();
-            if jobs.is_empty() {
-                tracing::debug!(
-                    "backfiller: dequeue_batch returned empty, sleeping {}ms",
-                    empty_backoff_ms
-                );
-                tokio::time::sleep(Duration::from_millis(empty_backoff_ms)).await;
-                empty_backoff_ms = (empty_backoff_ms * 2).min(MAX_EMPTY_BACKOFF_MS);
-                continue;
-            }
-
-            tracing::info!("backfiller: dequeued {} jobs", jobs.len());
-
-            // Reset backoff when we have work
-            empty_backoff_ms = 100;
-
-            tracing::debug!("backfiller: spawning job tasks");
-            let tasks = self.spawn_job_tasks(jobs).await;
-            tracing::debug!("backfiller: handling task results");
-            self.handle_task_results(tasks).await;
-            tracing::debug!("backfiller: loop iteration complete");
-        }
-    }
-
-    fn update_metrics(&self) {
-        // Use the existing metric counter instead of expensive len() call
-        // INGESTER_REPO_BACKFILL_LENGTH is already maintained via inc/dec on enqueue/dequeue
-        let queue_len = crate::metrics::INGESTER_REPO_BACKFILL_LENGTH.get();
-        crate::metrics::BACKFILLER_REPOS_WAITING.set(queue_len);
-
-        let output_len = crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH.get();
-        crate::metrics::BACKFILLER_OUTPUT_STREAM_LENGTH.set(output_len);
-
-        // Touch self to silence unused_self clippy lint
-        let _ = &self.storage;
-    }
-
-    #[allow(clippy::unused_self)]
-    const fn check_backpressure(&self) -> bool {
-        // Backpressure disabled - Fjall stores items on disk so there's no OOM risk
-        false
-    }
-
-    fn dequeue_batch(&self) -> Vec<(Vec<u8>, BackfillJob)> {
-        let batch_size = *BACKFILLER_BATCH_SIZE;
-        match self.storage.dequeue_backfill_batch(batch_size) {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                tracing::error!("failed to dequeue backfill batch: {e}");
-                Vec::new()
-            }
-        }
-    }
-
-    async fn spawn_job_tasks(
-        &self,
-        jobs: Vec<(Vec<u8>, BackfillJob)>,
-    ) -> Vec<tokio::task::JoinHandle<(Vec<u8>, BackfillJob, Result<(), WintermuteError>)>> {
-        let mut tasks = Vec::new();
-        for (key, job) in jobs {
-            let Ok(permit) = self.semaphore.clone().acquire_owned().await else {
-                break;
-            };
-
+        // Spawn worker tasks -- each loops forever, pulling from the channel
+        let mut worker_handles = Vec::with_capacity(self.workers);
+        for worker_id in 0..self.workers {
+            let rx = Arc::clone(&rx);
             let storage = Arc::clone(&self.storage);
             let http_client = self.http_client.clone();
             let pds_cache = Arc::clone(&self.pds_cache);
 
-            let task = tokio::spawn(async move {
-                let result = Self::process_job(&storage, &http_client, &pds_cache, &job).await;
-                drop(permit);
-                (key, job, result)
-            });
+            worker_handles.push(tokio::spawn(async move {
+                loop {
+                    // Acquire the next job from the channel
+                    let job_opt = {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    };
 
-            tasks.push(task);
+                    let Some((_key, job)) = job_opt else {
+                        tracing::info!("worker {worker_id}: channel closed, exiting");
+                        break;
+                    };
+
+                    match Self::process_job(&storage, &http_client, &pds_cache, &job).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!("worker {worker_id}: failed {}: {e}", job.did);
+                            if job.retry_count < 2 {
+                                let mut retry_job = job;
+                                retry_job.retry_count += 1;
+                                crate::metrics::BACKFILLER_RETRIES_ATTEMPTED_TOTAL.inc();
+                                drop(storage.enqueue_backfill(&retry_job));
+                            } else {
+                                tracing::error!(
+                                    "worker {worker_id}: exceeded retries: {}",
+                                    job.did
+                                );
+                                crate::metrics::BACKFILLER_REPOS_DEAD_LETTERED_TOTAL.inc();
+                            }
+                        }
+                    }
+                }
+            }));
         }
-        tasks
-    }
 
-    async fn handle_task_results(&self, tasks: Vec<tokio::task::JoinHandle<BackfillTaskResult>>) {
-        for task in tasks {
-            match task.await {
-                Ok((key, _job, Ok(()))) => {
-                    if let Err(e) = self.storage.remove_backfill(&key) {
-                        tracing::error!("failed to remove backfill job: {e}");
+        // Dequeue task: continuously feed the channel from Fjall
+        let dequeue_storage = Arc::clone(&self.storage);
+        let dequeue_handle = tokio::spawn(async move {
+            let mut empty_backoff_ms = 100u64;
+
+            loop {
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    tracing::info!("dequeue task: shutdown requested");
+                    break;
+                }
+
+                let batch_size = *BACKFILLER_BATCH_SIZE;
+                let jobs = match dequeue_storage.dequeue_backfill_batch(batch_size) {
+                    Ok(jobs) => jobs,
+                    Err(e) => {
+                        tracing::error!("dequeue task: failed to dequeue: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+
+                if jobs.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(empty_backoff_ms)).await;
+                    empty_backoff_ms = (empty_backoff_ms * 2).min(MAX_EMPTY_BACKOFF_MS);
+                    continue;
+                }
+
+                empty_backoff_ms = 100;
+                let count = jobs.len();
+
+                for job in jobs {
+                    if tx.send(job).await.is_err() {
+                        tracing::info!("dequeue task: channel closed, exiting");
+                        return;
                     }
                 }
-                Ok((key, mut job, Err(e))) => {
-                    tracing::error!("backfill job failed for {}: {e}", job.did);
-                    job.retry_count += 1;
-                    if job.retry_count < 3 {
-                        crate::metrics::BACKFILLER_RETRIES_ATTEMPTED_TOTAL.inc();
-                        drop(self.storage.remove_backfill(&key));
-                        drop(self.storage.enqueue_backfill(&job));
-                    } else {
-                        tracing::error!("backfill job exceeded retries: {}", job.did);
-                        crate::metrics::BACKFILLER_REPOS_DEAD_LETTERED_TOTAL.inc();
-                        drop(self.storage.remove_backfill(&key));
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("task panicked: {e}");
-                }
+
+                tracing::debug!("dequeue task: sent {count} jobs to workers");
             }
+
+            // Drop sender to signal workers to exit
+            drop(tx);
+        });
+
+        // Wait for dequeue task to finish (on shutdown)
+        drop(dequeue_handle.await);
+
+        // Workers will exit when channel is closed
+        for handle in worker_handles {
+            drop(handle.await);
         }
+
+        tracing::info!("backfiller pipeline stopped");
     }
 
     pub async fn process_job(
