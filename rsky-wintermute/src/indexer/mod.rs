@@ -25,13 +25,6 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_postgres::NoTls;
 
-// Global semaphore to serialize like inserts across all workers.
-// The like table has a 133GB index that causes severe contention when
-// multiple workers hit it simultaneously. Serializing like access prevents
-// 10+ second delays from index cache misses.
-static LIKE_INSERT_SEMAPHORE: std::sync::LazyLock<Semaphore> =
-    std::sync::LazyLock::new(|| Semaphore::new(1));
-
 // Cache of actor DIDs known to exist in the DB, avoiding redundant INSERT ON CONFLICT DO NOTHING.
 // Bounded to 2M entries to prevent unbounded memory growth.
 static ACTOR_CACHE: std::sync::LazyLock<DashMap<String, ()>> =
@@ -2319,11 +2312,6 @@ impl IndexerManager {
             return (0, 0, None);
         }
         let start = std::time::Instant::now();
-
-        // Acquire semaphore to serialize like inserts across workers.
-        // The like table's 133GB index causes severe contention when
-        // multiple workers hit it simultaneously.
-        let _permit = LIKE_INSERT_SEMAPHORE.acquire().await;
 
         let client = match pool.get().await {
             Ok(c) => c,
