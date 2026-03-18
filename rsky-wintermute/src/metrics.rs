@@ -289,6 +289,39 @@ pub static BACKFILLER_BACKPRESSURE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock
     .unwrap()
 });
 
+/// Direct write metrics (bypass Fjall, write directly to `PostgreSQL`)
+pub static BACKFILLER_DIRECT_WRITE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfiller_direct_write_total",
+        "Total repos written directly to PostgreSQL"
+    )
+    .unwrap()
+});
+
+pub static BACKFILLER_DIRECT_WRITE_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfiller_direct_write_errors_total",
+        "Total direct write failures"
+    )
+    .unwrap()
+});
+
+pub static BACKFILLER_DIRECT_WRITE_RECORDS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfiller_direct_write_records_total",
+        "Total records inserted via direct write"
+    )
+    .unwrap()
+});
+
+pub static BACKFILLER_DIRECT_WRITE_STALE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfiller_direct_write_stale_total",
+        "Total records skipped as stale via direct write"
+    )
+    .unwrap()
+});
+
 // =============================================================================
 // INDEXER METRICS
 // =============================================================================

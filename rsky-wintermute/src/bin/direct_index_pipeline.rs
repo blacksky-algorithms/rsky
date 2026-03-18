@@ -13,8 +13,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use color_eyre::eyre::{self, Result};
 use clap::Parser;
+use color_eyre::eyre::{self, Result};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::parse::get_and_parse_record;

@@ -1,4 +1,4 @@
-mod bulk;
+pub(crate) mod bulk;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -50,11 +50,11 @@ type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
-fn sanitize_text(s: &str) -> String {
+pub(crate) fn sanitize_text(s: &str) -> String {
     s.replace('\0', "")
 }
 
-fn sanitize_opt(s: Option<&str>) -> Option<String> {
+pub(crate) fn sanitize_opt(s: Option<&str>) -> Option<String> {
     s.map(|v| v.replace('\0', ""))
 }
 

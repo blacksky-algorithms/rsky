@@ -19,7 +19,7 @@ fn setup_test_storage() -> (Arc<Storage>, TempDir) {
 #[test]
 fn test_backfiller_manager_new_success() {
     let (storage, _dir) = setup_test_storage();
-    let manager = BackfillerManager::new(storage);
+    let manager = BackfillerManager::new(storage, "postgresql://test:test@localhost/test");
     assert!(
         manager.is_ok(),
         "BackfillerManager::new should succeed: {:?}",
@@ -42,7 +42,8 @@ async fn test_backfiller_processes_single_job() {
     // Process with timeout
     let storage_clone = Arc::clone(&storage);
     let handle = tokio::spawn(async move {
-        let manager = BackfillerManager::new(storage_clone).unwrap();
+        let manager =
+            BackfillerManager::new(storage_clone, "postgresql://test:test@localhost/test").unwrap();
 
         // Spawn the manager in background with shutdown after processing
         let manager_handle = tokio::spawn(async move {
@@ -70,7 +71,10 @@ async fn test_backfiller_handles_empty_queue() {
     assert_eq!(storage.repo_backfill_len().unwrap(), 0);
 
     // Create manager and verify it handles empty queue gracefully
-    let manager = BackfillerManager::new(Arc::clone(&storage));
+    let manager = BackfillerManager::new(
+        Arc::clone(&storage),
+        "postgresql://test:test@localhost/test",
+    );
     assert!(manager.is_ok());
 }
 
@@ -160,9 +164,14 @@ async fn test_backfiller_handles_job_failures_with_retry() {
         .build()
         .unwrap();
 
-    let result =
-        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-            .await;
+    let result = BackfillerManager::process_job(
+        &storage,
+        &http_client,
+        &dashmap::DashMap::new(),
+        &None,
+        &job,
+    )
+    .await;
 
     // Should fail
     assert!(result.is_err());
@@ -203,9 +212,14 @@ async fn test_process_job_error_paths() {
         retry_count: 0,
         priority: false,
     };
-    let result1 =
-        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job1)
-            .await;
+    let result1 = BackfillerManager::process_job(
+        &storage,
+        &http_client,
+        &dashmap::DashMap::new(),
+        &None,
+        &job1,
+    )
+    .await;
     assert!(result1.is_err());
 
     // Test 2: Invalid DID format
@@ -214,9 +228,14 @@ async fn test_process_job_error_paths() {
         retry_count: 0,
         priority: false,
     };
-    let result2 =
-        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job2)
-            .await;
+    let result2 = BackfillerManager::process_job(
+        &storage,
+        &http_client,
+        &dashmap::DashMap::new(),
+        &None,
+        &job2,
+    )
+    .await;
     assert!(result2.is_err());
 }
 
@@ -225,7 +244,7 @@ async fn test_backfiller_manager_run_setup() {
     // Test that run() properly sets up the tokio runtime
     // We can't actually run it since it blocks forever, but we can verify creation succeeds
     let (storage, _dir) = setup_test_storage();
-    let manager = BackfillerManager::new(storage);
+    let manager = BackfillerManager::new(storage, "postgresql://test:test@localhost/test");
     assert!(manager.is_ok());
 
     // The manager should be ready to run

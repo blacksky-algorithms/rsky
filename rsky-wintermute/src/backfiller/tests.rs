@@ -66,9 +66,14 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         match result {
             Ok(()) => {
@@ -129,9 +134,14 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         // Should fail with DID resolution error
         assert!(result.is_err());
@@ -158,9 +168,14 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         // Should fail with HTTP or DID resolution error
         assert!(result.is_err());
@@ -210,7 +225,10 @@ mod backfiller_tests {
     #[test]
     fn test_backfiller_manager_new() {
         let (storage, _dir) = setup_test_storage();
-        let manager = BackfillerManager::new(std::sync::Arc::new(storage));
+        let manager = BackfillerManager::new(
+            std::sync::Arc::new(storage),
+            "postgresql://test:test@localhost/test",
+        );
         assert!(manager.is_ok(), "BackfillerManager::new should succeed");
     }
 
@@ -313,9 +331,14 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         assert!(result.is_err());
         match result {
@@ -331,7 +354,9 @@ mod backfiller_tests {
         use std::sync::Arc;
 
         let (storage, _dir) = setup_test_storage();
-        let manager = BackfillerManager::new(Arc::new(storage)).unwrap();
+        let manager =
+            BackfillerManager::new(Arc::new(storage), "postgresql://test:test@localhost/test")
+                .unwrap();
 
         // Set shutdown flag immediately so process_loop exits
         crate::SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -349,7 +374,9 @@ mod backfiller_tests {
         use std::sync::Arc;
 
         let (storage, _dir) = setup_test_storage();
-        let manager = BackfillerManager::new(Arc::new(storage)).unwrap();
+        let manager =
+            BackfillerManager::new(Arc::new(storage), "postgresql://test:test@localhost/test")
+                .unwrap();
 
         // Set shutdown flag
         crate::SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -367,7 +394,9 @@ mod backfiller_tests {
         use std::time::Duration;
 
         let (storage, _dir) = setup_test_storage();
-        let manager = BackfillerManager::new(Arc::new(storage)).unwrap();
+        let manager =
+            BackfillerManager::new(Arc::new(storage), "postgresql://test:test@localhost/test")
+                .unwrap();
 
         // Spawn process_loop in background
         let manager_arc = Arc::new(manager);
@@ -410,9 +439,14 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         // Should fail with DID resolution error
         assert!(result.is_err());
@@ -432,9 +466,14 @@ mod backfiller_tests {
         };
 
         let http_client = reqwest::Client::new();
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        let result = BackfillerManager::process_job(
+            &storage,
+            &http_client,
+            &dashmap::DashMap::new(),
+            &None,
+            &job,
+        )
+        .await;
 
         assert!(result.is_err());
     }
@@ -446,7 +485,8 @@ mod backfiller_tests {
         let (storage, _dir) = setup_test_storage();
 
         // Test that new() successfully creates HTTP client with timeout
-        let result = BackfillerManager::new(Arc::new(storage));
+        let result =
+            BackfillerManager::new(Arc::new(storage), "postgresql://test:test@localhost/test");
         assert!(result.is_ok());
 
         let manager = result.unwrap();

@@ -206,8 +206,9 @@ pub async fn copy_ensure_actors(
     Ok(())
 }
 
-/// Bulk insert posts using `COPY` protocol.
-pub async fn copy_insert_posts(
+/// Bulk insert posts using `COPY` protocol (phases 1-3 only, no aggregation).
+/// Use this from the backfiller to avoid `profile_agg` row-lock contention.
+pub async fn copy_insert_posts_core(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, text, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
@@ -280,7 +281,29 @@ pub async fn copy_insert_posts(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg postsCount for affected creators
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW post bulk (core): {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
+/// Update `profile_agg` `postsCount` from `_bulk_post` temp table.
+/// Must be called on the same connection after `copy_insert_posts_core`.
+pub async fn update_post_aggregates(
+    client: &deadpool_postgres::Client,
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     let agg_start = Instant::now();
     client
         .execute(
@@ -294,21 +317,21 @@ pub async fn copy_insert_posts(
         .await?;
     let agg_ms = agg_start.elapsed().as_millis();
 
-    // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
-    if total_ms > 100 {
-        tracing::warn!(
-            "SLOW post bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
-            total_ms,
-            setup_ms,
-            copy_ms,
-            insert_ms,
-            agg_ms,
-            count
-        );
+    if agg_ms > 100 {
+        tracing::warn!("SLOW post agg: {}ms", agg_ms);
     }
 
     Ok(())
+}
+
+/// Bulk insert posts using `COPY` protocol with `profile_agg` aggregation.
+/// This is the full pipeline used by the indexer.
+pub async fn copy_insert_posts(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, String, String, String, String)], // uri, cid, creator, text, created_at, indexed_at
+) -> Result<(), WintermuteError> {
+    copy_insert_posts_core(client, data).await?;
+    update_post_aggregates(client).await
 }
 
 /// Bulk insert `feed_item` records using `COPY` protocol.
@@ -479,7 +502,9 @@ pub async fn copy_insert_likes(
 }
 
 /// Bulk insert follows using `COPY` protocol.
-pub async fn copy_insert_follows(
+/// Bulk insert follows using `COPY` protocol (phases 1-3 only, no aggregation).
+/// Use this from the backfiller to avoid `profile_agg` row-lock contention.
+pub async fn copy_insert_follows_core(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
 ) -> Result<(), WintermuteError> {
@@ -545,7 +570,29 @@ pub async fn copy_insert_follows(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg followsCount and followersCount
+    // Log if total > 100ms (worth investigating)
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW follow bulk (core): {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
+/// Update `profile_agg` `followsCount` and `followersCount` from `_bulk_follow` temp table.
+/// Must be called on the same connection after `copy_insert_follows_core`.
+pub async fn update_follow_aggregates(
+    client: &deadpool_postgres::Client,
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
     let agg_start = Instant::now();
     // Update followsCount for creators (those who are following)
     client
@@ -571,21 +618,21 @@ pub async fn copy_insert_follows(
         .await?;
     let agg_ms = agg_start.elapsed().as_millis();
 
-    // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
-    if total_ms > 100 {
-        tracing::warn!(
-            "SLOW follow bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
-            total_ms,
-            setup_ms,
-            copy_ms,
-            insert_ms,
-            agg_ms,
-            count
-        );
+    if agg_ms > 100 {
+        tracing::warn!("SLOW follow agg: {}ms", agg_ms);
     }
 
     Ok(())
+}
+
+/// Bulk insert follows using `COPY` protocol with `profile_agg` aggregation.
+/// This is the full pipeline used by the indexer.
+pub async fn copy_insert_follows(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
+) -> Result<(), WintermuteError> {
+    copy_insert_follows_core(client, data).await?;
+    update_follow_aggregates(client).await
 }
 
 /// Bulk insert reposts using `COPY` protocol.

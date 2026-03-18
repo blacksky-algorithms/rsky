@@ -1,3 +1,4 @@
+
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Context, Result};
 use reqwest::Client;
