@@ -401,6 +401,7 @@ impl BackfillerManager {
         jobs: &[IndexJob],
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        use crate::indexer::IndexerManager;
         use crate::indexer::bulk;
         use crate::indexer::sanitize_opt;
         use crate::indexer::sanitize_text;
@@ -455,7 +456,9 @@ impl BackfillerManager {
         let mut profile_avatar_cids: Vec<Option<String>> = Vec::new();
         let mut profile_banner_cids: Vec<Option<String>> = Vec::new();
         let mut profile_indexed_ats: Vec<String> = Vec::new();
-        let mut skipped_collections: u64 = 0;
+        let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut other_count: u64 = 0;
         let mut stale_count: u64 = 0;
 
         for (i, job) in jobs.iter().enumerate() {
@@ -507,6 +510,16 @@ impl BackfillerManager {
                         did.to_owned(),
                         sort_at,
                     ));
+
+                    // Extract embed images/videos
+                    if let Some(embed) = record.get("embed") {
+                        IndexerManager::extract_embed_data(
+                            embed,
+                            &job.uri,
+                            &mut embed_image_data,
+                            &mut embed_video_data,
+                        );
+                    }
                 }
                 "app.bsky.feed.like" => {
                     let subject_obj = record.get("subject");
@@ -632,8 +645,30 @@ impl BackfillerManager {
                     profile_banner_cids.push(banner_cid);
                     profile_indexed_ats.push(indexed_at.to_owned());
                 }
-                _ => {
-                    skipped_collections += 1;
+                other_collection => {
+                    let rkey = job
+                        .uri
+                        .strip_prefix("at://")
+                        .and_then(|rest| rest.split('/').nth(2))
+                        .unwrap_or("");
+                    if let Err(e) = IndexerManager::process_collection_specific(
+                        &client,
+                        other_collection,
+                        did,
+                        rkey,
+                        record,
+                        &job.cid,
+                        indexed_at,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "direct write: {} failed for {}: {e}",
+                            other_collection,
+                            job.uri
+                        );
+                    }
+                    other_count += 1;
                 }
             }
         }
@@ -646,6 +681,8 @@ impl BackfillerManager {
         bulk::copy_insert_reposts(&client, &repost_data).await?;
         bulk::copy_insert_feed_items(&client, &repost_feed_items).await?;
         bulk::copy_insert_blocks(&client, &block_data).await?;
+        bulk::copy_insert_post_embed_images(&client, &embed_image_data).await?;
+        bulk::copy_insert_post_embed_videos(&client, &embed_video_data).await?;
 
         // Insert profiles via unnest (same pattern as batch_insert_profiles)
         if !profile_uris.is_empty() {
@@ -696,7 +733,7 @@ impl BackfillerManager {
         metrics::BACKFILLER_DIRECT_WRITE_STALE_TOTAL.inc_by(stale_count);
 
         tracing::info!(
-            "direct write {}: {}ms, records={}, applied={}, stale={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, skipped={}",
+            "direct write {}: {}ms, records={}, applied={}, stale={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, images={}, videos={}, other={}",
             did,
             total_ms,
             jobs.len(),
@@ -708,7 +745,9 @@ impl BackfillerManager {
             repost_data.len(),
             block_data.len(),
             profile_uris.len(),
-            skipped_collections,
+            embed_image_data.len(),
+            embed_video_data.len(),
+            other_count,
         );
 
         Ok(())

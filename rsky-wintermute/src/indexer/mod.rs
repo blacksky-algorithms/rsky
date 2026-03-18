@@ -849,7 +849,7 @@ impl IndexerManager {
         }
     }
 
-    async fn ensure_actor_exists(
+    pub(crate) async fn ensure_actor_exists(
         client: &deadpool_postgres::Client,
         did: &str,
         _indexed_at: &str,
@@ -1832,7 +1832,7 @@ impl IndexerManager {
         }
     }
 
-    async fn process_collection_specific(
+    pub(crate) async fn process_collection_specific(
         client: &deadpool_postgres::Client,
         collection: &str,
         did: &str,
@@ -2464,7 +2464,7 @@ impl IndexerManager {
     }
 
     /// Extract embed data (images and videos) from a post's embed field
-    fn extract_embed_data(
+    pub(crate) fn extract_embed_data(
         embed: &serde_json::Value,
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
@@ -2495,7 +2495,7 @@ impl IndexerManager {
         }
     }
 
-    fn extract_images(
+    pub(crate) fn extract_images(
         embed: &serde_json::Value,
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
@@ -2523,7 +2523,7 @@ impl IndexerManager {
         }
     }
 
-    fn extract_video(
+    pub(crate) fn extract_video(
         embed: &serde_json::Value,
         post_uri: &str,
         embed_video_data: &mut Vec<(String, String, Option<String>)>,
