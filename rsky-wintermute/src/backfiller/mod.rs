@@ -408,11 +408,26 @@ impl BackfillerManager {
         use crate::metrics;
         use std::time::Instant;
 
+        // Sanitize string fields from record JSON for COPY text format.
+        // Tabs/newlines in field values shift columns and cause "missing data" errors.
+        fn clean(s: &str) -> String {
+            s.replace(['\t', '\n', '\r'], "")
+        }
+
+        // Max rows per COPY batch to avoid long-held locks on large tables.
+        const CHUNK: usize = 5000;
+
         let batch_start = Instant::now();
         let client = pool
             .get()
             .await
             .map_err(|e| WintermuteError::Other(format!("backfiller pool error: {e}")))?;
+
+        // Override the appview role's 10s statement_timeout for backfill operations.
+        // 300s is generous but finite -- if anything takes longer, something is wrong.
+        client
+            .execute("SET statement_timeout = '300s'", &[])
+            .await?;
 
         // 1. Ensure actor exists
         bulk::copy_ensure_actors(&client, &[did]).await?;
@@ -435,7 +450,12 @@ impl BackfillerManager {
             })
             .collect();
 
-        let applied = bulk::copy_insert_records(&client, &record_data).await?;
+        // Chunk record inserts to avoid 10s+ INSERT...ON CONFLICT on 100K+ batches
+        let mut applied = Vec::with_capacity(record_data.len());
+        for chunk in record_data.chunks(5000) {
+            let chunk_applied = bulk::copy_insert_records(&client, chunk).await?;
+            applied.extend(chunk_applied);
+        }
 
         // 3. Route applied (non-stale) records by collection
         let mut post_data: Vec<(String, String, String, String, String, String)> = Vec::new();
@@ -526,39 +546,46 @@ impl BackfillerManager {
                     let subject_uri = subject_obj
                         .and_then(|s| s.get("uri"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .map(clean)
+                        .unwrap_or_default();
                     let subject_cid = subject_obj
                         .and_then(|s| s.get("cid"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let created_at = record
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(indexed_at);
+                        .map(clean)
+                        .unwrap_or_default();
+                    let created_at = clean(
+                        record
+                            .get("createdAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(indexed_at),
+                    );
 
                     like_data.push((
                         job.uri.clone(),
                         job.cid.clone(),
                         did.to_owned(),
-                        subject_uri.to_owned(),
-                        subject_cid.to_owned(),
-                        created_at.to_owned(),
+                        subject_uri,
+                        subject_cid,
+                        created_at,
                         indexed_at.to_owned(),
                     ));
                 }
                 "app.bsky.graph.follow" => {
-                    let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-                    let created_at = record
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(indexed_at);
+                    let subject =
+                        clean(record.get("subject").and_then(|v| v.as_str()).unwrap_or(""));
+                    let created_at = clean(
+                        record
+                            .get("createdAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(indexed_at),
+                    );
 
                     follow_data.push((
                         job.uri.clone(),
                         job.cid.clone(),
                         did.to_owned(),
-                        subject.to_owned(),
-                        created_at.to_owned(),
+                        subject,
+                        created_at,
                         indexed_at.to_owned(),
                     ));
                 }
@@ -567,16 +594,19 @@ impl BackfillerManager {
                     let subject_uri = subject_obj
                         .and_then(|s| s.get("uri"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .map(clean)
+                        .unwrap_or_default();
                     let subject_cid = subject_obj
                         .and_then(|s| s.get("cid"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let created_at = record
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(indexed_at)
-                        .to_owned();
+                        .map(clean)
+                        .unwrap_or_default();
+                    let created_at = clean(
+                        record
+                            .get("createdAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(indexed_at),
+                    );
                     let sort_at = if indexed_at < created_at.as_str() {
                         indexed_at.to_owned()
                     } else {
@@ -587,8 +617,8 @@ impl BackfillerManager {
                         job.uri.clone(),
                         job.cid.clone(),
                         did.to_owned(),
-                        subject_uri.to_owned(),
-                        subject_cid.to_owned(),
+                        subject_uri.clone(),
+                        subject_cid,
                         created_at,
                         indexed_at.to_owned(),
                     ));
@@ -597,24 +627,27 @@ impl BackfillerManager {
                         "repost".to_owned(),
                         job.uri.clone(),
                         job.cid.clone(),
-                        subject_uri.to_owned(),
+                        subject_uri,
                         did.to_owned(),
                         sort_at,
                     ));
                 }
                 "app.bsky.graph.block" => {
-                    let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-                    let created_at = record
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(indexed_at);
+                    let subject =
+                        clean(record.get("subject").and_then(|v| v.as_str()).unwrap_or(""));
+                    let created_at = clean(
+                        record
+                            .get("createdAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(indexed_at),
+                    );
 
                     block_data.push((
                         job.uri.clone(),
                         job.cid.clone(),
                         did.to_owned(),
-                        subject.to_owned(),
-                        created_at.to_owned(),
+                        subject,
+                        created_at,
                         indexed_at.to_owned(),
                     ));
                 }
@@ -673,16 +706,37 @@ impl BackfillerManager {
             }
         }
 
-        // 4. Call bulk COPY functions for each collection type
-        bulk::copy_insert_posts_core(&client, &post_data).await?;
-        bulk::copy_insert_feed_items(&client, &feed_item_data).await?;
-        bulk::copy_insert_likes(&client, &like_data).await?;
-        bulk::copy_insert_follows_core(&client, &follow_data).await?;
-        bulk::copy_insert_reposts(&client, &repost_data).await?;
-        bulk::copy_insert_feed_items(&client, &repost_feed_items).await?;
-        bulk::copy_insert_blocks(&client, &block_data).await?;
-        bulk::copy_insert_post_embed_images(&client, &embed_image_data).await?;
-        bulk::copy_insert_post_embed_videos(&client, &embed_video_data).await?;
+        // 4. Call bulk COPY functions, chunked to avoid long-held locks.
+        //    Each chunk is its own implicit transaction (no wrapping tx).
+        //    Partial state on failure is fine -- ON CONFLICT DO NOTHING on re-run.
+
+        for chunk in post_data.chunks(CHUNK) {
+            bulk::copy_insert_posts_core(&client, chunk).await?;
+        }
+        for chunk in feed_item_data.chunks(CHUNK) {
+            bulk::copy_insert_feed_items(&client, chunk).await?;
+        }
+        for chunk in like_data.chunks(CHUNK) {
+            bulk::copy_insert_likes(&client, chunk).await?;
+        }
+        for chunk in follow_data.chunks(CHUNK) {
+            bulk::copy_insert_follows_core(&client, chunk).await?;
+        }
+        for chunk in repost_data.chunks(CHUNK) {
+            bulk::copy_insert_reposts(&client, chunk).await?;
+        }
+        for chunk in repost_feed_items.chunks(CHUNK) {
+            bulk::copy_insert_feed_items(&client, chunk).await?;
+        }
+        for chunk in block_data.chunks(CHUNK) {
+            bulk::copy_insert_blocks(&client, chunk).await?;
+        }
+        for chunk in embed_image_data.chunks(CHUNK) {
+            bulk::copy_insert_post_embed_images(&client, chunk).await?;
+        }
+        for chunk in embed_video_data.chunks(CHUNK) {
+            bulk::copy_insert_post_embed_videos(&client, chunk).await?;
+        }
 
         // Insert profiles via unnest (same pattern as batch_insert_profiles)
         if !profile_uris.is_empty() {
@@ -711,20 +765,9 @@ impl BackfillerManager {
                 .await?;
         }
 
-        // 5. Corrective profile_agg COUNT for the creator DID only
-        //    Skip subject followersCount -- corrected when their repos are backfilled.
-        client
-            .execute(
-                "INSERT INTO profile_agg (did, \"followsCount\", \"postsCount\")
-                 SELECT $1::varchar,
-                        (SELECT COUNT(*) FROM follow WHERE creator = $1),
-                        (SELECT COUNT(*) FROM post WHERE creator = $1)
-                 ON CONFLICT (did) DO UPDATE SET
-                   \"followsCount\" = EXCLUDED.\"followsCount\",
-                   \"postsCount\" = EXCLUDED.\"postsCount\"",
-                &[&did],
-            )
-            .await?;
+        // Skip per-repo corrective profile_agg COUNT during backfill.
+        // COUNT(*) FROM follow WHERE creator=X has no index on `follow.creator` and scans
+        // millions of rows. Run a bulk corrective pass after the backfill completes instead.
 
         let total_ms = batch_start.elapsed().as_millis();
         let applied_count = applied.iter().filter(|a| **a).count();
