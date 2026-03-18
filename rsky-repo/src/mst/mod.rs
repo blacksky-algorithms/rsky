@@ -198,12 +198,15 @@ impl NodeIterReachable {
                 };
 
                 match entries {
-                    Err(e) => {
-                        match e.downcast_ref() {
-                            Some(DataStoreError::MissingBlock(_)) => self.next().await, // Don't iterate
-                            _ => return Some(Err(e)),
+                    Err(e) => match e.downcast_ref() {
+                        Some(DataStoreError::MissingBlock(cid)) => {
+                            tracing::warn!(
+                                "MST walk: skipping unreachable subtree (missing block: {cid})"
+                            );
+                            self.next().await
                         }
-                    }
+                        _ => return Some(Err(e)),
+                    },
                     _ => {
                         *self = NodeIterReachable {
                             entries: entries.unwrap().to_vec(),

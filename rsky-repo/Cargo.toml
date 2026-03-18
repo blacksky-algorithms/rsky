@@ -39,6 +39,7 @@ iroh-car = "0.5.1"
 
 regex = "1.10.3"
 lazy_static = "1.4.0"
+tracing = "0.1"
 
 [dev-dependencies]
 glob = "0.3"

@@ -274,7 +274,7 @@ impl BackfillerManager {
             .map_err(|e| WintermuteError::Repo(format!("blockstore failed: {e}")))?;
         let storage_arc = Arc::new(tokio::sync::RwLock::new(blockstore));
 
-        let mut repo = ReadableRepo::load(storage_arc, root)
+        let repo = ReadableRepo::load(storage_arc, root)
             .await
             .map_err(|e| WintermuteError::Repo(format!("repo load failed: {e}")))?;
 
@@ -288,21 +288,24 @@ impl BackfillerManager {
             )));
         }
 
+        // Use reachable_leaves() instead of list() to handle repos with missing MST blocks.
+        // list() uses NodeIter which silently drops entire subtrees via unwrap_or_default().
+        // reachable_leaves() uses NodeIterReachable which skips missing blocks with logging.
+        let repo_storage = repo.storage.clone();
+        let rev = repo.commit.rev.clone();
         let leaves = repo
             .data
-            .list(None, None, None)
+            .reachable_leaves()
             .await
-            .map_err(|e| WintermuteError::Repo(format!("list failed: {e}")))?;
+            .map_err(|e| WintermuteError::Repo(format!("reachable_leaves failed: {e}")))?;
 
         let blocks_result = {
-            let storage_guard = repo.storage.read().await;
+            let storage_guard = repo_storage.read().await;
             storage_guard
                 .get_blocks(leaves.iter().map(|e| e.value).collect())
                 .await
                 .map_err(|e| WintermuteError::Repo(format!("get blocks failed: {e}")))?
         };
-
-        let rev = repo.commit.rev.clone();
         let now = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
