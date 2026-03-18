@@ -52,6 +52,18 @@ pub struct AtUri {
 }
 
 impl AtUri {
+    /// Build an AtUri from pre-validated components without regex parsing.
+    /// Use this when host and pathname are already known-good (e.g., from MST keys).
+    #[must_use]
+    pub fn from_parts(host: String, pathname: String) -> Self {
+        Self {
+            hash: String::new(),
+            host,
+            pathname,
+            search_params: Vec::new(),
+        }
+    }
+
     pub fn new(uri: String, base: Option<String>) -> Result<Self> {
         let parsed: ParsedOutput = match base {
             Some(base) => match parse(&base)? {

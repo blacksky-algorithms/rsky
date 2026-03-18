@@ -11,7 +11,6 @@ use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::readable_repo::ReadableRepo;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
-use rsky_syntax::aturi::AtUri;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -311,13 +310,10 @@ impl BackfillerManager {
         let mut batch_jobs: Vec<IndexJob> = Vec::with_capacity(leaves.len());
 
         for entry in &leaves {
-            let uri_string = format!("at://{did}/{}", entry.key);
-            let Ok(uri) = AtUri::new(uri_string, None) else {
+            // entry.key is "collection/rkey" from MST -- split directly, skip regex
+            let Some((collection, rkey)) = entry.key.split_once('/') else {
                 continue;
             };
-
-            let collection = uri.get_collection();
-            let rkey = uri.get_rkey();
 
             if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
                 metrics::BACKFILLER_RECORDS_FILTERED_TOTAL.inc();
@@ -331,12 +327,10 @@ impl BackfillerManager {
                 let record_json = convert_record_to_ipld(&record_json_raw);
 
                 let uri_string = format!("at://{did}/{collection}/{rkey}");
-                let uri = AtUri::new(uri_string, None)
-                    .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
                 let cid = entry.value.to_string();
 
                 batch_jobs.push(IndexJob {
-                    uri: uri.to_string(),
+                    uri: uri_string,
                     cid,
                     action: WriteAction::Create,
                     record: Some(record_json),
