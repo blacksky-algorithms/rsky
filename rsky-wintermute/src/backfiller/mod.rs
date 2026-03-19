@@ -422,7 +422,7 @@ impl BackfillerManager {
         // Sanitize string fields from record JSON for COPY text format.
         // Tabs/newlines in field values shift columns and cause "missing data" errors.
         fn clean(s: &str) -> String {
-            s.replace(['\t', '\n', '\r'], "")
+            s.replace(['\t', '\n', '\r', '\0'], "")
         }
 
         // Max rows per COPY batch to avoid long-held locks on large tables.
@@ -753,23 +753,27 @@ impl BackfillerManager {
                 for i in 0..profile_uris.len() {
                     let dn = profile_display_names[i]
                         .as_deref()
-                        .map_or("\\N".to_owned(), |s| s.replace(['\t', '\n', '\r'], ""));
+                        .map_or("\\N".to_owned(), |s| clean(&s.replace('\0', "")));
                     let desc = profile_descriptions[i]
                         .as_deref()
-                        .map_or("\\N".to_owned(), |s| s.replace(['\t', '\n', '\r'], ""));
-                    let av = profile_avatar_cids[i].as_deref().unwrap_or("\\N");
-                    let bn = profile_banner_cids[i].as_deref().unwrap_or("\\N");
+                        .map_or("\\N".to_owned(), |s| clean(&s.replace('\0', "")));
+                    let av = profile_avatar_cids[i]
+                        .as_deref()
+                        .map_or("\\N".to_owned(), |s| clean(s));
+                    let bn = profile_banner_cids[i]
+                        .as_deref()
+                        .map_or("\\N".to_owned(), |s| clean(s));
                     writeln!(
                         buf,
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        profile_uris[i],
-                        profile_cids[i],
-                        profile_creators[i],
+                        clean(&profile_uris[i]),
+                        clean(&profile_cids[i]),
+                        clean(&profile_creators[i]),
                         dn,
                         desc,
                         av,
                         bn,
-                        profile_indexed_ats[i]
+                        clean(&profile_indexed_ats[i])
                     )
                     .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
                 }
