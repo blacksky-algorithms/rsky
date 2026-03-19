@@ -9,6 +9,17 @@ use futures::SinkExt;
 use futures::pin_mut;
 use std::io::Write;
 
+/// Sanitize a field for COPY text format: strip null bytes, replace tabs/newlines with spaces.
+fn sf(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\0')
+        .map(|c| match c {
+            '\t' | '\n' | '\r' => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
 pub async fn staging_copy_records(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, did, json, rev, indexed_at
@@ -40,7 +51,12 @@ pub async fn staging_copy_records(
             .replace('\r', "\\r");
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{did}\t{escaped_json}\t{rev}\t{indexed_at}"
+            "{}\t{}\t{}\t{escaped_json}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(did),
+            sf(rev),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -67,7 +83,7 @@ pub async fn staging_copy_actors(
 
     let mut buffer = Vec::with_capacity(dids.len() * 50);
     for did in dids {
-        writeln!(buffer, "{did}")
+        writeln!(buffer, "{}", sf(did))
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
@@ -93,16 +109,15 @@ pub async fn staging_copy_posts(
 
     let mut buffer = Vec::with_capacity(data.len() * 300);
     for (uri, cid, creator, text, created_at, indexed_at) in data {
-        let escaped_text: String = text
-            .chars()
-            .map(|c| match c {
-                '\t' | '\n' | '\r' => ' ',
-                _ => c,
-            })
-            .collect();
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{escaped_text}\t{created_at}\t{indexed_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(creator),
+            sf(text),
+            sf(created_at),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -131,7 +146,13 @@ pub async fn staging_copy_feed_items(
     for (item_type, uri, cid, post_uri, originator_did, sort_at) in data {
         writeln!(
             buffer,
-            "{item_type}\t{uri}\t{cid}\t{post_uri}\t{originator_did}\t{sort_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            sf(item_type),
+            sf(uri),
+            sf(cid),
+            sf(post_uri),
+            sf(originator_did),
+            sf(sort_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -160,7 +181,14 @@ pub async fn staging_copy_likes(
     for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(creator),
+            sf(subject),
+            sf(subject_cid),
+            sf(created_at),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -189,7 +217,13 @@ pub async fn staging_copy_follows(
     for (uri, cid, creator, subject_did, created_at, indexed_at) in data {
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(creator),
+            sf(subject_did),
+            sf(created_at),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -218,7 +252,14 @@ pub async fn staging_copy_reposts(
     for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(creator),
+            sf(subject),
+            sf(subject_cid),
+            sf(created_at),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -247,7 +288,13 @@ pub async fn staging_copy_blocks(
     for (uri, cid, creator, subject, created_at, indexed_at) in data {
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{created_at}\t{indexed_at}"
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            sf(uri),
+            sf(cid),
+            sf(creator),
+            sf(subject),
+            sf(created_at),
+            sf(indexed_at)
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -274,15 +321,15 @@ pub async fn staging_copy_embed_images(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, position, image_cid, alt) in data {
-        let escaped_alt: String = alt
-            .chars()
-            .map(|c| match c {
-                '\t' | '\n' | '\r' => ' ',
-                _ => c,
-            })
-            .collect();
-        writeln!(buffer, "{post_uri}\t{position}\t{image_cid}\t{escaped_alt}")
-            .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+        writeln!(
+            buffer,
+            "{}\t{}\t{}\t{}",
+            sf(post_uri),
+            sf(position),
+            sf(image_cid),
+            sf(alt)
+        )
+        .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
     sink.send(bytes::Bytes::from(buffer)).await?;
@@ -307,19 +354,15 @@ pub async fn staging_copy_embed_videos(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, video_cid, alt) in data {
-        let escaped_alt = alt.as_ref().map_or_else(
-            || "\\N".to_owned(),
-            |a| {
-                a.chars()
-                    .map(|c| match c {
-                        '\t' | '\n' | '\r' => ' ',
-                        _ => c,
-                    })
-                    .collect::<String>()
-            },
-        );
-        writeln!(buffer, "{post_uri}\t{video_cid}\t{escaped_alt}")
-            .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+        let escaped_alt = alt.as_ref().map_or_else(|| "\\N".to_owned(), |a| sf(a));
+        writeln!(
+            buffer,
+            "{}\t{}\t{}",
+            sf(post_uri),
+            sf(video_cid),
+            escaped_alt
+        )
+        .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
     sink.send(bytes::Bytes::from(buffer)).await?;
