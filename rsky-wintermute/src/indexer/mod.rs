@@ -1,4 +1,5 @@
 pub(crate) mod bulk;
+pub(crate) mod staging;
 mod tests;
 
 use crate::SHUTDOWN;

@@ -159,6 +159,12 @@ pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
         .is_none_or(|s| s == "true" || s == "1") // Default: enabled (bypass Fjall)
 });
 
+// Backfiller staging mode - write to UNLOGGED staging tables with no indexes/constraints.
+// Used with a temporary PG server for offline build + sorted merge backfill strategy.
+pub static BACKFILLER_STAGING_MODE: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("BACKFILLER_STAGING_MODE").is_ok_and(|s| s == "true" || s == "1")
+});
+
 // Backfiller DB pool size - separate from main pool for direct write mode
 pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("BACKFILLER_DB_POOL_SIZE")

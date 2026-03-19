@@ -401,10 +401,12 @@ impl BackfillerManager {
         jobs: &[IndexJob],
         indexed_at: &str,
     ) -> Result<(), WintermuteError> {
+        use crate::config::BACKFILLER_STAGING_MODE;
         use crate::indexer::IndexerManager;
         use crate::indexer::bulk;
         use crate::indexer::sanitize_opt;
         use crate::indexer::sanitize_text;
+        use crate::indexer::staging;
         use crate::metrics;
         use std::time::Instant;
 
@@ -417,20 +419,27 @@ impl BackfillerManager {
         // Max rows per COPY batch to avoid long-held locks on large tables.
         const CHUNK: usize = 5000;
 
+        let staging = *BACKFILLER_STAGING_MODE;
         let batch_start = Instant::now();
         let client = pool
             .get()
             .await
             .map_err(|e| WintermuteError::Other(format!("backfiller pool error: {e}")))?;
 
-        // Override the appview role's 10s statement_timeout for backfill operations.
-        // 300s is generous but finite -- if anything takes longer, something is wrong.
-        client
-            .execute("SET statement_timeout = '300s'", &[])
-            .await?;
+        if !staging {
+            // Override the appview role's 10s statement_timeout for backfill operations.
+            // 300s is generous but finite -- if anything takes longer, something is wrong.
+            client
+                .execute("SET statement_timeout = '300s'", &[])
+                .await?;
+        }
 
         // 1. Ensure actor exists
-        bulk::copy_ensure_actors(&client, &[did]).await?;
+        if staging {
+            staging::staging_copy_actors(&client, &[did]).await?;
+        } else {
+            bulk::copy_ensure_actors(&client, &[did]).await?;
+        }
 
         // 2. Insert all records into the record table (DO NOTHING on conflict)
         let record_data: Vec<(String, String, String, String, String, String)> = jobs
@@ -450,8 +459,12 @@ impl BackfillerManager {
             })
             .collect();
 
-        for chunk in record_data.chunks(CHUNK) {
-            bulk::copy_insert_records_backfill(&client, chunk).await?;
+        if staging {
+            staging::staging_copy_records(&client, &record_data).await?;
+        } else {
+            for chunk in record_data.chunks(CHUNK) {
+                bulk::copy_insert_records_backfill(&client, chunk).await?;
+            }
         }
 
         // 3. Route ALL records by collection unconditionally.
@@ -674,90 +687,143 @@ impl BackfillerManager {
                     profile_indexed_ats.push(indexed_at.to_owned());
                 }
                 other_collection => {
-                    let rkey = job
-                        .uri
-                        .strip_prefix("at://")
-                        .and_then(|rest| rest.split('/').nth(2))
-                        .unwrap_or("");
-                    if let Err(e) = IndexerManager::process_collection_specific(
-                        &client,
-                        other_collection,
-                        did,
-                        rkey,
-                        record,
-                        &job.cid,
-                        indexed_at,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "direct write: {} failed for {}: {e}",
+                    if !staging {
+                        let rkey = job
+                            .uri
+                            .strip_prefix("at://")
+                            .and_then(|rest| rest.split('/').nth(2))
+                            .unwrap_or("");
+                        if let Err(e) = IndexerManager::process_collection_specific(
+                            &client,
                             other_collection,
-                            job.uri
-                        );
+                            did,
+                            rkey,
+                            record,
+                            &job.cid,
+                            indexed_at,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "direct write: {} failed for {}: {e}",
+                                other_collection,
+                                job.uri
+                            );
+                        }
                     }
                     other_count += 1;
                 }
             }
         }
 
-        // 4. Call bulk COPY functions, chunked to avoid long-held locks.
-        //    Each chunk is its own implicit transaction (no wrapping tx).
-        //    Partial state on failure is fine -- ON CONFLICT DO NOTHING on re-run.
+        // 4. Write collection data to staging or production tables.
+        if staging {
+            // Staging: direct COPY into UNLOGGED tables, no indexes, no constraints.
+            staging::staging_copy_posts(&client, &post_data).await?;
+            staging::staging_copy_feed_items(&client, &feed_item_data).await?;
+            staging::staging_copy_likes(&client, &like_data).await?;
+            staging::staging_copy_follows(&client, &follow_data).await?;
+            staging::staging_copy_reposts(&client, &repost_data).await?;
+            staging::staging_copy_feed_items(&client, &repost_feed_items).await?;
+            staging::staging_copy_blocks(&client, &block_data).await?;
+            staging::staging_copy_embed_images(&client, &embed_image_data).await?;
+            staging::staging_copy_embed_videos(&client, &embed_video_data).await?;
 
-        for chunk in post_data.chunks(CHUNK) {
-            bulk::copy_insert_posts_core(&client, chunk).await?;
-        }
-        for chunk in feed_item_data.chunks(CHUNK) {
-            bulk::copy_insert_feed_items(&client, chunk).await?;
-        }
-        for chunk in like_data.chunks(CHUNK) {
-            bulk::copy_insert_likes(&client, chunk).await?;
-        }
-        for chunk in follow_data.chunks(CHUNK) {
-            bulk::copy_insert_follows_core(&client, chunk).await?;
-        }
-        for chunk in repost_data.chunks(CHUNK) {
-            bulk::copy_insert_reposts(&client, chunk).await?;
-        }
-        for chunk in repost_feed_items.chunks(CHUNK) {
-            bulk::copy_insert_feed_items(&client, chunk).await?;
-        }
-        for chunk in block_data.chunks(CHUNK) {
-            bulk::copy_insert_blocks(&client, chunk).await?;
-        }
-        for chunk in embed_image_data.chunks(CHUNK) {
-            bulk::copy_insert_post_embed_images(&client, chunk).await?;
-        }
-        for chunk in embed_video_data.chunks(CHUNK) {
-            bulk::copy_insert_post_embed_videos(&client, chunk).await?;
-        }
+            // Profiles: COPY into staging_profile
+            if !profile_uris.is_empty() {
+                use futures::SinkExt as _;
+                use std::io::Write as _;
 
-        // Insert profiles via unnest (same pattern as batch_insert_profiles)
-        if !profile_uris.is_empty() {
-            client
-                .execute(
-                    "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
-                     SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
-                     ON CONFLICT (uri) DO UPDATE SET
-                       cid = EXCLUDED.cid,
-                       \"displayName\" = EXCLUDED.\"displayName\",
-                       description = EXCLUDED.description,
-                       \"avatarCid\" = EXCLUDED.\"avatarCid\",
-                       \"bannerCid\" = EXCLUDED.\"bannerCid\",
-                       \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                    &[
-                        &profile_uris,
-                        &profile_cids,
-                        &profile_creators,
-                        &profile_display_names,
-                        &profile_descriptions,
-                        &profile_avatar_cids,
-                        &profile_banner_cids,
-                        &profile_indexed_ats,
-                    ],
-                )
-                .await?;
+                let profile_copy = client
+                    .copy_in("COPY staging_profile (uri, cid, creator, display_name, description, avatar_cid, banner_cid, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')")
+                    .await?;
+                let profile_sink = profile_copy;
+                futures::pin_mut!(profile_sink);
+
+                let mut buf = Vec::with_capacity(profile_uris.len() * 200);
+                for i in 0..profile_uris.len() {
+                    let dn = profile_display_names[i]
+                        .as_deref()
+                        .map_or("\\N".to_owned(), |s| s.replace(['\t', '\n', '\r'], ""));
+                    let desc = profile_descriptions[i]
+                        .as_deref()
+                        .map_or("\\N".to_owned(), |s| s.replace(['\t', '\n', '\r'], ""));
+                    let av = profile_avatar_cids[i].as_deref().unwrap_or("\\N");
+                    let bn = profile_banner_cids[i].as_deref().unwrap_or("\\N");
+                    writeln!(
+                        buf,
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        profile_uris[i],
+                        profile_cids[i],
+                        profile_creators[i],
+                        dn,
+                        desc,
+                        av,
+                        bn,
+                        profile_indexed_ats[i]
+                    )
+                    .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+                }
+
+                profile_sink.send(bytes::Bytes::from(buf)).await?;
+                profile_sink.close().await?;
+            }
+        } else {
+            // Production: chunked bulk COPY with ON CONFLICT DO NOTHING.
+            for chunk in post_data.chunks(CHUNK) {
+                bulk::copy_insert_posts_core(&client, chunk).await?;
+            }
+            for chunk in feed_item_data.chunks(CHUNK) {
+                bulk::copy_insert_feed_items(&client, chunk).await?;
+            }
+            for chunk in like_data.chunks(CHUNK) {
+                bulk::copy_insert_likes(&client, chunk).await?;
+            }
+            for chunk in follow_data.chunks(CHUNK) {
+                bulk::copy_insert_follows_core(&client, chunk).await?;
+            }
+            for chunk in repost_data.chunks(CHUNK) {
+                bulk::copy_insert_reposts(&client, chunk).await?;
+            }
+            for chunk in repost_feed_items.chunks(CHUNK) {
+                bulk::copy_insert_feed_items(&client, chunk).await?;
+            }
+            for chunk in block_data.chunks(CHUNK) {
+                bulk::copy_insert_blocks(&client, chunk).await?;
+            }
+            for chunk in embed_image_data.chunks(CHUNK) {
+                bulk::copy_insert_post_embed_images(&client, chunk).await?;
+            }
+            for chunk in embed_video_data.chunks(CHUNK) {
+                bulk::copy_insert_post_embed_videos(&client, chunk).await?;
+            }
+
+            // Insert profiles via unnest (same pattern as batch_insert_profiles)
+            if !profile_uris.is_empty() {
+                client
+                    .execute(
+                        "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
+                         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+                         ON CONFLICT (uri) DO UPDATE SET
+                           cid = EXCLUDED.cid,
+                           \"displayName\" = EXCLUDED.\"displayName\",
+                           description = EXCLUDED.description,
+                           \"avatarCid\" = EXCLUDED.\"avatarCid\",
+                           \"bannerCid\" = EXCLUDED.\"bannerCid\",
+                           \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                        &[
+                            &profile_uris,
+                            &profile_cids,
+                            &profile_creators,
+                            &profile_display_names,
+                            &profile_descriptions,
+                            &profile_avatar_cids,
+                            &profile_banner_cids,
+                            &profile_indexed_ats,
+                        ],
+                    )
+                    .await?;
+            }
         }
 
         // Skip per-repo corrective profile_agg COUNT during backfill.
@@ -768,8 +834,9 @@ impl BackfillerManager {
         metrics::BACKFILLER_DIRECT_WRITE_TOTAL.inc();
         metrics::BACKFILLER_DIRECT_WRITE_RECORDS_TOTAL.inc_by(jobs.len() as u64);
 
+        let mode = if staging { "staging" } else { "direct" };
         tracing::info!(
-            "direct write {}: {}ms, records={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, images={}, videos={}, other={}",
+            "{mode} write {}: {}ms, records={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, images={}, videos={}, other={}",
             did,
             total_ms,
             jobs.len(),
