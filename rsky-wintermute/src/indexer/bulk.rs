@@ -131,6 +131,104 @@ pub async fn copy_insert_records(
         .collect())
 }
 
+/// Bulk insert records using `COPY` protocol for backfill.
+/// Uses `ON CONFLICT (uri) DO NOTHING` instead of conditional update,
+/// eliminating heap reads and WAL writes for existing rows.
+pub async fn copy_insert_records_backfill(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, String, String, String, String)], // uri, cid, did, json, rev, indexed_at
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let count = data.len();
+
+    // Phase 1: Table setup
+    let setup_start = Instant::now();
+    client
+        .execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _bulk_record (
+                uri text NOT NULL,
+                cid text NOT NULL,
+                did text NOT NULL,
+                json text,
+                rev text NOT NULL,
+                indexed_at text NOT NULL
+            )",
+            &[],
+        )
+        .await?;
+
+    client.execute("TRUNCATE _bulk_record", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
+
+    // Phase 2: COPY data into temp table
+    let copy_start = Instant::now();
+    let copy_stmt = client
+        .copy_in("COPY _bulk_record (uri, cid, did, json, rev, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .await?;
+
+    let sink = copy_stmt;
+    pin_mut!(sink);
+
+    let mut buffer = Vec::with_capacity(data.len() * 200);
+    for (uri, cid, did, json, rev, indexed_at) in data {
+        let json = json.replace('\0', "").replace("\\u0000", "");
+
+        if serde_json::from_str::<serde_json::Value>(&json).is_err() {
+            tracing::error!(
+                "bulk insert backfill: skipping {uri} - invalid JSON after serialization"
+            );
+            continue;
+        }
+
+        let escaped_json = json
+            .replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        writeln!(
+            buffer,
+            "{uri}\t{cid}\t{did}\t{escaped_json}\t{rev}\t{indexed_at}"
+        )
+        .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+    }
+
+    sink.send(bytes::Bytes::from(buffer)).await?;
+    sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
+
+    // Phase 3: INSERT...ON CONFLICT DO NOTHING (no heap read, no WAL for existing rows)
+    let insert_start = Instant::now();
+    client
+        .execute(
+            "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
+             SELECT uri, cid, did, json, rev, indexed_at
+             FROM _bulk_record
+             ON CONFLICT (uri) DO NOTHING",
+            &[],
+        )
+        .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW record bulk (backfill): {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
 /// Bulk insert actors using `COPY` protocol.
 pub async fn copy_ensure_actors(
     client: &deadpool_postgres::Client,

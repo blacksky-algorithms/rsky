@@ -314,14 +314,6 @@ pub static BACKFILLER_DIRECT_WRITE_RECORDS_TOTAL: LazyLock<IntCounter> = LazyLoc
     .unwrap()
 });
 
-pub static BACKFILLER_DIRECT_WRITE_STALE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_direct_write_stale_total",
-        "Total records skipped as stale via direct write"
-    )
-    .unwrap()
-});
-
 // =============================================================================
 // INDEXER METRICS
 // =============================================================================

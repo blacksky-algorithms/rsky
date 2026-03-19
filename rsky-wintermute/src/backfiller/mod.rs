@@ -432,7 +432,7 @@ impl BackfillerManager {
         // 1. Ensure actor exists
         bulk::copy_ensure_actors(&client, &[did]).await?;
 
-        // 2. Insert all records into the record table with stale detection
+        // 2. Insert all records into the record table (DO NOTHING on conflict)
         let record_data: Vec<(String, String, String, String, String, String)> = jobs
             .iter()
             .map(|j| {
@@ -450,14 +450,15 @@ impl BackfillerManager {
             })
             .collect();
 
-        // Chunk record inserts to avoid 10s+ INSERT...ON CONFLICT on 100K+ batches
-        let mut applied = Vec::with_capacity(record_data.len());
-        for chunk in record_data.chunks(5000) {
-            let chunk_applied = bulk::copy_insert_records(&client, chunk).await?;
-            applied.extend(chunk_applied);
+        for chunk in record_data.chunks(CHUNK) {
+            bulk::copy_insert_records_backfill(&client, chunk).await?;
         }
 
-        // 3. Route applied (non-stale) records by collection
+        // 3. Route ALL records by collection unconditionally.
+        // Each collection table has its own ON CONFLICT DO NOTHING, so duplicates are safe.
+        // This is more correct than gating on record-table staleness: the record table
+        // may have been written by the live firehose, but the collection table insert
+        // could have failed or been out of order.
         let mut post_data: Vec<(String, String, String, String, String, String)> = Vec::new();
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> = Vec::new();
         let mut like_data: Vec<(String, String, String, String, String, String, String)> =
@@ -479,14 +480,8 @@ impl BackfillerManager {
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
         let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
         let mut other_count: u64 = 0;
-        let mut stale_count: u64 = 0;
 
-        for (i, job) in jobs.iter().enumerate() {
-            if !applied[i] {
-                stale_count += 1;
-                continue;
-            }
-
+        for job in jobs {
             let Some(record) = &job.record else {
                 continue;
             };
@@ -770,18 +765,14 @@ impl BackfillerManager {
         // millions of rows. Run a bulk corrective pass after the backfill completes instead.
 
         let total_ms = batch_start.elapsed().as_millis();
-        let applied_count = applied.iter().filter(|a| **a).count();
         metrics::BACKFILLER_DIRECT_WRITE_TOTAL.inc();
-        metrics::BACKFILLER_DIRECT_WRITE_RECORDS_TOTAL.inc_by(applied_count as u64);
-        metrics::BACKFILLER_DIRECT_WRITE_STALE_TOTAL.inc_by(stale_count);
+        metrics::BACKFILLER_DIRECT_WRITE_RECORDS_TOTAL.inc_by(jobs.len() as u64);
 
         tracing::info!(
-            "direct write {}: {}ms, records={}, applied={}, stale={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, images={}, videos={}, other={}",
+            "direct write {}: {}ms, records={}, posts={}, likes={}, follows={}, reposts={}, blocks={}, profiles={}, images={}, videos={}, other={}",
             did,
             total_ms,
             jobs.len(),
-            applied_count,
-            stale_count,
             post_data.len(),
             like_data.len(),
             follow_data.len(),
