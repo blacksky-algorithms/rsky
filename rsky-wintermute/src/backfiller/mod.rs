@@ -78,6 +78,15 @@ impl BackfillerManager {
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
+        if self.workers == 0 {
+            tracing::info!("backfiller disabled (workers=0), skipping");
+            // Park until shutdown so the thread doesn't exit
+            while !SHUTDOWN.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            return Ok(());
+        }
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(self.workers)
             .enable_all()
