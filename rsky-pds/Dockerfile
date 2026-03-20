@@ -1,8 +1,9 @@
-FROM rust AS builder
+FROM rust:1.86-bookworm AS builder
 
 WORKDIR /usr/src/rsky
 COPY . .
-RUN cargo build --release --package rsky-pds
+ENV CARGO_BUILD_JOBS=1
+RUN cargo build --release --package rsky-pds --jobs "${CARGO_BUILD_JOBS}"
 
 FROM debian:bullseye-slim
 RUN apt-get update \
