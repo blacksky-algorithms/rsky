@@ -34,13 +34,17 @@ struct Args {
     #[arg(long, default_value = "4")]
     pool_size: usize,
 
+    /// Skip these tables (comma-separated, e.g. --skip record)
+    #[arg(long, default_value = "")]
+    skip: String,
+
     #[command(subcommand)]
     command: MergeCommand,
 }
 
 #[derive(Debug, Subcommand)]
 enum MergeCommand {
-    /// Merge all tables
+    /// Merge all tables (use --skip to exclude)
     All,
     /// Show staging table row counts
     Status,
@@ -48,6 +52,11 @@ enum MergeCommand {
     Table {
         /// Table name (record, post, like, follow, repost, feed_item, block, profile, embed_image, embed_video)
         name: String,
+    },
+    /// Merge specific tables in order (comma-separated)
+    Tables {
+        /// Comma-separated table names
+        names: String,
     },
 }
 
@@ -109,16 +118,27 @@ async fn run(args: Args) -> Result<()> {
             }
         }
         MergeCommand::All => {
-            // Merge record first (AppView depends on it for hydration)
-            merge_table(&staging_pool, &production_pool, "record", args.batch_size).await?;
+            let skip: Vec<&str> = args
+                .skip
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             for table in TABLES {
-                if *table != "record" {
-                    merge_table(&staging_pool, &production_pool, table, args.batch_size).await?;
+                if skip.contains(table) {
+                    tracing::info!("skipping {table} (--skip)");
+                    continue;
                 }
+                merge_table(&staging_pool, &production_pool, table, args.batch_size).await?;
             }
         }
         MergeCommand::Table { name } => {
             merge_table(&staging_pool, &production_pool, &name, args.batch_size).await?;
+        }
+        MergeCommand::Tables { names } => {
+            for name in names.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                merge_table(&staging_pool, &production_pool, name, args.batch_size).await?;
+            }
         }
     }
 
