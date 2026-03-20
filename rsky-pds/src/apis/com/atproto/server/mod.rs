@@ -72,11 +72,21 @@ pub fn validate_handle(handle: &str) -> bool {
     if !service_handle_domains.is_empty() {
         return service_handle_domains
             .iter()
-            .any(|domain| handle.ends_with(domain.as_str()));
+            .any(|domain| is_direct_handle_for_domain(handle, domain));
     }
 
     let suffix = env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
-    handle.ends_with(suffix.as_str())
+    is_direct_handle_for_domain(handle, &suffix)
+}
+
+fn is_direct_handle_for_domain(handle: &str, domain: &str) -> bool {
+    let normalized_domain = domain.trim_start_matches('.');
+    let required_suffix = format!(".{normalized_domain}");
+
+    match handle.strip_suffix(&required_suffix) {
+        Some(front) => !front.is_empty() && !front.contains('.'),
+        None => false,
+    }
 }
 
 pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {
@@ -223,6 +233,7 @@ mod tests {
         }
 
         assert!(validate_handle("alice.localhost"));
+        assert!(!validate_handle("alice.dev.localhost"));
         assert!(!validate_handle("alice.example.com"));
     }
 }
