@@ -359,13 +359,7 @@ fn merge_sql(table: &str) -> (String, String, String) {
             "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
              SELECT uri, cid, creator, display_name, description, avatar_cid, banner_cid, indexed_at FROM _merge_profile
              ORDER BY uri
-             ON CONFLICT (uri) DO UPDATE SET
-               cid = EXCLUDED.cid,
-               \"displayName\" = EXCLUDED.\"displayName\",
-               description = EXCLUDED.description,
-               \"avatarCid\" = EXCLUDED.\"avatarCid\",
-               \"bannerCid\" = EXCLUDED.\"bannerCid\",
-               \"indexedAt\" = EXCLUDED.\"indexedAt\"".into(),
+             ON CONFLICT (uri) DO NOTHING".into(),
         ),
         "post_embed_image" => (
             "CREATE TEMP TABLE IF NOT EXISTS _merge_post_embed_image (
