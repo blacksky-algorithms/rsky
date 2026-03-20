@@ -113,9 +113,14 @@ pub async fn server_create_account(
     let did_doc = match safe_resolve_did_doc(id_resolver, &did, Some(true)).await {
         Ok(res) => res,
         Err(error) => {
-            tracing::error!("Error resolving DID Doc\n{error}");
-            actor_store.destroy().await?;
-            return Err(ApiError::RuntimeError);
+            if cfg.service.dev_mode {
+                tracing::warn!("DID doc resolution failed in dev mode, continuing: {error}");
+                None
+            } else {
+                tracing::error!("Error resolving DID Doc\n{error}");
+                actor_store.destroy().await?;
+                return Err(ApiError::RuntimeError);
+            }
         }
     };
 
