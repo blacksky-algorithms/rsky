@@ -31,6 +31,7 @@ pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::{AccountManager, SharedAccountManager};
 use crate::config::env_to_cfg;
+use crate::config::ServerConfig;
 use crate::crawlers::Crawlers;
 use crate::db::DbConn;
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
@@ -85,10 +86,10 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
-use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use std::env;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub struct CORS;
@@ -194,6 +195,20 @@ pub struct RocketConfig {
     pub db_url: String,
 }
 
+fn build_id_resolver(cfg: &ServerConfig) -> SharedIdResolver {
+    SharedIdResolver {
+        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
+            timeout: Some(Duration::from_millis(cfg.identity.resolver_timeout)),
+            plc_url: Some(cfg.identity.plc_url.clone()),
+            did_cache: Some(DidCache::new(
+                Some(Duration::from_millis(cfg.identity.cache_state_ttl)),
+                Some(Duration::from_millis(cfg.identity.cache_max_ttl)),
+            )),
+            backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
+        })),
+    }
+}
+
 pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
@@ -228,16 +243,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .load()
         .await;
 
-    let id_resolver = SharedIdResolver {
-        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
-            timeout: None,
-            plc_url: Some(
-                env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
-            ),
-            did_cache: Some(DidCache::new(None, None)),
-            backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
-        })),
-    };
+    let id_resolver = build_id_resolver(&cfg);
 
     // Keeping unused for other config purposes for now.
     let app_view_agent = match cfg.bsky_app_view {
@@ -378,4 +384,68 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(local_viewer)
         .manage(app_view_agent)
         .manage(account_manager)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::build_id_resolver;
+    use crate::config::{CoreConfig, IdentityConfig, InvitesConfig, ServerConfig, SubscriptionConfig};
+    use rsky_identity::did::did_resolver::ResolverKind;
+    use std::time::Duration;
+
+    #[test]
+    fn build_id_resolver_uses_identity_config_timeout_and_cache_ttls() {
+        let cfg = ServerConfig {
+            service: CoreConfig {
+                port: 8000,
+                hostname: "pds.staging.dvines.org".to_string(),
+                public_url: "https://pds.staging.dvines.org".to_string(),
+                did: "did:web:pds.staging.dvines.org".to_string(),
+                version: None,
+                privacy_policy_url: None,
+                terms_of_service_url: None,
+                accepting_imports: true,
+                blob_upload_limit: 1024,
+                contact_email_address: None,
+                dev_mode: false,
+            },
+            mod_service: None,
+            report_service: None,
+            bsky_app_view: None,
+            subscription: SubscriptionConfig {
+                max_buffer: 100,
+                repo_backfill_limit_ms: 1000,
+            },
+            invites: InvitesConfig {
+                required: false,
+                interval: None,
+                epoch: None,
+            },
+            identity: IdentityConfig {
+                plc_url: "https://plc.directory".to_string(),
+                resolver_timeout: 30_000,
+                cache_state_ttl: 60_000,
+                cache_max_ttl: 120_000,
+                recovery_did_key: None,
+                service_handle_domains: vec![".staging.dvines.org".to_string()],
+                handle_backup_name_servers: Some(vec!["1.1.1.1".to_string()]),
+                enable_did_doc_with_session: false,
+            },
+            crawlers: vec![],
+        };
+
+        let id_resolver = build_id_resolver(&cfg).id_resolver.into_inner();
+
+        match id_resolver.did.methods.get("plc") {
+            Some(ResolverKind::Plc(plc)) => {
+                assert_eq!(plc.plc_url, "https://plc.directory");
+                assert_eq!(plc.timeout, Duration::from_millis(30_000));
+            }
+            other => panic!("unexpected plc resolver: {other:?}"),
+        }
+
+        let cache = id_resolver.did.cache.expect("did cache should be configured");
+        assert_eq!(cache.stale_ttl, Duration::from_millis(60_000));
+        assert_eq!(cache.max_ttl, Duration::from_millis(120_000));
+    }
 }
