@@ -141,41 +141,15 @@ async fn merge_table(
         .execute("SET statement_timeout = '600s'", &[])
         .await?;
 
-    // Count total rows
-    let row = staging_client
-        .query_one(&format!("SELECT COUNT(*) FROM {staging_name}"), &[])
-        .await?;
-    let total: i64 = row.get(0);
-    tracing::info!("merging {table}: {total} rows from {staging_name}");
+    tracing::info!("merging {table} from {staging_name} (streaming, no count/index)");
 
-    if total == 0 {
-        return Ok(());
-    }
-
-    // Create temporary index for sorted reads (fast on UNLOGGED tables)
-    let idx_name = format!("staging_{table}_merge_idx");
-    let uri_col = match table {
-        "post_embed_image" => "post_uri",
-        "post_embed_video" => "post_uri",
-        _ => "uri",
-    };
-    tracing::info!("creating sort index {idx_name} on {staging_name}({uri_col})");
-    let idx_start = Instant::now();
-    staging_client
-        .execute(
-            &format!("CREATE INDEX IF NOT EXISTS {idx_name} ON {staging_name} ({uri_col})"),
-            &[],
-        )
-        .await?;
-    tracing::info!("index created in {}ms", idx_start.elapsed().as_millis());
-
-    // Use server-side cursor for sorted reads
+    // Stream rows via cursor without sorting on the staging side.
+    // The INSERT INTO production has ORDER BY uri which sorts each batch
+    // on the production temp table (small, in-memory sort).
     staging_client.execute("BEGIN", &[]).await?;
     staging_client
         .execute(
-            &format!(
-                "DECLARE merge_cursor CURSOR FOR SELECT * FROM {staging_name} ORDER BY {uri_col}"
-            ),
+            &format!("DECLARE merge_cursor CURSOR FOR SELECT * FROM {staging_name}"),
             &[],
         )
         .await?;
@@ -205,7 +179,7 @@ async fn merge_table(
             0
         };
         tracing::info!(
-            "merged {merged}/{total} rows for {table} ({batch_count} in {elapsed}ms, {rate} rows/sec)"
+            "merged {merged} rows for {table} ({batch_count} in {elapsed}ms, {rate} rows/sec)"
         );
     }
 
