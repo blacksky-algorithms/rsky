@@ -273,6 +273,14 @@ async fn merge_batch(
 /// Returns (temp table DDL, COPY column list, INSERT SQL with ORDER BY and ON CONFLICT)
 fn merge_sql(table: &str) -> (String, String, String) {
     match table {
+        "actor" => (
+            "CREATE TEMP TABLE IF NOT EXISTS _merge_actor (did text)".into(),
+            "did".into(),
+            "INSERT INTO actor (did, \"indexedAt\")
+             SELECT did, '1970-01-01T00:00:00Z' FROM _merge_actor
+             ORDER BY did
+             ON CONFLICT (did) DO NOTHING".into(),
+        ),
         "record" => (
             "CREATE TEMP TABLE IF NOT EXISTS _merge_record (
                 uri text, cid text, did text, json text, rev text, indexed_at text
