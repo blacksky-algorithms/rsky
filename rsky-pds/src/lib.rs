@@ -95,25 +95,97 @@ use tokio::sync::RwLock;
 pub struct CORS;
 
 #[get("/")]
-async fn index() -> &'static str {
-    r#"
-    .------..------..------..------.
-    |R.--. ||S.--. ||K.--. ||Y.--. |
-    | :(): || :/\: || :/\: || (\/) |
-    | ()() || :\/: || :\/: || :\/: |
-    | '--'R|| '--'S|| '--'K|| '--'Y|
-    `------'`------'`------'`------'
-    .------..------..------.
-    |P.--. ||D.--. ||S.--. |
-    | :/\: || :/\: || :/\: |
-    | (__) || (__) || :\/: |
-    | '--'P|| '--'D|| '--'S|
-    `------'`------'`------'
-    
-    This is an atproto [https://atproto.com] Personal Data Server (PDS) running the rsky-pds codebase [https://github.com/blacksky-algorithms/rsky]
+async fn index() -> rocket::response::content::RawHtml<&'static str> {
+    rocket::response::content::RawHtml(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rsky-pds — ATProto Personal Data Server</title>
+<style>
+:root { --primary: #27C58B; --bg: #1b1b1b; --card: #2d2d2d; --text: #fff; --muted: #999; --code: #41444e; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+.container { max-width: 700px; margin: 0 auto; padding: 2rem; }
+h1 { color: var(--primary); margin-bottom: 0.3rem; font-size: 1.8rem; }
+h2 { color: var(--primary); margin-top: 1.5rem; font-size: 1.1rem; }
+.subtitle { color: var(--muted); margin-bottom: 1.5rem; }
+a { color: var(--primary); }
+code { background: var(--code); padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+.endpoint { margin: 0.3rem 0; }
+.card { background: var(--card); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+input, button { font-size: 1rem; padding: 0.5rem 0.8rem; border-radius: 6px; border: 1px solid #555; }
+input { background: var(--code); color: var(--text); width: 100%; margin-bottom: 0.5rem; }
+button { background: var(--primary); color: #000; border: none; cursor: pointer; font-weight: 600; }
+button:hover { background: #1fa06f; }
+#result { background: var(--code); padding: 1rem; border-radius: 6px; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-all; font-family: monospace; font-size: 0.85rem; max-height: 400px; overflow-y: auto; display: none; }
+.footer { margin-top: 2rem; color: var(--muted); font-size: 0.85rem; border-top: 1px solid #333; padding-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>rsky-pds</h1>
+<p class="subtitle">ATProto Personal Data Server — powered by <a href="https://github.com/blacksky-algorithms/rsky">rsky</a></p>
 
-    Most API routes are under /xrpc/
-    "#
+<h2>Query This PDS</h2>
+<div class="card">
+<input type="text" id="did" placeholder="Enter DID or handle (e.g., did:plc:... or user.example.com)">
+<button onclick="query()">Look Up</button>
+<div id="result"></div>
+</div>
+
+<h2>XRPC Endpoints</h2>
+<div class="endpoint"><code>GET</code> <a href="/xrpc/_health">/xrpc/_health</a> — Health check</div>
+<div class="endpoint"><code>GET</code> <a href="/xrpc/com.atproto.server.describeServer">/xrpc/com.atproto.server.describeServer</a> — Server info</div>
+<div class="endpoint"><code>POST</code> /xrpc/com.atproto.server.createSession — Authenticate</div>
+<div class="endpoint"><code>POST</code> /xrpc/com.atproto.server.createAccount — Create account</div>
+<div class="endpoint"><code>GET</code> /xrpc/com.atproto.sync.listRepos — List hosted repos</div>
+<div class="endpoint"><code>GET</code> /xrpc/com.atproto.repo.listRecords — List records in a repo</div>
+<div class="endpoint"><code>GET</code> /xrpc/com.atproto.repo.getRecord — Get a single record</div>
+
+<h2>About</h2>
+<p>This PDS hosts ATProto repositories for users. It stores identity documents, posts, profiles, and other ATProto records. Data is synchronized with the broader AT Protocol network via the <a href="https://atproto.com">ATProto</a> federation protocol.</p>
+
+<div class="footer">
+<a href="https://atproto.com">ATProto</a> · <a href="https://github.com/blacksky-algorithms/rsky">rsky on GitHub</a> · <a href="/xrpc/_health">Health</a>
+</div>
+</div>
+<script>
+async function query() {
+  const input = document.getElementById('did').value.trim();
+  const el = document.getElementById('result');
+  if (!input) return;
+  el.style.display = 'block';
+  el.textContent = 'Loading...';
+  try {
+    // Try listRecords for posts
+    const url = input.startsWith('did:')
+      ? `/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(input)}&collection=app.bsky.feed.post&limit=10`
+      : `/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(input)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.did && !input.startsWith('did:')) {
+      // Resolved handle to DID, now fetch posts
+      el.textContent = `Handle: ${input}\nDID: ${data.did}\n\nFetching posts...\n`;
+      const postsResp = await fetch(`/xrpc/com.atproto.repo.listRecords?repo=${data.did}&collection=app.bsky.feed.post&limit=10`);
+      const posts = await postsResp.json();
+      let out = `Handle: ${input}\nDID: ${data.did}\n\nPosts (${(posts.records||[]).length}):\n`;
+      for (const r of (posts.records || [])) {
+        const v = r.value?.value || r.value || {};
+        out += `\n  ${v.createdAt || '?'}\n  ${v.text || '(no text)'}\n  URI: ${r.uri}\n`;
+      }
+      el.textContent = out;
+    } else {
+      el.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (e) {
+    el.textContent = `Error: ${e.message}`;
+  }
+}
+document.getElementById('did').addEventListener('keypress', e => { if (e.key === 'Enter') query(); });
+</script>
+</body>
+</html>"#)
 }
 
 #[get("/robots.txt")]
