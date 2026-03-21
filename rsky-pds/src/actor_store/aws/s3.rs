@@ -18,16 +18,22 @@ struct MoveObject {
 #[derive(Debug, Clone)]
 pub struct S3BlobStore {
     client: s3::Client,
+    /// The actual S3 bucket name (from PDS_BLOBSTORE_S3_BUCKET env var).
+    /// Falls back to the DID for backwards compatibility with single-tenant setups.
+    s3_bucket: String,
+    /// The actor DID, used as a path prefix within the bucket.
     pub bucket: String,
 }
 
-// Intended to work with DigitalOcean Spaces Object Storage which is an
-// S3-compatible object storage service
+// Intended to work with S3-compatible object storage services
+// (DigitalOcean Spaces, AWS S3, Google Cloud Storage, MinIO, etc.)
 impl S3BlobStore {
     pub fn new(did: String, cfg: &SdkConfig) -> Self {
         let client = aws_sdk_s3::Client::new(cfg);
+        let s3_bucket = env_str("PDS_BLOBSTORE_S3_BUCKET").unwrap_or_else(|| did.clone());
         S3BlobStore {
             client,
+            s3_bucket,
             bucket: did,
         }
     }
@@ -58,7 +64,7 @@ impl S3BlobStore {
         self.client
             .put_object()
             .body(body)
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(self.get_tmp_path(&key))
             .acl(ObjectCannedAcl::PublicRead)
             .send()
@@ -86,7 +92,7 @@ impl S3BlobStore {
         self.client
             .put_object()
             .body(body)
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(self.get_stored_path(cid))
             .acl(ObjectCannedAcl::PublicRead)
             .send()
@@ -114,7 +120,7 @@ impl S3BlobStore {
         let res = self
             .client
             .get_object()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(self.get_stored_path(cid))
             .send()
             .await;
@@ -160,7 +166,7 @@ impl S3BlobStore {
         let res = self
             .client
             .head_object()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(key)
             .send()
             .await;
@@ -170,7 +176,7 @@ impl S3BlobStore {
     async fn delete_key(&self, key: String) -> Result<()> {
         self.client
             .delete_object()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(key)
             .send()
             .await?;
@@ -185,7 +191,7 @@ impl S3BlobStore {
         let deletes = Delete::builder().set_objects(Some(objects)).build()?;
         self.client
             .delete_objects()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .delete(deletes)
             .send()
             .await?;
@@ -195,7 +201,7 @@ impl S3BlobStore {
     async fn move_object(&self, keys: MoveObject) -> Result<()> {
         self.client
             .copy_object()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .copy_source(format!(
                 "{0}/{1}/{2}",
                 env_str("AWS_ENDPOINT_BUCKET").unwrap(),
@@ -208,7 +214,7 @@ impl S3BlobStore {
             .await?;
         self.client
             .delete_object()
-            .bucket(&self.bucket)
+            .bucket(&self.s3_bucket)
             .key(keys.from)
             .send()
             .await?;

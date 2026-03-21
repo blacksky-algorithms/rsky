@@ -1,4 +1,3 @@
-use crate::common::encode_uri_component;
 use crate::types::DidCache;
 use anyhow::{bail, Result};
 use serde_json::Value;
@@ -23,7 +22,7 @@ impl DidPlcResolver {
     pub async fn resolve_no_check(&self, did: String) -> Result<Option<Value>> {
         let client = reqwest::Client::new();
         let response = client
-            .get(format!("{0}/{1}", self.plc_url, encode_uri_component(&did)))
+            .get(format!("{0}/{1}", self.plc_url, did))
             .timeout(self.timeout)
             .header("Connection", "Keep-Alive")
             .header("Keep-Alive", "timeout=5, max=1000")

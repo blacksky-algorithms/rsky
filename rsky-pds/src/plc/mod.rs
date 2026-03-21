@@ -2,7 +2,6 @@ use crate::plc::operations::update_handle_op;
 use crate::plc::types::{CompatibleOp, OpOrTombstone};
 use crate::APP_USER_AGENT;
 use anyhow::{bail, Result};
-use rsky_common::encode_uri_component;
 use secp256k1::SecretKey;
 use serde::de::DeserializeOwned;
 use types::{CompatibleOpOrTombstone, DocumentData};
@@ -17,7 +16,7 @@ impl Client {
     }
 
     pub fn post_op_url(&self, did: &String) -> String {
-        format!("{0}/{1}", self.url, encode_uri_component(did))
+        format!("{0}/{1}", self.url, did)
     }
 
     // @TODO: Add better failure mode here
@@ -61,7 +60,7 @@ impl Client {
     pub async fn get_document_data(&self, did: &String) -> Result<DocumentData> {
         match self
             .make_get_req(
-                format!("{0}/{1}/data", self.url, encode_uri_component(did)),
+                format!("{0}/{1}/data", self.url, did),
                 None,
             )
             .await
@@ -74,7 +73,7 @@ impl Client {
     pub async fn get_last_op(&self, did: &String) -> Result<CompatibleOpOrTombstone> {
         match self
             .make_get_req(
-                format!("{0}/{1}/log/last", self.url, encode_uri_component(did)),
+                format!("{0}/{1}/log/last", self.url, did),
                 None,
             )
             .await

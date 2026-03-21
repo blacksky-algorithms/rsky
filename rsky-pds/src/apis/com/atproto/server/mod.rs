@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use rocket::form::validate::Contains;
 use rocket::State;
-use rsky_common::env::{env_int, env_str};
+use rsky_common::env::{env_int, env_list, env_str};
 use rsky_crypto::utils::encode_did_key;
 use rsky_identity::types::DidDocument;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -68,10 +68,25 @@ pub fn gen_invite_codes(count: i32) -> Vec<String> {
 }
 
 pub fn validate_handle(handle: &str) -> bool {
-    let suffix: String = env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
-    let s_slice: &str = &suffix[..]; // take a full slice of the string
-    handle.ends_with(s_slice)
-    // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
+    let service_handle_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
+    if !service_handle_domains.is_empty() {
+        return service_handle_domains
+            .iter()
+            .any(|domain| is_direct_handle_for_domain(handle, domain));
+    }
+
+    let suffix = env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
+    is_direct_handle_for_domain(handle, &suffix)
+}
+
+fn is_direct_handle_for_domain(handle: &str, domain: &str) -> bool {
+    let normalized_domain = domain.trim_start_matches('.');
+    let required_suffix = format!(".{normalized_domain}");
+
+    match handle.strip_suffix(&required_suffix) {
+        Some(front) => !front.is_empty() && !front.contains('.'),
+        None => false,
+    }
 }
 
 pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {
@@ -193,3 +208,32 @@ pub mod reserve_signing_key;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
+
+#[cfg(test)]
+mod tests {
+    use super::validate_handle;
+
+    #[test]
+    fn validate_handle_uses_service_domains_when_present() {
+        unsafe {
+            std::env::set_var("PDS_HOSTNAME", "pds.staging.dvines.org");
+            std::env::set_var("PDS_SERVICE_HANDLE_DOMAINS", ".staging.dvines.org,.divine.video");
+        }
+
+        assert!(validate_handle("alice.staging.dvines.org"));
+        assert!(validate_handle("alice.divine.video"));
+        assert!(!validate_handle("alice.pds.staging.dvines.org"));
+    }
+
+    #[test]
+    fn validate_handle_falls_back_to_hostname_without_service_domains() {
+        unsafe {
+            std::env::set_var("PDS_HOSTNAME", "localhost");
+            std::env::remove_var("PDS_SERVICE_HANDLE_DOMAINS");
+        }
+
+        assert!(validate_handle("alice.localhost"));
+        assert!(!validate_handle("alice.dev.localhost"));
+        assert!(!validate_handle("alice.example.com"));
+    }
+}
