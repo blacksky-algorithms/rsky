@@ -317,7 +317,10 @@ impl Manager {
     }
 
     fn scan_did(&mut self, cursor: &mut Cursor, did: &str) -> Result<(), ManagerError> {
-        let Some((pds, key)) = self.resolver.resolve(did)? else { unreachable!("{did}") };
+        let Some((pds, key)) = self.resolver.resolve(did)? else {
+            tracing::warn!("skipping unresolvable DID: {did}");
+            return Ok(());
+        };
 
         let mut batch: Option<Batch> = None;
         for res in self.queue.prefix(&did) {
