@@ -4,14 +4,14 @@ use std::time::{Duration, Instant};
 use std::{io, thread};
 
 use exponential_backoff::{Backoff, IntoIter as BackoffIter};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
-use crate::config::CAPACITY_STATUS;
+use crate::config::{BAN_REFRESH_INTERVAL, CAPACITY_STATUS};
 use crate::crawler::RequestCrawl;
 use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status, StatusReceiver};
 use crate::crawler::worker::{Worker, WorkerError};
@@ -50,6 +50,8 @@ pub struct Manager {
     next_id: usize,
     hosts: HashMap<String, [BackoffIter; 2]>,
     retries: BTreeMap<Instant, (usize, String)>,
+    banned: HashSet<String>,
+    last_ban_check: Instant,
     conn: Connection,
     request_crawl_rx: RequestCrawlReceiver,
     status_rx: StatusReceiver,
@@ -78,11 +80,16 @@ impl Manager {
             "relay.db",
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        let banned = HashSet::new();
+        let now = Instant::now();
+        let last_ban_check = now.checked_sub(BAN_REFRESH_INTERVAL).unwrap_or(now);
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: 0,
             hosts: HashMap::new(),
             retries: BTreeMap::new(),
+            banned,
+            last_ban_check,
             conn,
             request_crawl_rx,
             status_rx,
@@ -112,13 +119,24 @@ impl Manager {
             return Ok(false);
         }
 
+        if self.last_ban_check.elapsed() > BAN_REFRESH_INTERVAL {
+            if let Err(err) = self.refresh_bans() {
+                tracing::warn!(%err, "unable to refresh banned hosts");
+            }
+            self.last_ban_check = Instant::now();
+        }
+
         if let Some(entry) = self.retries.first_entry() {
             if *entry.key() < Instant::now() {
                 let (id, hostname) = entry.remove();
-                let prev = self.next_id;
-                self.next_id = id;
-                self.handle_connect(RequestCrawl { hostname, cursor: None })?;
-                self.next_id = prev;
+                if self.banned.contains(&hostname) {
+                    tracing::debug!(%hostname, "skipping retry for banned host");
+                } else {
+                    let prev = self.next_id;
+                    self.next_id = id;
+                    self.handle_connect(RequestCrawl { hostname, cursor: None })?;
+                    self.next_id = prev;
+                }
             }
         }
 
@@ -127,7 +145,9 @@ impl Manager {
         }
 
         if let Ok(request_crawl) = self.request_crawl_rx.pop() {
-            if !self.hosts.contains_key(&request_crawl.hostname) {
+            if self.banned.contains(&request_crawl.hostname) {
+                tracing::debug!(host = %request_crawl.hostname, "ignoring requestCrawl for banned host");
+            } else if !self.hosts.contains_key(&request_crawl.hostname) {
                 self.handle_connect(request_crawl)?;
             }
         }
@@ -138,9 +158,16 @@ impl Manager {
     fn handle_status(&mut self, status: Status) {
         match status {
             Status::Disconnected { worker_id: id, hostname, connected } => {
+                if self.banned.contains(&hostname) {
+                    tracing::debug!(%hostname, "ignoring disconnect for banned host");
+                    return;
+                }
+                let Some(backoffs) = self.hosts.get_mut(&hostname) else {
+                    tracing::debug!(%hostname, "ignoring disconnect for unknown host");
+                    return;
+                };
                 #[expect(clippy::unwrap_used)]
-                let backoff =
-                    self.hosts.get_mut(&hostname).unwrap().get_mut(usize::from(connected)).unwrap();
+                let backoff = backoffs.get_mut(usize::from(connected)).unwrap();
                 let Some(Some(delay)) = backoff.next() else { unreachable!() };
                 let next = Instant::now() + delay;
                 assert!(self.retries.insert(next, (id, hostname)).is_none());
@@ -161,10 +188,7 @@ impl Manager {
                 match self.get_cursor(&request_crawl.hostname) {
                     Ok(cursor) => break cursor,
                     Err(ManagerError::Sqlite(err))
-                        if err.sqlite_error_code() == Some(ErrorCode::DatabaseLocked) =>
-                    {
-                        continue;
-                    }
+                        if err.sqlite_error_code() == Some(ErrorCode::DatabaseLocked) => {}
                     Err(err) => Err(err)?,
                 }
             };
@@ -181,5 +205,27 @@ impl Manager {
             .query_one((&host,), |row| Ok(row.get_unwrap::<_, u64>("cursor")))
             .optional()?
             .map(Into::into))
+    }
+
+    fn refresh_bans(&mut self) -> Result<(), ManagerError> {
+        let mut stmt = self.conn.prepare_cached("SELECT host FROM banned_hosts")?;
+        let new_bans: HashSet<String> =
+            stmt.query_map([], |row| row.get::<_, String>(0))?.filter_map(Result::ok).collect();
+
+        for host in &new_bans {
+            if !self.banned.contains(host) {
+                tracing::warn!(%host, "host banned, sending disconnect");
+                for worker in &mut *self.workers {
+                    if let Err(err) = worker.command_tx.push(Command::Disconnect(host.clone())) {
+                        tracing::warn!(%host, %err, "unable to send disconnect to worker");
+                    }
+                }
+                self.hosts.remove(host);
+                self.retries.retain(|_, (_, h)| h != host);
+            }
+        }
+
+        self.banned = new_bans;
+        Ok(())
     }
 }

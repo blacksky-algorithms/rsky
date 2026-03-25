@@ -135,7 +135,7 @@ pub fn verify_commit_event(commit: &SubscribeReposCommit, root: Cid, prev: &Repo
                 tracing::debug!(%idx, ?op, %err, "error while inverting op");
                 return true;
             }
-        };
+        }
     }
 
     let root = match tree.root() {

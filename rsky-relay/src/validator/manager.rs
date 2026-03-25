@@ -61,11 +61,19 @@ impl Manager {
         let now = Instant::now();
         let last = now.checked_sub(HOSTS_WRITE_INTERVAL).unwrap_or(now);
         let conn = Connection::open("relay.db")?;
+        conn.execute_batch("PRAGMA journal_mode = WAL")?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS hosts (
                 host TEXT PRIMARY KEY,
                 cursor INTEGER NOT NULL,
                 latest TEXT NOT NULL
+            )",
+            (),
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS banned_hosts (
+                host TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )",
             (),
         )?;

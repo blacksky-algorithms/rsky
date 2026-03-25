@@ -83,6 +83,22 @@ impl Worker {
                 let res = Connection::connect(&config.hostname, config.cursor);
                 self.handle_connect(Instant::now(), config.hostname, res);
             }
+            Command::Disconnect(ref hostname) => {
+                for (idx, conn) in self.connections.iter_mut().enumerate() {
+                    if let Some(c) = conn {
+                        if c.hostname == *hostname {
+                            tracing::info!(host = %hostname, %idx, "disconnecting banned host");
+                            #[expect(clippy::expect_used)]
+                            self.poll
+                                .registry()
+                                .deregister(&mut SourceFd(&c.as_raw_fd()))
+                                .expect("failed to deregister");
+                            *conn = None;
+                        }
+                    }
+                }
+                self.pending.retain(|(_, h, _)| h != hostname);
+            }
         }
     }
 

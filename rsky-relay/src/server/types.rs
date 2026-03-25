@@ -31,3 +31,14 @@ pub struct GetHostStatus {
     pub seq: u64,
     pub status: HostStatus,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BannedHost {
+    pub host: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListBans {
+    pub banned_hosts: Vec<BannedHost>,
+}

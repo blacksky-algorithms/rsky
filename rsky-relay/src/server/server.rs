@@ -19,11 +19,12 @@ use thiserror::Error;
 use url::Url;
 
 use crate::SHUTDOWN;
-use crate::config::{HOSTS_INTERVAL, PORT};
+use crate::config::{ADMIN_PASSWORD, HOSTS_INTERVAL, PORT};
 #[cfg(not(feature = "labeler"))]
 use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
+use crate::server::types::{BannedHost, ListBans};
 #[cfg(not(feature = "labeler"))]
 use crate::server::types::{GetHostStatus, Host, HostStatus, ListHosts};
 
@@ -45,6 +46,10 @@ const PATH_REQUEST_CRAWL: &str = if cfg!(feature = "labeler") {
 } else {
     "/xrpc/com.atproto.sync.requestCrawl"
 };
+
+const PATH_ADMIN_BAN: &str = "/admin/pds/ban";
+const PATH_ADMIN_UNBAN: &str = "/admin/pds/unban";
+const PATH_ADMIN_LIST_BANS: &str = "/admin/pds/listBans";
 
 const INDEX_ASCII: &str = r"
     .------..------..------..------.
@@ -95,11 +100,7 @@ impl Drop for ErrorOnDropTcpStream {
     }
 }
 
-fn write_response(
-    stream: &mut ErrorOnDropTcpStream,
-    status: &str,
-    body: &str,
-) -> Result<()> {
+fn write_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
@@ -128,6 +129,7 @@ pub struct Server {
     conn: Connection,
     #[cfg(not(feature = "labeler"))]
     relay_conn: Connection,
+    admin_conn: Connection,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
 }
@@ -168,6 +170,11 @@ impl Server {
             "plc_directory.db",
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        let admin_conn = Connection::open_with_flags(
+            "relay.db",
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        admin_conn.busy_timeout(Duration::from_secs(5))?;
         Ok(Self {
             listener,
             tls_config,
@@ -178,6 +185,7 @@ impl Server {
             conn,
             #[cfg(not(feature = "labeler"))]
             relay_conn,
+            admin_conn,
             request_crawl_tx,
             subscribe_repos_tx,
         })
@@ -239,6 +247,9 @@ impl Server {
         let res = parser.parse(&self.buf)?;
         let method = parser.method.ok_or_else(|| eyre!("method missing"))?;
         let path = parser.path.ok_or_else(|| eyre!("path missing"))?;
+        // Extract admin auth before the match block so parser's borrow on
+        // self.buf is released by NLL before &mut self methods in match arms.
+        let is_admin_authed = check_admin_auth(parser.headers);
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
 
         match (method, url.path()) {
@@ -292,6 +303,14 @@ impl Server {
                     if let Ok(request_crawl) =
                         serde_json::from_reader::<_, RequestCrawl>(&self.buf[offset..len])
                     {
+                        if self.is_host_banned(&request_crawl.hostname) {
+                            tracing::info!(host = %request_crawl.hostname, "rejecting requestCrawl for banned host");
+                            return write_response(
+                                &mut stream,
+                                "403 Forbidden",
+                                "{\"error\":\"Forbidden\",\"message\":\"host is banned\"}",
+                            );
+                        }
                         self.request_crawl_tx.push(request_crawl)?;
                         return write_response(&mut stream, "200 OK", "");
                     }
@@ -302,6 +321,10 @@ impl Server {
                     "{\"error\":\"InvalidRequest\",\"message\":\"invalid or missing hostname\"}",
                 )
             }
+            ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN)
+            | ("GET", PATH_ADMIN_LIST_BANS) => {
+                self.handle_admin(&mut stream, url.path(), &url, is_admin_authed)
+            }
             _ => write_response(
                 &mut stream,
                 "404 Not Found",
@@ -310,8 +333,62 @@ impl Server {
         }
     }
 
+    fn handle_admin(
+        &self, stream: &mut ErrorOnDropTcpStream, path: &str, url: &Url, is_admin_authed: bool,
+    ) -> Result<()> {
+        if !is_admin_authed {
+            return write_response(
+                stream,
+                "401 Unauthorized",
+                "{\"error\":\"Unauthorized\",\"message\":\"invalid or missing auth\"}",
+            );
+        }
+        match path {
+            PATH_ADMIN_BAN | PATH_ADMIN_UNBAN => {
+                let Some(hostname) = Self::get_query_param(url, "host") else {
+                    return write_response(
+                        stream,
+                        "400 Bad Request",
+                        "{\"error\":\"BadRequest\",\"message\":\"host parameter is required\"}",
+                    );
+                };
+                let is_ban = path == PATH_ADMIN_BAN;
+                let result =
+                    if is_ban { self.ban_host(&hostname) } else { self.unban_host(&hostname) };
+                let (status, body) = match result {
+                    Ok(()) => {
+                        let body = serde_json::json!({"host": hostname, "banned": is_ban});
+                        ("200 OK", serde_json::to_string(&body)?)
+                    }
+                    Err(e) => {
+                        let body =
+                            serde_json::json!({"error": "InternalError", "message": e.to_string()});
+                        ("500 Internal Server Error", serde_json::to_string(&body)?)
+                    }
+                };
+                write_response(stream, status, &body)
+            }
+            PATH_ADMIN_LIST_BANS => {
+                let (status, body) = match self.list_bans() {
+                    Ok(bans) => ("200 OK", serde_json::to_string(&bans)?),
+                    Err(e) => {
+                        let body =
+                            serde_json::json!({"error": "InternalError", "message": e.to_string()});
+                        ("500 Internal Server Error", serde_json::to_string(&body)?)
+                    }
+                };
+                write_response(stream, status, &body)
+            }
+            _ => write_response(
+                stream,
+                "404 Not Found",
+                "{\"error\":\"NotFound\",\"message\":\"endpoint not found\"}",
+            ),
+        }
+    }
+
     #[cfg(not(feature = "labeler"))]
-    fn list_hosts(&mut self, url: &Url) -> Result<ListHosts> {
+    fn list_hosts(&self, url: &Url) -> Result<ListHosts> {
         // Default query parameters.
         let mut limit = 200;
         let mut cursor = None;
@@ -347,7 +424,13 @@ impl Server {
                     ":cursor": cursor,
                     ":limit": limit,
                 },
-                |row| Ok((row.get::<_, i64>("rowid")?, row.get("host")?, row.get("cursor")?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>("rowid")?,
+                        row.get::<_, String>("host")?,
+                        row.get::<_, u64>("cursor")?,
+                    ))
+                },
             )?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -355,13 +438,19 @@ impl Server {
 
         let hosts = hosts
             .into_iter()
-            .map(|(_, hostname, seq)| Host {
-                // TODO: Track host account counts.
-                account_count: 0,
-                hostname,
-                seq,
-                // TODO: Track status of hosts.
-                status: HostStatus::Active,
+            .map(|(_, hostname, seq)| {
+                let status = if self.is_host_banned(&hostname) {
+                    HostStatus::Banned
+                } else {
+                    HostStatus::Active
+                };
+                Host {
+                    // TODO: Track host account counts.
+                    account_count: 0,
+                    hostname,
+                    seq,
+                    status,
+                }
             })
             .collect();
 
@@ -369,7 +458,7 @@ impl Server {
     }
 
     #[cfg(not(feature = "labeler"))]
-    fn host_status(&mut self, url: &Url) -> Result<GetHostStatus> {
+    fn host_status(&self, url: &Url) -> Result<GetHostStatus> {
         let mut hostname = None;
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
@@ -378,21 +467,20 @@ impl Server {
                 _ => (),
             }
         }
-        let hostname = hostname.ok_or(eyre!("hostname param is required"))?;
+        let hostname = hostname.ok_or_else(|| eyre!("hostname param is required"))?;
 
-        Ok(self
-            .relay_conn
+        let is_banned = self.is_host_banned(&hostname);
+        self.relay_conn
             .prepare_cached("SELECT cursor FROM hosts WHERE host = :host")?
             .query_one(named_params! { ":host": hostname.clone() }, |row| {
                 Ok(GetHostStatus {
                     hostname: hostname.clone(),
                     seq: row.get("cursor")?,
-                    // TODO: Track status of hosts.
-                    status: HostStatus::Active,
+                    status: if is_banned { HostStatus::Banned } else { HostStatus::Active },
                 })
             })
             .optional()?
-            .ok_or(eyre!("hostname {hostname:?} not found"))?)
+            .ok_or_else(|| eyre!("hostname {hostname:?} not found"))
     }
 
     #[cfg(not(feature = "labeler"))]
@@ -414,6 +502,7 @@ impl Server {
             for host in hosts.hosts.into_iter().rev() {
                 if host.account_count > HOSTS_MIN_ACCOUNTS
                     && matches!(host.status, HostStatus::Active | HostStatus::Idle)
+                    && !self.is_host_banned(&host.hostname)
                 {
                     self.request_crawl_tx
                         .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
@@ -440,4 +529,53 @@ impl Server {
         drop(stmt);
         Ok(())
     }
+
+    fn ban_host(&self, hostname: &str) -> Result<()> {
+        self.admin_conn
+            .execute("INSERT OR IGNORE INTO banned_hosts (host) VALUES (?1)", [hostname])?;
+        tracing::warn!(%hostname, "banned PDS host");
+        Ok(())
+    }
+
+    fn unban_host(&self, hostname: &str) -> Result<()> {
+        self.admin_conn.execute("DELETE FROM banned_hosts WHERE host = ?1", [hostname])?;
+        tracing::warn!(%hostname, "unbanned PDS host");
+        Ok(())
+    }
+
+    fn list_bans(&self) -> Result<ListBans> {
+        let mut stmt = self
+            .admin_conn
+            .prepare_cached("SELECT host, created_at FROM banned_hosts ORDER BY created_at")?;
+        let banned_hosts = stmt
+            .query_map([], |row| {
+                Ok(BannedHost { host: row.get("host")?, created_at: row.get("created_at")? })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ListBans { banned_hosts })
+    }
+
+    fn is_host_banned(&self, hostname: &str) -> bool {
+        self.admin_conn
+            .prepare_cached("SELECT 1 FROM banned_hosts WHERE host = ?1")
+            .and_then(|mut stmt| stmt.exists([hostname]))
+            .unwrap_or(false)
+    }
+
+    fn get_query_param(url: &Url, key: &str) -> Option<String> {
+        url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.to_string())
+    }
+}
+
+fn check_admin_auth(headers: &[httparse::Header<'_>]) -> bool {
+    let Some(password) = ADMIN_PASSWORD.as_ref() else {
+        return false;
+    };
+    headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("Authorization")
+            && std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .is_some_and(|token| token == password.as_str())
+    })
 }

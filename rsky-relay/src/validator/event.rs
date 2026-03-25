@@ -310,7 +310,7 @@ impl SubscribeReposEvent {
                 labels.seq = seq.get();
                 serde_ipld_dagcbor::to_writer(&mut writer, &labels)?;
             }
-        };
+        }
 
         Ok(writer.into_inner())
     }

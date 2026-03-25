@@ -30,12 +30,7 @@ pub fn connect<Req: IntoClientRequest>(request: Req) -> HandshakeResult {
 }
 
 // Ref: https://github.com/snapview/tungstenite-rs/blob/master/src/client.rs
-#[expect(
-    clippy::expect_used,
-    clippy::ignored_unit_patterns,
-    clippy::redundant_clone,
-    clippy::redundant_else
-)]
+#[expect(clippy::expect_used, clippy::ignored_unit_patterns, clippy::redundant_clone)]
 pub fn connect_with_config<Req: IntoClientRequest>(
     request: Req, config: Option<WebSocketConfig>, max_redirects: u8,
 ) -> HandshakeResult {
@@ -72,10 +67,7 @@ pub fn connect_with_config<Req: IntoClientRequest>(
             Err(Error::Http(res)) if res.status().is_redirection() && attempt < max_redirects => {
                 if let Some(location) = res.headers().get("Location") {
                     uri = location.to_str()?.parse::<Uri>()?;
-                    // debug!("Redirecting to {uri:?}");
-                    continue;
                 } else {
-                    // warn!("No `Location` found in redirect");
                     return Err(Error::Http(res));
                 }
             }

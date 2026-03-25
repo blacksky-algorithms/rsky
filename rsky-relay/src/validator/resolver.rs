@@ -74,7 +74,7 @@ impl Resolver {
             match conn.execute("PRAGMA secure_delete = OFF", []) {
                 Ok(_) | Err(rusqlite::Error::ExecuteReturnedResults) => {}
                 Err(err) => Err(err)?,
-            };
+            }
             conn.execute("PRAGMA synchronous = NORMAL", [])?;
             conn.execute("PRAGMA incremental_vacuum", [])?;
             conn.execute("PRAGMA optimize = 0x10002", [])?;

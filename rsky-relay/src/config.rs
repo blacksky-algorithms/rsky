@@ -2,6 +2,11 @@ use std::env;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+// admin
+pub static ADMIN_PASSWORD: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("RELAY_ADMIN_PASSWORD").ok().filter(|s| !s.is_empty()));
+pub const BAN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
 // main
 pub const CAPACITY_MSGS: usize = 1 << 16;
 pub const CAPACITY_REQS: usize = 1 << 12;

@@ -64,7 +64,7 @@ impl Cursor {
     }
 
     #[inline]
-    pub fn next(&mut self) -> Self {
+    pub const fn next(&mut self) -> Self {
         let value = u64::from_be_bytes(self.0) + 1;
         self.0 = value.to_be_bytes();
         *self
