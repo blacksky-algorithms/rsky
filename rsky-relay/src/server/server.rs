@@ -13,7 +13,10 @@ use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
 #[cfg(not(feature = "labeler"))]
 use rusqlite::named_params;
+#[cfg(not(feature = "labeler"))]
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+#[cfg(feature = "labeler")]
+use rusqlite::{Connection, OpenFlags};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
 use url::Url;
