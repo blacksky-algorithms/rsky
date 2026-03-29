@@ -272,65 +272,68 @@ impl ActorStore {
                         delete_and_update_uris.push(d_at_uri)
                     }
                 }
-                if write.swap_cid().is_none() {
-                    continue;
-                }
+
                 let write_at_uri: &AtUri = &write.uri().try_into()?;
-                let record = self
-                    .record
-                    .get_record(write_at_uri, None, Some(true))
-                    .await?;
-                let current_record = match record {
-                    Some(record) => Some(Cid::from_str(&record.cid)?),
-                    None => None,
-                };
                 let cid = match &write {
                     &PreparedWrite::Delete(_) => None,
                     &PreparedWrite::Create(w) | &PreparedWrite::Update(w) => Some(w.cid),
                 };
+
+                // Always build the op for the firehose
                 let mut op = CommitOp {
                     action: commit_action,
                     path: format_data_key(write_at_uri.get_collection(), write_at_uri.get_rkey()),
                     cid,
                     prev: None,
                 };
-                if let Some(_) = current_record {
-                    op.prev = current_record;
-                };
+
+                // Look up current record for prev and swap_cid validation
+                if write.swap_cid().is_some() {
+                    let record = self
+                        .record
+                        .get_record(write_at_uri, None, Some(true))
+                        .await?;
+                    let current_record = match record {
+                        Some(record) => Some(Cid::from_str(&record.cid)?),
+                        None => None,
+                    };
+                    if let Some(_) = current_record {
+                        op.prev = current_record;
+                    };
+
+                    match write {
+                        PreparedWrite::Create(_) if write.swap_cid().is_some() => {
+                            Err::<(), anyhow::Error>(
+                                FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                    .into(),
+                            )
+                        }
+                        PreparedWrite::Update(_) if write.swap_cid().is_none() => {
+                            Err::<(), anyhow::Error>(
+                                FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                    .into(),
+                            )
+                        }
+                        PreparedWrite::Delete(_) if write.swap_cid().is_none() => {
+                            Err::<(), anyhow::Error>(
+                                FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
+                                    .into(),
+                            )
+                        }
+                        _ => Ok::<(), anyhow::Error>(()),
+                    }?;
+                    match (current_record, write.swap_cid()) {
+                        (Some(current_record), Some(swap_cid)) if current_record.eq(swap_cid) => {
+                            Ok::<(), anyhow::Error>(())
+                        }
+                        _ => Err::<(), anyhow::Error>(
+                            FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record))
+                                .into(),
+                        ),
+                    }?;
+                }
+
                 commit_ops.push(op);
-                match write {
-                    // There should be no current record for a create
-                    PreparedWrite::Create(_) if write.swap_cid().is_some() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    // There should be a current record for an update
-                    PreparedWrite::Update(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    // There should be a current record for a delete
-                    PreparedWrite::Delete(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    _ => Ok::<(), anyhow::Error>(()),
-                }?;
-                match (current_record, write.swap_cid()) {
-                    (Some(current_record), Some(swap_cid)) if current_record.eq(swap_cid) => {
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    _ => Err::<(), anyhow::Error>(
-                        FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record))
-                            .into(),
-                    ),
-                }?;
             }
             let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;
             let previous_data = repo.commit.data;
