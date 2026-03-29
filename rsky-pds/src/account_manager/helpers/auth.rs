@@ -65,7 +65,10 @@ pub struct ServiceJwtParams {
 
 #[derive(Serialize, Deserialize)]
 pub struct CustomClaimObj {
+    #[serde(default)]
     pub scope: String,
+    #[serde(default)]
+    pub lxm: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -116,6 +119,7 @@ pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
     let claims = Claims::with_custom_claims(
         CustomClaimObj {
             scope: scope.as_str().to_owned(),
+            lxm: None,
         },
         expires_in,
     )
@@ -141,6 +145,7 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     let claims = Claims::with_custom_claims(
         CustomClaimObj {
             scope: AuthScope::Refresh.as_str().to_owned(),
+            lxm: None,
         },
         expires_in,
     )
