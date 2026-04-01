@@ -4,12 +4,15 @@
 //! and inserts into production using COPY + INSERT ON CONFLICT DO NOTHING.
 //! The sorted key order gives sequential B-tree access on production indexes.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
+
+static SKIPPED_INVALID_JSON: AtomicI64 = AtomicI64::new(0);
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -206,8 +209,26 @@ async fn merge_table(
     staging_client.execute("CLOSE merge_cursor", &[]).await?;
     staging_client.execute("COMMIT", &[]).await?;
 
-    tracing::info!("merge complete for {table}: {merged} rows");
+    let skipped = SKIPPED_INVALID_JSON.load(Ordering::Relaxed);
+    if skipped > 0 {
+        tracing::warn!(
+            "merge complete for {table}: {merged} rows merged, {skipped} skipped (invalid JSON)"
+        );
+    } else {
+        tracing::info!("merge complete for {table}: {merged} rows");
+    }
     Ok(())
+}
+
+/// Index of the `json` column in staging_record rows.
+const RECORD_JSON_COL: usize = 3;
+
+/// Escape a string value for PostgreSQL COPY text format.
+fn escape_copy(v: &str) -> String {
+    v.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 async fn merge_batch(
@@ -218,6 +239,8 @@ async fn merge_batch(
     use futures::SinkExt;
     use futures::pin_mut;
     use std::io::Write;
+
+    let is_record = table == "record";
 
     // Create temp table matching the staging schema
     let (temp_ddl, copy_cols, insert_sql) = merge_sql(table);
@@ -238,7 +261,23 @@ async fn merge_batch(
 
     let mut buffer = Vec::with_capacity(rows.len() * 200);
     let num_cols = rows.first().map_or(0, |r| r.len());
-    for row in rows {
+    'row: for row in rows {
+        // For record table, validate JSON before writing to COPY buffer.
+        if is_record {
+            let json_val: Option<String> = row.try_get(RECORD_JSON_COL).ok().flatten();
+            if let Some(ref json) = json_val {
+                if serde_json::from_str::<serde_json::Value>(json).is_err() {
+                    let uri: Option<String> = row.try_get(0).ok().flatten();
+                    let total = SKIPPED_INVALID_JSON.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        "skipping record with invalid JSON: uri={} (total skipped: {total})",
+                        uri.as_deref().unwrap_or("unknown")
+                    );
+                    continue 'row;
+                }
+            }
+        }
+
         for col in 0..num_cols {
             if col > 0 {
                 write!(buffer, "\t").ok();
@@ -246,12 +285,7 @@ async fn merge_batch(
             let val: Option<String> = row.try_get(col).ok().flatten();
             match val {
                 Some(v) => {
-                    let escaped = v
-                        .replace('\\', "\\\\")
-                        .replace('\t', "\\t")
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r");
-                    write!(buffer, "{escaped}").ok();
+                    write!(buffer, "{}", escape_copy(&v)).ok();
                 }
                 None => {
                     write!(buffer, "\\N").ok();
