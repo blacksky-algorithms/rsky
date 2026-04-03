@@ -4,10 +4,17 @@ use anyhow::Result;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::response::status;
+use rocket::serde::json::Json;
 use rocket::{Request, State};
+use serde::Serialize;
 
 pub struct HostHeader(pub String);
 
+#[derive(Serialize)]
+pub struct OAuthProtectedResourceMetadata {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+}
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for HostHeader {
     type Error = ();
@@ -55,6 +62,22 @@ pub async fn well_known(
         Err(_) => Err(status::Custom(
             Status::InternalServerError,
             "Internal Server Error".to_string(),
+        )),
+    }
+}
+
+#[rocket::get("/.well-known/oauth-protected-resource")]
+pub async fn oauth_protected_resource(
+    cfg: &State<ServerConfig>,
+) -> Result<Json<OAuthProtectedResourceMetadata>, status::Custom<String>> {
+    match cfg.identity.oauth_authorization_server.clone() {
+        Some(authorization_server) => Ok(Json(OAuthProtectedResourceMetadata {
+            resource: cfg.service.public_url.clone(),
+            authorization_servers: vec![authorization_server],
+        })),
+        None => Err(status::Custom(
+            Status::NotFound,
+            "OAuth protected resource metadata not configured".to_string(),
         )),
     }
 }
