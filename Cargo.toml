@@ -20,20 +20,20 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-serde = { version = "1.0.160", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "^1.0"
-serde_ipld_dagcbor = {  version = "0.6.1" ,features = ["codec"]}
+serde_ipld_dagcbor = {  version = "0.6.4" ,features = ["codec"]}
 lexicon_cid = { package = "cid", version = "0.11.1", features = ["serde-codec"] }
-ipld-core = "0.4.2"
+ipld-core = "0.4.3"
 serde_cbor = "0.11.2"
-serde_bytes = "0.11.15"
-tokio = { version = "1.28.2",features = ["full"] }
+serde_bytes = "0.11.19"
+tokio = { version = "1.51.0",features = ["full"] }
 tokio-util = "0.7"
-sha2 = "0.10.8"
+sha2 = "0.10.9"
 rand = "0.8.5"
 rand_core = "0.6.4"
 secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes","rand-std"] }
-serde_json = { version = "1.0.96",features = ["preserve_order"] }
+serde_json = { version = "1.0.149",features = ["preserve_order"] }
 rsky-lexicon = {path = "rsky-lexicon", version = "0.2.8"}
 rsky-identity = {path = "rsky-identity", version = "0.1.0"}
 rsky-crypto = {path = "rsky-crypto", version = "0.1.1"}

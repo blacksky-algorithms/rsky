@@ -13,16 +13,16 @@ readme = "README.md"
 documentation = "https://docs.rs/rsky-lexicon"
 
 [dependencies]
-chrono = { version = "0.4.24", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 derive_builder = "0.12.0"
-miette = "5.8.0"
-parking_lot = "0.12.1"
+miette = "5.10.0"
+parking_lot = "0.12.5"
 serde = {workspace = true}
 serde_json = {workspace = true}
 serde_cbor = {workspace = true}
 serde_derive = "^1.0"
-serde_bytes = "0.11.9"
-thiserror = "1.0.40"
+serde_bytes = "0.11.19"
+thiserror = "1.0.69"
 secp256k1 = {workspace = true}
 lexicon_cid = {workspace = true}
-anyhow = "1.0.79" # @TODO: Remove anyhow in lib
+anyhow = "1.0.102" # @TODO: Remove anyhow in lib

@@ -67,5 +67,5 @@ prometheus = { version = "0.13", features = ["process"] }
 rsky-syntax = { workspace = true }
 
 [dev-dependencies]
-mockito = "1.7.0"
+mockito = "1.7.2"
 tempfile = "3"
