@@ -25,8 +25,7 @@ const INFINITY: u64 = u64::MAX;
 pub static JWT_PUBLIC_KEY: std::sync::LazyLock<ES256kPublicKey> = std::sync::LazyLock::new(|| {
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let secret_key =
-        SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
     let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
     let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice()).unwrap();
 
@@ -964,10 +963,7 @@ pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
     }
 }
 
-pub fn verify_jwt(
-    jwt: &str,
-    verify_options: Option<VerificationOptions>,
-) -> Result<JwtPayload> {
+pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Result<JwtPayload> {
     let claims = JWT_PUBLIC_KEY.verify_token::<CustomClaimObj>(jwt, verify_options)?;
 
     Ok(JwtPayload {
