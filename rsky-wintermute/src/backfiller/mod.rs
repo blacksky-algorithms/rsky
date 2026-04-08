@@ -1,7 +1,7 @@
 mod tests;
 
 use crate::SHUTDOWN;
-use crate::config::{BACKFILLER_BATCH_SIZE, WORKERS_BACKFILLER, backfiller_timeout};
+use crate::config::{WORKERS_BACKFILLER, backfiller_timeout};
 use crate::storage::Storage;
 use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
 use dashmap::DashMap;
@@ -23,6 +23,23 @@ pub struct BackfillerManager {
     pds_cache: Arc<DashMap<String, String>>,
 }
 
+/// RAII guard that decrements `BACKFILLER_REPOS_RUNNING` on drop.
+/// Prevents metric leaks when `process_job` returns early via `?`.
+struct RepoRunningGuard;
+
+impl RepoRunningGuard {
+    fn new() -> Self {
+        crate::metrics::BACKFILLER_REPOS_RUNNING.inc();
+        Self
+    }
+}
+
+impl Drop for RepoRunningGuard {
+    fn drop(&mut self) {
+        crate::metrics::BACKFILLER_REPOS_RUNNING.dec();
+    }
+}
+
 impl BackfillerManager {
     pub fn new(storage: Arc<Storage>) -> Result<Self, WintermuteError> {
         let workers = *WORKERS_BACKFILLER;
@@ -31,9 +48,9 @@ impl BackfillerManager {
             .build()?;
 
         tracing::info!(
-            "backfiller config: workers={}, batch_size={}, timeout={:?}",
+            "backfiller config: workers={}, channel_cap={}, timeout={:?}",
             workers,
-            *BACKFILLER_BATCH_SIZE,
+            workers * 2,
             backfiller_timeout()
         );
 
@@ -46,6 +63,14 @@ impl BackfillerManager {
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
+        if self.workers == 0 {
+            tracing::info!("backfiller disabled (workers=0), skipping");
+            while !SHUTDOWN.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+            return Ok(());
+        }
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(self.workers)
             .enable_all()
@@ -64,7 +89,10 @@ impl BackfillerManager {
     /// No batch barriers -- each worker immediately picks up the next job when done.
     async fn process_loop(&self) {
         const MAX_EMPTY_BACKOFF_MS: u64 = 5000;
-        let (tx, rx) = tokio::sync::mpsc::channel::<(Vec<u8>, BackfillJob)>(*BACKFILLER_BATCH_SIZE);
+        // Channel capacity = workers * 2: enough to keep workers fed without buffering
+        // thousands of dequeued items that would be lost on crash.
+        let channel_cap = self.workers * 2;
+        let (tx, rx) = tokio::sync::mpsc::channel::<(Vec<u8>, BackfillJob)>(channel_cap);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         tracing::info!(
@@ -126,7 +154,9 @@ impl BackfillerManager {
                     break;
                 }
 
-                let batch_size = *BACKFILLER_BATCH_SIZE;
+                // Dequeue in small batches proportional to channel capacity to avoid
+                // removing thousands of items from Fjall that would be lost on crash.
+                let batch_size = channel_cap;
                 let jobs = match dequeue_storage.dequeue_backfill_batch(batch_size) {
                     Ok(jobs) => jobs,
                     Err(e) => {
@@ -178,7 +208,8 @@ impl BackfillerManager {
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
-        metrics::BACKFILLER_REPOS_RUNNING.inc();
+        // Guard decrements BACKFILLER_REPOS_RUNNING on drop, even on early ? returns.
+        let _running_guard = RepoRunningGuard::new();
 
         let did = &job.did;
 
@@ -195,7 +226,6 @@ impl BackfillerManager {
             let mut resolver = IdResolver::new(resolver_opts);
             let Ok(Some(doc)) = resolver.did.resolve(did.to_string(), None).await else {
                 metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-                metrics::BACKFILLER_REPOS_RUNNING.dec();
                 return Err(WintermuteError::Other(format!(
                     "did resolution failed for: {did}"
                 )));
@@ -214,7 +244,6 @@ impl BackfillerManager {
 
             let Some(pds_url) = endpoint else {
                 metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-                metrics::BACKFILLER_REPOS_RUNNING.dec();
                 return Err(WintermuteError::Other(format!("no pds found: {did}")));
             };
 
@@ -228,7 +257,6 @@ impl BackfillerManager {
             Err(e) => {
                 metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
                 metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-                metrics::BACKFILLER_REPOS_RUNNING.dec();
                 return Err(WintermuteError::Other(format!("http error: {e}")));
             }
         };
@@ -236,7 +264,6 @@ impl BackfillerManager {
         if !response.status().is_success() {
             metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
             metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-            metrics::BACKFILLER_REPOS_RUNNING.dec();
             return Err(WintermuteError::Other(format!(
                 "http error: {}",
                 response.status()
@@ -249,7 +276,6 @@ impl BackfillerManager {
             Err(e) => {
                 metrics::BACKFILLER_CAR_PARSE_ERRORS_TOTAL.inc();
                 metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-                metrics::BACKFILLER_REPOS_RUNNING.dec();
                 return Err(WintermuteError::Repo(format!("car read failed: {e}")));
             }
         };
@@ -281,7 +307,6 @@ impl BackfillerManager {
         if repo.did() != did {
             metrics::BACKFILLER_VERIFICATION_ERRORS_TOTAL.inc();
             metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
-            metrics::BACKFILLER_REPOS_RUNNING.dec();
             return Err(WintermuteError::Repo(format!(
                 "did mismatch: expected {did}, got {}",
                 repo.did()
@@ -349,7 +374,6 @@ impl BackfillerManager {
         }
 
         metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
-        metrics::BACKFILLER_REPOS_RUNNING.dec();
 
         Ok(())
     }
