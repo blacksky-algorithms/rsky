@@ -92,7 +92,11 @@ pub fn get_profiles_munge(
                     if prof.did != requester {
                         prof
                     } else {
-                        local_viewer.update_profile_detailed(prof, profile.record.clone())
+                        local_viewer.update_profile_detailed(
+                            prof,
+                            profile.record.clone(),
+                            local.posts.len(),
+                        )
                     }
                 })
                 .collect::<Vec<ProfileViewDetailed>>();

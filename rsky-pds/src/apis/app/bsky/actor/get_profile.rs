@@ -96,7 +96,7 @@ pub fn get_profile_munge(
             if original.did != requester {
                 return Ok(original);
             }
-            Ok(local_viewer.update_profile_detailed(original, profile.record))
+            Ok(local_viewer.update_profile_detailed(original, profile.record, local.posts.len()))
         }
     }
 }

@@ -565,6 +565,7 @@ impl LocalViewer {
         &self,
         view: ProfileViewDetailed,
         record: Profile,
+        local_posts_count: usize,
     ) -> ProfileViewDetailed {
         let ProfileViewDetailed {
             did,
@@ -620,7 +621,7 @@ impl LocalViewer {
             },
             followers_count,
             follows_count,
-            posts_count,
+            posts_count: apply_local_posts_count(posts_count, local_posts_count),
             associated,
             joined_via_starter_pack,
             viewer,
@@ -650,6 +651,32 @@ impl LocalViewer {
             )
             .build();
         Ok(AtpServiceClient::new(client))
+    }
+}
+
+/// Adds locally written posts to an upstream posts_count.
+/// Returns None if the upstream count is unknown.
+pub fn apply_local_posts_count(upstream: Option<usize>, local_posts: usize) -> Option<usize> {
+    upstream.map(|c| c + local_posts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_posts_added_to_upstream_count() {
+        assert_eq!(apply_local_posts_count(Some(5), 3), Some(8));
+    }
+
+    #[test]
+    fn zero_local_posts_leaves_count_unchanged() {
+        assert_eq!(apply_local_posts_count(Some(10), 0), Some(10));
+    }
+
+    #[test]
+    fn unknown_upstream_count_stays_none() {
+        assert_eq!(apply_local_posts_count(None, 5), None);
     }
 }
 
