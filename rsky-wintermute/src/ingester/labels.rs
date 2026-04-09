@@ -193,7 +193,15 @@ async fn connect_and_stream(
                     // Not a label message, skip
                 }
                 Err(e) => {
-                    tracing::error!("failed to parse label message: {e}");
+                    // Skip unparseable messages instead of breaking the connection.
+                    // The WebSocket stream has already consumed this message, so the
+                    // next read.next() will return the following message. Without this,
+                    // a single bad message causes an infinite reconnect loop because
+                    // the cursor isn't advanced past it.
+                    tracing::warn!(
+                        "skipping unparseable label message from {labeler_host}: {e} ({}B)",
+                        data.len()
+                    );
                     metrics::INGESTER_ERRORS_TOTAL
                         .with_label_values(&["label_parse"])
                         .inc();
@@ -221,8 +229,10 @@ pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, Wintermute
     struct Header {
         #[serde(rename = "t")]
         type_: String,
+        // AT Protocol uses op=1 for regular messages, op=-1 for error/info.
+        // Must be signed to handle negative values.
         #[serde(rename = "op")]
-        _operation: u8,
+        operation: i8,
     }
 
     #[derive(serde::Deserialize)]
@@ -251,7 +261,8 @@ pub fn parse_label_message(data: &[u8]) -> Result<Option<LabelEvent>, Wintermute
     let header: Header = ciborium::from_reader(&mut cursor)
         .map_err(|e| WintermuteError::Serialization(format!("failed to parse header: {e}")))?;
 
-    if header.type_ != "#labels" {
+    // op=-1 is an error/info message from the server, not a label event
+    if header.operation != 1 || header.type_ != "#labels" {
         return Ok(None);
     }
 

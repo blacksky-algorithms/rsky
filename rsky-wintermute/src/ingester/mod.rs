@@ -558,8 +558,9 @@ impl IngesterManager {
         struct Header {
             #[serde(rename = "t")]
             type_: String,
+            // AT Protocol uses op=1 for regular messages, op=-1 for error/info.
             #[serde(rename = "op")]
-            _operation: u8,
+            _operation: i8,
         }
 
         #[derive(serde::Deserialize)]
