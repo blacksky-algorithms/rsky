@@ -277,7 +277,7 @@ impl AccountManager {
 
             // Shorten the refresh token lifespan down from its
             // original expiration time to its revocation grace period.
-            let prev_expires_at = from_str_to_micros(&token.expires_at);
+            let prev_expires_at = from_str_to_micros(&token.expires_at)?;
 
             const REFRESH_GRACE_MS: i32 = 2 * HOUR;
             let grace_expires_at = dt.timestamp_micros() + REFRESH_GRACE_MS as i64;

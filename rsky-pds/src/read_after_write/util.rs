@@ -99,7 +99,7 @@ pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
         Some(oldest) => {
             let system_time = SystemTime::now();
             let now: DateTime<UtcOffset> = system_time.into();
-            let duration = now - from_str_to_utc(&oldest);
+            let duration = now - from_str_to_utc(&oldest)?;
             Ok(Some(duration.num_milliseconds() as usize))
         }
     }
