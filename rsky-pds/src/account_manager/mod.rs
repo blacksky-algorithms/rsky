@@ -24,7 +24,6 @@ use rsky_common::time::{from_micros_to_str, from_str_to_micros, HOUR};
 use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
-use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
@@ -146,21 +145,15 @@ impl AccountManager {
             Some(password) => Some(password::gen_salt_and_hash(password)?),
             None => None,
         };
-        // Should be a global var so this only happens once
-        let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX")?;
-        let secret_key =
-            SecretKey::from_slice(&Result::unwrap(hex::decode(private_key.as_bytes())))?;
-        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did: did.clone(),
-            jwt_key,
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
             scope: Some(AuthScope::Access),
             jti: None,
             expires_in: None,
         })?;
-        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
         let now = rsky_common::now();
 
         if let Some(invite_code) = invite_code.clone() {
@@ -242,10 +235,7 @@ impl AccountManager {
         app_password_name: Option<String>,
     ) -> Result<(String, String)> {
         let db = self.db.clone();
-        let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX")?;
-        let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes())?)?;
-        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+
         let scope = if app_password_name.is_none() {
             AuthScope::Access
         } else {
@@ -253,13 +243,12 @@ impl AccountManager {
         };
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did,
-            jwt_key,
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
             scope: Some(scope),
             jti: None,
             expires_in: None,
         })?;
-        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
         auth::store_refresh_token(refresh_payload, app_password_name, db.as_ref()).await?;
         Ok((access_jwt, refresh_jwt))
     }
@@ -296,15 +285,8 @@ impl AccountManager {
             // reuse you always receive a refresh token with the same id.
             let next_id = token.next_id.unwrap_or_else(auth::get_refresh_token_id);
 
-            let secp = Secp256k1::new();
-            let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-            let secret_key =
-                SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-            let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-
             let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
                 did: token.did,
-                jwt_key,
                 service_did: env::var("PDS_SERVICE_DID").unwrap(),
                 scope: Some(if token.app_password_name.is_none() {
                     AuthScope::Access
@@ -314,7 +296,7 @@ impl AccountManager {
                 jti: Some(next_id.clone()),
                 expires_in: None,
             })?;
-            let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone(), jwt_key)?;
+            let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
             match try_join!(
                 auth::add_refresh_grace_period(
                     RefreshGracePeriodOpts {

@@ -6,14 +6,13 @@ use diesel::*;
 use jwt_simple::prelude::*;
 use rsky_common::time::{from_micros_to_utc, MINUTE};
 use rsky_common::{get_random_str, json_to_b64url, RFC3339_VARIANT};
-use secp256k1::{Keypair, Message, SecretKey};
+use secp256k1::{Message, SecretKey};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 use thiserror::Error;
 
 pub struct CreateTokensOpts {
     pub did: String,
-    pub jwt_key: Keypair,
     pub service_did: String,
     pub scope: Option<AuthScope>,
     pub jti: Option<String>,
@@ -77,7 +76,6 @@ pub enum AuthHelperError {
 pub fn create_tokens(opts: CreateTokensOpts) -> Result<(String, String)> {
     let CreateTokensOpts {
         did,
-        jwt_key,
         service_did,
         scope,
         jti,
@@ -85,7 +83,6 @@ pub fn create_tokens(opts: CreateTokensOpts) -> Result<(String, String)> {
     } = opts;
     let access_jwt = create_access_token(CreateTokensOpts {
         did: did.clone(),
-        jwt_key,
         service_did: service_did.clone(),
         scope,
         expires_in,
@@ -93,7 +90,6 @@ pub fn create_tokens(opts: CreateTokensOpts) -> Result<(String, String)> {
     })?;
     let refresh_jwt = create_refresh_token(CreateTokensOpts {
         did,
-        jwt_key,
         service_did,
         jti,
         expires_in,
@@ -105,7 +101,6 @@ pub fn create_tokens(opts: CreateTokensOpts) -> Result<(String, String)> {
 pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
     let CreateTokensOpts {
         did,
-        jwt_key,
         service_did,
         scope,
         expires_in,
@@ -121,16 +116,13 @@ pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
     )
     .with_audience(service_did)
     .with_subject(did);
-    // alg ES256K
-    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
-    let token = key.sign(claims)?;
-    Ok(token)
+
+    crate::auth_verifier::JWT_KEY.sign(claims)
 }
 
 pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     let CreateTokensOpts {
         did,
-        jwt_key,
         service_did,
         jti,
         expires_in,
@@ -147,10 +139,8 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     .with_audience(service_did)
     .with_subject(did)
     .with_jwt_id(jti);
-    // alg ES256K
-    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
-    let token = key.sign(claims)?;
-    Ok(token)
+
+    crate::auth_verifier::JWT_KEY.sign(claims)
 }
 
 pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
@@ -197,10 +187,10 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
 }
 
 // @NOTE unsafe for verification, should only be used w/ direct output from createRefreshToken() or createTokens()
-pub fn decode_refresh_token(jwt: String, jwt_key: Keypair) -> Result<RefreshToken> {
-    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
-    let public_key = key.public_key();
-    let claims = public_key.verify_token::<CustomClaimObj>(&jwt, None)?;
+pub fn decode_refresh_token(jwt: String) -> Result<RefreshToken> {
+    let claims = crate::auth_verifier::JWT_KEY
+        .public_key()
+        .verify_token::<CustomClaimObj>(&jwt, None)?;
     assert_eq!(
         claims.custom.scope,
         AuthScope::Refresh.as_str().to_owned(),
