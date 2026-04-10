@@ -1,4 +1,4 @@
-use crate::auth_verifier::AuthScope;
+use crate::auth_verifier::{AuthScope, PDS_JWT_KEYPAIR};
 use crate::db::DbConn;
 use crate::models;
 use anyhow::Result;
@@ -117,7 +117,7 @@ pub fn create_access_token(opts: CreateTokensOpts) -> Result<String> {
     .with_audience(service_did)
     .with_subject(did);
 
-    crate::auth_verifier::JWT_KEY.sign(claims)
+    PDS_JWT_KEYPAIR.sign(claims)
 }
 
 pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
@@ -140,7 +140,7 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     .with_subject(did)
     .with_jwt_id(jti);
 
-    crate::auth_verifier::JWT_KEY.sign(claims)
+    PDS_JWT_KEYPAIR.sign(claims)
 }
 
 pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
@@ -188,7 +188,7 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
 
 // @NOTE unsafe for verification, should only be used w/ direct output from createRefreshToken() or createTokens()
 pub fn decode_refresh_token(jwt: String) -> Result<RefreshToken> {
-    let claims = crate::auth_verifier::JWT_KEY
+    let claims = PDS_JWT_KEYPAIR
         .public_key()
         .verify_token::<CustomClaimObj>(&jwt, None)?;
     assert_eq!(
