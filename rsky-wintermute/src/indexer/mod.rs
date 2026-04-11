@@ -1387,16 +1387,6 @@ impl IndexerManager {
                         )
                         .await?;
                     }
-                    "place.stream.live.viewerCount" => {
-                        metrics::INDEXER_STREAM_VIEWER_COUNT_EVENTS_TOTAL.inc();
-                        Self::index_stream_viewer_count(
-                            &client,
-                            did.as_str(),
-                            record_json,
-                            &job.indexed_at,
-                        )
-                        .await?;
-                    }
                     _ => {}
                 }
             }
@@ -1935,9 +1925,6 @@ impl IndexerManager {
             }
             "place.stream.livestream" => {
                 Self::index_stream_livestream(client, did, rkey, record, cid, indexed_at).await
-            }
-            "place.stream.live.viewerCount" => {
-                Self::index_stream_viewer_count(client, did, record, indexed_at).await
             }
             _ => Ok(()),
         }
@@ -3514,46 +3501,6 @@ impl IndexerManager {
         client
             .execute("DELETE FROM stream_livestream WHERE uri = $1", &[&uri])
             .await?;
-        Ok(())
-    }
-
-    async fn index_stream_viewer_count(
-        client: &deadpool_postgres::Client,
-        did: &str,
-        record: &serde_json::Value,
-        indexed_at: &str,
-    ) -> Result<(), WintermuteError> {
-        let streamer = record
-            .get("streamer")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let server = record.get("server").and_then(|v| v.as_str()).unwrap_or(did);
-        let count: i32 = record
-            .get("count")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0)
-            .try_into()
-            .unwrap_or(i32::MAX);
-        let updated_at = record
-            .get("updatedAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
-
-        if streamer.is_empty() {
-            return Ok(());
-        }
-
-        client
-            .execute(
-                "INSERT INTO stream_viewer_count (streamer, server, count, \"updatedAt\")
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (streamer, server) DO UPDATE SET
-                   count = EXCLUDED.count,
-                   \"updatedAt\" = EXCLUDED.\"updatedAt\"",
-                &[&streamer, &server, &count, &updated_at],
-            )
-            .await?;
-
         Ok(())
     }
 
