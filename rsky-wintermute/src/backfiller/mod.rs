@@ -340,7 +340,10 @@ impl BackfillerManager {
                 continue;
             };
 
-            if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+            if !collection.starts_with("app.bsky.")
+                && !collection.starts_with("chat.bsky.")
+                && !collection.starts_with("place.stream.")
+            {
                 metrics::BACKFILLER_RECORDS_FILTERED_TOTAL.inc();
                 continue;
             }

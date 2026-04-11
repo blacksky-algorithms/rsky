@@ -1363,6 +1363,40 @@ impl IndexerManager {
                         )
                         .await?;
                     }
+                    "place.stream.chat.message" => {
+                        metrics::INDEXER_STREAM_CHAT_EVENTS_TOTAL.inc();
+                        Self::index_stream_chat_message(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "place.stream.livestream" => {
+                        metrics::INDEXER_STREAM_LIVESTREAM_EVENTS_TOTAL.inc();
+                        Self::index_stream_livestream(
+                            &client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    "place.stream.live.viewerCount" => {
+                        metrics::INDEXER_STREAM_VIEWER_COUNT_EVENTS_TOTAL.inc();
+                        Self::index_stream_viewer_count(
+                            &client,
+                            did.as_str(),
+                            record_json,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
                     _ => {}
                 }
             }
@@ -1431,6 +1465,14 @@ impl IndexerManager {
                     }
                     "community.blacksky.feed.post" => {
                         Self::delete_community_post(&client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    "place.stream.chat.message" => {
+                        Self::delete_stream_chat_message(&client, did.as_str(), rkey.as_str())
+                            .await?;
+                    }
+                    "place.stream.livestream" => {
+                        Self::delete_stream_livestream(&client, did.as_str(), rkey.as_str())
+                            .await?;
                     }
                     _ => {}
                 }
@@ -1887,6 +1929,15 @@ impl IndexerManager {
             }
             "community.blacksky.feed.post" => {
                 Self::index_community_post_stub(client, did, rkey, cid, indexed_at).await
+            }
+            "place.stream.chat.message" => {
+                Self::index_stream_chat_message(client, did, rkey, record, cid, indexed_at).await
+            }
+            "place.stream.livestream" => {
+                Self::index_stream_livestream(client, did, rkey, record, cid, indexed_at).await
+            }
+            "place.stream.live.viewerCount" => {
+                Self::index_stream_viewer_count(client, did, record, indexed_at).await
             }
             _ => Ok(()),
         }
@@ -3370,6 +3421,144 @@ impl IndexerManager {
         tracing::info!("deleted community post {}", uri);
         Ok(())
     }
+
+    // ── Streamplace record indexing ─────────────────────────────────────────
+
+    async fn index_stream_chat_message(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/place.stream.chat.message/{rkey}");
+        let text = record.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let streamer = record
+            .get("streamer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        if streamer.is_empty() {
+            return Ok(());
+        }
+
+        client
+            .execute(
+                "INSERT INTO stream_chat_message (uri, cid, creator, streamer, text, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT DO NOTHING",
+                &[&uri, &cid, &did, &streamer, &text, &created_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_stream_chat_message(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/place.stream.chat.message/{rkey}");
+        client
+            .execute("DELETE FROM stream_chat_message WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_stream_livestream(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        cid: &str,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/place.stream.livestream/{rkey}");
+        let title = record.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let stream_url = record.get("url").and_then(|v| v.as_str());
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+        let ended_at = record.get("endedAt").and_then(|v| v.as_str());
+
+        client
+            .execute(
+                "INSERT INTO stream_livestream (uri, cid, creator, title, url, \"createdAt\", \"endedAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (uri) DO UPDATE SET
+                   cid = EXCLUDED.cid,
+                   title = EXCLUDED.title,
+                   url = EXCLUDED.url,
+                   \"endedAt\" = EXCLUDED.\"endedAt\",
+                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                &[&uri, &cid, &did, &title, &stream_url, &created_at, &ended_at, &indexed_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_stream_livestream(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        let uri = format!("at://{did}/place.stream.livestream/{rkey}");
+        client
+            .execute("DELETE FROM stream_livestream WHERE uri = $1", &[&uri])
+            .await?;
+        Ok(())
+    }
+
+    async fn index_stream_viewer_count(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        record: &serde_json::Value,
+        indexed_at: &str,
+    ) -> Result<(), WintermuteError> {
+        let streamer = record
+            .get("streamer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let server = record.get("server").and_then(|v| v.as_str()).unwrap_or(did);
+        let count: i32 = record
+            .get("count")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(i32::MAX);
+        let updated_at = record
+            .get("updatedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(indexed_at);
+
+        if streamer.is_empty() {
+            return Ok(());
+        }
+
+        client
+            .execute(
+                "INSERT INTO stream_viewer_count (streamer, server, count, \"updatedAt\")
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (streamer) DO UPDATE SET
+                   server = EXCLUDED.server,
+                   count = EXCLUDED.count,
+                   \"updatedAt\" = EXCLUDED.\"updatedAt\"",
+                &[&streamer, &server, &count, &updated_at],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    // ── End Streamplace record indexing ───────────────────────────────────
 
     async fn index_like(
         client: &deadpool_postgres::Client,

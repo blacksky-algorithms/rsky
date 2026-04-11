@@ -342,6 +342,30 @@ pub static INDEXER_PROFILE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(||
     .unwrap()
 });
 
+pub static INDEXER_STREAM_CHAT_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "indexer_stream_chat_events_total",
+        "Total number of stream chat message events indexed"
+    )
+    .unwrap()
+});
+
+pub static INDEXER_STREAM_LIVESTREAM_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "indexer_stream_livestream_events_total",
+        "Total number of stream livestream events indexed"
+    )
+    .unwrap()
+});
+
+pub static INDEXER_STREAM_VIEWER_COUNT_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "indexer_stream_viewer_count_events_total",
+        "Total number of stream viewer count events indexed"
+    )
+    .unwrap()
+});
+
 /// Overall indexer stats
 pub static INDEXER_RECORDS_PROCESSED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
