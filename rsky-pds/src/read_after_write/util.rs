@@ -60,7 +60,7 @@ impl<'r, T: Serialize> Responder<'r, 'static> for ReadAfterWriteResponse<T> {
                 let mut builder = Response::build();
                 let encoding = handler_response.encoding.clone();
                 let headers = handler_response.headers.clone();
-                let bytes = serde_json::to_vec(&handler_response).unwrap();
+                let bytes = serde_json::to_vec(&handler_response.body).unwrap();
                 builder.sized_body(bytes.len(), Cursor::new(bytes));
                 builder
                     .status(Status::Ok)
@@ -191,6 +191,61 @@ pub fn format_munged_response<T: DeserializeOwned + serde::Serialize>(
             }
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TestBody {
+        did: String,
+        handle: String,
+    }
+
+    #[test]
+    fn handler_response_serializes_body_not_wrapper() {
+        let response: HandlerResponse<TestBody> = HandlerResponse {
+            encoding: "application/json".to_string(),
+            body: TestBody {
+                did: "did:plc:abc".to_string(),
+                handle: "alice.bsky.social".to_string(),
+            },
+            headers: None,
+        };
+
+        let bytes = serde_json::to_vec(&response.body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Body fields are present at the top level
+        assert_eq!(value["did"], "did:plc:abc");
+        assert_eq!(value["handle"], "alice.bsky.social");
+
+        // Wrapper fields must not appear — that was the bug
+        assert!(!value.as_object().unwrap().contains_key("encoding"));
+        assert!(!value.as_object().unwrap().contains_key("body"));
+        assert!(!value.as_object().unwrap().contains_key("headers"));
+    }
+
+    #[test]
+    fn handler_response_wrapper_shape_is_wrong_for_xrpc() {
+        // Demonstrates what the bug looked like: serializing the wrapper
+        // instead of .body produces an envelope that clients cannot parse.
+        let response: HandlerResponse<TestBody> = HandlerResponse {
+            encoding: "application/json".to_string(),
+            body: TestBody {
+                did: "did:plc:abc".to_string(),
+                handle: "alice.bsky.social".to_string(),
+            },
+            headers: None,
+        };
+
+        let wrapped = serde_json::to_value(&response).unwrap();
+        // The wrapper contains envelope fields — this is what clients used to receive
+        assert_eq!(wrapped["encoding"], json!("application/json"));
+        assert!(wrapped.as_object().unwrap().contains_key("body"));
+    }
 }
 
 pub fn nodejs_format(format: &str, args: &[&dyn std::fmt::Display]) -> String {
