@@ -28,14 +28,20 @@ WORKSPACE_MEMBERS=()
 
 # Look for members section in Cargo.toml
 if grep -q '\[workspace\]' Cargo.toml; then
-  # Extract the members section
-  MEMBERS_SECTION=$(sed -n '/\[workspace\]/,/\[/p' Cargo.toml | grep -A 20 'members.*=' | grep -v '^\[')
-  
-  # Extract member paths - handle both array and table formats
-  if echo "$MEMBERS_SECTION" | grep -q 'members.*=.*\['; then
-    # Array format: members = ["pkg1", "pkg2"]
-    MEMBERS_LIST=$(echo "$MEMBERS_SECTION" | grep -o '"[^"]*"' | tr -d '"')
-    readarray -t WORKSPACE_MEMBERS <<< "$MEMBERS_LIST"
+  # Extract the members array from the [workspace] section.
+  # awk correctly captures multi-line arrays. The previous approach used the sed
+  # range '/\[workspace\]/,/\[/' which stopped at "members = [" itself (because
+  # it contains "["), so member names on subsequent lines were never captured,
+  # and readarray produced a one-element array of the empty string.
+  MEMBERS_LIST=$(awk '
+    /^\[workspace\]/ { in_workspace=1 }
+    in_workspace && /members[[:space:]]*=/ { in_members=1 }
+    in_members { print }
+    in_members && /\]/ { exit }
+  ' Cargo.toml | grep -o '"[^"]*"' | tr -d '"')
+
+  if [[ -n "$MEMBERS_LIST" ]]; then
+    readarray -t WORKSPACE_MEMBERS < <(echo "$MEMBERS_LIST")
   else
     # Fallback: Try to find any directory that contains a Cargo.toml file
     echo "Falling back to finding all directories with Cargo.toml..."
