@@ -8,6 +8,7 @@ use rsky_crypto::utils::encode_did_key;
 use rsky_identity::types::DidDocument;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::env;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AssertionContents {
@@ -147,13 +148,8 @@ pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()
     if pds_endpoint.is_none() || pds_endpoint.unwrap() != public_url {
         bail!("DID document atproto_pds service endpoint does not match PDS public url")
     }
-
-    let repo_signing_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let repo_signing_keypair =
-        SecretKey::from_slice(&hex::decode(repo_signing_key.as_bytes()).unwrap()).unwrap();
-    let secp = Secp256k1::new();
-    let repo_public_key = repo_signing_keypair.public_key(&secp);
-    if signing_key.is_none() || signing_key.unwrap() != encode_did_key(&repo_public_key) {
+    
+    if signing_key.is_none() || signing_key.unwrap() != encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()) {
         bail!("DID document verification method does not match expected signing key")
     }
     Ok(())

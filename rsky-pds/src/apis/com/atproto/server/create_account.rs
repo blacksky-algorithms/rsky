@@ -6,6 +6,7 @@ use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::config::ServerConfig;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
@@ -30,7 +31,6 @@ pub struct TransformedCreateAccountInput {
     pub did: String,
     pub invite_code: Option<String>,
     pub password: String,
-    pub signing_key: Keypair,
     pub plc_op: Option<Operation>,
     pub deactivated: bool,
 }
@@ -66,7 +66,6 @@ pub async fn server_create_account(
         password,
         deactivated,
         plc_op,
-        signing_key,
     } = validate_inputs_for_local_pds(
         cfg,
         id_resolver,
@@ -79,7 +78,10 @@ pub async fn server_create_account(
     // Create new actor repo TODO: Proper rollback
     let mut actor_store =
         ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store.create_repo(signing_key, Vec::new()).await {
+    let commit = match actor_store
+        .create_repo(&PDS_REPO_SIGNING_KEYPAIR, Vec::new())
+        .await
+    {
         Ok(commit) => commit,
         Err(error) => {
             tracing::error!("Failed to create repo\n{:?}", error);
@@ -302,12 +304,6 @@ pub async fn validate_inputs_for_local_pds(
         Some(ref pass) => pass.clone(),
     };
 
-    // Get Signing Key
-    let secp = Secp256k1::new();
-    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-    let signing_key = Keypair::from_secret_key(&secp, &secret_key);
-
     match input.did {
         Some(input_did) => {
             if input_did == requester.unwrap_or("n/a".to_string()) {
@@ -320,7 +316,7 @@ pub async fn validate_inputs_for_local_pds(
             deactivated = true;
         }
         None => {
-            let res = format_did_and_plc_op(input, signing_key).await?;
+            let res = format_did_and_plc_op(input).await?;
             did = res.0;
             plc_op = Some(res.1);
             deactivated = false;
@@ -333,7 +329,6 @@ pub async fn validate_inputs_for_local_pds(
         did,
         invite_code,
         password,
-        signing_key,
         plc_op,
         deactivated,
     })
@@ -342,7 +337,6 @@ pub async fn validate_inputs_for_local_pds(
 #[tracing::instrument(skip_all)]
 async fn format_did_and_plc_op(
     input: CreateAccountInput,
-    signing_key: Keypair,
 ) -> Result<(String, Operation), ApiError> {
     let mut rotation_keys: Vec<String> = Vec::new();
 
@@ -362,7 +356,7 @@ async fn format_did_and_plc_op(
     //Build PLC Create Operation
 
     let create_op_input = CreateAtprotoOpInput {
-        signing_key: encode_did_key(&signing_key.public_key()),
+        signing_key: encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()),
         handle: input.handle,
         pds: format!(
             "https://{}",

@@ -11,6 +11,7 @@ use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::SubmitPlcOperationRequest;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 
 #[tracing::instrument(skip_all)]
 fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
@@ -59,30 +60,7 @@ fn get_public_rotation_key() -> Result<String, ApiError> {
 
 #[tracing::instrument(skip_all)]
 fn get_public_signing_key() -> Result<String, ApiError> {
-    let secp = Secp256k1::new();
-    let private_signing_key = match env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX") {
-        Ok(res) => res,
-        Err(error) => {
-            tracing::error!("Error geting signing private key\n{error}");
-            return Err(ApiError::RuntimeError);
-        }
-    };
-    match hex::decode(private_signing_key.as_bytes()) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
-            Ok(secret_key) => {
-                let signing_keypair = Keypair::from_secret_key(&secp, &secret_key);
-                Ok(encode_did_key(&signing_keypair.public_key()))
-            }
-            Err(error) => {
-                tracing::error!("Error geting signing secret key from bytes\n{error}");
-                Err(ApiError::RuntimeError)
-            }
-        },
-        Err(error) => {
-            tracing::error!("Unable to hex decode signing key\n{error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
+    Ok(encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()))
 }
 
 #[tracing::instrument(skip_all)]

@@ -1,4 +1,5 @@
 use crate::auth_verifier::{AuthScope, PDS_JWT_KEYPAIR};
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::db::DbConn;
 use crate::models;
 use anyhow::Result;
@@ -6,7 +7,7 @@ use diesel::*;
 use jwt_simple::prelude::*;
 use rsky_common::time::{from_micros_to_utc, MINUTE};
 use rsky_common::{get_random_str, json_to_b64url, RFC3339_VARIANT};
-use secp256k1::{Message, SecretKey};
+use secp256k1::Message;
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -59,7 +60,6 @@ pub struct ServiceJwtParams {
     pub exp: Option<u64>,
     pub lxm: Option<String>,
     pub jti: Option<String>,
-    pub keypair: SecretKey,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,9 +144,7 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
 }
 
 pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
-    let ServiceJwtParams {
-        iss, aud, keypair, ..
-    } = params;
+    let ServiceJwtParams { iss, aud, .. } = params;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("timestamp in micros since UNIX epoch")
@@ -174,7 +172,7 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
     );
     let hash = Sha256::digest(to_sign_str.clone());
     let message = Message::from_digest_slice(hash.as_ref())?;
-    let mut sig = keypair.sign_ecdsa(message);
+    let mut sig = PDS_REPO_SIGNING_KEYPAIR.secret_key().sign_ecdsa(message);
     // Convert to low-s
     sig.normalize_s();
     // ASN.1 encoded per decode_dss_signature

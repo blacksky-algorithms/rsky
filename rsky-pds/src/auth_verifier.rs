@@ -18,11 +18,12 @@ use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
 
-pub static PDS_JWT_KEYPAIR: std::sync::LazyLock<ES256kKeyPair> = std::sync::LazyLock::new(|| {
+pub static PDS_JWT_KEYPAIR: LazyLock<ES256kKeyPair> = LazyLock::new(|| {
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
     let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
