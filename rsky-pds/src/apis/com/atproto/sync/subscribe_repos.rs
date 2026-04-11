@@ -151,7 +151,10 @@ pub async fn subscribe_repos<'a>(
                             let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs, prev_data} = evt;
                             let subscribe_commit_evt = SubscribeReposCommit {
                                 seq,
-                                time: from_str_to_utc(&time),
+                                time: from_str_to_utc(&time).unwrap_or_else(|e| {
+                                tracing::warn!("failed to parse event timestamp {:?}: {}", time, e);
+                                chrono::Utc::now()
+                            }),
                                 rebase,
                                 too_big,
                                 repo,
@@ -191,7 +194,10 @@ pub async fn subscribe_repos<'a>(
                                 did,
                                 seq,
                                 handle,
-                                time: from_str_to_utc(&time),
+                                time: from_str_to_utc(&time).unwrap_or_else(|e| {
+                                tracing::warn!("failed to parse event timestamp {:?}: {}", time, e);
+                                chrono::Utc::now()
+                            }),
                             };
                             let message_frame = MessageFrame::new(subscribe_identity_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
                             let binary = match message_frame.to_bytes() {
@@ -215,7 +221,10 @@ pub async fn subscribe_repos<'a>(
                                 seq,
                                 status,
                                 active,
-                                time: from_str_to_utc(&time),
+                                time: from_str_to_utc(&time).unwrap_or_else(|e| {
+                                tracing::warn!("failed to parse event timestamp {:?}: {}", time, e);
+                                chrono::Utc::now()
+                            }),
                             };
                             let message_frame = MessageFrame::new(subscribe_account_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
                             let binary = match message_frame.to_bytes() {
@@ -239,7 +248,10 @@ pub async fn subscribe_repos<'a>(
                                 did,
                                 blocks,
                                 rev,
-                                time: from_str_to_utc(&time),
+                                time: from_str_to_utc(&time).unwrap_or_else(|e| {
+                                tracing::warn!("failed to parse event timestamp {:?}: {}", time, e);
+                                chrono::Utc::now()
+                            }),
                             };
                             let message_frame = MessageFrame::new(subscribe_sync_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
                             let binary = match message_frame.to_bytes() {

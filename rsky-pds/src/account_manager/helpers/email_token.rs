@@ -61,7 +61,7 @@ pub async fn assert_valid_token(
         })
         .await?;
     if let Some(res) = res {
-        let requested_at = from_str_to_utc(&res.requested_at);
+        let requested_at = from_str_to_utc(&res.requested_at)?;
         let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
             bail!("Token is expired")
@@ -93,7 +93,7 @@ pub async fn assert_valid_token_and_find_did(
         })
         .await?;
     if let Some(res) = res {
-        let requested_at = from_str_to_utc(&res.requested_at);
+        let requested_at = from_str_to_utc(&res.requested_at)?;
         let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
             bail!("Token is expired")
