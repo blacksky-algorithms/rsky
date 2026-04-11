@@ -3547,8 +3547,7 @@ impl IndexerManager {
             .execute(
                 "INSERT INTO stream_viewer_count (streamer, server, count, \"updatedAt\")
                  VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (streamer) DO UPDATE SET
-                   server = EXCLUDED.server,
+                 ON CONFLICT (streamer, server) DO UPDATE SET
                    count = EXCLUDED.count,
                    \"updatedAt\" = EXCLUDED.\"updatedAt\"",
                 &[&streamer, &server, &count, &updated_at],
