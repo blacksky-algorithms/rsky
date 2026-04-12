@@ -8078,6 +8078,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-ghost-detector"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "color-eyre",
+ "futures",
+ "reqwest 0.12.23",
+ "rsky-lexicon",
+ "rsky-syntax",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "rsky-identity"
 version = "0.1.0"
 dependencies = [
@@ -8161,6 +8181,44 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rsky-motoko"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "cid 0.11.1",
+ "clap",
+ "color-eyre",
+ "dashmap 6.1.0",
+ "deadpool-postgres",
+ "fjall",
+ "futures",
+ "http-body-util",
+ "hyper 1.7.0",
+ "hyper-util",
+ "ipld-core",
+ "iroh-car",
+ "prometheus",
+ "reqwest 0.12.23",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-firehose",
+ "rsky-identity",
+ "rsky-lexicon",
+ "rsky-repo",
+ "rsky-syntax",
+ "serde",
+ "serde_ipld_dagcbor 0.6.3",
+ "serde_json",
+ "thiserror 2.0.16",
+ "tokio",
+ "tokio-postgres",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
