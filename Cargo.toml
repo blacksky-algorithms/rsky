@@ -16,8 +16,6 @@ members = [
   "rsky-syntax",
   "rsky-video",
   "rsky-wintermute",
-  "rsky-motoko",
-  "rsky-ghost-detector",
 ]
 resolver = "2"
 
