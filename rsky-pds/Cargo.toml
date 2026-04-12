@@ -30,6 +30,7 @@ email_address = "0.2.4"
 event-emitter-rs = "0.1.4"
 futures = "0.3.28"
 hex = "0.4.3"
+multibase = "0.9.1"
 image = "0.25.1"
 indexmap = { version = "1.9.3", features = ["serde-1"] }
 infer = "0.15.0"
