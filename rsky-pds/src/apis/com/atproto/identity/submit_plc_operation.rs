@@ -59,25 +59,20 @@ fn get_public_rotation_key() -> Result<String, ApiError> {
 }
 
 #[tracing::instrument(skip_all)]
-fn get_public_signing_key() -> Result<String, ApiError> {
-    Ok(encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()))
-}
-
-#[tracing::instrument(skip_all)]
 async fn validate_plc_request(
     did: &str,
     op: &Operation,
     public_endpoint: &str,
     account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
-    let public_rotation_key = get_public_signing_key()?;
+    let public_rotation_key = get_public_rotation_key()?;
     if !op.rotation_keys.contains(&public_rotation_key) {
         return Err(ApiError::InvalidRequest(
             "Rotation keys do not include server's rotation key".to_string(),
         ));
     }
 
-    let public_signing_key = get_public_signing_key()?;
+    let public_signing_key = encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key());
     match op.verification_methods.get("atproto") {
         None => {
             return Err(ApiError::InvalidRequest(
