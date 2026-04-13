@@ -1,16 +1,15 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::GetRecommendedDidCredentialsResponse;
-use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde_json::json;
-use std::env;
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.identity.getRecommendedDidCredentials")]
@@ -42,7 +41,7 @@ pub async fn get_recommended_did_credentials(
         "atproto": signing_key
     });
 
-    let rotation_key = get_public_rotation_key()?;
+    let rotation_key = encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key());
     let rotation_keys = vec![rotation_key];
 
     let services = json!({
@@ -58,31 +57,4 @@ pub async fn get_recommended_did_credentials(
         services,
     };
     Ok(Json(response))
-}
-
-fn get_public_rotation_key() -> Result<String, ApiError> {
-    let secp = Secp256k1::new();
-    let private_rotation_key = match env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX") {
-        Ok(res) => res,
-        Err(error) => {
-            tracing::error!("Error geting rotation private key\n{error}");
-            return Err(ApiError::RuntimeError);
-        }
-    };
-    match hex::decode(private_rotation_key.as_bytes()) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
-            Ok(secret_key) => {
-                let rotation_keypair = Keypair::from_secret_key(&secp, &secret_key);
-                Ok(encode_did_key(&rotation_keypair.public_key()))
-            }
-            Err(error) => {
-                tracing::error!("Error geting rotation secret key from bytes\n{error}");
-                Err(ApiError::RuntimeError)
-            }
-        },
-        Err(error) => {
-            tracing::error!("Unable to hex decode rotation key\n{error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
 }

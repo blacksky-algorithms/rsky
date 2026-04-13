@@ -5,6 +5,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
+use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::config::ServerConfig;
 use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::db::DbConn;
@@ -21,7 +22,6 @@ use rocket::State;
 use rsky_common::env::env_str;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
-use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -335,9 +335,7 @@ pub async fn validate_inputs_for_local_pds(
 }
 
 #[tracing::instrument(skip_all)]
-async fn format_did_and_plc_op(
-    input: CreateAccountInput,
-) -> Result<(String, Operation), ApiError> {
+async fn format_did_and_plc_op(input: CreateAccountInput) -> Result<(String, Operation), ApiError> {
     let mut rotation_keys: Vec<String> = Vec::new();
 
     //Add user provided rotation key
@@ -346,12 +344,7 @@ async fn format_did_and_plc_op(
     }
 
     //Add PDS rotation key
-    let secp = Secp256k1::new();
-    let private_rotation_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let private_secret_key =
-        SecretKey::from_slice(&hex::decode(private_rotation_key.as_bytes()).unwrap()).unwrap();
-    let rotation_keypair = Keypair::from_secret_key(&secp, &private_secret_key);
-    rotation_keys.push(encode_did_key(&rotation_keypair.public_key()));
+    rotation_keys.push(encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key()));
 
     //Build PLC Create Operation
 
@@ -364,7 +357,7 @@ async fn format_did_and_plc_op(
         ),
         rotation_keys,
     };
-    let response = match create_op(create_op_input, rotation_keypair.secret_key()).await {
+    let response = match create_op(create_op_input, PDS_PLC_ROTATION_KEYPAIR.secret_key()).await {
         Ok(res) => res,
         Err(error) => {
             tracing::error!("{error}");

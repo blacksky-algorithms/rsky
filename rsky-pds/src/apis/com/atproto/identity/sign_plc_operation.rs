@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::apis::com::atproto::server::get_keys_from_private_key_str;
+use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
@@ -51,9 +51,6 @@ pub async fn sign_plc_operation(
         }
     };
 
-    let private_key = env_str("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let (secret_rotation_key, _) = get_keys_from_private_key_str(private_key)?;
-
     //If request doesn't contain field, check last op for field. In the case of CreateOpV1,
     // we don't set it (which is aligned with BSky Implementation
     let also_known_as = match request.also_known_as {
@@ -92,7 +89,7 @@ pub async fn sign_plc_operation(
     };
     let operation = match create_update_op(
         last_op,
-        &secret_rotation_key,
+        &PDS_PLC_ROTATION_KEYPAIR.secret_key(),
         |normalized: Operation| -> Operation {
             let mut updated = normalized.clone();
             if let Some(also_known_as) = &also_known_as {

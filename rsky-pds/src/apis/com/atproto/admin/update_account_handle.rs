@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::apis::com::atproto::server::get_keys_from_private_key_str;
+use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
 use crate::config::ServerConfig;
@@ -11,7 +11,6 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::admin::UpdateAccountHandleInput;
-use std::env;
 
 async fn inner_update_account_handle(
     body: Json<UpdateAccountHandleInput>,
@@ -50,10 +49,8 @@ async fn inner_update_account_handle(
         None => {
             let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
             let plc_client = plc::Client::new(plc_url);
-            let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-            let (signing_key, _) = get_keys_from_private_key_str(private_key)?;
             plc_client
-                .update_handle(&did, &signing_key, &handle)
+                .update_handle(&did, &PDS_PLC_ROTATION_KEYPAIR.secret_key(), &handle)
                 .await?;
             account_manager.update_handle(&did, &handle).await?;
         }

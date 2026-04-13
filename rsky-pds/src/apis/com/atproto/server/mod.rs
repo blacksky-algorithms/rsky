@@ -1,3 +1,4 @@
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::{plc, SharedIdResolver};
 use anyhow::{bail, Result};
 use rand::{distributions::Alphanumeric, Rng};
@@ -6,9 +7,16 @@ use rocket::State;
 use rsky_common::env::{env_int, env_str};
 use rsky_crypto::utils::encode_did_key;
 use rsky_identity::types::DidDocument;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
+use std::sync::LazyLock;
+
+pub static PDS_PLC_ROTATION_KEYPAIR: LazyLock<Keypair> = LazyLock::new(|| {
+    let secp = Secp256k1::new();
+    let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    Keypair::from_secret_key(&secp, &secret_key)
+});
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AssertionContents {
@@ -75,20 +83,6 @@ pub fn validate_handle(handle: &str) -> bool {
     // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
 }
 
-pub fn get_keys_from_private_key_str(private_key: String) -> Result<(SecretKey, PublicKey)> {
-    let secp = Secp256k1::new();
-    let decoded_key = hex::decode(private_key.as_bytes()).map_err(|error| {
-        let context = format!("Issue decoding hex '{}'", private_key);
-        anyhow::Error::new(error).context(context)
-    })?;
-    let secret_key = SecretKey::from_slice(&decoded_key).map_err(|error| {
-        let context = format!("Issue creating secret key from input '{}'", private_key);
-        anyhow::Error::new(error).context(context)
-    })?;
-    let public_key = secret_key.public_key(&secp);
-    Ok((secret_key, public_key))
-}
-
 pub async fn is_valid_did_doc_for_service(did: String) -> Result<bool> {
     match assert_valid_did_documents_for_service(did).await {
         Ok(()) => Ok(true),
@@ -127,9 +121,7 @@ pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()
         pds_endpoint,
         rotation_keys,
     } = contents;
-    let private_key = env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let (_, plc_rotation_key) = get_keys_from_private_key_str(private_key)?;
-    let plc_rotation_key = encode_did_key(&plc_rotation_key);
+    let plc_rotation_key = encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key());
 
     if let Some(rotation_keys) = rotation_keys {
         if !rotation_keys.contains(plc_rotation_key) {
@@ -148,8 +140,10 @@ pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()
     if pds_endpoint.is_none() || pds_endpoint.unwrap() != public_url {
         bail!("DID document atproto_pds service endpoint does not match PDS public url")
     }
-    
-    if signing_key.is_none() || signing_key.unwrap() != encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()) {
+
+    if signing_key.is_none()
+        || signing_key.unwrap() != encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key())
+    {
         bail!("DID document verification method does not match expected signing key")
     }
     Ok(())
