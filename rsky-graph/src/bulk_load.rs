@@ -32,6 +32,12 @@ pub async fn bulk_load_follows(database_url: &str, graph: &FollowGraph) -> Resul
 
     tracing::info!("starting bulk load from PostgreSQL follow table");
 
+    // Begin transaction for cursor
+    client
+        .execute("BEGIN", &[])
+        .await
+        .map_err(|e| GraphError::Other(format!("begin failed: {e}")))?;
+
     // Stream follows using a cursor to avoid loading everything into memory
     client
         .execute(
@@ -79,6 +85,7 @@ pub async fn bulk_load_follows(database_url: &str, graph: &FollowGraph) -> Resul
     }
 
     client.execute("CLOSE follow_cursor", &[]).await.ok();
+    client.execute("COMMIT", &[]).await.ok();
 
     let elapsed = start.elapsed();
     tracing::info!(
