@@ -68,7 +68,12 @@ const INDEX_ASCII: &str = r"
  This is an atproto relay instance running the
  'rsky-relay' codebase [https://github.com/blacksky-algorithms/rsky]
 
+    Code: https://github.com/blacksky-algorithms
+    Support: https://opencollective.com/blacksky
+    Protocol: https://atproto.com
+
  The firehose WebSocket path is at:  /xrpc/com.atproto.sync.subscribeRepos
+ The moderation relay WebSocket path is at: /xrpc/com.atproto.label.subscribeLabels
 ";
 
 #[derive(Debug, Error)]
