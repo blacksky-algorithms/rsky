@@ -77,14 +77,11 @@ impl<'r, T: Serialize> Responder<'r, 'static> for ReadAfterWriteResponse<T> {
 }
 
 pub fn get_repo_rev(headers: &BTreeMap<String, String>) -> Option<String> {
-    headers.get(REPO_REV_HEADER).map(|value| value.clone())
+    headers.get(REPO_REV_HEADER).cloned()
 }
 
 pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
-    let mut oldest: Option<String> = match local.profile {
-        None => None,
-        Some(ref profile) => Some(profile.indexed_at.clone()),
-    };
+    let mut oldest: Option<String> = local.profile.as_ref().map(|profile| profile.indexed_at.clone());
     for post in local.posts.clone() {
         match oldest {
             None => oldest = Some(post.indexed_at),
@@ -105,6 +102,7 @@ pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     nsid: String,
@@ -140,6 +138,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     nsid: String,
     requester: String,
@@ -150,7 +149,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     db: DbConn,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
-    let headers = &res.headers.clone().unwrap_or_else(BTreeMap::new);
+    let headers = &res.headers.clone().unwrap_or_default();
     let rev = get_repo_rev(headers);
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
@@ -191,6 +190,18 @@ pub fn format_munged_response<T: DeserializeOwned + serde::Serialize>(
             }
         },
     })
+}
+
+pub fn nodejs_format(format: &str, args: &[&dyn std::fmt::Display]) -> String {
+    let mut result = String::new();
+    let parts = format.split("{}");
+    for (i, part) in parts.enumerate() {
+        result.push_str(part);
+        if i < args.len() {
+            result.push_str(&args[i].to_string());
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -246,16 +257,4 @@ mod tests {
         assert_eq!(wrapped["encoding"], json!("application/json"));
         assert!(wrapped.as_object().unwrap().contains_key("body"));
     }
-}
-
-pub fn nodejs_format(format: &str, args: &[&dyn std::fmt::Display]) -> String {
-    let mut result = String::new();
-    let parts = format.split("{}");
-    for (i, part) in parts.enumerate() {
-        result.push_str(part);
-        if i < args.len() {
-            result.push_str(&args[i].to_string());
-        }
-    }
-    result
 }

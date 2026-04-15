@@ -45,6 +45,12 @@ pub struct KeySetPaginateOpts {
 /// These types relate as such. Implementers define the relations marked with a *:
 ///   Result -*-> LabeledResult <-*-> Cursor <--> packed/string cursor
 ///                     ↳ SQL Condition
+impl Default for TimeCodeKeySet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeCodeKeySet {
     pub fn new() -> Self {
         TimeCodeKeySet {}
@@ -113,7 +119,7 @@ impl TimeCodeKeySet {
             None => Ok(None),
             Some(cursor_str) => {
                 let result = cursor_str.split("::").collect::<Vec<&str>>();
-                match (result.get(0), result.get(1), result.get(2)) {
+                match (result.first(), result.get(1), result.get(2)) {
                     (Some(primary), Some(secondary), None) => Ok(Some(Cursor {
                         primary: primary.to_string(),
                         secondary: secondary.to_string(),
@@ -210,6 +216,12 @@ pub struct UseCodeResult {
 
 pub struct UseCodeKeyset {}
 
+impl Default for UseCodeKeyset {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UseCodeKeyset {
     pub fn new() -> Self {
         UseCodeKeyset {}
@@ -278,7 +290,7 @@ impl UseCodeKeyset {
             None => Ok(None),
             Some(cursor_str) => {
                 let result = cursor_str.split("::").collect::<Vec<&str>>();
-                match (result.get(0), result.get(1), result.get(2)) {
+                match (result.first(), result.get(1), result.get(2)) {
                     (Some(primary), Some(secondary), None) => Ok(Some(Cursor {
                         primary: primary.to_string(),
                         secondary: secondary.to_string(),

@@ -44,6 +44,12 @@ pub struct KeySetPaginateOpts {
 /// These types relate as such. Implementers define the relations marked with a *:
 ///   Result -*-> LabeledResult <-*-> Cursor <--> packed/string cursor
 ///                     ↳ SQL Condition
+impl Default for TimeDidKeySet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeDidKeySet {
     pub fn new() -> Self {
         TimeDidKeySet {}

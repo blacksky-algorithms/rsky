@@ -112,10 +112,7 @@ impl LocalViewer {
                             Some(AtpServiceClient::new(client))
                         }
                     },
-                    match params.appview_agent {
-                        None => None,
-                        Some(ref bsky_app_view_url) => Some(bsky_app_view_url.clone()),
-                    },
+                    params.appview_agent.clone(),
                     params.appview_did.clone(),
                     params.appview_cdn_url_pattern.clone(),
                 )
@@ -133,7 +130,7 @@ impl LocalViewer {
                 cid
             ),
             Some(appview_cdn_url_pattern) => {
-                util::nodejs_format(&*appview_cdn_url_pattern, &[&pattern, &self.did, &cid])
+                util::nodejs_format(appview_cdn_url_pattern, &[&pattern, &self.did, &cid])
             }
         }
     }
@@ -205,12 +202,9 @@ impl LocalViewer {
                     },
                     avatar: match record {
                         Some(record) => match record.avatar {
-                            Some(avatar) => match avatar.r#ref {
-                                Some(r#ref) => Some(
-                                    self.get_image_url("avatar".to_string(), r#ref.to_string()),
-                                ),
-                                None => None,
-                            },
+                            Some(avatar) => avatar.r#ref.map(|r#ref| {
+                                self.get_image_url("avatar".to_string(), r#ref.to_string())
+                            }),
                             None => None,
                         },
                         None => None,
@@ -330,7 +324,7 @@ impl LocalViewer {
                     .map(|img| ViewImage {
                         thumb: self.get_image_url(
                             "feed_thumbnail".to_string(),
-                            img.image.r#ref.clone().unwrap().to_string(),
+                            img.image.r#ref.unwrap().to_string(),
                         ),
                         fullsize: self.get_image_url(
                             "feed_fullsize".to_string(),
@@ -406,7 +400,7 @@ impl LocalViewer {
                         None => Ok(None),
                         Some(post) => {
                             let post: PostView =
-                                serde_json::from_value(serde_json::to_value(&post)?)?;
+                                serde_json::from_value(serde_json::to_value(post)?)?;
                             Ok(Some(record::ViewUnion::ViewRecord(ViewRecord {
                                 uri: post.uri,
                                 cid: post.cid,
@@ -416,10 +410,7 @@ impl LocalViewer {
                                 reply_count: None,
                                 repost_count: None,
                                 like_count: None,
-                                embeds: match post.embed {
-                                    Some(post_embed) => Some(vec![post_embed]),
-                                    None => None,
-                                },
+                                embeds: post.embed.map(|post_embed| vec![post_embed]),
                                 indexed_at: post.indexed_at,
                             })))
                         }
@@ -501,12 +492,9 @@ impl LocalViewer {
             display_name: record.display_name,
             avatar: match record.avatar {
                 None => None,
-                Some(avatar) => match avatar.r#ref {
-                    Some(r#ref) => {
-                        Some(self.get_image_url("avatar".to_string(), r#ref.to_string()))
-                    }
-                    None => None,
-                },
+                Some(avatar) => avatar
+                    .r#ref
+                    .map(|r#ref| self.get_image_url("avatar".to_string(), r#ref.to_string())),
             },
             associated,
             viewer,
@@ -605,12 +593,9 @@ impl LocalViewer {
             avatar,
             banner: match record.banner {
                 None => None,
-                Some(record_banner) => match record_banner.r#ref {
-                    Some(r#ref) => {
-                        Some(self.get_image_url("banner".to_string(), r#ref.to_string()))
-                    }
-                    None => None,
-                },
+                Some(record_banner) => record_banner
+                    .r#ref
+                    .map(|r#ref| self.get_image_url("banner".to_string(), r#ref.to_string())),
             },
             followers_count,
             follows_count,
@@ -626,7 +611,7 @@ impl LocalViewer {
 
     async fn get_authenticated_agent_for_nsid(
         &self,
-        nsid: &String,
+        nsid: &str,
     ) -> Result<AtpServiceClient<ReqwestClient>> {
         let auth_headers = self.service_auth_headers(&self.did, nsid).await?;
         let base = match self.appview_agent_str {
@@ -639,8 +624,7 @@ impl LocalViewer {
                     .user_agent(APP_USER_AGENT)
                     .timeout(std::time::Duration::from_millis(1000))
                     .default_headers(auth_headers)
-                    .build()
-                    .unwrap(),
+                    .build()?,
             )
             .build();
         Ok(AtpServiceClient::new(client))
@@ -706,7 +690,7 @@ pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Res
         |mut acc: LocalRecords, cur| {
             let uri: AtUri = AtUri::new(cur.0.uri, None)?;
             if uri.get_collection() == Ids::AppBskyActorProfile.as_str()
-                && uri.get_rkey() == "self".to_string()
+                && uri.get_rkey() == *"self"
             {
                 let profile: Profile = serde_ipld_dagcbor::from_slice(cur.1.content.as_slice())?;
                 let descript = RecordDescript {
