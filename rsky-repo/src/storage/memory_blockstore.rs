@@ -89,7 +89,8 @@ impl RepoStorage for MemoryBlockstore {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>> {
         Box::pin(async move {
             let mut block_guard = self.blocks.write().await;
-            Ok(block_guard.set(cid, bytes))
+            block_guard.set(cid, bytes);
+            Ok(())
         })
     }
 
