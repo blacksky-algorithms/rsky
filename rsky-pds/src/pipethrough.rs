@@ -67,10 +67,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                 );
                 let proxy_req = ProxyRequest {
                     headers,
-                    query: match req.uri().query() {
-                        None => None,
-                        Some(query) => Some(query.to_string()),
-                    },
+                    query: req.uri().query().map(|query| query.to_string()),
                     path: req.uri().path().to_string(),
                     method: req.method(),
                     id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
@@ -134,10 +131,7 @@ impl<'r> FromRequest<'r> for ProxyRequest<'r> {
         );
         Outcome::Success(Self {
             headers,
-            query: match req.uri().query() {
-                None => None,
-                Some(query) => Some(query.to_string()),
-            },
+            query: req.uri().query().map(|query| query.to_string()),
             path: req.uri().path().to_string(),
             method: req.method(),
             id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
@@ -146,8 +140,8 @@ impl<'r> FromRequest<'r> for ProxyRequest<'r> {
     }
 }
 
-pub async fn pipethrough<'r>(
-    req: &'r ProxyRequest<'_>,
+pub async fn pipethrough(
+    req: &ProxyRequest<'_>,
     requester: Option<String>,
     override_opts: OverrideOpts,
 ) -> Result<HandlerPipeThrough> {
@@ -163,8 +157,8 @@ pub async fn pipethrough<'r>(
     parse_proxy_res(res).await
 }
 
-pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
-    req: &'r ProxyRequest<'_>,
+pub async fn pipethrough_procedure<T: serde::Serialize>(
+    req: &ProxyRequest<'_>,
     requester: Option<String>,
     body: Option<T>,
 ) -> Result<HandlerPipeThrough> {
@@ -184,8 +178,8 @@ pub async fn pipethrough_procedure<'r, T: serde::Serialize>(
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn pipethrough_procedure_post<'r>(
-    req: &'r ProxyRequest<'_>,
+pub async fn pipethrough_procedure_post(
+    req: &ProxyRequest<'_>,
     requester: Option<String>,
     body: Option<Data<'_>>,
 ) -> Result<HandlerPipeThrough, ApiError> {
@@ -236,8 +230,8 @@ const REQ_HEADERS_TO_FORWARD: [&str; 4] = [
 ];
 
 #[tracing::instrument(skip_all)]
-pub async fn format_url_and_aud<'r>(
-    req: &'r ProxyRequest<'_>,
+pub async fn format_url_and_aud(
+    req: &ProxyRequest<'_>,
     aud_override: Option<String>,
 ) -> Result<UrlAndAud> {
     let proxy_to = parse_proxy_header(req).await?;
@@ -251,10 +245,9 @@ pub async fn format_url_and_aud<'r>(
             );
             Some(proxy_to.service_url.clone())
         }
-        None => match default_proxy {
-            Some(ref default_proxy) => Some(default_proxy.url.clone()),
-            None => None,
-        },
+        None => default_proxy
+            .as_ref()
+            .map(|default_proxy| default_proxy.url.clone()),
     };
     let aud = match aud_override {
         Some(_) => aud_override,
@@ -285,8 +278,8 @@ pub async fn format_url_and_aud<'r>(
     }
 }
 
-pub async fn format_headers<'r>(
-    req: &'r ProxyRequest<'_>,
+pub async fn format_headers(
+    req: &ProxyRequest<'_>,
     aud: String,
     lxm: String,
     requester: Option<String>,
@@ -381,14 +374,14 @@ pub fn format_req_init_with_value(
     }
 }
 
-pub async fn parse_proxy_header<'r>(req: &'r ProxyRequest<'_>) -> Result<Option<ProxyHeader>> {
+pub async fn parse_proxy_header(req: &ProxyRequest<'_>) -> Result<Option<ProxyHeader>> {
     let headers = &req.headers;
     let proxy_to: Option<&String> = headers.get("atproto-proxy");
     match proxy_to {
         None => Ok(None),
         Some(proxy_to) => {
             let parts: Vec<&str> = proxy_to.split("#").collect::<Vec<&str>>();
-            match (parts.get(0), parts.get(1), parts.get(2)) {
+            match (parts.first(), parts.get(1), parts.get(2)) {
                 (Some(did), Some(service_id), None) => {
                     let did = did.to_string();
                     let id_resolver = req.id_resolver;
@@ -445,14 +438,12 @@ pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
                 bail!(InvalidRequestError::XRPCError(XRPCError::FailedResponse {
                     status,
                     headers,
-                    error: match error_body["error"].as_str() {
-                        None => None,
-                        Some(error_body_error) => Some(error_body_error.to_string()),
-                    },
-                    message: match error_body["message"].as_str() {
-                        None => None,
-                        Some(error_body_message) => Some(error_body_message.to_string()),
-                    }
+                    error: error_body["error"]
+                        .as_str()
+                        .map(|error_body_error| error_body_error.to_string()),
+                    message: error_body["message"]
+                        .as_str()
+                        .map(|error_body_message| error_body_message.to_string())
                 }))
             }
         },
@@ -546,7 +537,7 @@ lazy_static! {
 
 }
 
-pub async fn default_service<'r>(req: &'r ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
+pub async fn default_service(req: &ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
     let cfg = req.cfg;
     match Ids::from_str(nsid) {
         Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
@@ -591,8 +582,7 @@ pub fn is_safe_url(url: Url) -> bool {
         return false;
     }
     match url.host_str() {
-        None => false,
-        Some(hostname) if hostname == "localhost" => false,
+        None | Some("localhost") => false,
         Some(hostname) => {
             if std::net::IpAddr::from_str(hostname).is_ok() {
                 return false;

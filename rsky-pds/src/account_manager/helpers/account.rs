@@ -81,7 +81,7 @@ pub fn select_account_qb(flags: Option<AvailabilityFlags>) -> BoxedQuery<'static
     let AvailabilityFlags {
         include_taken_down,
         include_deactivated,
-    } = flags.unwrap_or_else(|| AvailabilityFlags {
+    } = flags.unwrap_or(AvailabilityFlags {
         include_taken_down: Some(false),
         include_deactivated: Some(false),
     });
