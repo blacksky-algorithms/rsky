@@ -120,6 +120,7 @@ impl RecordReader {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_records_for_collection(
         &mut self,
         collection: String,
@@ -133,11 +134,7 @@ impl RecordReader {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
 
-        let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
-            include_soft_deleted
-        } else {
-            false
-        };
+        let include_soft_deleted: bool = include_soft_deleted.unwrap_or_default();
         let mut builder = RecordSchema::record
             .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
             .limit(limit)
@@ -190,11 +187,7 @@ impl RecordReader {
         use crate::schema::pds::record::dsl as RecordSchema;
         use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
 
-        let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
-            include_soft_deleted
-        } else {
-            false
-        };
+        let include_soft_deleted: bool = include_soft_deleted.unwrap_or_default();
         let mut builder = RecordSchema::record
             .inner_join(RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)))
             .select((models::Record::as_select(), models::RepoBlock::as_select()))
@@ -231,11 +224,7 @@ impl RecordReader {
     ) -> Result<bool> {
         use crate::schema::pds::record::dsl as RecordSchema;
 
-        let include_soft_deleted: bool = if let Some(include_soft_deleted) = include_soft_deleted {
-            include_soft_deleted
-        } else {
-            false
-        };
+        let include_soft_deleted: bool = include_soft_deleted.unwrap_or_default();
         let mut builder = RecordSchema::record
             .select(RecordSchema::uri)
             .filter(RecordSchema::uri.eq(uri))
@@ -250,7 +239,7 @@ impl RecordReader {
             .db
             .run(move |conn| builder.first::<String>(conn).optional())
             .await?;
-        Ok(!!record_uri.is_some())
+        Ok(record_uri.is_some())
     }
 
     pub async fn get_record_takedown_status(&self, uri: String) -> Result<Option<StatusAttr>> {
@@ -337,14 +326,8 @@ impl RecordReader {
         let record_backlinks = get_backlinks(uri, record)?;
         let conflicts: Vec<Vec<Record>> = stream::iter(record_backlinks)
             .then(|backlink| async move {
-                Ok::<Vec<Record>, anyhow::Error>(
-                    self.get_record_backlinks(
-                        uri.get_collection(),
-                        backlink.path,
-                        backlink.link_to,
-                    )
-                    .await?,
-                )
+                self.get_record_backlinks(uri.get_collection(), backlink.path, backlink.link_to)
+                    .await
             })
             .collect::<Vec<_>>()
             .await
@@ -356,7 +339,7 @@ impl RecordReader {
             .filter_map(|record| {
                 AtUri::make(
                     env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned()),
-                    Some(String::from(uri.get_collection())),
+                    Some(uri.get_collection()),
                     Some(record.rkey),
                 )
                 .ok()
@@ -382,7 +365,7 @@ impl RecordReader {
         let rkey = uri.get_rkey();
         let hostname = uri.get_hostname().to_string();
         let action = action.unwrap_or(WriteOpAction::Create);
-        let indexed_at = timestamp.unwrap_or_else(|| rsky_common::now());
+        let indexed_at = timestamp.unwrap_or_else(rsky_common::now);
         let row = Record {
             did: self.did.clone(),
             uri: uri.to_string(),
@@ -472,7 +455,7 @@ impl RecordReader {
     }
 
     pub async fn add_backlinks(&self, backlinks: Vec<Backlink>) -> Result<()> {
-        if backlinks.len() == 0 {
+        if backlinks.is_empty() {
             Ok(())
         } else {
             use crate::schema::pds::backlink::dsl as BacklinkSchema;

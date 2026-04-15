@@ -160,11 +160,7 @@ impl BlobReader {
             size: size as i64,
             cid,
             mime_type,
-            width: if let Some(ref info) = img_info {
-                Some(info.width as i32)
-            } else {
-                None
-            },
+            width: img_info.as_ref().map(|info| info.width as i32),
             height: if let Some(info) = img_info {
                 Some(info.height as i32)
             } else {
@@ -227,7 +223,7 @@ impl BlobReader {
         self.delete_dereferenced_blobs(writes.clone()).await?;
         let _ = stream::iter(writes)
             .then(|write| async move {
-                Ok::<(), anyhow::Error>(match write {
+                match write {
                     PreparedWrite::Create(w) => {
                         for blob in w.blobs {
                             self.verify_blob_and_make_permanent(blob.clone()).await?;
@@ -241,7 +237,8 @@ impl BlobReader {
                         }
                     }
                     _ => (),
-                })
+                };
+                Ok::<(), anyhow::Error>(())
             })
             .collect::<Vec<_>>()
             .await

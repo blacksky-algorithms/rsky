@@ -10,7 +10,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ListRecordsOutput, Record};
 use rsky_syntax::aturi::AtUri;
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::too_many_arguments)]
 async fn inner_list_records(
     // The handle or DID of the repo.
     repo: String,
@@ -74,7 +74,7 @@ async fn inner_list_records(
 }
 
 #[tracing::instrument(skip_all)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::too_many_arguments)]
 #[rocket::get("/xrpc/com.atproto.repo.listRecords?<repo>&<collection>&<limit>&<cursor>&<rkeyStart>&<rkeyEnd>&<reverse>")]
 pub async fn list_records(
     // The handle or DID of the repo.

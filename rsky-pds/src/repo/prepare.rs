@@ -86,7 +86,7 @@ pub fn blobs_for_write(record: RepoRecord, validate: bool) -> anyhow::Result<Vec
 
 pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) -> Vec<FoundBlobRef> {
     let layer = layer.unwrap_or(0);
-    let path = path.unwrap_or_else(std::vec::Vec::new);
+    let path = path.unwrap_or_default();
     if layer > 32 {
         return vec![];
     }
@@ -156,7 +156,7 @@ pub fn set_collection_name(
         );
     }
     if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(record_type)))) = record.get("$type") {
-        if validate && record_type.to_string() != *collection {
+        if validate && record_type != collection {
             bail!("Invalid $type: expected {collection}, got {record_type}")
         }
     }
