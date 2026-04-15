@@ -81,7 +81,10 @@ pub fn get_repo_rev(headers: &BTreeMap<String, String>) -> Option<String> {
 }
 
 pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
-    let mut oldest: Option<String> = local.profile.as_ref().map(|profile| profile.indexed_at.clone());
+    let mut oldest: Option<String> = local
+        .profile
+        .as_ref()
+        .map(|profile| profile.indexed_at.clone());
     for post in local.posts.clone() {
         match oldest {
             None => oldest = Some(post.indexed_at),
