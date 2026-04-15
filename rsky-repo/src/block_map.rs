@@ -43,7 +43,6 @@ impl BlockMap {
 
     pub fn set(&mut self, cid: Cid, bytes: Vec<u8>) {
         self.map.insert(cid.to_string(), Bytes(bytes));
-        
     }
 
     pub fn get(&self, cid: Cid) -> Option<&Vec<u8>> {
@@ -102,7 +101,7 @@ impl BlockMap {
     pub fn add_map(&mut self, to_add: BlockMap) -> Result<()> {
         for (cid, bytes) in to_add.map.iter() {
             self.set(Cid::from_str(cid)?, bytes.0.clone());
-        };
+        }
         Ok(())
     }
 
