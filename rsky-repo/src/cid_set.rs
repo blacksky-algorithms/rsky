@@ -20,26 +20,22 @@ impl CidSet {
 
     pub fn add(&mut self, cid: Cid) {
         let _ = &self.set.insert(cid.to_string());
-        
     }
 
     pub fn add_set(&mut self, to_merge: CidSet) {
         for cid in to_merge.to_list() {
             let _ = &self.add(cid);
         }
-        
     }
 
     pub fn subtract_set(&mut self, to_subtract: CidSet) {
         for cid in to_subtract.to_list() {
             self.delete(cid);
         }
-        
     }
 
     pub fn delete(&mut self, cid: Cid) {
         self.set.remove(&cid.to_string());
-        
     }
 
     pub fn has(&self, cid: Cid) -> bool {
@@ -52,7 +48,6 @@ impl CidSet {
 
     pub fn clear(mut self) {
         self.set.clear();
-        
     }
 
     pub fn to_list(&self) -> Vec<Cid> {
