@@ -321,8 +321,7 @@ impl Server {
                     "{\"error\":\"InvalidRequest\",\"message\":\"invalid or missing hostname\"}",
                 )
             }
-            ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN)
-            | ("GET", PATH_ADMIN_LIST_BANS) => {
+            ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN) | ("GET", PATH_ADMIN_LIST_BANS) => {
                 self.handle_admin(&mut stream, url.path(), &url, is_admin_authed)
             }
             _ => write_response(

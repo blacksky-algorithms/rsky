@@ -8,8 +8,6 @@ use chrono::DateTime;
 use rocket::serde::json::Json;
 use rsky_common::time::{from_micros_to_utc, HOUR, MINUTE};
 use rsky_lexicon::com::atproto::server::GetServiceAuthOutput;
-use secp256k1::SecretKey;
-use std::env;
 use std::time::SystemTime;
 
 pub async fn inner_get_service_auth(
@@ -20,9 +18,6 @@ pub async fn inner_get_service_auth(
 ) -> Result<String> {
     let credentials = auth.access.credentials.unwrap();
     let did = credentials.clone().did.unwrap();
-    // We just use the repo signing key
-    let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-    let keypair = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
     let exp = match exp {
         None => None,
         Some(exp) => Some(exp * 1000),
@@ -53,7 +48,6 @@ pub async fn inner_get_service_auth(
         exp: None,
         lxm,
         jti: None,
-        keypair,
     })
     .await
 }

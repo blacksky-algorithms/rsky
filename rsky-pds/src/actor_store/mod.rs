@@ -7,6 +7,7 @@ use crate::actor_store::preference::PreferenceReader;
 use crate::actor_store::record::RecordReader;
 use crate::actor_store::repo::sql_repo::SqlRepoReader;
 use crate::actor_store::repo::types::SyncEvtData;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::db::DbConn;
 use anyhow::Result;
 use diesel::*;
@@ -22,8 +23,7 @@ use rsky_repo::types::{
 };
 use rsky_repo::util::format_data_key;
 use rsky_syntax::aturi::AtUri;
-use secp256k1::{Keypair, Secp256k1, SecretKey};
-use std::env;
+use secp256k1::Keypair;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -89,7 +89,7 @@ impl ActorStore {
     #[deprecated]
     pub async fn create_repo_legacy(
         &self,
-        keypair: Keypair,
+        keypair: &Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitData> {
         let write_ops = writes
@@ -108,7 +108,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            keypair,
+            *keypair,
             Some(write_ops),
         )
         .await?;
@@ -124,7 +124,7 @@ impl ActorStore {
 
     pub async fn create_repo(
         &self,
-        keypair: Keypair,
+        keypair: &Keypair,
         writes: Vec<PreparedCreateOrUpdate>,
     ) -> Result<CommitDataWithOps> {
         let write_ops = writes
@@ -143,7 +143,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            keypair,
+            *keypair,
             Some(write_ops),
         )
         .await?;
@@ -338,15 +338,9 @@ impl ActorStore {
                 .into_iter()
                 .map(write_to_op)
                 .collect::<Result<Vec<RecordWriteOp>>>()?;
-            // @TODO: Use repo signing key global config
-            let secp = Secp256k1::new();
-            let repo_private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-            let repo_secret_key =
-                SecretKey::from_slice(&hex::decode(repo_private_key.as_bytes()).unwrap()).unwrap();
-            let repo_signing_key = Keypair::from_secret_key(&secp, &repo_secret_key);
 
             let mut commit = repo
-                .format_commit(RecordWriteEnum::List(write_ops), repo_signing_key)
+                .format_commit(RecordWriteEnum::List(write_ops), *PDS_REPO_SIGNING_KEYPAIR)
                 .await?;
 
             // find blocks that would be deleted but are referenced by another record

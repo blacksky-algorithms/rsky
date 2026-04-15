@@ -1,16 +1,16 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
+use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::SubmitPlcOperationRequest;
-use secp256k1::{Keypair, Secp256k1, SecretKey};
-use std::env;
 
 #[tracing::instrument(skip_all)]
 fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
@@ -30,76 +30,20 @@ fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
 }
 
 #[tracing::instrument(skip_all)]
-fn get_public_rotation_key() -> Result<String, ApiError> {
-    let secp = Secp256k1::new();
-    let private_rotation_key = match env::var("PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX") {
-        Ok(res) => res,
-        Err(error) => {
-            tracing::error!("Error geting rotation private key\n{error}");
-            return Err(ApiError::RuntimeError);
-        }
-    };
-    match hex::decode(private_rotation_key.as_bytes()) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
-            Ok(secret_key) => {
-                let rotation_keypair = Keypair::from_secret_key(&secp, &secret_key);
-                Ok(encode_did_key(&rotation_keypair.public_key()))
-            }
-            Err(error) => {
-                tracing::error!("Error geting rotation secret key from bytes\n{error}");
-                Err(ApiError::RuntimeError)
-            }
-        },
-        Err(error) => {
-            tracing::error!("Unable to hex decode rotation key\n{error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
-}
-
-#[tracing::instrument(skip_all)]
-fn get_public_signing_key() -> Result<String, ApiError> {
-    let secp = Secp256k1::new();
-    let private_signing_key = match env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX") {
-        Ok(res) => res,
-        Err(error) => {
-            tracing::error!("Error geting signing private key\n{error}");
-            return Err(ApiError::RuntimeError);
-        }
-    };
-    match hex::decode(private_signing_key.as_bytes()) {
-        Ok(bytes) => match SecretKey::from_slice(&bytes) {
-            Ok(secret_key) => {
-                let signing_keypair = Keypair::from_secret_key(&secp, &secret_key);
-                Ok(encode_did_key(&signing_keypair.public_key()))
-            }
-            Err(error) => {
-                tracing::error!("Error geting signing secret key from bytes\n{error}");
-                Err(ApiError::RuntimeError)
-            }
-        },
-        Err(error) => {
-            tracing::error!("Unable to hex decode signing key\n{error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
-}
-
-#[tracing::instrument(skip_all)]
 async fn validate_plc_request(
     did: &str,
     op: &Operation,
     public_endpoint: &str,
     account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
-    let public_rotation_key = get_public_signing_key()?;
+    let public_rotation_key = encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key());
     if !op.rotation_keys.contains(&public_rotation_key) {
         return Err(ApiError::InvalidRequest(
             "Rotation keys do not include server's rotation key".to_string(),
         ));
     }
 
-    let public_signing_key = get_public_signing_key()?;
+    let public_signing_key = encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key());
     match op.verification_methods.get("atproto") {
         None => {
             return Err(ApiError::InvalidRequest(

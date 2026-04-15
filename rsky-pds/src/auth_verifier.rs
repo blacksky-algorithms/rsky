@@ -18,9 +18,18 @@ use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
+
+pub static PDS_JWT_KEYPAIR: LazyLock<ES256kKeyPair> = LazyLock::new(|| {
+    let secp = Secp256k1::new();
+    let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+    ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice()).unwrap()
+});
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum AuthScope {
@@ -163,7 +172,7 @@ impl<'r> FromRequest<'r> for Refresh {
             token,
             payload,
             audience,
-        } = match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
+        } = match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)) {
             Ok(result) => {
                 let payload = result.payload.clone();
                 match payload.jti {
@@ -432,7 +441,7 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         let mut options = VerificationOptions::default();
         options.max_validity = Some(Duration::from_secs(INFINITY));
-        match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
+        match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)) {
             Ok(result) => match result.payload.jti {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
                 None => {
@@ -717,7 +726,7 @@ pub async fn validate_bearer_access_token<'r>(
         token,
         audience,
         ..
-    } = validate_bearer_token(request, scopes, Some(options)).await?;
+    } = validate_bearer_token(request, scopes, Some(options))?;
     let is_privileged = vec![AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope);
     Ok(AccessOutput {
         credentials: Some(Credentials {
@@ -734,19 +743,14 @@ pub async fn validate_bearer_access_token<'r>(
     })
 }
 
-pub async fn validate_bearer_token<'r>(
+pub fn validate_bearer_token<'r>(
     request: &'r Request<'_>,
     scopes: Vec<AuthScope>,
     verify_options: Option<VerificationOptions>,
 ) -> Result<ValidatedBearer> {
     let token = bearer_token_from_req(request)?;
     if let Some(token) = token {
-        let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-        let secret_key =
-            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-        let payload = verify_jwt(token.clone(), jwt_key, verify_options).await?;
+        let payload = verify_jwt(&token, verify_options)?;
         let JwtPayload {
             sub, aud, scope, ..
         } = payload.clone();
@@ -797,7 +801,7 @@ pub async fn validate_access_token<'r>(
         token,
         audience,
         ..
-    } = validate_bearer_token(request, scopes, Some(options)).await?;
+    } = validate_bearer_token(request, scopes, Some(options))?;
     let ValidateAccessTokenOpts {
         check_takedown,
         check_deactivated,
@@ -958,14 +962,10 @@ pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
     }
 }
 
-pub async fn verify_jwt(
-    jwt: String,
-    jwt_key: Keypair,
-    verify_options: Option<VerificationOptions>,
-) -> Result<JwtPayload> {
-    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
-    let public_key = key.public_key();
-    let claims = public_key.verify_token::<CustomClaimObj>(&jwt, verify_options)?;
+pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Result<JwtPayload> {
+    let claims = PDS_JWT_KEYPAIR
+        .public_key()
+        .verify_token::<CustomClaimObj>(jwt, verify_options)?;
 
     Ok(JwtPayload {
         scope: AuthScope::from_str(&claims.custom.scope)?,

@@ -17,7 +17,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use tokio::try_join;
 
-pub fn sign_commit(unsigned: UnsignedCommit, keypair: Keypair) -> Result<Commit> {
+pub fn sign_commit(unsigned: UnsignedCommit, keypair: &Keypair) -> Result<Commit> {
     let commit_sig = sign_without_indexmap(&unsigned, &keypair.secret_key())?;
     Ok(Commit {
         did: unsigned.did,

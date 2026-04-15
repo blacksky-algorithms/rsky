@@ -44,8 +44,6 @@ use rsky_lexicon::app::bsky::graph::ListView;
 use rsky_repo::types::Ids;
 use rsky_syntax::aturi::AtUri;
 use rsky_syntax::handle::INVALID_HANDLE;
-use secp256k1::SecretKey;
-use std::env;
 use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
@@ -144,16 +142,12 @@ impl LocalViewer {
         match &self.appview_did {
             None => bail!("Could not find bsky appview did"),
             Some(appview_did) => {
-                let private_key = env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-                let keypair =
-                    SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
                 create_service_auth_headers(ServiceJwtParams {
                     iss: did.to_owned(),
                     aud: appview_did.clone(),
                     exp: None,
                     lxm: Some(lxm.to_owned()),
                     jti: None,
-                    keypair,
                 })
                 .await
             }
