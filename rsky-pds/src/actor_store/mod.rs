@@ -108,7 +108,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            keypair,
+            *keypair,
             Some(write_ops),
         )
         .await?;
@@ -143,7 +143,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            keypair,
+            *keypair,
             Some(write_ops),
         )
         .await?;
@@ -340,7 +340,7 @@ impl ActorStore {
                 .collect::<Result<Vec<RecordWriteOp>>>()?;
 
             let mut commit = repo
-                .format_commit(RecordWriteEnum::List(write_ops), &PDS_REPO_SIGNING_KEYPAIR)
+                .format_commit(RecordWriteEnum::List(write_ops), *PDS_REPO_SIGNING_KEYPAIR)
                 .await?;
 
             // find blocks that would be deleted but are referenced by another record
