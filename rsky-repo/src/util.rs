@@ -49,11 +49,7 @@ pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
 
 pub fn lex_to_ipld(val: Lex) -> Ipld {
     match val {
-        Lex::List(list) => Ipld::List(
-            list.into_iter()
-                .map(|item| lex_to_ipld(item))
-                .collect::<Vec<Ipld>>(),
-        ),
+        Lex::List(list) => Ipld::List(list.into_iter().map(lex_to_ipld).collect::<Vec<Ipld>>()),
         Lex::Map(map) => {
             let mut to_return: BTreeMap<String, Ipld> = BTreeMap::new();
             for key in map.keys() {
@@ -76,11 +72,7 @@ pub fn lex_to_ipld(val: Lex) -> Ipld {
 
 pub fn ipld_to_lex(val: Ipld) -> Lex {
     match val {
-        Ipld::List(list) => Lex::List(
-            list.into_iter()
-                .map(|item| ipld_to_lex(item))
-                .collect::<Vec<Lex>>(),
-        ),
+        Ipld::List(list) => Lex::List(list.into_iter().map(ipld_to_lex).collect::<Vec<Lex>>()),
         Ipld::Map(map) => {
             let mut to_return: BTreeMap<String, Lex> = BTreeMap::new();
             for key in map.keys() {

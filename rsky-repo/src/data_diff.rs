@@ -38,6 +38,12 @@ pub struct DataDiff {
     pub removed_mst_blocks: CidSet,
 }
 
+impl Default for DataDiff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DataDiff {
     pub fn new() -> Self {
         DataDiff {
@@ -88,11 +94,11 @@ impl DataDiff {
         Ok(())
     }
 
-    pub fn leaf_add(&mut self, key: &String, cid: Cid) -> () {
+    pub fn leaf_add(&mut self, key: &str, cid: Cid) {
         self.adds.insert(
-            key.clone(),
+            key.to_owned(),
             DataAdd {
-                key: key.clone(),
+                key: key.to_owned(),
                 cid,
             },
         );
@@ -101,17 +107,16 @@ impl DataDiff {
         } else {
             self.new_leaf_cids.add(cid);
         }
-        ()
     }
 
-    pub fn leaf_update(&mut self, key: &String, prev: Cid, cid: Cid) -> () {
+    pub fn leaf_update(&mut self, key: &str, prev: Cid, cid: Cid) {
         if prev.eq(&cid) {
-            return ();
+            return;
         }
         self.updates.insert(
-            key.clone(),
+            key.to_owned(),
             DataUpdate {
-                key: key.clone(),
+                key: key.to_owned(),
                 prev,
                 cid,
             },
@@ -120,11 +125,11 @@ impl DataDiff {
         self.new_leaf_cids.add(cid);
     }
 
-    pub fn leaf_delete(&mut self, key: &String, cid: Cid) -> () {
+    pub fn leaf_delete(&mut self, key: &str, cid: Cid) {
         self.deletes.insert(
-            key.clone(),
+            key.to_owned(),
             DataDelete {
-                key: key.clone(),
+                key: key.to_owned(),
                 cid,
             },
         );
@@ -135,14 +140,13 @@ impl DataDiff {
         }
     }
 
-    pub fn tree_add(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
+    pub fn tree_add(&mut self, cid: Cid, bytes: Vec<u8>) {
         if self.removed_cids.has(cid) {
             self.removed_cids.delete(cid);
             self.removed_mst_blocks.delete(cid);
         } else {
             self.new_mst_blocks.set(cid, bytes);
         }
-        ()
     }
 
     pub fn tree_delete(&mut self, cid: Cid) -> Result<()> {

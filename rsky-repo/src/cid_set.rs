@@ -9,7 +9,7 @@ pub struct CidSet {
 impl CidSet {
     pub fn new(arr: Option<Vec<Cid>>) -> Self {
         let str_arr: Vec<String> = arr
-            .unwrap_or(Vec::new())
+            .unwrap_or_default()
             .into_iter()
             .map(|cid| cid.to_string())
             .collect::<Vec<String>>();
@@ -18,28 +18,28 @@ impl CidSet {
         }
     }
 
-    pub fn add(&mut self, cid: Cid) -> () {
+    pub fn add(&mut self, cid: Cid) {
         let _ = &self.set.insert(cid.to_string());
-        ()
+        
     }
 
-    pub fn add_set(&mut self, to_merge: CidSet) -> () {
+    pub fn add_set(&mut self, to_merge: CidSet) {
         for cid in to_merge.to_list() {
             let _ = &self.add(cid);
         }
-        ()
+        
     }
 
-    pub fn subtract_set(&mut self, to_subtract: CidSet) -> () {
+    pub fn subtract_set(&mut self, to_subtract: CidSet) {
         for cid in to_subtract.to_list() {
             self.delete(cid);
         }
-        ()
+        
     }
 
-    pub fn delete(&mut self, cid: Cid) -> () {
+    pub fn delete(&mut self, cid: Cid) {
         self.set.remove(&cid.to_string());
-        ()
+        
     }
 
     pub fn has(&self, cid: Cid) -> bool {
@@ -50,19 +50,16 @@ impl CidSet {
         self.set.len()
     }
 
-    pub fn clear(mut self) -> () {
+    pub fn clear(mut self) {
         self.set.clear();
-        ()
+        
     }
 
     pub fn to_list(&self) -> Vec<Cid> {
         self.set
             .clone()
             .into_iter()
-            .filter_map(|cid| match Cid::from_str(&cid) {
-                Ok(r) => Some(r),
-                Err(_) => None,
-            })
+            .filter_map(|cid| Cid::from_str(&cid).ok())
             .collect::<Vec<Cid>>()
     }
 }

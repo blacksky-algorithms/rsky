@@ -10,6 +10,7 @@ use serde_cbor::Value as CborValue;
 use std::future::Future;
 use std::pin::Pin;
 
+#[allow(clippy::type_complexity)]
 pub trait ReadableBlockstore: Send + Sync {
     fn get_bytes<'a>(
         &'a self,
@@ -34,9 +35,7 @@ pub trait ReadableBlockstore: Send + Sync {
                 Ok(Some(bytes)) => bytes,
                 _ => return Ok(None),
             };
-            parse::parse_obj_by_kind(bytes, *cid, move |v| check(v))
-                .map(Some)
-                .map_err(Into::into)
+            parse::parse_obj_by_kind(bytes, *cid, check).map(Some)
         })
     }
 
@@ -64,12 +63,7 @@ pub trait ReadableBlockstore: Send + Sync {
         &'a self,
         cid: &'a Cid,
     ) -> Pin<Box<dyn Future<Output = Option<RepoRecord>> + Send + Sync + 'a>> {
-        Box::pin(async move {
-            match self.read_record(cid).await {
-                Ok(res) => Some(res),
-                Err(_) => None,
-            }
-        })
+        Box::pin(async move { (self.read_record(cid).await).ok() })
     }
 
     fn read_record<'a>(
@@ -79,7 +73,7 @@ pub trait ReadableBlockstore: Send + Sync {
         Box::pin(async move {
             let bytes = self.get_bytes(cid).await?;
             bytes
-                .map(|bytes| cbor_to_lex_record(bytes))
+                .map(cbor_to_lex_record)
                 .transpose()?
                 .ok_or_else(|| DataStoreError::MissingBlock(cid.to_string()).into())
         })

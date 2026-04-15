@@ -19,6 +19,12 @@ pub struct BlockMap {
     pub map: BTreeMap<String, Bytes>,
 }
 
+impl Default for BlockMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockMap {
     pub fn new() -> Self {
         BlockMap {
@@ -35,9 +41,9 @@ impl BlockMap {
         Ok(cid)
     }
 
-    pub fn set(&mut self, cid: Cid, bytes: Vec<u8>) -> () {
+    pub fn set(&mut self, cid: Cid, bytes: Vec<u8>) {
         self.map.insert(cid.to_string(), Bytes(bytes));
-        ()
+        
     }
 
     pub fn get(&self, cid: Cid) -> Option<&Vec<u8>> {
@@ -66,14 +72,14 @@ impl BlockMap {
         self.map.contains_key(&cid.to_string())
     }
 
-    pub fn clear(&mut self) -> () {
+    pub fn clear(&mut self) {
         self.map.clear()
     }
 
     // Not really using. Issues with closures
-    pub fn for_each(&self, cb: impl Fn(&Vec<u8>, Cid) -> ()) -> Result<()> {
+    pub fn for_each(&self, cb: impl Fn(&Vec<u8>, Cid)) -> Result<()> {
         for (key, val) in self.map.iter() {
-            cb(&val.0, Cid::from_str(&key)?);
+            cb(&val.0, Cid::from_str(key)?);
         }
         Ok(())
     }
@@ -94,10 +100,10 @@ impl BlockMap {
     }
 
     pub fn add_map(&mut self, to_add: BlockMap) -> Result<()> {
-        let results = for (cid, bytes) in to_add.map.iter() {
+        for (cid, bytes) in to_add.map.iter() {
             self.set(Cid::from_str(cid)?, bytes.0.clone());
         };
-        Ok(results)
+        Ok(())
     }
 
     pub fn size(&self) -> usize {
