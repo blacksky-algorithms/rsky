@@ -8281,6 +8281,7 @@ dependencies = [
  "url",
  "urlencoding",
  "vec1",
+ "webpki-roots 1.0.2",
 ]
 
 [[package]]
@@ -8397,6 +8398,7 @@ dependencies = [
 name = "rsky-wintermute"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "ciborium",

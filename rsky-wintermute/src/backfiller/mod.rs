@@ -380,6 +380,8 @@ impl BackfillerManager {
 }
 
 pub fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Value {
+    use base64::Engine;
+
     match record_json {
         serde_json::Value::Object(map) => {
             let mut new_map = serde_json::Map::new();
@@ -402,6 +404,10 @@ pub fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Va
                 if let Ok(cid) = lexicon_cid::Cid::try_from(&bytes[..]) {
                     return serde_json::json!({"$link": cid.to_string()});
                 }
+
+                // Non-CID byte array: encode as $bytes (AT Protocol IPLD format)
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                return serde_json::json!({"$bytes": encoded});
             }
 
             serde_json::Value::Array(arr.iter().map(convert_record_to_ipld).collect())

@@ -26,6 +26,7 @@ name = "label_sync"
 path = "src/bin/label_sync.rs"
 
 [dependencies]
+base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 ciborium = "0.2"

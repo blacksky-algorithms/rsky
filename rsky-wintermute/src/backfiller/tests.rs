@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod backfiller_tests {
+    use base64::Engine as _;
+
     use crate::backfiller::{BackfillerManager, convert_record_to_ipld};
     use crate::storage::Storage;
     use crate::types::{BackfillJob, WintermuteError};
@@ -248,13 +250,35 @@ mod backfiller_tests {
     }
 
     #[test]
-    fn test_convert_record_invalid_cid_bytes() {
-        // Byte array that's not a valid CID - should be preserved as regular array
+    fn test_convert_record_invalid_cid_bytes_becomes_bytes() {
+        // Byte array that's not a valid CID - should be encoded as $bytes
         let input = json!({"data": [1, 2, 3, 4, 5]});
         let output = convert_record_to_ipld(&input);
-        // Should not have $link since it's not a valid CID
-        assert!(!output["data"].is_object());
-        assert_eq!(output, input);
+        // Should have $bytes since it's a byte array but not a valid CID
+        assert!(output["data"].is_object());
+        assert!(output["data"]["$bytes"].is_string());
+        assert_eq!(output["data"]["$bytes"], "AQIDBAU="); // base64 of [1,2,3,4,5]
+    }
+
+    #[test]
+    fn test_convert_record_germ_key_bytes() {
+        // Simulate a germ declaration record with crypto key bytes
+        let key_bytes: Vec<u8> = (0..32).collect();
+        let input = json!({
+            "$type": "com.germnetwork.declaration",
+            "currentKey": key_bytes,
+            "keyPackage": key_bytes
+        });
+        let output = convert_record_to_ipld(&input);
+
+        // Both key fields should be $bytes encoded
+        assert!(output["currentKey"]["$bytes"].is_string());
+        assert!(output["keyPackage"]["$bytes"].is_string());
+        // Verify round-trip: decode and check
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(output["currentKey"]["$bytes"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, (0u8..32).collect::<Vec<u8>>());
     }
 
     #[test]
