@@ -1,9 +1,11 @@
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 
 use http::Uri;
 use http::request::Parts;
 use socket2::{Domain, Protocol, Socket, Type};
+use tungstenite::Connector;
 use tungstenite::client::{IntoClientRequest, uri_mode};
 use tungstenite::client_tls_with_config;
 use tungstenite::error::{Error, Result, UrlError};
@@ -47,7 +49,19 @@ pub fn connect_with_config<Req: IntoClientRequest>(
         let mut stream = connect_to_some((host, port), request.uri())?;
         NoDelay::set_nodelay(&mut stream, true)?;
 
-        client_tls_with_config(request, stream, config, None).decompose()
+        // Build an explicit rustls connector to avoid the tungstenite "Bug: TLS
+        // handshake not blocked" panic that occurs when passing None for the
+        // connector in blocking mode with rustls-tls-webpki-roots.
+        let connector = {
+            let root_store = rustls::RootCertStore::from_iter(
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+            );
+            let tls_config = rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            Connector::Rustls(Arc::new(tls_config))
+        };
+        client_tls_with_config(request, stream, config, Some(connector)).decompose()
     }
 
     fn create_request(parts: &Parts, uri: &Uri) -> Request {

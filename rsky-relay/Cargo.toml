@@ -49,6 +49,7 @@ tracing = { version = "0.1", features = ["release_max_level_debug"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots", "url"] }
+webpki-roots = "1"
 url = "2"
 urlencoding = "2"
 vec1 = { version = "1", features = ["serde"] }
