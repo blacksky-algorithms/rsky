@@ -11,6 +11,13 @@ pub const WORKERS_INGESTER: usize = 4;
 // On high-memory servers (200GB+ RAM), these should be increased significantly
 // Rule of thumb: CACHE_SIZE = 20-25% of RAM, WRITE_BUFFER_SIZE = 1-2% of RAM
 pub static CACHE_SIZE: LazyLock<u64> = LazyLock::new(|| {
+    // FJALL_CACHE_SIZE_MB takes precedence (for CI/test environments)
+    if let Some(mb) = std::env::var("FJALL_CACHE_SIZE_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return mb * 1024 * 1024;
+    }
     std::env::var("FJALL_CACHE_SIZE_GB")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -18,6 +25,12 @@ pub static CACHE_SIZE: LazyLock<u64> = LazyLock::new(|| {
 });
 
 pub static WRITE_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| {
+    if let Some(mb) = std::env::var("FJALL_WRITE_BUFFER_SIZE_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return mb * 1024 * 1024;
+    }
     std::env::var("FJALL_WRITE_BUFFER_SIZE_GB")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
