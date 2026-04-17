@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 
 const SHA2_256: u64 = 0x12;
 const DAGCBORCODEC: u64 = 0x71;
-// https://docs.rs/libipld-core/0.16.0/src/libipld_core/raw.rs.html#19
-const RAWCODEC: u64 = 0x77;
+// ATProto requires raw codec (0x55) for blob CIDs — NOT 0x77 (dag-raw/obsolete)
+const RAWCODEC: u64 = 0x55;
 
 pub fn cid_for_cbor<T: Serialize>(data: &T) -> Result<Cid> {
     let bytes = crate::struct_to_cbor(data)?;
