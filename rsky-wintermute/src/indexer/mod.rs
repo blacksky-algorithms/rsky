@@ -3397,12 +3397,21 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        let via = record
+            .get("via")
+            .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str());
+        let via_cid = record
+            .get("via")
+            .and_then(|v| v.get("cid"))
+            .and_then(|v| v.as_str());
+
         let row_count = client
             .execute(
-                "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT DO NOTHING",
-                &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
+                &[&uri, &cid, &did, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at],
             )
             .await?;
 
@@ -3420,6 +3429,25 @@ impl IndexerManager {
                         .await
                     {
                         tracing::warn!("failed to insert like notification for {uri}: {e}");
+                    }
+                }
+
+                // like-via-repost: notify the reposter whose repost was liked through
+                if let Some(via_uri_str) = via {
+                    if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
+                        let reposter = via_uri.get_hostname();
+                        if reposter != did {
+                            drop(
+                                client
+                                    .execute(
+                                        "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                         ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                        &[&reposter, &did, &uri, &cid, &"like-via-repost", &Some(via_uri_str), &indexed_at],
+                                    )
+                                    .await,
+                            );
+                        }
                     }
                 }
             }
@@ -3593,12 +3621,21 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        let via = record
+            .get("via")
+            .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str());
+        let via_cid = record
+            .get("via")
+            .and_then(|v| v.get("cid"))
+            .and_then(|v| v.as_str());
+
         let row_count = client
             .execute(
-                "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT DO NOTHING",
-                &[&uri, &cid, &did, &subject, &subject_cid, &created_at, &indexed_at],
+                &[&uri, &cid, &did, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at],
             )
             .await?;
 
@@ -3633,6 +3670,25 @@ impl IndexerManager {
                         .await
                     {
                         tracing::warn!("failed to insert repost notification for {uri}: {e}");
+                    }
+                }
+
+                // repost-via-repost: notify the reposter whose repost was re-reposted through
+                if let Some(via_uri_str) = via {
+                    if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
+                        let original_reposter = via_uri.get_hostname();
+                        if original_reposter != did {
+                            drop(
+                                client
+                                    .execute(
+                                        "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                         ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &indexed_at],
+                                    )
+                                    .await,
+                            );
+                        }
                     }
                 }
             }
