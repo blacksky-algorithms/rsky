@@ -216,7 +216,7 @@ impl Resolver {
                         let mut dids = Vec::new();
                         let mut count = 0;
                         let tx = self.conn.transaction()?;
-                        let mut stmt = tx.prepare_cached("INSERT INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+                        let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
                         for line in bytes.reader().lines() {
                             count += 1;
                             if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
