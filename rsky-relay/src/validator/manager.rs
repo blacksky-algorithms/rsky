@@ -113,8 +113,10 @@ impl Manager {
             self.repos.reserve(handle.approximate_len());
             for res in handle.iter() {
                 let (did, state) = res?;
-                #[expect(clippy::unwrap_used)]
-                let did = String::from_utf8(did.to_vec()).unwrap();
+                let Ok(did) = String::from_utf8(did.to_vec()) else {
+                    tracing::warn!("skipping repo with non-UTF8 key");
+                    continue;
+                };
                 let state = serde_ipld_dagcbor::from_slice(&state)?;
                 self.repos.insert(did, state);
                 repos += 1;
@@ -126,10 +128,14 @@ impl Manager {
         let mut queue_pending = 0;
         for res in self.queue.keys() {
             let key = res?;
-            #[expect(clippy::unwrap_used)]
-            let key = std::str::from_utf8(&key).unwrap();
-            #[expect(clippy::unwrap_used)]
-            let did = key.split('>').next().unwrap();
+            let Some(key) = std::str::from_utf8(&key).ok() else {
+                tracing::warn!("skipping queue entry with non-UTF8 key");
+                continue;
+            };
+            let Some(did) = key.split('>').next() else {
+                tracing::warn!("skipping queue entry with malformed key: {key}");
+                continue;
+            };
             if self.resolver.resolve(did)?.is_some() {
                 self.scan_did(&mut cursor, did)?;
                 queue_drained += 1;
@@ -326,7 +332,18 @@ impl Manager {
 
     fn scan_did(&mut self, cursor: &mut Cursor, did: &str) -> Result<(), ManagerError> {
         let Some((pds, key)) = self.resolver.resolve(did)? else {
-            tracing::warn!("skipping unresolvable DID: {did}");
+            // Evict all queue entries for this unresolvable DID to prevent unbounded growth
+            let mut batch = DB.batch();
+            let mut evicted = 0u64;
+            for res in self.queue.prefix(did) {
+                let (k, _) = res?;
+                batch.remove(&self.queue, k);
+                evicted += 1;
+            }
+            if evicted > 0 {
+                batch.commit()?;
+                tracing::debug!(evicted, did, "evicted queue entries for unresolvable DID");
+            }
             return Ok(());
         };
 
@@ -335,8 +352,10 @@ impl Manager {
             let (k, input) = res?;
             batch.get_or_insert_with(|| DB.batch()).remove(&self.queue, k.clone());
 
-            #[expect(clippy::unwrap_used)]
-            let host = std::str::from_utf8(&k).unwrap().split('>').nth(1).unwrap();
+            let Some(host) = std::str::from_utf8(&k).ok().and_then(|s| s.split('>').nth(1)) else {
+                tracing::warn!("skipping queue entry with malformed key");
+                continue;
+            };
             let span = tracing::debug_span!("msg_read", %host, len = %input.len());
             let _enter = span.enter();
 

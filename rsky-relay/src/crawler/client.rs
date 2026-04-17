@@ -53,9 +53,8 @@ pub fn connect_with_config<Req: IntoClientRequest>(
         // handshake not blocked" panic that occurs when passing None for the
         // connector in blocking mode with rustls-tls-webpki-roots.
         let connector = {
-            let root_store = rustls::RootCertStore::from_iter(
-                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-            );
+            let root_store: rustls::RootCertStore =
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
             let tls_config = rustls::ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_no_client_auth();

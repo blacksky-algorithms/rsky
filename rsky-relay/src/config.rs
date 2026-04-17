@@ -30,6 +30,10 @@ pub const CAPACITY_CACHE: usize = 1 << 18;
 // validator
 pub const HOSTS_WRITE_INTERVAL: Duration = Duration::from_secs(10);
 
+// validator queue
+pub const QUEUE_DISK_SIZE: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB max queue size
+pub const QUEUE_TTL_SECONDS: Option<u64> = Some(6 * 60 * 60); // 6 hours
+
 // firehose
 pub const DISK_SIZE: u64 = 320 * 1024 * 1024 * 1024; // 320 GiB
 pub const TTL_SECONDS: Option<u64> = if cfg!(feature = "labeler") {

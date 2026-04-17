@@ -122,6 +122,13 @@ pub async fn main() -> Result<()> {
         }
         Ok(())
     });
-    handle.await??;
+    // Validator errors should not take down the entire relay.
+    // The server, crawlers, and publishers can continue serving existing
+    // firehose subscribers even if validation stops.
+    match handle.await {
+        Ok(Ok(())) => tracing::info!("validator stopped cleanly"),
+        Ok(Err(e)) => tracing::error!("validator stopped with error: {e}"),
+        Err(e) => tracing::error!("validator task panicked: {e}"),
+    }
     ret
 }

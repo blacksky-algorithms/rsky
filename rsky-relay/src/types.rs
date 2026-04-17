@@ -8,7 +8,8 @@ use fjall::{Keyspace, PartitionCreateOptions, Slice};
 use thingbuf::{Recycle, mpsc};
 
 use crate::config::{
-    BLOCK_SIZE, CACHE_SIZE, DISK_SIZE, FSYNC_MS, MEMTABLE_SIZE, TTL_SECONDS, WRITE_BUFFER_SIZE,
+    BLOCK_SIZE, CACHE_SIZE, DISK_SIZE, FSYNC_MS, MEMTABLE_SIZE, QUEUE_DISK_SIZE, QUEUE_TTL_SECONDS,
+    TTL_SECONDS, WRITE_BUFFER_SIZE,
 };
 
 pub type MessageSender = mpsc::blocking::Sender<Message, MessageRecycle>;
@@ -23,11 +24,16 @@ pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
         .open()
         .unwrap();
     db.open_partition("firehose", firehose_options()).unwrap();
-    db.open_partition("queue", PartitionCreateOptions::default()).unwrap();
+    db.open_partition("queue", queue_options()).unwrap();
     #[cfg(not(feature = "labeler"))]
     db.open_partition("repos", PartitionCreateOptions::default()).unwrap();
     db
 });
+
+fn queue_options() -> PartitionCreateOptions {
+    PartitionCreateOptions::default()
+        .compaction_strategy(Strategy::Fifo(Fifo::new(QUEUE_DISK_SIZE, QUEUE_TTL_SECONDS)))
+}
 
 fn firehose_options() -> PartitionCreateOptions {
     PartitionCreateOptions::default()
