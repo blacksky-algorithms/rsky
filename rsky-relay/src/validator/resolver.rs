@@ -66,10 +66,10 @@ impl Resolver {
         } else {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         };
-        let conn = Connection::open_with_flags(
-            "plc_directory.db",
-            flag | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let conn =
+            Connection::open_with_flags("plc_directory.db", flag | OpenFlags::SQLITE_OPEN_CREATE)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;")?;
         if *DO_PLC_EXPORT {
             match conn.execute("PRAGMA secure_delete = OFF", []) {
                 Ok(_) | Err(rusqlite::Error::ExecuteReturnedResults) => {}

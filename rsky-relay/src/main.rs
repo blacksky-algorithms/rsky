@@ -76,7 +76,15 @@ pub async fn main() -> Result<()> {
     let validator = ValidatorManager::new(message_rx)?;
     let server =
         Server::new(args.certs.zip(args.private_key), request_crawl_tx, subscribe_repos_tx)?;
-    let handle = tokio::spawn(validator.run());
+    // Track validator status via AtomicBool so the main loop can detect
+    // validator death without owning the JoinHandle (which stays outside the closure).
+    let validator_dead = Arc::new(AtomicBool::new(false));
+    let validator_dead_clone = Arc::clone(&validator_dead);
+    let handle = tokio::spawn(async move {
+        let result = validator.run().await;
+        validator_dead_clone.store(true, Ordering::Relaxed);
+        result
+    });
     let crawler = CrawlerManager::new(WORKERS_CRAWLERS, &message_tx, request_crawl_rx)?;
     let publisher = PublisherManager::new(WORKERS_PUBLISHERS, subscribe_repos_rx)?;
     #[expect(clippy::vec_init_then_push)]
@@ -100,34 +108,43 @@ pub async fn main() -> Result<()> {
         #[expect(clippy::expect_used)]
         let mut signals =
             SignalsInfo::<WithOrigin>::new(TERM_SIGNALS).expect("failed to init signals");
+        let mut validator_logged = false;
         'outer: loop {
             for signal_info in signals.pending() {
                 if TERM_SIGNALS.contains(&signal_info.signal) {
                     break 'outer;
                 }
             }
-            for handle in &handles {
-                if handle.is_finished() {
+            for h in &handles {
+                if h.is_finished() {
                     break 'outer;
                 }
+            }
+            // Validator dying should NOT take down the relay.
+            // Log it once and keep serving firehose to subscribers.
+            if validator_dead.load(Ordering::Relaxed) && !validator_logged {
+                validator_logged = true;
+                tracing::error!("validator stopped unexpectedly, relay continues serving");
             }
             thread::sleep(SLEEP);
         }
         tracing::info!("shutting down");
         SHUTDOWN.store(true, Ordering::Relaxed);
-        for handle in handles {
-            if let Ok(res) = handle.join() {
+        for h in handles {
+            if let Ok(res) = h.join() {
                 res?;
             }
         }
         Ok(())
     });
-    // Validator errors should not take down the entire relay.
-    // The server, crawlers, and publishers can continue serving existing
-    // firehose subscribers even if validation stops.
+    // Clean up validator task
+    if !handle.is_finished() {
+        handle.abort();
+    }
     match handle.await {
         Ok(Ok(())) => tracing::info!("validator stopped cleanly"),
         Ok(Err(e)) => tracing::error!("validator stopped with error: {e}"),
+        Err(e) if e.is_cancelled() => tracing::info!("validator aborted on shutdown"),
         Err(e) => tracing::error!("validator task panicked: {e}"),
     }
     ret
