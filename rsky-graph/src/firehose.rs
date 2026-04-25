@@ -107,43 +107,24 @@ fn process_firehose_message(data: &[u8], graph: &FollowGraph) {
         if parts.len() != 2 {
             continue;
         }
-        let collection = parts[0];
+        let (collection, rkey) = (parts[0], parts[1]);
         if collection != "app.bsky.graph.follow" {
             continue;
         }
 
         match op.action.as_str() {
             "create" => {
-                // Parse the record from blocks to get the subject DID
                 if let Some(subject) = extract_follow_subject(&commit.blocks, &op.cid) {
-                    graph.add_follow(&commit.repo, &subject);
-
-                    // Update bloom filter for the subject
-                    if let Some(subject_uid) = graph.get_uid(&subject) {
-                        if let Some(actor_uid) = graph.get_uid(&commit.repo) {
-                            graph
-                                .follower_blooms
-                                .entry(subject_uid)
-                                .or_insert_with(|| crate::bloom::new_bloom_filter(100))
-                                .set(&actor_uid);
-                        }
-                    }
-
+                    graph.add_follow_with_rkey(&commit.repo, rkey, &subject);
                     crate::metrics::GRAPH_FIREHOSE_EVENTS.inc();
                 }
             }
             "delete" => {
-                // For deletes, we need the subject DID. Since the firehose doesn't
-                // include the record content for deletes, we check if we can find
-                // the subject from our graph data.
-                // The path is "app.bsky.graph.follow/{rkey}" -- we don't know the subject.
-                // For now, skip deletes. The graph will have stale follows until
-                // a periodic full rebuild or a PostgreSQL lookup is added.
-                // This is acceptable because:
-                // 1. Unfollows are less frequent than follows
-                // 2. A stale follow in the graph means we might show a "known follower"
-                //    who actually unfollowed -- a minor inaccuracy
-                // 3. Periodic LMDB persistence + bloom rebuild corrects over time
+                if graph.remove_follow_by_rkey(&commit.repo, rkey) {
+                    crate::metrics::GRAPH_FIREHOSE_EVENTS.inc();
+                }
+                // If we don't know the rkey (pre-snapshot follow), the bitmap
+                // entry stays until the next snapshot rebuild. Acceptable.
             }
             _ => {}
         }
@@ -157,13 +138,10 @@ fn extract_follow_subject(blocks: &[u8], _cid: &Option<serde_json::Value>) -> Op
     // that starts with "did:". This is a pragmatic approach that avoids
     // full CAR parsing overhead in the hot path.
 
-    // Try DAG-CBOR parse of the blocks looking for follow records
+    // Try DAG-CBOR parse of the blocks looking for follow records.
     // The blocks may contain multiple CBOR items; we scan for any
-    // that have a "subject" field starting with "did:"
-    let block_str = String::from_utf8_lossy(blocks);
-
-    // Quick scan for "did:plc:" or "did:web:" substrings near a "subject" key
-    // This is a fast heuristic -- the proper approach would be CAR parsing
+    // that have a "subject" field starting with "did:". This is a fast heuristic --
+    // the proper approach would be full CAR parsing.
     for window in blocks.windows(200) {
         // Look for CBOR string "subject" followed by a DID
         if let Ok(val) = serde_ipld_dagcbor::from_slice::<serde_json::Value>(window) {

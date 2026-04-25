@@ -35,6 +35,11 @@ struct Args {
 
     #[clap(long, env = "DATABASE_URL")]
     database_url: Option<String>,
+
+    /// Path to a CSV (creator,subjectDid) produced by `\copy`. When set, this
+    /// is preferred over a live PG load -- see plan recursive-honking-sprout.
+    #[clap(long, env = "GRAPH_LOAD_FROM_FILE")]
+    load_from_file: Option<String>,
 }
 
 #[tokio::main]
@@ -68,23 +73,35 @@ async fn main() -> Result<()> {
             tracing::info!("loaded {} users from LMDB", count);
         }
         Ok(_) => {
-            // Empty LMDB -- do bulk load if database_url is provided
-            if let Some(ref db_url) = args.database_url {
-                tracing::info!("LMDB empty, starting bulk load from PostgreSQL");
-                bulk_load::bulk_load_follows(db_url, &graph).await?;
+            // Empty LMDB -- prefer file load (zero PG transaction) over a live PG load.
+            if let Some(ref path) = args.load_from_file {
+                tracing::info!("LMDB empty, bulk-loading from file: {path}");
+                bulk_load::bulk_load_from_file(std::path::Path::new(path), &graph).await?;
                 tracing::info!(
                     "bulk load complete: {} users, {} follows",
                     graph.user_count(),
                     graph.follow_count()
                 );
-                // Build bloom filters after bulk load
                 bloom::build_all_bloom_filters(&graph);
                 tracing::info!("bloom filters built");
-                // Persist to LMDB
+                persistence::save_to_lmdb(&args.db_path, &graph).await?;
+                tracing::info!("persisted to LMDB");
+            } else if let Some(ref db_url) = args.database_url {
+                tracing::info!("LMDB empty, starting keyset bulk load from PostgreSQL");
+                bulk_load::bulk_load_keyset(db_url, &graph).await?;
+                tracing::info!(
+                    "bulk load complete: {} users, {} follows",
+                    graph.user_count(),
+                    graph.follow_count()
+                );
+                bloom::build_all_bloom_filters(&graph);
+                tracing::info!("bloom filters built");
                 persistence::save_to_lmdb(&args.db_path, &graph).await?;
                 tracing::info!("persisted to LMDB");
             } else {
-                tracing::warn!("LMDB empty and no DATABASE_URL -- starting with empty graph");
+                tracing::warn!(
+                    "LMDB empty and no GRAPH_LOAD_FROM_FILE / DATABASE_URL -- starting with empty graph"
+                );
             }
         }
         Err(e) => {

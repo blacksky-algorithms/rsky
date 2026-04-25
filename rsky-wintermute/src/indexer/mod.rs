@@ -5,7 +5,7 @@ use crate::SHUTDOWN;
 use crate::config::{
     DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
-    IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
+    HANDLE_STALE_VALID_EVERY_N, IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
 use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
@@ -199,8 +199,14 @@ impl IndexerManager {
                 break;
             }
 
-            // Query actors with NULL handle or stale indexedAt
-            let dids_to_resolve = match self.get_actors_needing_handle_resolution().await {
+            // Run the cheap NULL-handle queries every iteration; fold in the more
+            // expensive "stale non-NULL" sweep only every Nth iteration so the
+            // background loop does not dominate PG IO.
+            let include_stale_valid = batch_count % HANDLE_STALE_VALID_EVERY_N == 0;
+            let dids_to_resolve = match self
+                .get_actors_needing_handle_resolution(include_stale_valid)
+                .await
+            {
                 Ok(dids) => dids,
                 Err(e) => {
                     tracing::warn!("failed to get actors needing handle resolution: {e}");
@@ -283,53 +289,72 @@ impl IndexerManager {
         }
     }
 
-    async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {
+    async fn get_actors_needing_handle_resolution(
+        &self,
+        include_stale_valid: bool,
+    ) -> Result<Vec<String>, WintermuteError> {
         let client = self.pool_labels.get().await?;
         let batch_size = i64::try_from(*HANDLE_RESOLUTION_BATCH_SIZE).unwrap_or(500);
 
-        // Get actors with NULL handle or stale indexedAt
-        // Priority order:
-        // 1. Recently-indexed actors with NULL handle (within priority window) - newest first
-        // 2. Older actors with NULL handle - oldest first
-        // 3. Actors with stale valid handles - oldest first
         let stale_threshold_invalid = (chrono::Utc::now()
             - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_INVALID).unwrap_or_default())
-        .to_rfc3339();
-        let stale_threshold_valid = (chrono::Utc::now()
-            - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_VALID).unwrap_or_default())
         .to_rfc3339();
         let priority_window = (chrono::Utc::now()
             - chrono::Duration::from_std(HANDLE_PRIORITY_WINDOW).unwrap_or_default())
         .to_rfc3339();
 
-        // Query with priority: recent NULL handles first (newest), then older NULL handles (oldest), then stale valid handles
-        let rows = client
+        // Query A: NULL handles. Two short queries against actor_null_handle_idx
+        // (the partial index on indexedAt WHERE handle IS NULL) -- one for recent
+        // priority-window actors (newest first), one for older actors (oldest first).
+        // These each do a bounded index range scan; together they replace the prior
+        // single OR/CASE query that the planner could not satisfy from one index.
+        let recent_half = batch_size / 2;
+        let older_half = batch_size - recent_half;
+
+        let recent_rows = client
             .query(
-                "SELECT did FROM actor
-                 WHERE (handle IS NULL AND \"indexedAt\" < $1)
-                    OR (handle IS NOT NULL AND \"indexedAt\" < $2)
-                 ORDER BY
-                   CASE
-                     WHEN handle IS NULL AND \"indexedAt\" >= $3 THEN 0  -- Recent NULL: highest priority
-                     WHEN handle IS NULL THEN 1                          -- Older NULL: second priority
-                     ELSE 2                                              -- Stale valid: lowest priority
-                   END,
-                   CASE
-                     WHEN handle IS NULL AND \"indexedAt\" >= $3 THEN \"indexedAt\"  -- Recent: newest first
-                     ELSE NULL
-                   END DESC NULLS LAST,
-                   \"indexedAt\" ASC  -- Older entries: oldest first
-                 LIMIT $4",
-                &[
-                    &stale_threshold_invalid,
-                    &stale_threshold_valid,
-                    &priority_window,
-                    &batch_size,
-                ],
+                "SELECT did FROM actor \
+                 WHERE handle IS NULL AND \"indexedAt\" >= $1 AND \"indexedAt\" < $2 \
+                 ORDER BY \"indexedAt\" DESC \
+                 LIMIT $3",
+                &[&priority_window, &stale_threshold_invalid, &recent_half],
             )
             .await?;
 
-        let dids: Vec<String> = rows.iter().map(|row| row.get("did")).collect();
+        let older_rows = client
+            .query(
+                "SELECT did FROM actor \
+                 WHERE handle IS NULL AND \"indexedAt\" < $1 \
+                 ORDER BY \"indexedAt\" ASC \
+                 LIMIT $2",
+                &[&priority_window, &older_half],
+            )
+            .await?;
+
+        let cap = usize::try_from(batch_size).unwrap_or(0);
+        let mut dids: Vec<String> = Vec::with_capacity(cap);
+        dids.extend(recent_rows.iter().map(|row| row.get::<_, String>("did")));
+        dids.extend(older_rows.iter().map(|row| row.get::<_, String>("did")));
+
+        // Query B: stale non-NULL handles. Run only at a slower cadence -- this
+        // path uses actor_indexed_at_idx (full table indexed, much larger) and is
+        // not user-visible, so we don't need it on every iteration.
+        if include_stale_valid {
+            let stale_threshold_valid = (chrono::Utc::now()
+                - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_VALID).unwrap_or_default())
+            .to_rfc3339();
+            let stale_rows = client
+                .query(
+                    "SELECT did FROM actor \
+                     WHERE handle IS NOT NULL AND \"indexedAt\" < $1 \
+                     ORDER BY \"indexedAt\" ASC \
+                     LIMIT $2",
+                    &[&stale_threshold_valid, &batch_size],
+                )
+                .await?;
+            dids.extend(stale_rows.iter().map(|row| row.get::<_, String>("did")));
+        }
+
         Ok(dids)
     }
 
