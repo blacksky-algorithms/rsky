@@ -1,0 +1,79 @@
+[package]
+name = "rsky-graph"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rsky-graph"
+path = "src/main.rs"
+
+[dependencies]
+# Roaring bitmaps for follow graph
+roaring = "0.10"
+
+# Bloom filters for fast rejection
+bloomfilter = "1.0"
+
+# Concurrent hashmaps
+dashmap = "6"
+
+# Async runtime
+tokio = { workspace = true }
+
+# PostgreSQL for bulk load
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+deadpool-postgres = "0.13"
+
+# HTTP server
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# WebSocket for firehose
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
+futures = "0.3"
+
+# TLS
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = "1"
+ciborium = "0.2"
+serde_ipld_dagcbor = { workspace = true }
+
+# LMDB persistence
+heed = "0.20"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Metrics
+prometheus = "0.13"
+
+# Memory allocator
+mimalloc = "0.1"
+
+# Error handling
+color-eyre = "0.6"
+
+# Signal handling
+signal-hook = { version = "0.3", features = ["extended-siginfo"] }
+
+# URL parsing
+url = "2"
+
+# Timestamp
+chrono = "0.4"
+
+# AT Protocol parsing
+rsky-firehose = { path = "../rsky-firehose" }
+rsky-lexicon = { workspace = true }
+lexicon_cid = { workspace = true }
+serde_cbor = "0.11"
+anyhow = "1"

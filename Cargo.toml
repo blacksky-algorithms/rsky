@@ -16,6 +16,7 @@ members = [
   "rsky-syntax",
   "rsky-video",
   "rsky-wintermute",
+  "rsky-graph",
 ]
 resolver = "2"
 

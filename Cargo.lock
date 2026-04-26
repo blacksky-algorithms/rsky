@@ -1125,6 +1125,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0669d5a35b64fdb5ab7fb19cae13148b6b5cbdf4b8247faf54ece47f699c8cef"
 
 [[package]]
+name = "bit-vec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
+
+[[package]]
 name = "bit_field"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,6 +1261,17 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
+]
+
+[[package]]
+name = "bloomfilter"
+version = "1.0.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c541c70a910b485670304fd420f0eab8f7bde68439db6a8d98819c3d2774d7e2"
+dependencies = [
+ "bit-vec",
+ "getrandom 0.2.16",
+ "siphasher 1.0.1",
 ]
 
 [[package]]
@@ -7827,6 +7844,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.10.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
 name = "rocket"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8074,6 +8101,44 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.18.0",
+ "url",
+]
+
+[[package]]
+name = "rsky-graph"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bloomfilter",
+ "bytes",
+ "chrono",
+ "ciborium",
+ "cid 0.11.1",
+ "clap",
+ "color-eyre",
+ "dashmap 6.1.0",
+ "deadpool-postgres",
+ "futures",
+ "heed",
+ "http-body-util",
+ "hyper 1.7.0",
+ "hyper-util",
+ "mimalloc",
+ "prometheus",
+ "roaring",
+ "rsky-firehose",
+ "rsky-lexicon",
+ "rustls 0.23.31",
+ "serde",
+ "serde_cbor",
+ "serde_ipld_dagcbor 0.6.3",
+ "serde_json",
+ "signal-hook",
+ "tokio",
+ "tokio-postgres",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

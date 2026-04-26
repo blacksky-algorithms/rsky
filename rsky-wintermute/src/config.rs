@@ -99,6 +99,12 @@ pub static HANDLE_RESOLUTION_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
 // Priority window for recently-indexed actors (resolve new actors faster)
 pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
 
+// How often the handle-resolution loop folds in the (much larger) sweep over
+// stale non-NULL handles. Default: every 20th iteration -- the cheap NULL-handle
+// scans run every iteration and dominate the priority queue; the stale-revalidate
+// path only needs to run periodically to catch handle changes.
+pub const HANDLE_STALE_VALID_EVERY_N: u64 = 20;
+
 // Backfiller config - tunable via environment variables for 15B+ record backfills
 pub static WORKERS_BACKFILLER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("BACKFILLER_WORKERS")
