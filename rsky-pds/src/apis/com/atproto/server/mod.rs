@@ -95,14 +95,11 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
         let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
         let plc_client = plc::Client::new(plc_url);
         let resolved = plc_client.get_document_data(&did).await?;
-        let pds_endpoint = match resolved.services.get("atproto_pds") {
-            Some(service) => Some(service.endpoint.clone()),
-            None => None,
-        };
-        let signing_key = match resolved.verification_methods.get("atproto") {
-            Some(key) => Some(key.clone()),
-            None => None,
-        };
+        let pds_endpoint = resolved
+            .services
+            .get("atproto_pds")
+            .map(|service| service.endpoint.clone());
+        let signing_key = resolved.verification_methods.get("atproto").cloned();
         assert_valid_doc_contents(AssertionContents {
             pds_endpoint,
             signing_key,

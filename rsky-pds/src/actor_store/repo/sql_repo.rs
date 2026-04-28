@@ -40,13 +40,13 @@ impl ReadableBlockstore for SqlRepoReader {
     ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + Sync + 'a>> {
         let did: String = self.did.clone();
         let db: Arc<DbConn> = self.db.clone();
-        let cid = cid.clone();
+        let cid = *cid;
 
         Box::pin(async move {
             use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
             let cached = {
                 let cache_guard = self.cache.read().await;
-                cache_guard.get(cid).map(|v| v.clone())
+                cache_guard.get(cid).cloned()
             };
             if let Some(cached_result) = cached {
                 return Ok(Some(cached_result.clone()));

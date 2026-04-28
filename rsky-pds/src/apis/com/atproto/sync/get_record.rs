@@ -18,6 +18,7 @@ use std::str::FromStr;
 #[response(status = 200, content_type = "application/vnd.ipld.car")]
 pub struct BlockResponder(Vec<u8>);
 
+#[allow(clippy::too_many_arguments)]
 async fn inner_get_record(
     did: String,
     collection: String,
@@ -56,6 +57,7 @@ async fn inner_get_record(
 
 /// Get data blocks needed to prove the existence or non-existence of record in the current version
 /// of repo. Does not require auth.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRecord?<did>&<collection>&<rkey>&<commit>")]
 pub async fn get_record(

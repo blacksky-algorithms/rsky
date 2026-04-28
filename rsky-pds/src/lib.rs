@@ -262,14 +262,14 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     let local_viewer = SharedLocalViewer {
         local_viewer: RwLock::new(LocalViewer::creator(LocalViewerCreatorParams {
             pds_hostname: cfg.service.hostname.clone(),
-            appview_agent: match cfg.bsky_app_view {
-                None => None,
-                Some(ref bsky_app_view) => Some(bsky_app_view.url.clone()),
-            },
-            appview_did: match cfg.bsky_app_view {
-                None => None,
-                Some(ref bsky_app_view) => Some(bsky_app_view.did.clone()),
-            },
+            appview_agent: cfg
+                .bsky_app_view
+                .as_ref()
+                .map(|bsky_app_view| bsky_app_view.url.clone()),
+            appview_did: cfg
+                .bsky_app_view
+                .as_ref()
+                .map(|bsky_app_view| bsky_app_view.did.clone()),
             appview_cdn_url_pattern: match cfg.bsky_app_view {
                 None => None,
                 Some(ref bsky_app_view) => bsky_app_view.cdn_url_pattern.clone(),

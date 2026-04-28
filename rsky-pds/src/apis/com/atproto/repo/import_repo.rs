@@ -23,7 +23,7 @@ use rsky_repo::sync::consumer::{verify_diff, VerifyRepoInput};
 use rsky_repo::types::{PreparedWrite, RecordWriteDescript, VerifiedDiff};
 use std::num::NonZeroU64;
 
-struct ImportRepoInput {
+pub struct ImportRepoInput {
     car_with_root: CarWithRoot,
 }
 

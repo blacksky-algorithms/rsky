@@ -165,7 +165,7 @@ pub struct TypedAccountEvt {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum SeqEvt {
-    TypedCommitEvt(TypedCommitEvt),
+    TypedCommitEvt(Box<TypedCommitEvt>),
     // TypedHandleEvt(TypedHandleEvt),
     TypedIdentityEvt(TypedIdentityEvt),
     TypedAccountEvt(TypedAccountEvt),
@@ -339,16 +339,16 @@ pub async fn format_seq_sync_evt(did: String, data: SyncEvtData) -> Result<model
 }
 
 pub async fn sync_evt_data_from_commit(mut commit_data: CommitDataWithOps) -> Result<SyncEvtData> {
-    let cid = vec![commit_data.commit_data.cid.clone()];
+    let cid = vec![commit_data.commit_data.cid];
     match commit_data.commit_data.relevant_blocks.get_many(cid) {
-        Ok(blocks_and_missing) if blocks_and_missing.missing.len() > 0 => Err(anyhow::anyhow!(
+        Ok(blocks_and_missing) if !blocks_and_missing.missing.is_empty() => Err(anyhow::anyhow!(
             "commit block was not found, could not build sync event"
         )),
         Ok(blocks_and_missing) => Ok(SyncEvtData {
             rev: commit_data.commit_data.rev,
-            cid: commit_data.commit_data.cid.clone(),
+            cid: commit_data.commit_data.cid,
             blocks: blocks_and_missing.blocks,
         }),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(e),
     }
 }
