@@ -57,6 +57,36 @@ pub static GRAPH_FIREHOSE_EVENTS: LazyLock<IntCounter> = LazyLock::new(|| {
     c
 });
 
+pub static GRAPH_FIREHOSE_FRAMES: LazyLock<IntCounter> = LazyLock::new(|| {
+    let c = IntCounter::new(
+        "graph_firehose_frames_total",
+        "Binary frames received from firehose (any type)",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static GRAPH_FIREHOSE_COMMITS: LazyLock<IntCounter> = LazyLock::new(|| {
+    let c = IntCounter::new(
+        "graph_firehose_commits_total",
+        "#commit frames successfully decoded",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
+pub static GRAPH_FIREHOSE_DECODE_ERRORS: LazyLock<IntCounter> = LazyLock::new(|| {
+    let c = IntCounter::new(
+        "graph_firehose_decode_errors_total",
+        "Frames where rsky_firehose::firehose::read returned Err or non-commit",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(c.clone())).unwrap();
+    c
+});
+
 pub fn encode_metrics() -> String {
     // Force lazy initialization
     let _ = &*GRAPH_QUERIES_TOTAL;
@@ -65,6 +95,9 @@ pub fn encode_metrics() -> String {
     let _ = &*GRAPH_USERS_TOTAL;
     let _ = &*GRAPH_FOLLOWS_TOTAL;
     let _ = &*GRAPH_FIREHOSE_EVENTS;
+    let _ = &*GRAPH_FIREHOSE_FRAMES;
+    let _ = &*GRAPH_FIREHOSE_COMMITS;
+    let _ = &*GRAPH_FIREHOSE_DECODE_ERRORS;
 
     let encoder = TextEncoder::new();
     let metric_families = REGISTRY.gather();

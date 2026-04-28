@@ -69,11 +69,26 @@ pub async fn tail_firehose(relay_host: &str, graph: &FollowGraph, shutdown: &Ato
 }
 
 fn process_message(data: &[u8], graph: &FollowGraph) {
+    crate::metrics::GRAPH_FIREHOSE_FRAMES.inc();
     // Use the shared rsky-firehose frame parser -- same path as rsky-firehose
     // and rsky-wintermute. Anything other than a #commit is irrelevant here.
-    let Ok(Some((_, SubscribeRepos::Commit(commit)))) = firehose::read(data) else {
-        return;
+    let commit = match firehose::read(data) {
+        Ok(Some((_, SubscribeRepos::Commit(c)))) => c,
+        Ok(Some(_)) => {
+            // Non-commit frame (#identity, #account, #handle, #tombstone, ...)
+            return;
+        }
+        Ok(None) => {
+            // #info, #sync, or #error -- silently skip
+            return;
+        }
+        Err(e) => {
+            crate::metrics::GRAPH_FIREHOSE_DECODE_ERRORS.inc();
+            tracing::debug!("firehose: frame decode failed: {e}");
+            return;
+        }
     };
+    crate::metrics::GRAPH_FIREHOSE_COMMITS.inc();
 
     if commit.too_big || commit.ops.is_empty() {
         return;
