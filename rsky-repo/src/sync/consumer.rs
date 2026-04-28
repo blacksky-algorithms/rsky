@@ -80,7 +80,7 @@ pub async fn verify_diff(
     let writes = util::diff_to_write_descripts(&diff).await?;
     let mut new_blocks = diff.new_mst_blocks;
     let leaves = update_blocks.get_many(diff.new_leaf_cids.to_list())?;
-    if leaves.missing.len() > 0 && ensure_leaves {
+    if !leaves.missing.is_empty() && ensure_leaves {
         bail!("missing leaf blocks: {:?}", leaves.missing);
     }
     new_blocks.add_map(leaves.blocks)?;
@@ -99,14 +99,8 @@ pub async fn verify_diff(
         commit: CommitData {
             cid: updated.cid,
             rev: updated.commit.rev.clone(),
-            since: match repo {
-                None => None,
-                Some(ref repo) => Some(repo.commit.rev.clone()),
-            },
-            prev: match repo {
-                None => None,
-                Some(ref repo) => Some(repo.cid),
-            },
+            since: repo.as_ref().map(|repo| repo.commit.rev.clone()),
+            prev: repo.as_ref().map(|repo| repo.cid),
             relevant_blocks: new_blocks.clone(),
             new_blocks,
             removed_cids,
@@ -135,7 +129,7 @@ pub async fn verify_repo_root(
         if !valid_sig {
             return Err(ConsumerError::RepoVerificationError(format!(
                 "Invalid signature on commit: {}",
-                repo.cid.to_string()
+                repo.cid
             ))
             .into());
         }
@@ -154,12 +148,7 @@ pub async fn verify_proofs(
     let data: CborValue = blockstore
         .read_obj(
             &car.root,
-            Box::new(
-                |obj: CborValue| match serde_cbor::value::from_value::<Commit>(obj.clone()) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                },
-            ),
+            Box::new(|obj: CborValue| serde_cbor::value::from_value::<Commit>(obj.clone()).is_ok()),
         )
         .await?;
     let commit: Commit = serde_cbor::value::from_value(data)?;
@@ -171,13 +160,11 @@ pub async fn verify_proofs(
         .into());
     }
     match verify_commit_sig(commit.clone(), did_key)? {
-        false => {
-            return Err(ConsumerError::RepoVerificationError(format!(
-                "Invalid signature on commit: {}",
-                car.root.to_string()
-            ))
-            .into());
-        }
+        false => Err(ConsumerError::RepoVerificationError(format!(
+            "Invalid signature on commit: {}",
+            car.root
+        ))
+        .into()),
         true => {
             let mut mst = MST::load(Arc::new(RwLock::new(blockstore)), commit.data, None)?;
             let mut verified: Vec<RecordCidClaim> = Default::default();
@@ -229,12 +216,7 @@ pub async fn verify_records(
     let data: CborValue = blockstore
         .read_obj(
             &car.root,
-            Box::new(
-                |obj: CborValue| match serde_cbor::value::from_value::<Commit>(obj.clone()) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                },
-            ),
+            Box::new(|obj: CborValue| serde_cbor::value::from_value::<Commit>(obj.clone()).is_ok()),
         )
         .await?;
     let commit: Commit = serde_cbor::value::from_value(data)?;
@@ -246,13 +228,11 @@ pub async fn verify_records(
         .into());
     }
     match verify_commit_sig(commit.clone(), signing_key)? {
-        false => {
-            return Err(ConsumerError::RepoVerificationError(format!(
-                "Invalid signature on commit: {}",
-                car.root.to_string()
-            ))
-            .into());
-        }
+        false => Err(ConsumerError::RepoVerificationError(format!(
+            "Invalid signature on commit: {}",
+            car.root
+        ))
+        .into()),
         true => {
             let mst = MST::load(Arc::new(RwLock::new(blockstore)), commit.data, None)?;
 

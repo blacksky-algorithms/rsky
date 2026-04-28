@@ -43,6 +43,7 @@ pub async fn inner_get_profiles(
 }
 
 /// Get detailed profile views of multiple actors.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.actor.getProfiles?<actors>")]
 pub async fn get_profiles(

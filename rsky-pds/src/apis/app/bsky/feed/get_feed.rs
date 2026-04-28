@@ -104,10 +104,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                 );
                                 let proxy_req = ProxyRequest {
                                     headers,
-                                    query: match req.uri().query() {
-                                        None => None,
-                                        Some(query) => Some(query.to_string()),
-                                    },
+                                    query: req.uri().query().map(|query| query.to_string()),
                                     path: req.uri().path().to_string(),
                                     method: req.method(),
                                     id_resolver: req

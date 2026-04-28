@@ -108,7 +108,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            *keypair,
+            keypair,
             Some(write_ops),
         )
         .await?;
@@ -143,7 +143,7 @@ impl ActorStore {
         let commit = Repo::format_init_commit(
             self.storage.clone(),
             self.did.clone(),
-            *keypair,
+            keypair,
             Some(write_ops),
         )
         .await?;
@@ -156,7 +156,7 @@ impl ActorStore {
                 acc.push(CommitOp {
                     action: CommitAction::Create,
                     path: format_data_key(aturi.get_collection(), aturi.get_rkey()),
-                    cid: Some(w.cid.clone()),
+                    cid: Some(w.cid),
                     prev: None,
                 });
                 Ok(acc)
@@ -294,7 +294,7 @@ impl ActorStore {
                     cid,
                     prev: None,
                 };
-                if let Some(_) = current_record {
+                if current_record.is_some() {
                     op.prev = current_record;
                 };
                 commit_ops.push(op);
@@ -340,7 +340,7 @@ impl ActorStore {
                 .collect::<Result<Vec<RecordWriteOp>>>()?;
 
             let mut commit = repo
-                .format_commit(RecordWriteEnum::List(write_ops), *PDS_REPO_SIGNING_KEYPAIR)
+                .format_commit(RecordWriteEnum::List(write_ops), &PDS_REPO_SIGNING_KEYPAIR)
                 .await?;
 
             // find blocks that would be deleted but are referenced by another record
@@ -377,7 +377,7 @@ impl ActorStore {
 
         let _ = stream::iter(writes)
             .then(|write| async move {
-                Ok::<(), anyhow::Error>(match write {
+                match write {
                     PreparedWrite::Create(write) => {
                         let write_at_uri: AtUri = write.uri.try_into()?;
                         self.record
@@ -408,7 +408,8 @@ impl ActorStore {
                         let write_at_uri: AtUri = write.uri.try_into()?;
                         self.record.delete_record(&write_at_uri).await?
                     }
-                })
+                };
+                Ok::<(), anyhow::Error>(())
             })
             .collect::<Vec<_>>()
             .await
@@ -470,7 +471,7 @@ impl ActorStore {
             })
             .await?;
         res.into_iter()
-            .map(|row| Cid::from_str(&row).map_err(|error| anyhow::Error::new(error)))
+            .map(|row| Cid::from_str(&row).map_err(anyhow::Error::new))
             .collect::<Result<Vec<Cid>>>()
     }
 }

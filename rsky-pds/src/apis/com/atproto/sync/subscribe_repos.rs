@@ -27,7 +27,7 @@ use ws::Message;
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
     let mut dt: DateTime<UtcOffset> = system_time.into();
-    dt = dt - Duration::milliseconds(ms as i64);
+    dt -= Duration::milliseconds(ms as i64);
     format!("{}", dt.format(RFC3339_VARIANT))
 }
 
@@ -35,6 +35,7 @@ fn get_backfill_limit(ms: u64) -> String {
 /// and identity update events, for all repositories on the current server. See the atproto
 /// specifications for details around stream sequencing, repo versioning, CAR diff format, and more.
 /// Public and does not require auth; implemented by PDS and Relay.
+#[allow(clippy::needless_lifetimes)]
 #[rocket::get("/xrpc/com.atproto.sync.subscribeRepos?<cursor>")]
 #[allow(unused_variables)]
 pub async fn subscribe_repos<'a>(
@@ -147,7 +148,7 @@ pub async fn subscribe_repos<'a>(
 
                     match evt {
                         SeqEvt::TypedCommitEvt(commit) => {
-                            let TypedCommitEvt { r#type, seq, time, evt } = commit;
+                            let TypedCommitEvt { r#type, seq, time, evt } = *commit;
                             let CommitEvt { rebase, too_big, repo, commit, prev, rev, since, blocks, ops, blobs, prev_data} = evt;
                             let subscribe_commit_evt = SubscribeReposCommit {
                                 seq,
@@ -165,10 +166,7 @@ pub async fn subscribe_repos<'a>(
                                 blocks,
                                 ops: ops.into_iter().map(|op| SubscribeReposCommitOperation {
                                     path: op.path,
-                                    cid: match op.cid {
-                                        None => None,
-                                        Some(cid) => Some(cid)
-                                    },
+                                    cid: op.cid,
                                     action: op.action.to_string()
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
                                 blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
