@@ -11,38 +11,38 @@ repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-pds"
 documentation = "https://docs.rs/rsky-pds"
 
 [dependencies]
-anyhow = "1.0.79"
+anyhow = "1.0.102"
 argon2 = "0.5.3"
-async-event-emitter = "0.1.3"
-atrium-api = "0.24.6"
+async-event-emitter = "0.1.5"
+atrium-api = "0.24.10"
 # atrium-ipld = { package = "ipld-core", version = "0.4.1" }
-atrium-xrpc-client = "0.5.8"
-aws-config = { version = "1.1.8", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.29.0"
-base64 = "0.22.0"
+atrium-xrpc-client = "0.5.15"
+aws-config = { version = "1.8.15", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.128.0"
+base64 = "0.22.1"
 base64-url = "2.0.2"
-base64ct = "1.6.0"
-chrono = "0.4.26"
-data-encoding = "2.5.0"
-diesel = { version = "=2.2.0", features = ["chrono", "postgres"] }
+base64ct = "1.8.3"
+chrono = "0.4.44"
+data-encoding = "2.10.0"
+diesel = { version = "~2.3.7", features = ["chrono", "postgres"] }
 dotenvy = "0.15"
-email_address = "0.2.4"
+email_address = "0.2.9"
 event-emitter-rs = "0.1.4"
-futures = "0.3.28"
+futures = "0.3.32"
 hex = "0.4.3"
-image = "0.25.1"
+image = "0.25.10"
 indexmap = { version = "1.9.3", features = ["serde-1"] }
 infer = "0.15.0"
 ipld-core = { workspace = true }
-jwt-simple = { version = "0.12.9", default-features = false, features = ["pure-rust"] }
-lazy_static = "1.4.0"
+jwt-simple = { version = "0.12.14", default-features = false, features = ["pure-rust"] }
+lazy_static = "1.5.0"
 lexicon_cid = { workspace = true }
-mailchecker = "6.0.1"
-mailgun-rs = "0.1.10"
+mailchecker = "6.0.20"
+mailgun-rs = "0.1.12"
 rand = { workspace = true }
 rand_core = { workspace = true }
-regex = "1.10.3"
-reqwest = { version = "0.12.3", features = ["json", "blocking"] }
+regex = "1.12.3"
+reqwest = { version = "0.12.28", features = ["json", "blocking"] }
 rocket = { version = "=0.5.1", features = ["json", "tls"] }
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }
@@ -59,21 +59,21 @@ serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
 sha2 = { workspace = true }
-thiserror = "1.0.40"
-time = "^0.3.36"
+thiserror = "1.0.69"
+time = "^0.3.47"
 tokio = { workspace = true }
-toml = "0.8.12"
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
-url = "2.5.2"
+toml = "0.8.23"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
 ws = { package = "rocket_ws", version = "0.1.1" }
 
 
 [dev-dependencies]
-testcontainers = "0.23.2"
+testcontainers = "0.23.3"
 testcontainers-modules = { version = "0.11.6", features = ["postgres", "blocking"] }
-diesel_migrations = {version = "2.1.0", features = ["postgres"]}
-http-auth-basic = { version = "0.3.5" }
+diesel_migrations = {version = "2.3.1", features = ["postgres"]}
+http-auth-basic = { version = "0.3.7" }
 
 [dependencies.rocket_sync_db_pools]
 version = "=0.1.0"

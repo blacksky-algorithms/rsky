@@ -25,11 +25,11 @@ lexicon_cid = {workspace = true}
 tokio = {workspace = true}
 async-recursion = "1.1.1"
 sha2 = {workspace = true}
-anyhow = "1.0.79" # @TODO: Remove anyhow in lib
-futures = "0.3.28"
-thiserror = "1.0.40"
-async-stream = "0.3.5"
-async-trait = "0.1.86"
+anyhow = "1.0.102" # @TODO: Remove anyhow in lib
+futures = "0.3.32"
+thiserror = "1.0.69"
+async-stream = "0.3.6"
+async-trait = "0.1.89"
 integer-encoding = { version = "3", features = ["tokio_async"] }
 rand = "0.8.5"
 rand_core = "0.6.4"
@@ -37,8 +37,8 @@ secp256k1 = {workspace = true}
 ipld-core = {workspace = true}
 iroh-car = "0.5.1"
 
-regex = "1.10.3"
-lazy_static = "1.4.0"
+regex = "1.12.3"
+lazy_static = "1.5.0"
 
 [dev-dependencies]
 glob = "0.3"

@@ -14,26 +14,26 @@ documentation = "https://docs.rs/rsky-labeler"
 rsky-lexicon = { workspace = true }
 rsky-common = { workspace = true }
 lexicon_cid = {workspace = true}
-ciborium = "0.2.0"
-futures = "0.3.28"
-tokio = { version = "1.28.0", features = ["full"] }
-tokio-tungstenite = { version = "0.26.1", features = ["native-tls"] }
-chrono = { version = "0.4.24", features = ["serde"] }
+ciborium = "0.2.2"
+futures = "0.3.32"
+tokio = { version = "1.51.0", features = ["full"] }
+tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 derive_builder = "0.20.2"
-miette = "7.4.0"
-parking_lot = "0.12.1"
-reqwest = { version = "0.12.9", features = ["json"] }
-serde = { version = "1.0.160", features = ["derive"] }
+miette = "7.6.0"
+parking_lot = "0.12.5"
+reqwest = { version = "0.12.28", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "^1.0"
-serde_bytes = "0.11.9"
-serde_ipld_dagcbor = "0.6.1"
-serde_json = "1.0.96"
+serde_bytes = "0.11.19"
+serde_ipld_dagcbor = "0.6.4"
+serde_json = "1.0.149"
 serde_cbor = "0.11.2"
-thiserror = "2.0.9"
+thiserror = "2.0.18"
 dotenvy = "0.15.7"
-retry = "2.0.0"
-anyhow = "1.0.81"
-atrium-api = { version = "0.24.6", features = ["namespace-toolsozone"] }
-atrium-xrpc-client = "0.5.8"
-atrium-ipld = {package = "ipld-core", version = "0.4.1"}
+retry = "2.2.0"
+anyhow = "1.0.102"
+atrium-api = { version = "0.24.10", features = ["namespace-toolsozone"] }
+atrium-xrpc-client = "0.5.15"
+atrium-ipld = {package = "ipld-core", version = "0.4.3"}
 multihash = "0.19"
