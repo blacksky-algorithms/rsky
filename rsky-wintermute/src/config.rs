@@ -105,6 +105,33 @@ pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_secs(6 * 60 * 60); /
 // path only needs to run periodically to catch handle changes.
 pub const HANDLE_STALE_VALID_EVERY_N: u64 = 20;
 
+// Cap for `actor.handleResolveTries`. Once a row hits this many failures it is
+// retried at the maximum cooldown (currently 7 days). Fits in SMALLINT.
+pub const HANDLE_MAX_TRIES: i16 = 10;
+
+// Exponential backoff for failed handle resolutions, indexed by tries.
+// tries=0  -> immediate retry (new actor, never tried)
+// tries=1  -> 1 h
+// tries=2  -> 2 h
+// tries=3  -> 4 h
+// ...
+// tries>=7 -> 168 h (7 days, cap)
+//
+// Returning Duration::ZERO for tries=0 means new rows from the backfiller hit
+// the resolver as soon as they're picked up. Failed rows then back off so a
+// permanently-broken DID stops head-of-line blocking the queue.
+#[must_use]
+pub fn handle_retry_cooldown(tries: i16) -> Duration {
+    const SEVEN_DAYS_SECS: u64 = 168 * 60 * 60;
+    if tries <= 0 {
+        Duration::ZERO
+    } else {
+        let exp = u32::try_from(tries - 1).unwrap_or(0).min(30);
+        let secs = 3600u64.saturating_mul(1u64 << exp).min(SEVEN_DAYS_SECS);
+        Duration::from_secs(secs)
+    }
+}
+
 // Backfiller config - tunable via environment variables for 15B+ record backfills
 pub static WORKERS_BACKFILLER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("BACKFILLER_WORKERS")
@@ -172,3 +199,33 @@ pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(32) // Default: 32 connections for backfiller (matches worker count)
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cooldown_is_zero_for_fresh_rows() {
+        assert_eq!(handle_retry_cooldown(0), Duration::ZERO);
+        assert_eq!(handle_retry_cooldown(-1), Duration::ZERO);
+    }
+
+    #[test]
+    fn cooldown_doubles_per_try() {
+        assert_eq!(handle_retry_cooldown(1), Duration::from_secs(3600));
+        assert_eq!(handle_retry_cooldown(2), Duration::from_secs(2 * 3600));
+        assert_eq!(handle_retry_cooldown(3), Duration::from_secs(4 * 3600));
+        assert_eq!(handle_retry_cooldown(4), Duration::from_secs(8 * 3600));
+    }
+
+    #[test]
+    fn cooldown_caps_at_seven_days() {
+        let seven_days = Duration::from_secs(168 * 3600);
+        // 2^7 = 128h (still under cap), 2^8 = 256h (clamped to 168h).
+        assert_eq!(handle_retry_cooldown(8), Duration::from_secs(128 * 3600));
+        assert_eq!(handle_retry_cooldown(9), seven_days);
+        assert_eq!(handle_retry_cooldown(HANDLE_MAX_TRIES), seven_days);
+        assert_eq!(handle_retry_cooldown(HANDLE_MAX_TRIES + 5), seven_days);
+        assert_eq!(handle_retry_cooldown(i16::MAX), seven_days);
+    }
+}

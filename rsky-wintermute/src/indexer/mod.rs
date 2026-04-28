@@ -3,9 +3,9 @@ mod tests;
 
 use crate::SHUTDOWN;
 use crate::config::{
-    DB_POOL_SIZE, HANDLE_PRIORITY_WINDOW, HANDLE_REINDEX_INTERVAL_INVALID,
-    HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
-    HANDLE_STALE_VALID_EVERY_N, IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
+    DB_POOL_SIZE, HANDLE_MAX_TRIES, HANDLE_REINDEX_INTERVAL_INVALID, HANDLE_REINDEX_INTERVAL_VALID,
+    HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY, HANDLE_STALE_VALID_EVERY_N,
+    IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER, handle_retry_cooldown,
 };
 use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
@@ -294,47 +294,41 @@ impl IndexerManager {
         include_stale_valid: bool,
     ) -> Result<Vec<String>, WintermuteError> {
         let client = self.pool_labels.get().await?;
-        let batch_size = i64::try_from(*HANDLE_RESOLUTION_BATCH_SIZE).unwrap_or(500);
+        let batch_size = *HANDLE_RESOLUTION_BATCH_SIZE;
+        let now = chrono::Utc::now();
+        let mut dids: Vec<String> = Vec::with_capacity(batch_size);
 
-        let stale_threshold_invalid = (chrono::Utc::now()
-            - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_INVALID).unwrap_or_default())
-        .to_rfc3339();
-        let priority_window = (chrono::Utc::now()
-            - chrono::Duration::from_std(HANDLE_PRIORITY_WINDOW).unwrap_or_default())
-        .to_rfc3339();
-
-        // Query A: NULL handles. Two short queries against actor_null_handle_idx
-        // (the partial index on indexedAt WHERE handle IS NULL) -- one for recent
-        // priority-window actors (newest first), one for older actors (oldest first).
-        // These each do a bounded index range scan; together they replace the prior
-        // single OR/CASE query that the planner could not satisfy from one index.
-        let recent_half = batch_size / 2;
-        let older_half = batch_size - recent_half;
-
-        let recent_rows = client
-            .query(
-                "SELECT did FROM actor \
-                 WHERE handle IS NULL AND \"indexedAt\" >= $1 AND \"indexedAt\" < $2 \
-                 ORDER BY \"indexedAt\" DESC \
-                 LIMIT $3",
-                &[&priority_window, &stale_threshold_invalid, &recent_half],
-            )
-            .await?;
-
-        let older_rows = client
-            .query(
-                "SELECT did FROM actor \
-                 WHERE handle IS NULL AND \"indexedAt\" < $1 \
-                 ORDER BY \"indexedAt\" ASC \
-                 LIMIT $2",
-                &[&priority_window, &older_half],
-            )
-            .await?;
-
-        let cap = usize::try_from(batch_size).unwrap_or(0);
-        let mut dids: Vec<String> = Vec::with_capacity(cap);
-        dids.extend(recent_rows.iter().map(|row| row.get::<_, String>("did")));
-        dids.extend(older_rows.iter().map(|row| row.get::<_, String>("did")));
+        // Per-tries bucketed scan. Lower-tries buckets drain first so brand-new
+        // actors (tries=0) always get fastest service. Each bucket's predicate
+        // matches `actor_handle_retry_idx (handleResolveTries, indexedAt)
+        // WHERE handle IS NULL`, so the scan is index-only.
+        //
+        // Crucially, every failure path bumps `handleResolveTries` and
+        // `indexedAt`, so a row that just failed exits the tries=N bucket and
+        // re-enters bucket N+1 with a longer cooldown. This is what prevents the
+        // head-of-line blocking pattern where 28k+ permanently-broken DIDs
+        // (e.g. deleted accounts) starve the queue indefinitely.
+        for tries in 0..=HANDLE_MAX_TRIES {
+            let need = batch_size.saturating_sub(dids.len());
+            if need == 0 {
+                break;
+            }
+            let cooldown = handle_retry_cooldown(tries);
+            let threshold =
+                (now - chrono::Duration::from_std(cooldown).unwrap_or_default()).to_rfc3339();
+            let limit = i64::try_from(need).unwrap_or(i64::MAX);
+            let rows = client
+                .query(
+                    "SELECT did FROM actor \
+                     WHERE handle IS NULL \
+                       AND \"handleResolveTries\" = $1 \
+                       AND \"indexedAt\" < $2 \
+                     ORDER BY \"indexedAt\" ASC LIMIT $3",
+                    &[&tries, &threshold, &limit],
+                )
+                .await?;
+            dids.extend(rows.iter().map(|row| row.get::<_, String>("did")));
+        }
 
         // Query B: stale non-NULL handles. Run only at a slower cadence -- this
         // path uses actor_indexed_at_idx (full table indexed, much larger) and is
@@ -343,19 +337,41 @@ impl IndexerManager {
             let stale_threshold_valid = (chrono::Utc::now()
                 - chrono::Duration::from_std(HANDLE_REINDEX_INTERVAL_VALID).unwrap_or_default())
             .to_rfc3339();
+            let limit = i64::try_from(batch_size).unwrap_or(i64::MAX);
             let stale_rows = client
                 .query(
                     "SELECT did FROM actor \
                      WHERE handle IS NOT NULL AND \"indexedAt\" < $1 \
                      ORDER BY \"indexedAt\" ASC \
                      LIMIT $2",
-                    &[&stale_threshold_valid, &batch_size],
+                    &[&stale_threshold_valid, &limit],
                 )
                 .await?;
             dids.extend(stale_rows.iter().map(|row| row.get::<_, String>("did")));
         }
 
         Ok(dids)
+    }
+
+    /// Bump `handleResolveTries` (capped at `HANDLE_MAX_TRIES`) and refresh
+    /// `indexedAt` so the row is excluded from the resolver until its cooldown
+    /// elapses. Used on every failure path in `index_handle` and
+    /// `process_identity_event` to prevent retry storms on broken DIDs.
+    pub(crate) async fn bump_handle_failure(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        timestamp: &str,
+    ) -> Result<(), WintermuteError> {
+        client
+            .execute(
+                "UPDATE actor \
+                 SET \"indexedAt\" = $2, \
+                     \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
+                 WHERE did = $1",
+                &[&did, &timestamp, &HANDLE_MAX_TRIES],
+            )
+            .await?;
+        Ok(())
     }
 
     async fn process_firehose_live_loop(&self) {
@@ -947,10 +963,12 @@ impl IndexerManager {
                 Ok(Some(doc)) => doc,
                 Ok(None) => {
                     tracing::debug!("DID not found: {did}");
+                    Self::bump_handle_failure(client, did, timestamp).await?;
                     return Ok(false);
                 }
                 Err(e) => {
                     tracing::debug!("failed to resolve DID {did}: {e}");
+                    Self::bump_handle_failure(client, did, timestamp).await?;
                     return Ok(false);
                 }
             }
@@ -967,13 +985,8 @@ impl IndexerManager {
             Some(h) if !h.is_empty() => h,
             _ => {
                 tracing::debug!("no handle found in DID document for {did}");
-                // Update actor indexedAt even if no handle found
-                client
-                    .execute(
-                        "UPDATE actor SET \"indexedAt\" = $2 WHERE did = $1",
-                        &[&did, &timestamp],
-                    )
-                    .await?;
+                // No alsoKnownAs is a definitive negative -- treat as a failed try.
+                Self::bump_handle_failure(client, did, timestamp).await?;
                 return Ok(false);
             }
         };
@@ -985,16 +998,22 @@ impl IndexerManager {
                 Ok(Some(resolved_did)) => resolved_did,
                 Ok(None) => {
                     tracing::debug!("handle {handle} does not resolve to a DID");
+                    // Handle does not exist -- null it out and record the failure.
                     client
                         .execute(
-                            "UPDATE actor SET handle = NULL, \"indexedAt\" = $2 WHERE did = $1",
-                            &[&did, &timestamp],
+                            "UPDATE actor \
+                             SET handle = NULL, \
+                                 \"indexedAt\" = $2, \
+                                 \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
+                             WHERE did = $1",
+                            &[&did, &timestamp, &HANDLE_MAX_TRIES],
                         )
                         .await?;
                     return Ok(false);
                 }
                 Err(e) => {
                     tracing::debug!("failed to resolve handle {handle}: {e}");
+                    Self::bump_handle_failure(client, did, timestamp).await?;
                     return Ok(false);
                 }
             }
@@ -1018,17 +1037,34 @@ impl IndexerManager {
                 .await?;
         }
 
-        // Update actor with handle
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\")
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (did) DO UPDATE SET
-                   handle = EXCLUDED.handle,
-                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &verified_handle, &timestamp],
-            )
-            .await?;
+        // Update actor with handle. Reset tries on success; bump on bidirectional
+        // mismatch (verified_handle = None) so we don't keep hammering a DID
+        // whose handle was hijacked by someone else.
+        if verified_handle.is_some() {
+            client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\", \"handleResolveTries\") \
+                     VALUES ($1, $2, $3, 0) \
+                     ON CONFLICT (did) DO UPDATE SET \
+                       handle = EXCLUDED.handle, \
+                       \"indexedAt\" = EXCLUDED.\"indexedAt\", \
+                       \"handleResolveTries\" = 0",
+                    &[&did, &verified_handle, &timestamp],
+                )
+                .await?;
+        } else {
+            client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\", \"handleResolveTries\") \
+                     VALUES ($1, NULL, $2, 1) \
+                     ON CONFLICT (did) DO UPDATE SET \
+                       handle = NULL, \
+                       \"indexedAt\" = EXCLUDED.\"indexedAt\", \
+                       \"handleResolveTries\" = LEAST(actor.\"handleResolveTries\" + 1, $3)",
+                    &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                )
+                .await?;
+        }
 
         Ok(verified_handle.is_some())
     }
