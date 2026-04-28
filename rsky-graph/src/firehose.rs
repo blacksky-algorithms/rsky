@@ -20,7 +20,11 @@ pub async fn tail_firehose(relay_host: &str, graph: &FollowGraph, shutdown: &Ato
             return;
         }
 
-        let url = format!("{relay_host}/xrpc/com.atproto.sync.subscribeRepos");
+        // rsky-relay's subscribeRepos only sends events when the connection has
+        // a cursor set; without `?cursor=`, the relay assigns `seq+1` and the
+        // poll-loop range `[seq+1..seq]` is empty so no events are forwarded.
+        // Always pass an explicit cursor; 0 means "from the beginning".
+        let url = format!("{relay_host}/xrpc/com.atproto.sync.subscribeRepos?cursor=0");
         tracing::info!("firehose: connecting to {url}");
 
         match tokio_tungstenite::connect_async(&url).await {
