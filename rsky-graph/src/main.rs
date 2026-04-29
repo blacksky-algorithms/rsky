@@ -39,6 +39,10 @@ struct Args {
     /// is preferred over a live PG load -- see plan recursive-honking-sprout.
     #[clap(long, env = "GRAPH_LOAD_FROM_FILE")]
     load_from_file: Option<String>,
+
+    /// Bearer token gating POST /admin/bulk-load. Unset = admin disabled.
+    #[clap(long, env = "GRAPH_ADMIN_TOKEN")]
+    admin_token: Option<String>,
 }
 
 #[tokio::main]
@@ -144,8 +148,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Build admin state. The token gates POST /admin/bulk-load; without it
+    // the route always 401s. database_url is reused from the startup arg.
+    let admin = Arc::new(api::AdminState::new(
+        args.admin_token.clone(),
+        args.database_url.clone(),
+    ));
+
     // Start HTTP API (blocks until shutdown)
-    api::serve(args.port, Arc::clone(&graph), shutdown_flag).await?;
+    api::serve(args.port, Arc::clone(&graph), admin, shutdown_flag).await?;
 
     // Final persist on shutdown
     tracing::info!("final LMDB save");
