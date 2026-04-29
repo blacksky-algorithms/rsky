@@ -1,3 +1,10 @@
+// MST implementation tracking indigo/atproto/repo/mst/{node,node_insert,node_remove,encoding}.go.
+// Each `TODO` below is mirrored from the corresponding upstream comment; do NOT fix them in
+// isolation — diverging from indigo creates real correctness drift on cross-implementation
+// MST inversion. Strict-mode improvements should port indigo's interop test fixtures
+// (atproto/repo/mst/testdata/) and run them against this implementation before changing
+// algorithm behavior. Lenient mode (default in production) bypasses this verifier on failure
+// per AT Protocol relay-validator-discretion.
 use std::cmp::Ordering;
 use std::{io, mem};
 
