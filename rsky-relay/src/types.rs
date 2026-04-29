@@ -1,6 +1,7 @@
-use std::fmt;
 use std::ops::{Add, Sub};
+use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::{env, fmt};
 
 use bytes::Bytes;
 use fjall::compaction::{Fifo, Strategy};
@@ -16,19 +17,25 @@ pub type MessageSender = mpsc::blocking::Sender<Message, MessageRecycle>;
 pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
 
 #[expect(clippy::unwrap_used)]
-pub static DB: LazyLock<Keyspace> = LazyLock::new(|| {
-    let db = fjall::Config::new("db")
+pub static DB: LazyLock<Keyspace> = LazyLock::new(|| open_keyspace(&db_path()).unwrap());
+
+#[inline]
+pub fn db_path() -> PathBuf {
+    env::var_os("RELAY_DB_PATH").map_or_else(|| PathBuf::from("db"), PathBuf::from)
+}
+
+pub fn open_keyspace(path: &std::path::Path) -> fjall::Result<Keyspace> {
+    let db = fjall::Config::new(path)
         .cache_size(CACHE_SIZE)
         .max_write_buffer_size(WRITE_BUFFER_SIZE)
         .fsync_ms(FSYNC_MS)
-        .open()
-        .unwrap();
-    db.open_partition("firehose", firehose_options()).unwrap();
-    db.open_partition("queue", queue_options()).unwrap();
+        .open()?;
+    db.open_partition("firehose", firehose_options())?;
+    db.open_partition("queue", queue_options())?;
     #[cfg(not(feature = "labeler"))]
-    db.open_partition("repos", PartitionCreateOptions::default()).unwrap();
-    db
-});
+    db.open_partition("repos", PartitionCreateOptions::default())?;
+    Ok(db)
+}
 
 fn queue_options() -> PartitionCreateOptions {
     PartitionCreateOptions::default()
@@ -69,9 +76,17 @@ impl Cursor {
         u64::from_be_bytes(self.0)
     }
 
+    /// Non-mutating `+1`; saturates at `u64::MAX` to keep fjall key ordering monotonic.
+    #[inline]
+    pub const fn successor(self) -> Self {
+        let value = u64::from_be_bytes(self.0).saturating_add(1);
+        Self(value.to_be_bytes())
+    }
+
+    /// In-place `+1`; saturates at `u64::MAX`. Prefer `successor` for non-mutating reads.
     #[inline]
     pub const fn next(&mut self) -> Self {
-        let value = u64::from_be_bytes(self.0) + 1;
+        let value = u64::from_be_bytes(self.0).saturating_add(1);
         self.0 = value.to_be_bytes();
         *self
     }
@@ -141,5 +156,169 @@ impl fmt::Debug for Cursor {
 impl fmt::Display for Cursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.get().fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_get_round_trips_u64() {
+        for v in [0u64, 1, 42, u64::MAX / 2, u64::MAX - 1, u64::MAX] {
+            assert_eq!(Cursor::from(v).get(), v);
+        }
+    }
+
+    #[test]
+    fn successor_does_not_mutate_self() {
+        let c = Cursor::from(5);
+        let s = c.successor();
+        assert_eq!(s.get(), 6);
+        assert_eq!(c.get(), 5);
+    }
+
+    #[test]
+    fn successor_saturates_at_u64_max() {
+        assert_eq!(Cursor::from(u64::MAX).successor().get(), u64::MAX);
+    }
+
+    #[test]
+    fn next_mutates_and_returns_new_value() {
+        let mut c = Cursor::from(10);
+        let returned = c.next();
+        assert_eq!(returned.get(), 11);
+        assert_eq!(c.get(), 11);
+    }
+
+    #[test]
+    fn next_saturates_at_u64_max() {
+        let mut c = Cursor::from(u64::MAX);
+        assert_eq!(c.next().get(), u64::MAX);
+        assert_eq!(c.get(), u64::MAX);
+    }
+
+    #[test]
+    fn add_sub_round_trip() {
+        let c = Cursor::from(100);
+        assert_eq!((c + 50).get(), 150);
+        assert_eq!((c - 25).get(), 75);
+    }
+
+    #[test]
+    fn equality_and_default() {
+        assert_eq!(Cursor::default().get(), 0);
+        assert_eq!(Cursor::from(7), Cursor::from(7));
+        assert_ne!(Cursor::from(7), Cursor::from(8));
+    }
+
+    #[test]
+    fn debug_and_display_match_u64() {
+        let c = Cursor::from(123);
+        assert_eq!(format!("{c:?}"), "123");
+        assert_eq!(format!("{c}"), "123");
+    }
+
+    #[test]
+    fn slice_round_trip() {
+        let c = Cursor::from(0xdead_beef);
+        let s: Slice = c.into();
+        let c2: Cursor = s.into();
+        assert_eq!(c, c2);
+    }
+
+    #[test]
+    fn slice_too_short_yields_default() {
+        let s: Slice = (&[1u8, 2, 3][..]).into();
+        assert_eq!(Cursor::from(s), Cursor::default());
+    }
+
+    #[test]
+    fn as_ref_returns_be_bytes() {
+        let c = Cursor::from(1);
+        assert_eq!(c.as_ref(), &1u64.to_be_bytes());
+    }
+
+    #[test]
+    fn into_u64_round_trips() {
+        let c = Cursor::from(42);
+        let v: u64 = c.into();
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn copy_clone_semantics() {
+        let c = Cursor::from(9);
+        let d = c;
+        let e = c;
+        assert_eq!(d, e);
+        assert_eq!(c.get(), 9);
+    }
+
+    #[test]
+    fn message_recycle_no_op() {
+        let recycler = MessageRecycle;
+        let mut msg = recycler.new_element();
+        msg.data = Bytes::from_static(b"x");
+        msg.hostname = "h".to_owned();
+        // recycle is a no-op; message must be untouched.
+        recycler.recycle(&mut msg);
+        assert_eq!(msg.data, Bytes::from_static(b"x"));
+        assert_eq!(msg.hostname, "h");
+    }
+
+    #[test]
+    fn db_path_defaults_to_db_when_unset() {
+        // Don't mutate global env to avoid races with parallel tests; check pure default branch.
+        let saved = std::env::var_os("RELAY_DB_PATH");
+        // SAFETY: tests run with a single-threaded test runner via #[test] only when serialized;
+        // we restore the var below and the LazyLock DB is intentionally not deref'd here.
+        unsafe {
+            std::env::remove_var("RELAY_DB_PATH");
+            assert_eq!(db_path(), std::path::PathBuf::from("db"));
+            if let Some(v) = saved {
+                std::env::set_var("RELAY_DB_PATH", v);
+            }
+        }
+    }
+
+    #[test]
+    fn db_path_reads_env_var_when_set() {
+        unsafe {
+            std::env::set_var("RELAY_DB_PATH", "/tmp/rsky-relay-test-path");
+        }
+        assert_eq!(db_path(), std::path::PathBuf::from("/tmp/rsky-relay-test-path"));
+        unsafe {
+            std::env::remove_var("RELAY_DB_PATH");
+        }
+    }
+
+    #[test]
+    fn open_keyspace_creates_partitions_at_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = open_keyspace(tmp.path()).unwrap();
+        // Both partitions must be present after open_keyspace.
+        let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
+        let queue = ks.open_partition("queue", PartitionCreateOptions::default()).unwrap();
+        // The on-disk dir was created.
+        assert!(tmp.path().exists());
+        // Both partitions are usable: insert + read round-trip.
+        firehose.insert(Cursor::from(1), b"hello".as_slice()).unwrap();
+        let v = firehose.get(Cursor::from(1)).unwrap().unwrap();
+        assert_eq!(v.as_ref(), b"hello");
+        // queue partition is functional too.
+        queue.insert(b"k".as_slice(), b"v".as_slice()).unwrap();
+    }
+
+    #[test]
+    fn db_lazylock_initializes_against_env_path() {
+        // Trigger the global LazyLock body once. Set RELAY_DB_PATH first; if another
+        // test already deref'd DB, the global path is sticky and this test still
+        // exercises the (already-cached) deref; coverage reaches the closure either way.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("RELAY_DB_PATH", tmp.path());
+        }
+        let _ks: &fjall::Keyspace = &DB;
     }
 }

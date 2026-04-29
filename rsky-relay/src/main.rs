@@ -20,10 +20,12 @@ use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use rsky_relay::config::{CAPACITY_MSGS, CAPACITY_REQS, WORKERS_CRAWLERS, WORKERS_PUBLISHERS};
+use rsky_relay::config::{
+    CAPACITY_MSGS, CAPACITY_REQS, METRICS_LISTEN, WORKERS_CRAWLERS, WORKERS_PUBLISHERS,
+};
 use rsky_relay::{
     CrawlerManager, MessageRecycle, PublisherManager, RelayError, SHUTDOWN, Server,
-    ValidatorManager,
+    ValidatorManager, metrics,
 };
 
 #[global_allocator]
@@ -62,6 +64,21 @@ pub async fn main() -> Result<()> {
 
     #[expect(clippy::unwrap_used)]
     default_provider().install_default().unwrap();
+
+    if let Some(addr_str) = METRICS_LISTEN.as_deref() {
+        match addr_str.parse() {
+            Ok(addr) => match metrics::install_listener(addr) {
+                Ok(_) => tracing::info!(%addr_str, "metrics listener bound"),
+                Err(err) => tracing::error!(%err, %addr_str, "failed to bind metrics listener"),
+            },
+            Err(err) => tracing::error!(%err, %addr_str, "invalid RELAY_METRICS_LISTEN"),
+        }
+    } else {
+        // No listener configured: install an in-process recorder so describe()/counters work.
+        if let Err(err) = metrics::install_recorder() {
+            tracing::error!(%err, "failed to install metrics recorder");
+        }
+    }
 
     let args = Args::parse();
 

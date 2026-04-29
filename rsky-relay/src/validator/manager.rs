@@ -12,7 +12,8 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 use crate::SHUTDOWN;
-use crate::config::HOSTS_WRITE_INTERVAL;
+use crate::config::{HOSTS_WRITE_INTERVAL, LENIENT_VALIDATION};
+use crate::metrics;
 use crate::types::{Cursor, DB, MessageReceiver};
 use crate::validator::event::{ParseError, SerializeError, SubscribeReposEvent};
 use crate::validator::resolver::{Resolver, ResolverError};
@@ -223,11 +224,14 @@ impl Manager {
                     if prev > curr {
                         tracing::trace!(%prev, diff = %prev - curr, "old seq");
                     }
+                    metrics::record_validator_dropped("old_seq");
                     continue;
                 } else if prev + 1 != curr {
                     tracing::trace!(%prev, diff = %curr - prev - 1, "seq gap");
                 }
             }
+
+            let lenient = *LENIENT_VALIDATION;
 
             // get commit object for #commit/#sync or add to the firehose
             let span;
@@ -247,6 +251,7 @@ impl Manager {
 
                     #[cfg(not(feature = "labeler"))]
                     if !event.validate(&commit, &head) {
+                        metrics::record_validator_dropped("envelope_invalid");
                         continue;
                     }
                     (commit, head)
@@ -255,48 +260,78 @@ impl Manager {
                     if let SubscribeReposEvent::Identity(_) = &event {
                         self.resolver.expire(did, event.time());
                     }
+                    let event_type = event.type_();
                     let data = event.serialize(msg.data.len(), cursor.next())?;
                     self.firehose.insert(*cursor, data)?;
                     self.hosts.insert(host.clone(), (seq, time));
+                    metrics::record_validator_published(event_type);
+                    metrics::record_firehose_head(cursor.get());
                     continue;
                 }
                 Err(err) => {
                     tracing::debug!(%err, "commit decode error");
+                    metrics::record_validator_dropped("commit_decode");
                     continue;
                 }
             };
 
-            // resolve identity & check pds
-            let Some((pds, key)) = self.resolver.resolve(did)? else {
-                self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
-                self.hosts.insert(host.clone(), (seq, time));
-                continue;
-            };
+            // resolve identity & check pds (copy values out so resolver is no longer mutably borrowed)
+            let (pds_owned, key_owned): (Option<String>, Option<crate::validator::event::DidKey>) =
+                if let Some((pds, key)) = self.resolver.resolve(did)? {
+                    (pds.map(str::to_owned), Some(*key))
+                } else {
+                    if !lenient {
+                        self.queue
+                            .insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
+                        self.hosts.insert(host.clone(), (seq, time));
+                        metrics::record_validator_deferred("resolver_pending");
+                        continue;
+                    }
+                    self.resolver.request_direct(did);
+                    tracing::warn!(%did, "resolver pending; publishing under lenient mode");
+                    metrics::record_validator_passed_with_warning("resolver_pending");
+                    (None, None)
+                };
 
-            if let Some(pds) = pds {
-                if host != pds {
-                    // PDS mismatch: user may have migrated. Fetch their DID doc directly
-                    // from plc.directory to get the current PDS and signing key.
-                    tracing::debug!(%pds, "hostname pds mismatch, fetching latest DID doc");
+            // PDS host validation
+            let pds_mismatch = pds_owned.as_deref().is_some_and(|p| host.as_str() != p);
+            if pds_mismatch {
+                if !lenient {
+                    tracing::debug!(?pds_owned, "hostname pds mismatch, fetching latest DID doc");
                     self.resolver.request_direct(did);
                     self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
                     self.hosts.insert(host.clone(), (seq, time));
+                    metrics::record_validator_deferred("pds_mismatch");
                     continue;
                 }
+                self.resolver.request_direct(did);
+                tracing::warn!(?pds_owned, %host, "PDS mismatch; publishing under lenient mode");
+                metrics::record_validator_passed_with_warning("pds_mismatch");
             }
 
-            // verify signature
+            // signature verify (only when key is available)
             #[allow(clippy::needless_borrow)]
-            match utils::verify_commit_sig(&commit, key) {
-                Ok(valid) => {
-                    if !valid {
-                        tracing::debug!(?key, "signature mismatch");
-                        continue;
+            if let Some(ref key) = key_owned {
+                match utils::verify_commit_sig(&commit, key) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if !lenient {
+                            tracing::debug!(?key, "signature mismatch");
+                            metrics::record_validator_dropped("sig_fail");
+                            continue;
+                        }
+                        tracing::warn!(?key, "signature mismatch; publishing under lenient mode");
+                        metrics::record_validator_passed_with_warning("sig_fail");
                     }
-                }
-                Err(err) => {
-                    tracing::debug!(%err, ?key, "signature check error");
-                    continue;
+                    Err(err) => {
+                        if !lenient {
+                            tracing::debug!(%err, ?key, "signature check error");
+                            metrics::record_validator_dropped("sig_check_error");
+                            continue;
+                        }
+                        tracing::warn!(%err, ?key, "signature check error; publishing under lenient mode");
+                        metrics::record_validator_passed_with_warning("sig_check_error");
+                    }
                 }
             }
 
@@ -311,13 +346,21 @@ impl Manager {
                     let span = tracing::debug_span!("previous", rev = %prev.rev, data = %prev.data, head = %prev.head);
                     let _enter = span.enter();
                     if !utils::verify_commit_event(commit, data, prev) {
-                        continue;
+                        if !lenient {
+                            metrics::record_validator_dropped("mst_fail");
+                            continue;
+                        }
+                        tracing::warn!("MST verify failed; publishing under lenient mode");
+                        metrics::record_validator_passed_with_warning("mst_fail");
                     }
                 }
             }
 
+            let event_type = event.type_();
             let msg = event.serialize(msg.data.len(), cursor.next())?;
             self.firehose.insert(*cursor, msg)?;
+            metrics::record_validator_published(event_type);
+            metrics::record_firehose_head(cursor.get());
             #[cfg(not(feature = "labeler"))]
             entry.insert(RepoState { rev, data, head });
             self.hosts.insert(host.clone(), (seq, time));
