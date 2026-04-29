@@ -16,7 +16,7 @@ use crate::config::{HOSTS_WRITE_INTERVAL, LENIENT_VALIDATION};
 use crate::metrics;
 use crate::types::{Cursor, DB, MessageReceiver};
 use crate::validator::event::{ParseError, SerializeError, SubscribeReposEvent};
-use crate::validator::resolver::{Resolver, ResolverError};
+use crate::validator::resolver::{IdentityResolver, Resolver, ResolverError};
 #[cfg(not(feature = "labeler"))]
 use crate::validator::types::RepoState;
 use crate::validator::utils;
@@ -41,24 +41,29 @@ pub enum ManagerError {
     DecodeError(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
 }
 
-pub struct Manager {
+pub struct Manager<R: IdentityResolver = Resolver> {
     message_rx: MessageReceiver,
     hosts: HashMap<String, (Cursor, DateTime<Utc>)>,
     #[cfg(not(feature = "labeler"))]
     repos: HashMap<String, RepoState>,
-    resolver: Resolver,
+    resolver: R,
     last: Instant,
     conn: Connection,
     queue: PartitionHandle,
     firehose: PartitionHandle,
 }
 
-impl Manager {
+impl Manager<Resolver> {
     pub fn new(message_rx: MessageReceiver) -> Result<Self, ManagerError> {
+        Self::with_resolver(message_rx, Resolver::new()?)
+    }
+}
+
+impl<R: IdentityResolver> Manager<R> {
+    pub fn with_resolver(message_rx: MessageReceiver, resolver: R) -> Result<Self, ManagerError> {
         let hosts = HashMap::new();
         #[cfg(not(feature = "labeler"))]
         let repos = HashMap::new();
-        let resolver = Resolver::new()?;
         let now = Instant::now();
         let last = now.checked_sub(HOSTS_WRITE_INTERVAL).unwrap_or(now);
         let conn = Connection::open("relay.db")?;
@@ -137,7 +142,7 @@ impl Manager {
                 tracing::warn!("skipping queue entry with malformed key: {key}");
                 continue;
             };
-            if self.resolver.resolve(did)?.is_some() {
+            if self.resolver.resolve_owned(did)?.is_some() {
                 self.scan_did(&mut cursor, did)?;
                 queue_drained += 1;
             } else {
@@ -275,14 +280,13 @@ impl Manager {
                 }
             };
 
-            // resolve identity & check pds (copy values out so resolver is no longer mutably borrowed)
+            // resolve identity & check pds (trait returns owned values so the resolver isn't borrowed)
             let (pds_owned, key_owned): (Option<String>, Option<crate::validator::event::DidKey>) =
-                if let Some((pds, key)) = self.resolver.resolve(did)? {
-                    (pds.map(str::to_owned), Some(*key))
+                if let Some((pds, key)) = self.resolver.resolve_owned(did)? {
+                    (pds, Some(key))
                 } else {
                     if !lenient {
-                        self.queue
-                            .insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
+                        self.queue.insert(format!("{did}>{host}>{seq}"), msg.data.to_vec())?;
                         self.hosts.insert(host.clone(), (seq, time));
                         metrics::record_validator_deferred("resolver_pending");
                         continue;
@@ -374,7 +378,7 @@ impl Manager {
     }
 
     fn scan_did(&mut self, cursor: &mut Cursor, did: &str) -> Result<(), ManagerError> {
-        let Some((pds, key)) = self.resolver.resolve(did)? else {
+        let Some((pds, key)) = self.resolver.resolve_owned(did)? else {
             // Evict all queue entries for this unresolvable DID to prevent unbounded growth
             let mut batch = DB.batch();
             let mut evicted = 0u64;
@@ -421,7 +425,7 @@ impl Manager {
             let span = tracing::debug_span!("validate", n_labels = commit.len());
             let _enter = span.enter();
 
-            if let Some(pds) = pds {
+            if let Some(pds) = pds.as_deref() {
                 if host != pds {
                     tracing::debug!(%pds, "hostname pds mismatch");
                     continue;
@@ -430,7 +434,7 @@ impl Manager {
 
             // verify signature
             #[allow(clippy::needless_borrow)]
-            match utils::verify_commit_sig(&commit, key) {
+            match utils::verify_commit_sig(&commit, &key) {
                 Ok(valid) => {
                     if !valid {
                         tracing::debug!(?key, "signature mismatch");
@@ -438,10 +442,11 @@ impl Manager {
                     }
                 }
                 Err(err) => {
-                    tracing::debug!(%err, ?key, "signature check error");
+                    tracing::debug!(%err, key = ?&key, "signature check error");
                     continue;
                 }
             }
+            let _ = key;
 
             // verify commit message
             #[cfg(not(feature = "labeler"))]
@@ -472,7 +477,7 @@ impl Manager {
     }
 }
 
-impl Drop for Manager {
+impl<R: IdentityResolver> Drop for Manager<R> {
     fn drop(&mut self) {
         SHUTDOWN.store(true, Ordering::Relaxed);
 
