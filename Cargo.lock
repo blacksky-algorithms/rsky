@@ -8377,6 +8377,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "socket2 0.5.10",
+ "tempfile",
  "thingbuf",
  "thiserror 2.0.16",
  "tokio",

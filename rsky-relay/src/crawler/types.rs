@@ -57,3 +57,45 @@ pub enum Command {
 pub enum Status {
     Disconnected { worker_id: usize, hostname: String, connected: bool },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_crawl_deserializes_and_skips_cursor() {
+        // cursor is #[serde(skip)] -> never deserialized from JSON.
+        let json = r#"{"hostname":"pds.example","cursor":42}"#;
+        let r: RequestCrawl = serde_json::from_str(json).unwrap();
+        assert_eq!(r.hostname, "pds.example");
+        assert!(r.cursor.is_none());
+    }
+
+    #[test]
+    fn command_debug_renders_variants() {
+        let connect = Command::Connect(RequestCrawl {
+            hostname: "h".to_owned(),
+            cursor: Some(Cursor::from(1)),
+        });
+        let disconnect = Command::Disconnect("h".to_owned());
+        assert!(format!("{connect:?}").starts_with("Connect("));
+        assert!(format!("{disconnect:?}").starts_with("Disconnect("));
+    }
+
+    #[test]
+    fn status_debug_renders_variant() {
+        let s = Status::Disconnected { worker_id: 7, hostname: "h".to_owned(), connected: true };
+        assert!(format!("{s:?}").contains("worker_id: 7"));
+    }
+
+    #[test]
+    fn decompose_handshake_failure_propagates_error() {
+        // Construct a fake `tungstenite::Error` and pump it through Decompose.
+        let res: Result<
+            (WebSocketClient, Response),
+            HandshakeError<ClientHandshake<MaybeTlsTcpStream>>,
+        > = Err(HandshakeError::Failure(tungstenite::Error::ConnectionClosed));
+        let out = res.decompose();
+        assert!(matches!(out, Err(tungstenite::Error::ConnectionClosed)));
+    }
+}

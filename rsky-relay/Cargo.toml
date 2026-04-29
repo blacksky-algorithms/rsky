@@ -60,6 +60,9 @@ vec1 = { version = "1", features = ["serde"] }
 rsky-common = { workspace = true }
 rsky-identity = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 # external
 default = []

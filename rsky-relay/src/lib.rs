@@ -34,6 +34,26 @@
     clippy::missing_safety_doc,
     clippy::multiple_crate_versions
 )]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::redundant_pub_crate,
+        clippy::min_ident_chars,
+        clippy::str_to_string,
+        clippy::string_to_string,
+        clippy::tests_outside_test_module,
+        clippy::let_underscore_must_use,
+        clippy::print_stdout,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::missing_assert_message,
+        clippy::literal_string_with_formatting_args,
+        clippy::unused_result_ok,
+        clippy::renamed_function_params
+    )
+)]
 
 mod crawler;
 mod publisher;

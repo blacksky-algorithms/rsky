@@ -52,9 +52,11 @@ pub fn describe() {
     describe_counter!(VALIDATOR_REJECTED, Unit::Count, "Events rejected by validator");
 }
 
-/// Build a recorder + handle without binding a socket. Useful for embedding or tests.
+/// Build a recorder + handle without binding a socket. Tolerates "global already set".
 pub fn install_recorder() -> Result<PrometheusHandle, MetricsError> {
-    let handle = PrometheusBuilder::new().install_recorder()?;
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    drop(metrics::set_global_recorder(recorder));
     describe();
     Ok(handle)
 }
@@ -213,6 +215,15 @@ mod tests {
         let out = handle.render();
         assert!(out.contains(VALIDATOR_REJECTED));
         assert!(out.contains("reason=\"wrong_host\""));
+    }
+
+    #[test]
+    fn install_recorder_returns_handle_and_tolerates_repeats() {
+        // Calling twice in the same process must not panic; second set_global_recorder is dropped.
+        let h1 = install_recorder().expect("install");
+        let h2 = install_recorder().expect("install");
+        drop(h1.render());
+        drop(h2.render());
     }
 
     #[tokio::test(flavor = "current_thread")]
