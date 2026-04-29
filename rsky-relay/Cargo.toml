@@ -25,6 +25,8 @@ k256 = "0.13"
 libc = "0.2"
 lru = "0.14"
 magnetic = "2"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
 mimalloc = "0.1"
 mio = { version = "1", features = ["os-ext", "os-poll"] }
 multibase = "0.9"

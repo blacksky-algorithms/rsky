@@ -62,14 +62,15 @@ impl Worker {
         }
     }
 
-    fn handle_command(&mut self, command: Command, mut seq: Cursor) {
+    fn handle_command(&mut self, command: Command, seq: Cursor) {
         match command {
             Command::Connect(config) => {
                 tracing::info!(addr = %config.addr, cursor = ?config.cursor, "starting publish");
+                // Absent cursor = "from now": start at the next not-yet-written seq.
                 match Connection::connect(
                     config.addr,
                     config.stream,
-                    config.cursor.unwrap_or_else(|| seq.next()),
+                    config.cursor.unwrap_or_else(|| seq.successor()),
                 ) {
                     Ok(conn) => {
                         let idx = self.connections.iter().position(Option::is_none).unwrap_or_else(
@@ -137,16 +138,21 @@ impl Worker {
 
     fn send(&mut self, seq: Cursor, data: &Bytes) -> bool {
         for conn in &mut self.connections {
-            if let Some(inner) = conn.as_mut() {
-                if let Err(err) = inner.send(seq, data.clone()) {
-                    tracing::info!(addr = %inner.addr, cursor = %inner.cursor, %err, "disconnected");
-                    #[expect(clippy::expect_used)]
-                    self.poll
-                        .registry()
-                        .deregister(&mut SourceFd(&inner.as_raw_fd()))
-                        .expect("failed to deregister");
-                    *conn = None;
-                }
+            let Some(inner) = conn.as_mut() else { continue };
+            // Lagging connection: drain the gap via firehose range read instead of dropping the live event.
+            let result = if inner.cursor == seq {
+                inner.send(seq, data.clone()).map(|_| ())
+            } else {
+                inner.poll(seq, &self.firehose).map(|_| ())
+            };
+            if let Err(err) = result {
+                tracing::info!(addr = %inner.addr, cursor = %inner.cursor, %err, "disconnected");
+                #[expect(clippy::expect_used)]
+                self.poll
+                    .registry()
+                    .deregister(&mut SourceFd(&inner.as_raw_fd()))
+                    .expect("failed to deregister");
+                *conn = None;
             }
         }
         true

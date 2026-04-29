@@ -69,22 +69,17 @@ impl Connection {
         Ok(())
     }
 
-    /// false: not sent
-    /// true: sent
-    pub fn send(&mut self, mut seq: Cursor, data: Bytes) -> Result<bool, ConnectionError> {
+    /// `Ok(true)` = delivered, cursor advanced. `Ok(false)` = backpressured / cursor mismatch, no advance.
+    pub fn send(&mut self, seq: Cursor, data: Bytes) -> Result<bool, ConnectionError> {
         if self.cursor != seq {
             return Ok(false);
         }
         match self.client.send(Message::Binary(data)) {
             Ok(()) => {
-                self.cursor = seq.next();
+                self.cursor = seq.successor();
                 Ok(true)
             }
-            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.cursor = seq.next();
-                Ok(false)
-            }
-            Err(tungstenite::Error::WriteBufferFull(_)) => Ok(false),
+            Err(err) if is_backpressure(&err) => Ok(false),
             Err(err) => Err(err)?,
         }
     }
@@ -119,5 +114,68 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         drop(self.close(SHUTDOWN_FRAME));
+    }
+}
+
+/// True if `err` means "byte never reached the wire" (cursor must NOT advance).
+#[inline]
+fn is_backpressure(err: &tungstenite::Error) -> bool {
+    matches!(err, tungstenite::Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock)
+        || matches!(err, tungstenite::Error::WriteBufferFull(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tungstenite::error::CapacityError;
+
+    #[test]
+    fn wouldblock_io_is_backpressure() {
+        let err = tungstenite::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, "x"));
+        assert!(is_backpressure(&err));
+    }
+
+    #[test]
+    fn write_buffer_full_is_backpressure() {
+        let err = tungstenite::Error::WriteBufferFull(Message::Binary(Bytes::new()));
+        assert!(is_backpressure(&err));
+    }
+
+    #[test]
+    fn other_io_kinds_are_not_backpressure() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::TimedOut,
+        ] {
+            let err = tungstenite::Error::Io(io::Error::new(kind, "x"));
+            assert!(!is_backpressure(&err), "{kind:?} should not be backpressure");
+        }
+    }
+
+    #[test]
+    fn connection_closed_is_not_backpressure() {
+        assert!(!is_backpressure(&tungstenite::Error::ConnectionClosed));
+        assert!(!is_backpressure(&tungstenite::Error::AlreadyClosed));
+    }
+
+    #[test]
+    fn capacity_message_too_long_is_not_backpressure() {
+        let err =
+            tungstenite::Error::Capacity(CapacityError::MessageTooLong { size: 100, max_size: 50 });
+        assert!(!is_backpressure(&err));
+    }
+
+    #[test]
+    fn outdated_msg_static_has_minimum_len() {
+        assert!(OUTDATED_MSG.len() > 16, "wire frame must be longer than CBOR header");
+        assert!(FUTURE_MSG.len() > 16);
+    }
+
+    #[test]
+    fn close_frames_have_expected_codes() {
+        assert_eq!(FUTURE_CLOSE.code, CloseCode::Policy);
+        assert_eq!(SHUTDOWN_FRAME.code, CloseCode::Restart);
     }
 }

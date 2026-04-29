@@ -42,6 +42,7 @@ mod types;
 mod validator;
 
 pub mod config;
+pub mod metrics;
 
 use std::sync::atomic::AtomicBool;
 
