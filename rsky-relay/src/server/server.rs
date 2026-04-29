@@ -13,10 +13,10 @@ use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
 #[cfg(not(feature = "labeler"))]
 use rusqlite::named_params;
-#[cfg(not(feature = "labeler"))]
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
 #[cfg(feature = "labeler")]
 use rusqlite::{Connection, OpenFlags};
+#[cfg(not(feature = "labeler"))]
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
 use url::Url;
@@ -24,7 +24,7 @@ use url::Url;
 use crate::SHUTDOWN;
 use crate::config::{ADMIN_PASSWORD, HOSTS_INTERVAL, PORT};
 #[cfg(not(feature = "labeler"))]
-use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
+use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAYS};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
 #[cfg(not(feature = "labeler"))]
 use crate::metrics;
@@ -41,6 +41,7 @@ pub trait HostListFetcher {
 #[cfg(not(feature = "labeler"))]
 struct ReqwestHostListFetcher {
     client: reqwest::blocking::Client,
+    base_url: String,
 }
 
 #[cfg(not(feature = "labeler"))]
@@ -50,8 +51,7 @@ impl HostListFetcher for ReqwestHostListFetcher {
         if let Some(c) = cursor {
             params.push(("cursor", c));
         }
-        let url =
-            Url::parse_with_params(&format!("https://{HOSTS_RELAY}{PATH_LIST_HOSTS}"), params)?;
+        let url = Url::parse_with_params(&self.base_url, params)?;
         Ok(self.client.get(url).send()?.json()?)
     }
 }
@@ -538,13 +538,25 @@ impl Server {
             .user_agent("rsky-relay")
             .https_only(true)
             .build()?;
-        let fetcher = ReqwestHostListFetcher { client };
-        self.query_hosts_with_fetcher(&fetcher, thread::sleep)
+        let mut seen: hashbrown::HashSet<String> = hashbrown::HashSet::new();
+        for upstream in HOSTS_RELAYS.iter() {
+            let fetcher = ReqwestHostListFetcher {
+                client: client.clone(),
+                base_url: format!("https://{upstream}{PATH_LIST_HOSTS}"),
+            };
+            if let Err(err) =
+                self.query_hosts_with_fetcher(&fetcher, thread::sleep, &mut seen, upstream)
+            {
+                tracing::warn!(%err, %upstream, "discovery upstream failed entirely");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(not(feature = "labeler"))]
     fn query_hosts_with_fetcher<F: HostListFetcher + ?Sized>(
         &mut self, fetcher: &F, sleep: impl Fn(Duration) + Copy,
+        seen: &mut hashbrown::HashSet<String>, upstream: &str,
     ) -> Result<()> {
         let mut cursor: Option<String> = None;
         let mut total_seen: usize = 0;
@@ -554,7 +566,7 @@ impl Server {
             let page = match fetch_page_with_retry(fetcher, cursor.as_deref(), sleep) {
                 Ok(page) => page,
                 Err(err) => {
-                    tracing::warn!(%err, "listHosts page failed after retries");
+                    tracing::warn!(%err, %upstream, "listHosts page failed after retries");
                     had_failure = true;
                     break;
                 }
@@ -566,6 +578,7 @@ impl Server {
                 if host.account_count > HOSTS_MIN_ACCOUNTS
                     && matches!(host.status, HostStatus::Active | HostStatus::Idle)
                     && !self.is_host_banned(&host.hostname)
+                    && seen.insert(host.hostname.clone())
                 {
                     self.request_crawl_tx
                         .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
@@ -580,7 +593,7 @@ impl Server {
         let outcome =
             if had_failure { if total_added > 0 { "partial" } else { "fail" } } else { "ok" };
         metrics::record_discovery_round(outcome);
-        tracing::info!(total = %total_seen, added = %total_added, %outcome, "host discovery refresh complete");
+        tracing::info!(total = %total_seen, added = %total_added, %outcome, %upstream, "host discovery refresh complete");
         Ok(())
     }
 
