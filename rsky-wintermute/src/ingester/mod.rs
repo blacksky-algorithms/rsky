@@ -963,7 +963,7 @@ impl IngesterManager {
                                          SET \"indexedAt\" = $2, \
                                              \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
                                          WHERE did = $1",
-                                        &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                                        &[&did, &timestamp, &(HANDLE_MAX_TRIES as i32)],
                                     )
                                     .await?;
                                 return Ok(());
@@ -982,7 +982,7 @@ impl IngesterManager {
                              SET \"indexedAt\" = $2, \
                                  \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
                              WHERE did = $1",
-                            &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                            &[&did, &timestamp, &(HANDLE_MAX_TRIES as i32)],
                         )
                         .await?;
                     return Ok(());
@@ -998,7 +998,7 @@ impl IngesterManager {
                              SET \"indexedAt\" = $2, \
                                  \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
                              WHERE did = $1",
-                            &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                            &[&did, &timestamp, &(HANDLE_MAX_TRIES as i32)],
                         )
                         .await?;
                     return Ok(());
