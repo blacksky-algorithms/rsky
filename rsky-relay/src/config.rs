@@ -7,6 +7,16 @@ pub static ADMIN_PASSWORD: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("RELAY_ADMIN_PASSWORD").ok().filter(|s| !s.is_empty()));
 pub const BAN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
+// validator: when true (default), the validator publishes events that strict checks would defer or drop.
+// AT Protocol relay validation is operator-discretion; consumers verify signatures end-to-end.
+pub static LENIENT_VALIDATION: LazyLock<bool> = LazyLock::new(|| {
+    env::var("RELAY_LENIENT_VALIDATION").map_or(true, |s| !matches!(s.as_str(), "0" | "false" | ""))
+});
+
+// metrics
+pub static METRICS_LISTEN: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("RELAY_METRICS_LISTEN").ok().filter(|s| !s.is_empty()));
+
 // main
 pub const CAPACITY_MSGS: usize = 1 << 16;
 pub const CAPACITY_REQS: usize = 1 << 12;
@@ -17,7 +27,7 @@ pub const WORKERS_PUBLISHERS: usize = 4;
 // server
 pub const PORT: u16 = if cfg!(feature = "labeler") { 9001 } else { 9000 };
 pub const HOSTS_RELAY: &str = "relay1.us-west.bsky.network";
-pub const HOSTS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const HOSTS_INTERVAL: Duration = Duration::from_secs(60 * 5);
 pub const HOSTS_MIN_ACCOUNTS: u64 = 0;
 
 // resolver

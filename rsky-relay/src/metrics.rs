@@ -13,6 +13,13 @@ pub const SUBSCRIBER_LAG_SECONDS: &str = "relay_subscriber_lag_seconds";
 pub const UPSTREAM_EVENTS: &str = "relay_upstream_events_total";
 pub const UPSTREAM_DISCONNECTS: &str = "relay_upstream_disconnects_total";
 pub const VALIDATOR_REJECTED: &str = "relay_validator_rejected_total";
+pub const VALIDATOR_PUBLISHED: &str = "relay_validator_published_total";
+pub const VALIDATOR_DEFERRED: &str = "relay_validator_deferred_total";
+pub const VALIDATOR_DROPPED: &str = "relay_validator_dropped_total";
+pub const VALIDATOR_PASSED_WITH_WARNING: &str = "relay_validator_passed_with_warning_total";
+pub const FIREHOSE_HEAD: &str = "relay_firehose_head_seq";
+pub const QUEUE_DEPTH_BYTES: &str = "relay_queue_depth_bytes";
+pub const DISCOVERY_ROUND: &str = "relay_discovery_round_total";
 
 #[derive(Debug, Clone, Copy)]
 pub enum DropReason {
@@ -50,6 +57,25 @@ pub fn describe() {
     describe_counter!(UPSTREAM_EVENTS, Unit::Count, "Events received from upstream PDS");
     describe_counter!(UPSTREAM_DISCONNECTS, Unit::Count, "Upstream PDS disconnects");
     describe_counter!(VALIDATOR_REJECTED, Unit::Count, "Events rejected by validator");
+    describe_counter!(
+        VALIDATOR_PUBLISHED,
+        Unit::Count,
+        "Events published to firehose by validator"
+    );
+    describe_counter!(VALIDATOR_DEFERRED, Unit::Count, "Events re-queued for later validation");
+    describe_counter!(
+        VALIDATOR_DROPPED,
+        Unit::Count,
+        "Events dropped without publish (strict mode)"
+    );
+    describe_counter!(
+        VALIDATOR_PASSED_WITH_WARNING,
+        Unit::Count,
+        "Events published despite a soft validation failure (lenient mode)"
+    );
+    describe_gauge!(FIREHOSE_HEAD, Unit::Count, "Highest sequence number written to firehose");
+    describe_gauge!(QUEUE_DEPTH_BYTES, Unit::Bytes, "Approximate validator queue partition size");
+    describe_counter!(DISCOVERY_ROUND, Unit::Count, "listHosts discovery round outcome");
 }
 
 /// Build a recorder + handle without binding a socket. Tolerates "global already set".
@@ -104,6 +130,43 @@ pub fn record_upstream_disconnect(host: &str, reason: &'static str) {
 #[inline]
 pub fn record_validator_rejected(reason: &'static str) {
     counter!(VALIDATOR_REJECTED, "reason" => reason).increment(1);
+}
+
+#[inline]
+pub fn record_validator_published(reason: &'static str) {
+    counter!(VALIDATOR_PUBLISHED, "reason" => reason).increment(1);
+}
+
+#[inline]
+pub fn record_validator_deferred(reason: &'static str) {
+    counter!(VALIDATOR_DEFERRED, "reason" => reason).increment(1);
+}
+
+#[inline]
+pub fn record_validator_dropped(reason: &'static str) {
+    counter!(VALIDATOR_DROPPED, "reason" => reason).increment(1);
+}
+
+#[inline]
+pub fn record_validator_passed_with_warning(reason: &'static str) {
+    counter!(VALIDATOR_PASSED_WITH_WARNING, "reason" => reason).increment(1);
+}
+
+#[inline]
+pub fn record_firehose_head(seq: u64) {
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(FIREHOSE_HEAD).set(seq as f64);
+}
+
+#[inline]
+pub fn record_queue_depth_bytes(bytes: u64) {
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(QUEUE_DEPTH_BYTES).set(bytes as f64);
+}
+
+#[inline]
+pub fn record_discovery_round(outcome: &'static str) {
+    counter!(DISCOVERY_ROUND, "outcome" => outcome).increment(1);
 }
 
 #[cfg(test)]
@@ -215,6 +278,73 @@ mod tests {
         let out = handle.render();
         assert!(out.contains(VALIDATOR_REJECTED));
         assert!(out.contains("reason=\"wrong_host\""));
+    }
+
+    #[test]
+    fn validator_published_deferred_dropped_counters() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_validator_published("commit");
+            record_validator_deferred("resolver_pending");
+            record_validator_dropped("sig_fail");
+        });
+        let out = handle.render();
+        assert!(out.contains(VALIDATOR_PUBLISHED));
+        assert!(out.contains(VALIDATOR_DEFERRED));
+        assert!(out.contains(VALIDATOR_DROPPED));
+        assert!(out.contains("reason=\"resolver_pending\""));
+        assert!(out.contains("reason=\"sig_fail\""));
+    }
+
+    #[test]
+    fn validator_passed_with_warning_counter() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_validator_passed_with_warning("resolver_pending");
+            record_validator_passed_with_warning("pds_mismatch");
+            record_validator_passed_with_warning("sig_fail");
+            record_validator_passed_with_warning("mst_fail");
+        });
+        let out = handle.render();
+        assert!(out.contains(VALIDATOR_PASSED_WITH_WARNING));
+        for r in ["resolver_pending", "pds_mismatch", "sig_fail", "mst_fail"] {
+            assert!(out.contains(&format!("reason=\"{r}\"")), "{out} missing {r}");
+        }
+    }
+
+    #[test]
+    fn firehose_head_and_queue_depth_gauges() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_firehose_head(123_456);
+            record_queue_depth_bytes(987_654_321);
+        });
+        let out = handle.render();
+        assert!(out.contains(FIREHOSE_HEAD));
+        assert!(out.contains(QUEUE_DEPTH_BYTES));
+    }
+
+    #[test]
+    fn discovery_round_counter() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_discovery_round("ok");
+            record_discovery_round("partial");
+            record_discovery_round("fail");
+        });
+        let out = handle.render();
+        assert!(out.contains(DISCOVERY_ROUND));
+        for o in ["ok", "partial", "fail"] {
+            assert!(out.contains(&format!("outcome=\"{o}\"")));
+        }
     }
 
     #[test]
