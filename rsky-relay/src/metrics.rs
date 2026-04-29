@@ -88,11 +88,17 @@ pub fn install_recorder() -> Result<PrometheusHandle, MetricsError> {
 }
 
 /// Bind an HTTP /metrics listener and install the recorder globally. Returns the handle.
+/// MUST be called from within a tokio runtime — the exporter task is spawned there.
 pub fn install_listener(addr: SocketAddr) -> Result<PrometheusHandle, MetricsError> {
-    let (recorder, _exporter) = PrometheusBuilder::new().with_http_listener(addr).build()?;
+    let (recorder, exporter) = PrometheusBuilder::new().with_http_listener(addr).build()?;
     let handle = recorder.handle();
     drop(metrics::set_global_recorder(recorder));
     describe();
+    tokio::spawn(async move {
+        if let Err(err) = exporter.await {
+            tracing::error!(?err, "metrics exporter task ended");
+        }
+    });
     Ok(handle)
 }
 
