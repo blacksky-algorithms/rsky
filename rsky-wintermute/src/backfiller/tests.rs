@@ -54,6 +54,7 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires network access to external PDS
     async fn test_process_job_with_real_repo() {
         let (storage, _dir) = setup_test_storage();
 
