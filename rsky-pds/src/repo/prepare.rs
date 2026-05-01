@@ -97,6 +97,29 @@ pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) ->
             .flat_map(|item| find_blob_refs(item, Some(path.clone()), Some(layer + 1)))
             .collect::<Vec<FoundBlobRef>>(),
         Lex::Blob(blob) => vec![FoundBlobRef { r#ref: blob, path }],
+        Lex::Ipld(Ipld::List(list)) => list
+            .into_iter()
+            .flat_map(|item| find_blob_refs(Lex::Ipld(item), Some(path.clone()), Some(layer + 1)))
+            .collect::<Vec<FoundBlobRef>>(),
+        Lex::Ipld(Ipld::Map(map)) => match serde_json::to_value(&map)
+            .ok()
+            .and_then(|json| serde_json::from_value::<JsonBlobRef>(json).ok())
+        {
+            Some(blob) => vec![FoundBlobRef {
+                r#ref: BlobRef { original: blob },
+                path,
+            }],
+            None => map
+                .into_iter()
+                .flat_map(|(key, item)| {
+                    find_blob_refs(
+                        Lex::Ipld(item),
+                        Some([path.as_slice(), [key].as_slice()].concat()),
+                        Some(layer + 1),
+                    )
+                })
+                .collect::<Vec<FoundBlobRef>>(),
+        },
         Lex::Ipld(Ipld::Json(JsonValue::Array(list))) => list
             .into_iter()
             .flat_map(|item| match serde_json::from_value::<RepoRecord>(item) {
@@ -259,9 +282,107 @@ lazy_static! {
             Ids::AppBskyFeedPost.as_str(): {
                 "embed/images/image": LEXICONS.app_bsky_embed_images.defs.image.properties.image,
                 "embed/external/thumb": LEXICONS.app_bsky_embed_external.defs.external.properties.thumb,
+                "embed/video": {
+                    "type": "blob",
+                    "accept": ["video/mp4"],
+                    "maxSize": 100000000
+                },
+                "embed/captions/file": {
+                    "type": "blob",
+                    "accept": ["text/vtt"],
+                    "maxSize": 20000
+                },
                 "embed/media/images/image": LEXICONS.app_bsky_embed_images.defs.image.properties.image,
-                "embed/media/external/thumb": LEXICONS.app_bsky_embed_external.defs.external.properties.thumb
+                "embed/media/external/thumb": LEXICONS.app_bsky_embed_external.defs.external.properties.thumb,
+                "embed/media/video": {
+                    "type": "blob",
+                    "accept": ["video/mp4"],
+                    "maxSize": 100000000
+                },
+                "embed/media/captions/file": {
+                    "type": "blob",
+                    "accept": ["text/vtt"],
+                    "maxSize": 20000
+                }
             }
         })
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blobs_for_write;
+    use anyhow::Result;
+    use rsky_repo::types::RepoRecord;
+    use serde_json::json;
+
+    #[test]
+    fn finds_blob_refs_in_video_embed_records_deserialized_from_json() -> Result<()> {
+        let record: RepoRecord = serde_json::from_value(json!({
+            "$type": "app.bsky.feed.post",
+            "text": "video upload test",
+            "createdAt": "2026-03-21T04:00:00Z",
+            "langs": ["en"],
+            "embed": {
+                "$type": "app.bsky.embed.video",
+                "video": {
+                    "$type": "blob",
+                    "ref": { "$link": "bafkreigh2akiscaildc4v5lskm6ty6q6ks5xifh4rtfj24rl6vb7aq6nzu" },
+                    "mimeType": "video/mp4",
+                    "size": 1027159
+                },
+                "alt": "test video",
+                "aspectRatio": {
+                    "width": 1,
+                    "height": 1
+                }
+            }
+        }))?;
+
+        let blobs = blobs_for_write(record, false)?;
+
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].mime_type, "video/mp4");
+        Ok(())
+    }
+
+    #[test]
+    fn validates_video_embed_blob_constraints() -> Result<()> {
+        std::thread::Builder::new()
+            .name("video-constraint-validate".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| -> Result<()> {
+                let record: RepoRecord = serde_json::from_value(json!({
+                    "$type": "app.bsky.feed.post",
+                    "text": "video upload test",
+                    "createdAt": "2026-03-21T04:00:00Z",
+                    "langs": ["en"],
+                    "embed": {
+                        "$type": "app.bsky.embed.video",
+                        "video": {
+                            "$type": "blob",
+                            "ref": { "$link": "bafkreigh2akiscaildc4v5lskm6ty6q6ks5xifh4rtfj24rl6vb7aq6nzu" },
+                            "mimeType": "video/mp4",
+                            "size": 1027159
+                        },
+                        "alt": "test video",
+                        "aspectRatio": {
+                            "width": 1,
+                            "height": 1
+                        }
+                    }
+                }))?;
+
+                let blobs = blobs_for_write(record, true)?;
+
+                assert_eq!(blobs.len(), 1);
+                assert_eq!(blobs[0].constraints.max_size, Some(100_000_000));
+                assert_eq!(blobs[0].constraints.accept, Some(vec!["video/mp4".to_string()]));
+                Ok(())
+            })
+            .expect("failed to spawn constraint validation thread")
+            .join()
+            .expect("constraint validation thread panicked")?;
+        Ok(())
+    }
 }
