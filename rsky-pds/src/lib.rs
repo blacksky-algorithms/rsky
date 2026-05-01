@@ -85,10 +85,11 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
-use rsky_common::env::env_list;
+use crate::config::ServerConfig;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use std::env;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub struct CORS;
@@ -120,9 +121,20 @@ async fn robots() -> &'static str {
     "# Hello!\n\n# Crawling the public API is allowed\nUser-agent: *\nAllow: /"
 }
 
-#[tracing::instrument(skip_all)]
+/// Fast liveness probe -- no database check, just confirms the HTTP server
+/// is accepting connections.
 #[get("/xrpc/_health")]
-async fn health(
+async fn health_live() -> Json<ServerVersion> {
+    let env_version = env::var("VERSION").unwrap_or("0.3.0-beta.3".into());
+    Json(ServerVersion {
+        version: env_version,
+    })
+}
+
+/// Deep readiness probe -- verifies database connectivity.
+#[tracing::instrument(skip_all)]
+#[get("/xrpc/_health/ready")]
+async fn health_ready(
     connection: DbConn,
 ) -> Result<Json<ServerVersion>, status::Custom<Json<ErrorMessageResponse>>> {
     let result = connection
@@ -194,6 +206,20 @@ pub struct RocketConfig {
     pub db_url: String,
 }
 
+fn build_id_resolver(cfg: &ServerConfig) -> SharedIdResolver {
+    SharedIdResolver {
+        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
+            timeout: Some(Duration::from_millis(cfg.identity.resolver_timeout)),
+            plc_url: Some(cfg.identity.plc_url.clone()),
+            did_cache: Some(DidCache::new(
+                Some(Duration::from_millis(cfg.identity.cache_state_ttl)),
+                Some(Duration::from_millis(cfg.identity.cache_max_ttl)),
+            )),
+            backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
+        })),
+    }
+}
+
 pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
@@ -221,23 +247,27 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         )),
     };
     let mut background_sequencer = sequencer.sequencer.write().await.clone();
-    tokio::spawn(async move { background_sequencer.start().await });
+    std::thread::Builder::new()
+        .name("sequencer".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build sequencer runtime");
+            rt.block_on(async move {
+                if let Err(e) = background_sequencer.start().await {
+                    tracing::error!("Sequencer exited with error: {e}");
+                }
+            });
+        })
+        .expect("failed to spawn sequencer thread");
 
     let aws_sdk_config = aws_config::from_env()
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
 
-    let id_resolver = SharedIdResolver {
-        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
-            timeout: None,
-            plc_url: Some(
-                env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
-            ),
-            did_cache: Some(DidCache::new(None, None)),
-            backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
-        })),
-    };
+    let id_resolver = build_id_resolver(&cfg);
 
     // Keeping unused for other config purposes for now.
     let app_view_agent = match cfg.bsky_app_view {
@@ -288,7 +318,8 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             routes![
                 index,
                 robots,
-                health,
+                health_live,
+                health_ready,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
