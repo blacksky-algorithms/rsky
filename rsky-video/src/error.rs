@@ -49,6 +49,9 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Transcode failed: {0}")]
+    TranscodeFailed(String),
 }
 
 impl IntoResponse for Error {
@@ -90,6 +93,13 @@ impl IntoResponse for Error {
             Error::Json(e) => {
                 tracing::error!("JSON error: {}", e);
                 (StatusCode::BAD_REQUEST, "Invalid JSON".to_string())
+            }
+            Error::TranscodeFailed(msg) => {
+                tracing::error!("Transcode failed: {}", msg);
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Could not process video: {}", msg),
+                )
             }
         };
 
