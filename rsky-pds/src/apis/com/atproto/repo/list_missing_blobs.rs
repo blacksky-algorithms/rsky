@@ -30,10 +30,7 @@ pub async fn list_missing_blobs(
         .await
     {
         Ok(blobs) => {
-            let cursor = match blobs.last() {
-                Some(last_blob) => Some(last_blob.cid.clone()),
-                None => None,
-            };
+            let cursor = blobs.last().map(|last_blob| last_blob.cid.clone());
             Ok(Json(ListMissingBlobsOutput { cursor, blobs }))
         }
         Err(error) => {
