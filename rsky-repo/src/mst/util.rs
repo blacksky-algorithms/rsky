@@ -29,17 +29,17 @@ fn is_valid_chars(input: &str) -> bool {
 pub fn is_valid_repo_mst_path(key: &str) -> Result<bool> {
     let split: Vec<&str> = key.split("/").collect();
 
-    return if key.len() <= 256
+    if key.len() <= 256
         && split.len() == 2
-        && split[0].len() > 0
-        && split[1].len() > 0
+        && !split[0].is_empty()
+        && !split[1].is_empty()
         && is_valid_chars(split[0])
         && is_valid_chars(split[1])
     {
         Ok(true)
     } else {
         Ok(false)
-    };
+    }
 }
 
 pub fn ensure_valid_mst_key(key: &str) -> Result<()> {
@@ -72,7 +72,7 @@ pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
         e: Vec::new(),
     };
     let mut i = 0;
-    if let Some(NodeEntry::MST(e)) = entries.get(0) {
+    if let Some(NodeEntry::MST(e)) = entries.first() {
         i += 1;
         let cid_guard = e.pointer.read().await;
         data.l = Some(*cid_guard);
@@ -84,13 +84,10 @@ pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
         if let NodeEntry::Leaf(l) = leaf {
             i += 1;
             let mut subtree: Option<Cid> = None;
-            match next {
-                Some(NodeEntry::MST(tree)) => {
-                    let cid_guard = tree.pointer.read().await;
-                    subtree = Some(*cid_guard);
-                    i += 1;
-                }
-                _ => (),
+            if let Some(NodeEntry::MST(tree)) = next {
+                let cid_guard = tree.pointer.read().await;
+                subtree = Some(*cid_guard);
+                i += 1;
             };
             ensure_valid_mst_key(&l.key)?;
             let prefix_len = count_prefix_len(last_key.to_owned(), l.key.to_owned())?;
@@ -128,7 +125,7 @@ pub fn deserialize_node_data(
     let mut last_key: String = "".to_owned();
     for entry in &data.e {
         let key_str = str::from_utf8(entry.k.as_ref())?;
-        let p = usize::try_from(entry.p)?;
+        let p = entry.p as usize;
         let key = format!("{}{}", &last_key[0..p], key_str);
         ensure_valid_mst_key(&key)?;
         entries.push(NodeEntry::Leaf(Leaf {
@@ -152,19 +149,19 @@ pub fn deserialize_node_data(
 }
 
 pub fn layer_for_entries(entries: &[NodeEntry]) -> Result<Option<u32>> {
-    let first_leaf = entries.into_iter().find(|entry| entry.is_leaf());
+    let first_leaf = entries.iter().find(|entry| entry.is_leaf());
     if let Some(f) = first_leaf {
         match f {
             NodeEntry::MST(_) => Ok(None),
             NodeEntry::Leaf(l) => Ok(Some(leading_zeros_on_hash(&l.key.to_owned().into_bytes())?)),
         }
     } else {
-        return Ok(None);
+        Ok(None)
     }
 }
 
 pub fn leading_zeros_on_hash(key: &[u8]) -> Result<u32> {
-    let digest = Sha256::digest(&*key);
+    let digest = Sha256::digest(key);
     let hash: &[u8] = digest.as_ref();
     let mut leading_zeros = 0;
     for byte in hash {

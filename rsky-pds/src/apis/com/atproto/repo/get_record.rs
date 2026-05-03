@@ -11,6 +11,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
 use rsky_syntax::aturi::AtUri;
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 async fn inner_get_record(
     repo: String,
@@ -65,6 +66,7 @@ async fn inner_get_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.repo.getRecord?<repo>&<collection>&<rkey>&<cid>")]
 pub async fn get_record(

@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// todo: determine which of these fields are necessary to keep around
+#[allow(dead_code)]
 pub struct CommitRecord {
     collection: String,
     rkey: String,
@@ -128,7 +130,7 @@ impl Repo {
             .collect::<Vec<Cid>>();
         let storage_guard = self.storage.read().await;
         let found = storage_guard.get_blocks(cids).await?;
-        if found.missing.len() > 0 {
+        if !found.missing.is_empty() {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
                 found.missing,
@@ -137,7 +139,7 @@ impl Repo {
         let mut contents: RepoContents = BTreeMap::new();
         for entry in entries {
             let path = util::parse_data_key(&entry.key)?;
-            if contents.get(&path.collection).is_none() {
+            if !contents.contains_key(&path.collection) {
                 contents.insert(path.collection.clone(), CollectionContents::new());
             }
             let parsed = crate::parse::get_and_parse_record(&found.blocks, entry.value)?;
@@ -157,7 +159,7 @@ impl Repo {
     ) -> Result<CommitData> {
         let mut new_blocks = BlockMap::new();
         let mut data = MST::create(storage, None, None).await?;
-        for record in initial_writes.unwrap_or(Vec::new()) {
+        for record in initial_writes.unwrap_or_default() {
             let cid = new_blocks.add(record.record)?;
             let data_key = util::format_data_key(record.collection, record.rkey);
             data = data.add(&data_key, cid, None).await?;
@@ -259,7 +261,7 @@ impl Repo {
         }
 
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
-        if added_leaves.missing.len() > 0 {
+        if !added_leaves.missing.is_empty() {
             bail!("Missing leaf blocks: {:?}", added_leaves.missing);
         }
         new_blocks.add_map(added_leaves.blocks.clone())?;
@@ -298,7 +300,7 @@ impl Repo {
     }
 
     pub async fn apply_commit(&self, commit_data: CommitData) -> Result<Self> {
-        let commit_data_cid = commit_data.cid.clone();
+        let commit_data_cid = commit_data.cid;
         {
             let storage_guard = self.storage.read().await;
             storage_guard.apply_commit(commit_data, None).await?;

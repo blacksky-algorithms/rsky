@@ -42,10 +42,10 @@ impl Outbox {
         }
     }
 
-    pub async fn events<'a>(
-        &'a mut self,
+    pub async fn events(
+        &mut self,
         backfill_cursor: Option<i64>,
-    ) -> impl Stream<Item = Result<SeqEvt>> + 'a {
+    ) -> impl Stream<Item = Result<SeqEvt>> + use<'_> {
         try_stream! {
             if let Some(cursor) = backfill_cursor {
                 let backfill_stream = self.get_backfill(cursor).await;
@@ -131,10 +131,10 @@ impl Outbox {
         }
     }
 
-    pub async fn get_backfill<'a>(
-        &'a mut self,
+    pub async fn get_backfill(
+        &mut self,
         backfill_cursor: i64,
-    ) -> impl Stream<Item = Result<SeqEvt>> + 'a {
+    ) -> impl Stream<Item = Result<SeqEvt>> + use<'_> {
         try_stream! {
             loop {
                 let earliest_seq = if self.last_seen > -1 {

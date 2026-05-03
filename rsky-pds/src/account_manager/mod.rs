@@ -452,7 +452,7 @@ impl AccountManager {
 
     // Email Tokens
     // ----------
-    pub async fn confirm_email<'em>(&self, opts: ConfirmEmailOpts<'em>) -> Result<()> {
+    pub async fn confirm_email(&self, opts: ConfirmEmailOpts<'_>) -> Result<()> {
         let db = self.db.clone();
         let ConfirmEmailOpts { did, token } = opts;
         email_token::assert_valid_token(

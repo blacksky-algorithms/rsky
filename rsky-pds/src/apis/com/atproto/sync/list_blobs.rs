@@ -13,6 +13,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::sync::ListBlobsOutput;
 
+#[allow(clippy::too_many_arguments)]
 async fn inner_list_blobs(
     did: String,
     since: Option<String>, // Optional revision of the repo to list blobs since.
@@ -40,10 +41,7 @@ async fn inner_list_blobs(
         })
         .await?;
 
-    let last_blob: Option<String> = match blob_cids.last() {
-        None => None,
-        Some(last) => Some(last.clone()),
-    };
+    let last_blob: Option<String> = blob_cids.last().cloned();
     Ok(ListBlobsOutput {
         cursor: last_blob,
         cids: blob_cids,
@@ -52,6 +50,7 @@ async fn inner_list_blobs(
 
 /// List blob CIDs for an account, since some repo revision. Does not require auth;
 /// implemented by PDS
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.listBlobs?<did>&<since>&<limit>&<cursor>")]
 pub async fn list_blobs(

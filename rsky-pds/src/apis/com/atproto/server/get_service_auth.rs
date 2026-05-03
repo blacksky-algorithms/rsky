@@ -18,10 +18,7 @@ pub async fn inner_get_service_auth(
 ) -> Result<String> {
     let credentials = auth.access.credentials.unwrap();
     let did = credentials.clone().did.unwrap();
-    let exp = match exp {
-        None => None,
-        Some(exp) => Some(exp * 1000),
-    };
+    let exp = exp.map(|exp| exp * 1000);
     if let Some(exp) = exp {
         let system_time = SystemTime::now();
         let now: DateTime<UtcOffset> = system_time.into();
