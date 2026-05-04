@@ -66,6 +66,9 @@ impl FollowGraph {
 
     /// Add a follow relationship: actor follows subject.
     pub fn add_follow(&self, actor_did: &str, subject_did: &str) {
+        if actor_did.is_empty() || subject_did.is_empty() {
+            return;
+        }
         let actor_uid = self.get_or_assign_uid(actor_did);
         let subject_uid = self.get_or_assign_uid(subject_did);
 
@@ -93,6 +96,9 @@ impl FollowGraph {
     /// Add a follow relationship and remember the rkey so a later firehose
     /// delete event (which carries only the rkey) can resolve back to the subject.
     pub fn add_follow_with_rkey(&self, actor_did: &str, rkey: &str, subject_did: &str) {
+        if actor_did.is_empty() || subject_did.is_empty() || rkey.is_empty() {
+            return;
+        }
         self.add_follow(actor_did, subject_did);
         let actor_uid = self.get_or_assign_uid(actor_did);
         let subject_uid = self.get_or_assign_uid(subject_did);

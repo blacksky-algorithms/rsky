@@ -151,18 +151,29 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
         .create_database(&mut wtxn, Some("followers"))
         .map_err(|e| GraphError::Other(format!("create db failed: {e}")))?;
 
-    // Save DID <-> UID mappings
+    // LMDB rejects empty keys with MDB_BAD_VALSIZE; one stray empty DID would abort the whole txn.
+    let mut skipped_empty = 0u64;
     for entry in graph.did_to_uid.iter() {
+        if entry.key().is_empty() {
+            skipped_empty += 1;
+            continue;
+        }
         let uid_bytes = entry.value().to_ne_bytes();
         did_uid_db
             .put(&mut wtxn, entry.key(), &uid_bytes)
             .map_err(|e| GraphError::Other(format!("put did_uid failed: {e}")))?;
     }
     for entry in graph.uid_to_did.iter() {
+        if entry.value().is_empty() {
+            continue;
+        }
         let did_bytes = entry.value().as_bytes();
         uid_did_db
             .put(&mut wtxn, entry.key(), did_bytes)
             .map_err(|e| GraphError::Other(format!("put uid_did failed: {e}")))?;
+    }
+    if skipped_empty > 0 {
+        tracing::warn!("skipped {skipped_empty} empty-DID entries during persistence");
     }
 
     // Save following bitmaps
