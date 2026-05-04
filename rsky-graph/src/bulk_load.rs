@@ -201,17 +201,16 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
 
     let mut total: u64 = 0;
     let start = std::time::Instant::now();
-    let mut last_creator = String::new();
-    let mut last_subject = String::new();
+    let (mut last_creator, mut last_subject) = find_resume_point(graph);
+    if !last_creator.is_empty() {
+        tracing::info!(
+            "resuming bulk load from (creator, subject) > ({}, {})",
+            last_creator,
+            last_subject
+        );
+    }
 
-    let initial_stmt = client
-        .prepare(
-            "SELECT creator, \"subjectDid\" FROM follow \
-             ORDER BY creator, \"subjectDid\" LIMIT $1::bigint",
-        )
-        .await
-        .map_err(|e| GraphError::Other(format!("prepare initial failed: {e}")))?;
-
+    // Single keyset statement; an empty (last_creator, last_subject) lex-precedes every real DID.
     let page_stmt = client
         .prepare(
             "SELECT creator, \"subjectDid\" FROM follow \
@@ -222,17 +221,10 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
         .map_err(|e| GraphError::Other(format!("prepare page failed: {e}")))?;
 
     loop {
-        let rows = if total == 0 {
-            client
-                .query(&initial_stmt, &[&batch_size])
-                .await
-                .map_err(|e| GraphError::Other(format!("initial query failed: {e}")))?
-        } else {
-            client
-                .query(&page_stmt, &[&last_creator, &last_subject, &batch_size])
-                .await
-                .map_err(|e| GraphError::Other(format!("page query failed: {e}")))?
-        };
+        let rows = client
+            .query(&page_stmt, &[&last_creator, &last_subject, &batch_size])
+            .await
+            .map_err(|e| GraphError::Other(format!("page query failed: {e}")))?;
 
         if rows.is_empty() {
             break;
@@ -259,4 +251,70 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
 
     finalize(total, start, graph);
     Ok(())
+}
+
+/// Pick a `(creator, subjectDid)` boundary the keyset can resume from.
+fn find_resume_point(graph: &FollowGraph) -> (String, String) {
+    let max_creator: Option<String> = graph
+        .following
+        .iter()
+        .filter(|e| !e.value().is_empty())
+        .filter_map(|e| graph.get_did(*e.key()))
+        .max();
+
+    let Some(creator) = max_creator else {
+        return (String::new(), String::new());
+    };
+
+    let max_subject = graph
+        .get_uid(&creator)
+        .and_then(|uid| graph.following.get(&uid).map(|bm| bm.value().clone()))
+        .and_then(|bm| bm.iter().filter_map(|uid| graph.get_did(uid)).max())
+        .unwrap_or_default();
+
+    (creator, max_subject)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_point_empty_graph_returns_empty() {
+        let graph = FollowGraph::new();
+        let (c, s) = find_resume_point(&graph);
+        assert!(c.is_empty() && s.is_empty());
+    }
+
+    #[test]
+    fn resume_point_picks_max_creator_with_following() {
+        let graph = FollowGraph::new();
+        graph.add_follow("did:plc:aaa", "did:plc:zzz");
+        graph.add_follow("did:plc:bbb", "did:plc:yyy");
+        graph.add_follow("did:plc:ccc", "did:plc:xxx");
+        let (c, s) = find_resume_point(&graph);
+        assert_eq!(c, "did:plc:ccc");
+        assert_eq!(s, "did:plc:xxx");
+    }
+
+    #[test]
+    fn resume_point_within_creator_picks_max_subject() {
+        let graph = FollowGraph::new();
+        graph.add_follow("did:plc:zzz", "did:plc:aaa");
+        graph.add_follow("did:plc:zzz", "did:plc:mmm");
+        graph.add_follow("did:plc:zzz", "did:plc:nnn");
+        let (c, s) = find_resume_point(&graph);
+        assert_eq!(c, "did:plc:zzz");
+        assert_eq!(s, "did:plc:nnn");
+    }
+
+    #[test]
+    fn resume_point_ignores_subject_only_dids() {
+        // did:plc:zzz appears only as a subject; its `following` is empty.
+        let graph = FollowGraph::new();
+        graph.add_follow("did:plc:aaa", "did:plc:zzz");
+        let (c, s) = find_resume_point(&graph);
+        assert_eq!(c, "did:plc:aaa");
+        assert_eq!(s, "did:plc:zzz");
+    }
 }
