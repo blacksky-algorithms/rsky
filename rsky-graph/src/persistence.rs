@@ -107,6 +107,10 @@ pub async fn load_from_lmdb(db_path: &str, graph: &FollowGraph) -> Result<usize,
         graph.followers.insert(uid, bm);
     }
 
+    // Restore follow_count from the bitmap state (load doesn't go through add_follow).
+    let total: u64 = graph.following.iter().map(|e| e.value().len()).sum();
+    graph.set_follow_count(total);
+
     rtxn.commit()
         .map_err(|e| GraphError::Other(format!("read commit failed: {e}")))?;
 

@@ -1,5 +1,6 @@
 use crate::graph::FollowGraph;
 use crate::metrics;
+use crate::types::LoadState;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::server::conn::http1;
@@ -33,6 +34,7 @@ pub async fn serve(
     port: u16,
     graph: Arc<FollowGraph>,
     admin: Arc<AdminState>,
+    load_state: Arc<LoadState>,
     shutdown: Arc<AtomicBool>,
 ) -> color_eyre::Result<()> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
@@ -59,11 +61,13 @@ pub async fn serve(
 
         let graph = Arc::clone(&graph);
         let admin = Arc::clone(&admin);
+        let load_state = Arc::clone(&load_state);
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let graph = Arc::clone(&graph);
                 let admin = Arc::clone(&admin);
-                async move { handle_request(req, graph, admin).await }
+                let load_state = Arc::clone(&load_state);
+                async move { handle_request(req, graph, admin, load_state).await }
             });
             if let Err(e) = http1::Builder::new()
                 .serve_connection(TokioIo::new(conn), service)
@@ -81,6 +85,7 @@ async fn handle_request<B>(
     req: Request<B>,
     graph: Arc<FollowGraph>,
     admin: Arc<AdminState>,
+    load_state: Arc<LoadState>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let path = req.uri().path();
 
@@ -96,11 +101,11 @@ async fn handle_request<B>(
                 .unwrap())
         }
 
-        "/v1/follows-following" => Ok(handle_follows_following(&req, &graph)),
+        "/v1/follows-following" => Ok(handle_follows_following(&req, &graph, &load_state)),
 
-        "/v1/is-following" => Ok(handle_is_following(&req, &graph)),
+        "/v1/is-following" => Ok(handle_is_following(&req, &graph, &load_state)),
 
-        "/admin/bulk-load" => Ok(handle_admin_bulk_load(&req, &graph, &admin)),
+        "/admin/bulk-load" => Ok(handle_admin_bulk_load(&req, &graph, &admin, &load_state)),
 
         _ => Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -109,7 +114,11 @@ async fn handle_request<B>(
     }
 }
 
-fn handle_follows_following<B>(req: &Request<B>, graph: &FollowGraph) -> Response<Full<Bytes>> {
+fn handle_follows_following<B>(
+    req: &Request<B>,
+    graph: &FollowGraph,
+    load_state: &LoadState,
+) -> Response<Full<Bytes>> {
     let start = Instant::now();
     let query = req.uri().query().unwrap_or("");
     let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
@@ -132,6 +141,15 @@ fn handle_follows_following<B>(req: &Request<B>, graph: &FollowGraph) -> Respons
         return json_response(
             StatusCode::BAD_REQUEST,
             r#"{"error":"viewer and targets required"}"#,
+        );
+    }
+
+    // 503 lets the appview fall back to its SQL self-JOIN; without this the
+    // graph would silently return empty mutuals for unloaded viewers.
+    if !load_state.creator_loaded(viewer) {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"viewer not yet loaded"}"#,
         );
     }
 
@@ -158,7 +176,11 @@ fn handle_follows_following<B>(req: &Request<B>, graph: &FollowGraph) -> Respons
         .unwrap()
 }
 
-fn handle_is_following<B>(req: &Request<B>, graph: &FollowGraph) -> Response<Full<Bytes>> {
+fn handle_is_following<B>(
+    req: &Request<B>,
+    graph: &FollowGraph,
+    load_state: &LoadState,
+) -> Response<Full<Bytes>> {
     let query = req.uri().query().unwrap_or("");
     let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -175,6 +197,13 @@ fn handle_is_following<B>(req: &Request<B>, graph: &FollowGraph) -> Response<Ful
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
+    if !actor.is_empty() && !load_state.creator_loaded(actor) {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"actor not yet loaded"}"#,
+        );
+    }
+
     let following = graph.is_following(actor, target);
     let body = serde_json::json!({ "following": following });
     json_response(StatusCode::OK, &body.to_string())
@@ -184,6 +213,7 @@ fn handle_admin_bulk_load<B>(
     req: &Request<B>,
     graph: &Arc<FollowGraph>,
     admin: &Arc<AdminState>,
+    load_state: &Arc<LoadState>,
 ) -> Response<Full<Bytes>> {
     if req.method() != Method::POST {
         return json_response(
@@ -226,15 +256,15 @@ fn handle_admin_bulk_load<B>(
 
     let graph = Arc::clone(graph);
     let admin = Arc::clone(admin);
+    let load_state = Arc::clone(load_state);
     tokio::spawn(async move {
         let _guard = BulkLoadGuard {
             admin: Arc::clone(&admin),
         };
         tracing::info!("admin: starting bulk-load via POST /admin/bulk-load");
-        match crate::bulk_load::bulk_load_keyset(&database_url, &graph).await {
+        match crate::bulk_load::bulk_load_keyset(&database_url, &graph, &load_state).await {
             Ok(()) => {
-                tracing::info!("admin: bulk-load complete; rebuilding bloom filters");
-                crate::bloom::build_all_bloom_filters(&graph);
+                tracing::info!("admin: bulk-load complete");
             }
             Err(e) => {
                 tracing::error!("admin bulk-load failed: {e}");
@@ -294,13 +324,24 @@ mod tests {
         ))
     }
 
+    fn loaded_state() -> Arc<LoadState> {
+        let s = LoadState::new();
+        s.mark_complete();
+        Arc::new(s)
+    }
+
     #[tokio::test]
     async fn admin_disabled_returns_401() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(None, Some("postgres://x"));
-        let resp = handle_request(req("POST", "/admin/bulk-load", Some("anything")), g, a)
-            .await
-            .unwrap();
+        let resp = handle_request(
+            req("POST", "/admin/bulk-load", Some("anything")),
+            g,
+            a,
+            loaded_state(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -308,9 +349,14 @@ mod tests {
     async fn admin_wrong_token_returns_401() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(Some("secret"), Some("postgres://x"));
-        let resp = handle_request(req("POST", "/admin/bulk-load", Some("nope")), g, a)
-            .await
-            .unwrap();
+        let resp = handle_request(
+            req("POST", "/admin/bulk-load", Some("nope")),
+            g,
+            a,
+            loaded_state(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -318,7 +364,7 @@ mod tests {
     async fn admin_missing_header_returns_401() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(Some("secret"), Some("postgres://x"));
-        let resp = handle_request(req("POST", "/admin/bulk-load", None), g, a)
+        let resp = handle_request(req("POST", "/admin/bulk-load", None), g, a, loaded_state())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -328,9 +374,14 @@ mod tests {
     async fn admin_get_returns_405() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(Some("secret"), Some("postgres://x"));
-        let resp = handle_request(req("GET", "/admin/bulk-load", Some("secret")), g, a)
-            .await
-            .unwrap();
+        let resp = handle_request(
+            req("GET", "/admin/bulk-load", Some("secret")),
+            g,
+            a,
+            loaded_state(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
@@ -338,9 +389,14 @@ mod tests {
     async fn admin_no_database_url_returns_503() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(Some("secret"), None);
-        let resp = handle_request(req("POST", "/admin/bulk-load", Some("secret")), g, a)
-            .await
-            .unwrap();
+        let resp = handle_request(
+            req("POST", "/admin/bulk-load", Some("secret")),
+            g,
+            a,
+            loaded_state(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -354,6 +410,7 @@ mod tests {
             req("POST", "/admin/bulk-load", Some("secret")),
             g,
             Arc::clone(&a),
+            loaded_state(),
         )
         .await
         .unwrap();
@@ -366,7 +423,7 @@ mod tests {
     async fn admin_404_for_unknown_path() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(Some("secret"), Some("postgres://x"));
-        let resp = handle_request(req("GET", "/nope", None), g, a)
+        let resp = handle_request(req("GET", "/nope", None), g, a, loaded_state())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -376,7 +433,7 @@ mod tests {
     async fn health_returns_200() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(None, None);
-        let resp = handle_request(req("GET", "/_health", None), g, a)
+        let resp = handle_request(req("GET", "/_health", None), g, a, loaded_state())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -386,7 +443,7 @@ mod tests {
     async fn metrics_returns_200_text() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(None, None);
-        let resp = handle_request(req("GET", "/metrics", None), g, a)
+        let resp = handle_request(req("GET", "/metrics", None), g, a, loaded_state())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -402,9 +459,14 @@ mod tests {
     async fn follows_following_missing_params_returns_400() {
         let g = Arc::new(FollowGraph::new());
         let a = admin_state(None, None);
-        let resp = handle_request(req("GET", "/v1/follows-following", None), g, a)
-            .await
-            .unwrap();
+        let resp = handle_request(
+            req("GET", "/v1/follows-following", None),
+            g,
+            a,
+            loaded_state(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -423,6 +485,7 @@ mod tests {
             ),
             g,
             a,
+            loaded_state(),
         )
         .await
         .unwrap();
@@ -442,10 +505,78 @@ mod tests {
             ),
             g,
             a,
+            loaded_state(),
         )
         .await
         .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn is_following_returns_503_when_actor_not_loaded() {
+        let g = Arc::new(FollowGraph::new());
+        g.add_follow("did:plc:alice", "did:plc:bob");
+        let a = admin_state(None, None);
+        // LoadState is NOT marked complete; no creators recorded -> 503.
+        let s = Arc::new(LoadState::new());
+        let resp = handle_request(
+            req(
+                "GET",
+                "/v1/is-following?actor=did:plc:alice&target=did:plc:bob",
+                None,
+            ),
+            g,
+            a,
+            s,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn is_following_serves_actor_below_progress_cursor() {
+        let g = Arc::new(FollowGraph::new());
+        g.add_follow("did:plc:alice", "did:plc:bob");
+        let a = admin_state(None, None);
+        let s = Arc::new(LoadState::new());
+        s.record_creator_completed("did:plc:zzz"); // alice < zzz, so alice is loaded
+        let resp = handle_request(
+            req(
+                "GET",
+                "/v1/is-following?actor=did:plc:alice&target=did:plc:bob",
+                None,
+            ),
+            g,
+            a,
+            s,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn follows_following_returns_503_when_viewer_not_loaded() {
+        let g = Arc::new(FollowGraph::new());
+        g.add_follow("did:plc:alice", "did:plc:bob");
+        g.add_follow("did:plc:bob", "did:plc:dan");
+        let a = admin_state(None, None);
+        let s = Arc::new(LoadState::new());
+        // viewer=alice not loaded -> 503 so appview falls back to SQL.
+        let resp = handle_request(
+            req(
+                "GET",
+                "/v1/follows-following?viewer=did:plc:alice&targets=did:plc:dan",
+                None,
+            ),
+            g,
+            a,
+            s,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

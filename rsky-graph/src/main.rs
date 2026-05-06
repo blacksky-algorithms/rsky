@@ -5,14 +5,7 @@ use clap::Parser;
 use color_eyre::Result;
 use mimalloc::MiMalloc;
 
-mod api;
-mod bloom;
-mod bulk_load;
-mod firehose;
-mod graph;
-mod metrics;
-mod persistence;
-mod types;
+use rsky_graph::{api, bulk_load, firehose, graph, persistence, types};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -68,6 +61,7 @@ async fn main() -> Result<()> {
 
     // Initialize graph
     let graph = Arc::new(graph::FollowGraph::new());
+    let load_state = Arc::new(types::LoadState::new());
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     {
@@ -80,46 +74,65 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Load from LMDB if available
-    let loaded = persistence::load_from_lmdb(&args.db_path, &graph).await;
-    match loaded {
+    // Load existing state from LMDB synchronously before any concurrent task
+    // starts (a second env handle on the same path during load races and
+    // corrupts state).
+    match persistence::load_from_lmdb(&args.db_path, &graph).await {
         Ok(count) if count > 0 => {
             tracing::info!("loaded {} users from LMDB", count);
+            // Existing on-disk state is from a previous fully-completed bulk-load,
+            // so the API can serve all queries.
+            load_state.mark_complete();
         }
         Ok(_) => {
-            // Empty LMDB -- prefer file load (zero PG transaction) over a live PG load.
-            if let Some(ref path) = args.load_from_file {
-                tracing::info!("LMDB empty, bulk-loading from file: {path}");
-                bulk_load::bulk_load_from_file(std::path::Path::new(path), &graph).await?;
-                tracing::info!(
-                    "bulk load complete: {} users, {} follows",
-                    graph.user_count(),
-                    graph.follow_count()
-                );
-                bloom::build_all_bloom_filters(&graph);
-                tracing::info!("bloom filters built");
-                persistence::save_to_lmdb(&args.db_path, &graph).await?;
-                tracing::info!("persisted to LMDB");
-            } else if let Some(ref db_url) = args.database_url {
-                tracing::info!("LMDB empty, starting keyset bulk load from PostgreSQL");
-                bulk_load::bulk_load_keyset(db_url, &graph).await?;
-                tracing::info!(
-                    "bulk load complete: {} users, {} follows",
-                    graph.user_count(),
-                    graph.follow_count()
-                );
-                bloom::build_all_bloom_filters(&graph);
-                tracing::info!("bloom filters built");
-                persistence::save_to_lmdb(&args.db_path, &graph).await?;
-                tracing::info!("persisted to LMDB");
-            } else {
-                tracing::warn!(
-                    "LMDB empty and no GRAPH_LOAD_FROM_FILE / DATABASE_URL -- starting with empty graph"
-                );
-            }
+            tracing::info!(
+                "LMDB empty -- API will return 503 for unloaded actors until bulk-load progresses"
+            );
         }
         Err(e) => {
             tracing::warn!("failed to load LMDB: {e}, starting fresh");
+        }
+    }
+
+    // Background bulk-load -- the API starts serving immediately and answers
+    // 503 for actors above the load cursor until they're processed.
+    if !load_state.is_complete() {
+        if let Some(ref path) = args.load_from_file {
+            let path = path.clone();
+            let graph_load = Arc::clone(&graph);
+            let load_state_bg = Arc::clone(&load_state);
+            let db_path_save = args.db_path.clone();
+            tokio::spawn(async move {
+                tracing::info!("background bulk-load from file: {path}");
+                if let Err(e) =
+                    bulk_load::bulk_load_from_file(std::path::Path::new(&path), &graph_load).await
+                {
+                    tracing::error!("bulk load from file failed: {e}");
+                    return;
+                }
+                load_state_bg.mark_complete();
+                post_load_finalize(&db_path_save, &graph_load).await;
+            });
+        } else if let Some(ref db_url) = args.database_url {
+            let db_url = db_url.clone();
+            let db_path_save = args.db_path.clone();
+            let graph_load = Arc::clone(&graph);
+            let load_state_bg = Arc::clone(&load_state);
+            tokio::spawn(async move {
+                tracing::info!("background keyset bulk load from PostgreSQL");
+                if let Err(e) =
+                    bulk_load::bulk_load_keyset(&db_url, &graph_load, &load_state_bg).await
+                {
+                    tracing::error!("bulk load failed: {e}");
+                    return;
+                }
+                post_load_finalize(&db_path_save, &graph_load).await;
+            });
+        } else {
+            tracing::warn!(
+                "LMDB empty and no GRAPH_LOAD_FROM_FILE / DATABASE_URL -- API serves an empty graph"
+            );
+            load_state.mark_complete();
         }
     }
 
@@ -131,20 +144,32 @@ async fn main() -> Result<()> {
         firehose::tail_firehose(&relay_host, &graph_firehose, &sf_firehose).await;
     });
 
-    // Periodic save runs only after bulk-load completes (concurrent saves race the loader).
+    // Periodic save. The save itself iterates DashMap (read locks per shard);
+    // bulk-load + firehose only mutate DashMap. Single env opened per save call.
+    // Sequential schedule: each save runs to completion before the next sleep.
     {
         let sf_persist = Arc::clone(&shutdown_flag);
         let db_path_persist = args.db_path.clone();
         let graph_persist = Arc::clone(&graph);
+        let load_state_persist = Arc::clone(&load_state);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            // Save more often during bulk-load so a crash loses minutes, not hours.
+            // After load completes we drop to a slower steady-state cadence.
             loop {
-                interval.tick().await;
+                let active = !load_state_persist.is_complete();
+                let next_sleep = if active { 600 } else { 1800 };
+                tokio::time::sleep(std::time::Duration::from_secs(next_sleep)).await;
                 if sf_persist.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Err(e) = persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
-                    tracing::error!("periodic LMDB save failed: {e}");
+                let users = graph_persist.user_count();
+                let start = std::time::Instant::now();
+                match persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
+                    Ok(()) => tracing::info!(
+                        "periodic LMDB save: {users} users in {:.1}s",
+                        start.elapsed().as_secs_f64()
+                    ),
+                    Err(e) => tracing::error!("periodic LMDB save failed: {e}"),
                 }
             }
         });
@@ -157,8 +182,16 @@ async fn main() -> Result<()> {
         args.database_url.clone(),
     ));
 
-    // Start HTTP API (blocks until shutdown)
-    api::serve(args.port, Arc::clone(&graph), admin, shutdown_flag).await?;
+    // Start HTTP API. Serving happens immediately even if bulk-load is still
+    // running -- handlers consult load_state to decide whether to 503.
+    api::serve(
+        args.port,
+        Arc::clone(&graph),
+        admin,
+        Arc::clone(&load_state),
+        shutdown_flag,
+    )
+    .await?;
 
     // Final persist on shutdown
     tracing::info!("final LMDB save");
@@ -166,4 +199,21 @@ async fn main() -> Result<()> {
 
     tracing::info!("goodbye");
     Ok(())
+}
+
+/// Post-bulk-load: persist the graph to LMDB so the next restart can serve
+/// from disk without re-loading from PG. Bloom filters are rebuilt lazily on
+/// first query rather than upfront -- a 25M-user upfront rebuild blocks the
+/// API for hours.
+async fn post_load_finalize(db_path: &str, graph: &graph::FollowGraph) {
+    tracing::info!(
+        "bulk load complete: {} users, {} follows",
+        graph.user_count(),
+        graph.follow_count()
+    );
+    if let Err(e) = persistence::save_to_lmdb(db_path, graph).await {
+        tracing::error!("post-load LMDB save failed: {e}");
+    } else {
+        tracing::info!("post-load LMDB save done");
+    }
 }

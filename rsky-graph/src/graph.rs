@@ -221,4 +221,10 @@ impl FollowGraph {
     pub fn set_next_uid(&self, uid: u32) {
         self.next_uid.store(uid, Ordering::Relaxed);
     }
+
+    /// Reset the in-memory follow counter -- used after `load_from_lmdb`
+    /// rebuilds bitmaps without going through `add_follow`.
+    pub fn set_follow_count(&self, count: u64) {
+        self.follow_count.store(count, Ordering::Relaxed);
+    }
 }

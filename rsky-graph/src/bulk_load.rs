@@ -1,5 +1,5 @@
 use crate::graph::FollowGraph;
-use crate::types::GraphError;
+use crate::types::{GraphError, LoadState};
 use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use std::path::Path;
 use std::time::Duration;
@@ -156,7 +156,11 @@ fn strip_csv_quotes(s: &str) -> &str {
 /// Each iteration runs an autonomous short query bounded by `LIMIT batch_size`,
 /// keyset-paged on `(creator, "subjectDid")`. Between batches we sleep
 /// `throttle_ms` to cap IO. Either may be tuned via env vars.
-pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result<(), GraphError> {
+pub async fn bulk_load_keyset(
+    database_url: &str,
+    graph: &FollowGraph,
+    load_state: &LoadState,
+) -> Result<(), GraphError> {
     let batch_size: i64 = std::env::var("GRAPH_LOAD_BATCH_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -253,6 +257,11 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
         for row in &rows {
             let creator: String = row.get(0);
             let subject: String = row.get(1);
+            // When the keyset transitions creators, the previous one's full
+            // follow set is now in the graph -- mark it loaded for the API.
+            if !last_creator.is_empty() && creator != last_creator {
+                load_state.record_creator_completed(&last_creator);
+            }
             graph.add_follow(&creator, &subject);
             last_creator = creator;
             last_subject = subject;
@@ -269,6 +278,11 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
         }
     }
 
+    // Last creator was completed by exhausting the keyset.
+    if !last_creator.is_empty() {
+        load_state.record_creator_completed(&last_creator);
+    }
+    load_state.mark_complete();
     finalize(total, start, graph);
     Ok(())
 }
