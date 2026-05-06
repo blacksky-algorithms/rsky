@@ -69,8 +69,6 @@ async fn main() -> Result<()> {
     // Initialize graph
     let graph = Arc::new(graph::FollowGraph::new());
 
-    // Spawn shutdown handler + periodic LMDB persistence BEFORE bulk-load so a
-    // crash mid-load doesn't lose hours of in-memory progress.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     {
         let sf = Arc::clone(&shutdown_flag);
@@ -81,20 +79,36 @@ async fn main() -> Result<()> {
             SHUTDOWN.store(true, Ordering::Relaxed);
         });
     }
+
+    // Exponential save backoff: 60s, 120s, 240s, ... capped at 30 min.
     {
         let sf_persist = Arc::clone(&shutdown_flag);
         let db_path_persist = args.db_path.clone();
         let graph_persist = Arc::clone(&graph);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut delay_secs: u64 = 60;
+            const MAX_DELAY: u64 = 1800;
             loop {
-                interval.tick().await;
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                 if sf_persist.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Err(e) = persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
-                    tracing::error!("periodic LMDB save failed: {e}");
+                let start = std::time::Instant::now();
+                let users = graph_persist.user_count();
+                match persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
+                    Ok(()) => {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        tracing::info!(
+                            "periodic LMDB save: {} users in {:.1}s (next in {}s)",
+                            users,
+                            elapsed,
+                            delay_secs
+                        );
+                    }
+                    Err(e) => tracing::error!("periodic LMDB save failed: {e}"),
                 }
+                // Back off so save overhead stays a small fraction of bulk-load time.
+                delay_secs = (delay_secs.saturating_mul(2)).min(MAX_DELAY);
             }
         });
     }
