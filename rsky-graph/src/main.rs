@@ -80,39 +80,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Exponential save backoff: 60s, 120s, 240s, ... capped at 30 min.
-    {
-        let sf_persist = Arc::clone(&shutdown_flag);
-        let db_path_persist = args.db_path.clone();
-        let graph_persist = Arc::clone(&graph);
-        tokio::spawn(async move {
-            let mut delay_secs: u64 = 60;
-            const MAX_DELAY: u64 = 1800;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                if sf_persist.load(Ordering::Relaxed) {
-                    break;
-                }
-                let start = std::time::Instant::now();
-                let users = graph_persist.user_count();
-                match persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
-                    Ok(()) => {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        tracing::info!(
-                            "periodic LMDB save: {} users in {:.1}s (next in {}s)",
-                            users,
-                            elapsed,
-                            delay_secs
-                        );
-                    }
-                    Err(e) => tracing::error!("periodic LMDB save failed: {e}"),
-                }
-                // Back off so save overhead stays a small fraction of bulk-load time.
-                delay_secs = (delay_secs.saturating_mul(2)).min(MAX_DELAY);
-            }
-        });
-    }
-
     // Load from LMDB if available
     let loaded = persistence::load_from_lmdb(&args.db_path, &graph).await;
     match loaded {
@@ -163,6 +130,25 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         firehose::tail_firehose(&relay_host, &graph_firehose, &sf_firehose).await;
     });
+
+    // Periodic save runs only after bulk-load completes (concurrent saves race the loader).
+    {
+        let sf_persist = Arc::clone(&shutdown_flag);
+        let db_path_persist = args.db_path.clone();
+        let graph_persist = Arc::clone(&graph);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                if sf_persist.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Err(e) = persistence::save_to_lmdb(&db_path_persist, &graph_persist).await {
+                    tracing::error!("periodic LMDB save failed: {e}");
+                }
+            }
+        });
+    }
 
     // Build admin state. The token gates POST /admin/bulk-load; without it
     // the route always 401s. database_url is reused from the startup arg.
