@@ -192,10 +192,10 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
         .execute("SET search_path TO bsky", &[])
         .await
         .map_err(|e| GraphError::Other(format!("set search_path failed: {e}")))?;
-    // Generous per-statement cap, but each query reads at most batch_size rows
-    // and finishes well within this. Prevents a single bad batch from running away.
+    // Per-statement cap. Larger than the historical 60s after observing that
+    // 60s tripped under appview PG load and crashed the entire load.
     client
-        .execute("SET statement_timeout = '60s'", &[])
+        .execute("SET statement_timeout = '300s'", &[])
         .await
         .map_err(|e| GraphError::Other(format!("set timeout failed: {e}")))?;
 
@@ -221,10 +221,30 @@ pub async fn bulk_load_keyset(database_url: &str, graph: &FollowGraph) -> Result
         .map_err(|e| GraphError::Other(format!("prepare page failed: {e}")))?;
 
     loop {
-        let rows = client
-            .query(&page_stmt, &[&last_creator, &last_subject, &batch_size])
-            .await
-            .map_err(|e| GraphError::Other(format!("page query failed: {e}")))?;
+        // Retry transient PG errors (timeouts, connection blips) with backoff.
+        let mut attempt = 0u32;
+        let rows = loop {
+            attempt += 1;
+            match client
+                .query(&page_stmt, &[&last_creator, &last_subject, &batch_size])
+                .await
+            {
+                Ok(r) => break r,
+                Err(e) if attempt < 5 => {
+                    let backoff = Duration::from_secs(10u64 * u64::from(attempt));
+                    tracing::warn!(
+                        "page query failed (attempt {attempt}/5, retrying in {:?}): {e}",
+                        backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    return Err(GraphError::Other(format!(
+                        "page query failed after {attempt} attempts: {e}"
+                    )));
+                }
+            }
+        };
 
         if rows.is_empty() {
             break;
