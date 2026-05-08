@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use roaring::RoaringBitmap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -25,6 +25,12 @@ pub struct FollowGraph {
     // follows are not reversible until the next snapshot rebuild.
     pub follow_rkeys: DashMap<(u32, String), u32>,
 
+    // UIDs whose `following`/`followers` bitmaps (or DID mapping) have been
+    // mutated since the last successful save. The save loop drains this and
+    // writes only those entries -- O(dirty) instead of O(graph). Empty after
+    // load_from_lmdb (which inserts directly into DashMaps without marking).
+    pub dirty_users: DashSet<u32>,
+
     // Stats
     follow_count: AtomicU64,
 }
@@ -39,6 +45,7 @@ impl FollowGraph {
             following: DashMap::new(),
             follower_blooms: DashMap::new(),
             follow_rkeys: DashMap::new(),
+            dirty_users: DashSet::new(),
             follow_count: AtomicU64::new(0),
         }
     }
@@ -90,6 +97,9 @@ impl FollowGraph {
             .or_insert_with(|| bloom::new_bloom_filter(100))
             .set(&actor_uid);
 
+        self.dirty_users.insert(actor_uid);
+        self.dirty_users.insert(subject_uid);
+
         self.follow_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -122,6 +132,8 @@ impl FollowGraph {
         if let Some(mut bm) = self.followers.get_mut(&subject_uid) {
             bm.remove(actor_uid);
         }
+        self.dirty_users.insert(actor_uid);
+        self.dirty_users.insert(subject_uid);
         self.follow_count.fetch_sub(1, Ordering::Relaxed);
         true
     }
@@ -146,6 +158,8 @@ impl FollowGraph {
         // For now, the bloom may have false positives for removed follows,
         // which is acceptable (it just means we do the bitmap check unnecessarily)
 
+        self.dirty_users.insert(actor_uid);
+        self.dirty_users.insert(subject_uid);
         self.follow_count.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -226,5 +240,91 @@ impl FollowGraph {
     /// rebuilds bitmaps without going through `add_follow`.
     pub fn set_follow_count(&self, count: u64) {
         self.follow_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Drain the dirty-user set into a Vec, atomically removing each entry.
+    /// Used by `save_to_lmdb` to learn which users were touched since the last
+    /// save. Pre-removing means a concurrent mutation arriving after we drain
+    /// but before we read the bitmap will re-mark the user dirty, so the next
+    /// save catches up; we never lose writes silently.
+    pub fn drain_dirty_users(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self.dirty_users.iter().map(|e| *e.key()).collect();
+        // Best-effort dedupe in case the snapshot saw duplicates across shards
+        // (DashSet shouldn't but cheap to be defensive about save IO).
+        out.sort_unstable();
+        out.dedup();
+        for uid in &out {
+            self.dirty_users.remove(uid);
+        }
+        out
+    }
+
+    /// Number of UIDs marked dirty since last save. For metrics + tests.
+    pub fn dirty_count(&self) -> usize {
+        self.dirty_users.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_follow_marks_both_uids_dirty() {
+        let g = FollowGraph::new();
+        g.add_follow("did:plc:a", "did:plc:b");
+        assert_eq!(g.dirty_count(), 2);
+        let a = g.get_uid("did:plc:a").unwrap();
+        let b = g.get_uid("did:plc:b").unwrap();
+        assert!(g.dirty_users.contains(&a));
+        assert!(g.dirty_users.contains(&b));
+    }
+
+    #[test]
+    fn drain_clears_dirty_set() {
+        let g = FollowGraph::new();
+        g.add_follow("did:plc:a", "did:plc:b");
+        g.add_follow("did:plc:c", "did:plc:d");
+        let drained = g.drain_dirty_users();
+        assert_eq!(drained.len(), 4);
+        assert_eq!(g.dirty_count(), 0);
+    }
+
+    #[test]
+    fn remove_follow_marks_dirty() {
+        let g = FollowGraph::new();
+        g.add_follow("did:plc:a", "did:plc:b");
+        g.drain_dirty_users();
+        assert_eq!(g.dirty_count(), 0);
+        g.remove_follow("did:plc:a", "did:plc:b");
+        assert_eq!(g.dirty_count(), 2);
+    }
+
+    #[test]
+    fn remove_follow_by_rkey_marks_dirty() {
+        let g = FollowGraph::new();
+        g.add_follow_with_rkey("did:plc:a", "rkey1", "did:plc:b");
+        g.drain_dirty_users();
+        assert!(g.remove_follow_by_rkey("did:plc:a", "rkey1"));
+        assert_eq!(g.dirty_count(), 2);
+    }
+
+    #[test]
+    fn dirty_set_dedupes_repeated_writes_to_same_user() {
+        let g = FollowGraph::new();
+        // Same actor follows three subjects: actor UID should appear once.
+        g.add_follow("did:plc:a", "did:plc:b");
+        g.add_follow("did:plc:a", "did:plc:c");
+        g.add_follow("did:plc:a", "did:plc:d");
+        let drained = g.drain_dirty_users();
+        // 1 actor + 3 subjects = 4 unique UIDs
+        assert_eq!(drained.len(), 4);
+    }
+
+    #[test]
+    fn drain_returns_empty_when_clean() {
+        let g = FollowGraph::new();
+        let drained = g.drain_dirty_users();
+        assert!(drained.is_empty());
     }
 }

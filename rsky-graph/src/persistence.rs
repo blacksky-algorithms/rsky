@@ -123,11 +123,26 @@ pub async fn load_from_lmdb(db_path: &str, graph: &FollowGraph) -> Result<usize,
     Ok(count)
 }
 
+/// Incremental save: only persists users in `graph.dirty_users` since the
+/// last successful save. The full O(N) snapshot is only used when the dirty
+/// set is empty AND LMDB is missing -- e.g. cold start from an empty data
+/// dir. After load_from_lmdb, dirty_users is empty and steady-state mutations
+/// re-mark it via add_follow/remove_follow, so per-save IO scales with
+/// recent write volume, not total graph size.
 pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), GraphError> {
     let path = Path::new(db_path);
+    let cold_start = !path.join("data.mdb").exists();
     if !path.exists() {
         std::fs::create_dir_all(path)
             .map_err(|e| GraphError::Other(format!("create dir failed: {e}")))?;
+    }
+
+    let dirty: Vec<u32> = graph.drain_dirty_users();
+    if dirty.is_empty() && !cold_start {
+        // Nothing changed since the last commit and the on-disk snapshot
+        // already exists. Skip opening LMDB entirely.
+        tracing::debug!("save: clean, no entries to persist");
+        return Ok(());
     }
 
     let env = unsafe {
@@ -155,7 +170,51 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
         .create_database(&mut wtxn, Some("followers"))
         .map_err(|e| GraphError::Other(format!("create db failed: {e}")))?;
 
-    // LMDB rejects empty keys with MDB_BAD_VALSIZE; one stray empty DID would abort the whole txn.
+    if cold_start && dirty.is_empty() {
+        // First-ever save with no in-memory mutations: snapshot everything
+        // already in the DashMaps so the on-disk file becomes a valid
+        // starting point for later incremental saves.
+        save_full(
+            graph,
+            &mut wtxn,
+            &did_uid_db,
+            &uid_did_db,
+            &following_db,
+            &followers_db,
+        )?;
+    } else {
+        save_dirty(
+            graph,
+            &dirty,
+            &mut wtxn,
+            &did_uid_db,
+            &uid_did_db,
+            &following_db,
+            &followers_db,
+        )?;
+    }
+
+    wtxn.commit()
+        .map_err(|e| GraphError::Other(format!("commit failed: {e}")))?;
+
+    tracing::debug!(
+        "saved {} dirty entries to LMDB ({} users total)",
+        dirty.len(),
+        graph.user_count()
+    );
+    Ok(())
+}
+
+/// Write all entries in the graph -- used only on cold start (no data.mdb yet)
+/// or by an explicit full-snapshot path. Linear in graph size.
+fn save_full(
+    graph: &FollowGraph,
+    wtxn: &mut heed::RwTxn<'_>,
+    did_uid_db: &StrDb,
+    uid_did_db: &U32Db,
+    following_db: &U32Db,
+    followers_db: &U32Db,
+) -> Result<(), GraphError> {
     let mut skipped_empty = 0u64;
     for entry in graph.did_to_uid.iter() {
         if entry.key().is_empty() {
@@ -164,7 +223,7 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
         }
         let uid_bytes = entry.value().to_ne_bytes();
         did_uid_db
-            .put(&mut wtxn, entry.key(), &uid_bytes)
+            .put(wtxn, entry.key(), &uid_bytes)
             .map_err(|e| GraphError::Other(format!("put did_uid failed: {e}")))?;
     }
     for entry in graph.uid_to_did.iter() {
@@ -173,14 +232,12 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
         }
         let did_bytes = entry.value().as_bytes();
         uid_did_db
-            .put(&mut wtxn, entry.key(), did_bytes)
+            .put(wtxn, entry.key(), did_bytes)
             .map_err(|e| GraphError::Other(format!("put uid_did failed: {e}")))?;
     }
     if skipped_empty > 0 {
         tracing::warn!("skipped {skipped_empty} empty-DID entries during persistence");
     }
-
-    // Save following bitmaps
     for entry in graph.following.iter() {
         let mut buf = Vec::new();
         entry
@@ -188,11 +245,9 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
             .serialize_into(&mut buf)
             .map_err(|e| GraphError::Other(format!("serialize following failed: {e}")))?;
         following_db
-            .put(&mut wtxn, entry.key(), &buf)
+            .put(wtxn, entry.key(), &buf)
             .map_err(|e| GraphError::Other(format!("put following failed: {e}")))?;
     }
-
-    // Save followers bitmaps
     for entry in graph.followers.iter() {
         let mut buf = Vec::new();
         entry
@@ -200,13 +255,67 @@ pub async fn save_to_lmdb(db_path: &str, graph: &FollowGraph) -> Result<(), Grap
             .serialize_into(&mut buf)
             .map_err(|e| GraphError::Other(format!("serialize followers failed: {e}")))?;
         followers_db
-            .put(&mut wtxn, entry.key(), &buf)
+            .put(wtxn, entry.key(), &buf)
             .map_err(|e| GraphError::Other(format!("put followers failed: {e}")))?;
     }
+    Ok(())
+}
 
-    wtxn.commit()
-        .map_err(|e| GraphError::Other(format!("commit failed: {e}")))?;
-
-    tracing::debug!("saved {} users to LMDB", graph.user_count());
+/// Write only the entries belonging to `dirty` UIDs. Linear in `dirty.len()`,
+/// independent of total graph size.
+fn save_dirty(
+    graph: &FollowGraph,
+    dirty: &[u32],
+    wtxn: &mut heed::RwTxn<'_>,
+    did_uid_db: &StrDb,
+    uid_did_db: &U32Db,
+    following_db: &U32Db,
+    followers_db: &U32Db,
+) -> Result<(), GraphError> {
+    let mut skipped_empty = 0u64;
+    for uid in dirty {
+        // Persist DID <-> UID for this user. uid_to_did is the source-of-truth
+        // for "what DID does this UID map to"; did_to_uid is its inverse.
+        if let Some(did_ref) = graph.uid_to_did.get(uid) {
+            let did = did_ref.value();
+            if did.is_empty() {
+                skipped_empty += 1;
+            } else {
+                did_uid_db
+                    .put(wtxn, did, &uid.to_ne_bytes())
+                    .map_err(|e| GraphError::Other(format!("put did_uid failed: {e}")))?;
+                uid_did_db
+                    .put(wtxn, uid, did.as_bytes())
+                    .map_err(|e| GraphError::Other(format!("put uid_did failed: {e}")))?;
+            }
+        }
+        // Following bitmap. Read-locks this DashMap shard; concurrent writes
+        // to the same UID block briefly. If the concurrent write arrives
+        // *after* this read, drain_dirty_users()'s pre-remove guarantees the
+        // UID is re-marked, so the next save catches up.
+        if let Some(bm_ref) = graph.following.get(uid) {
+            let mut buf = Vec::new();
+            bm_ref
+                .value()
+                .serialize_into(&mut buf)
+                .map_err(|e| GraphError::Other(format!("serialize following failed: {e}")))?;
+            following_db
+                .put(wtxn, uid, &buf)
+                .map_err(|e| GraphError::Other(format!("put following failed: {e}")))?;
+        }
+        if let Some(bm_ref) = graph.followers.get(uid) {
+            let mut buf = Vec::new();
+            bm_ref
+                .value()
+                .serialize_into(&mut buf)
+                .map_err(|e| GraphError::Other(format!("serialize followers failed: {e}")))?;
+            followers_db
+                .put(wtxn, uid, &buf)
+                .map_err(|e| GraphError::Other(format!("put followers failed: {e}")))?;
+        }
+    }
+    if skipped_empty > 0 {
+        tracing::warn!("skipped {skipped_empty} empty-DID entries during persistence");
+    }
     Ok(())
 }

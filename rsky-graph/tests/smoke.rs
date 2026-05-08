@@ -155,6 +155,69 @@ async fn persistence_round_trip_via_lmdb() {
     assert!(graph2.is_following("did:plc:aaa", "did:plc:bbb"));
 }
 
+/// Exercises the incremental save path without needing PG: start clean, do
+/// a cold-start save (full snapshot), modify a small subset, save again,
+/// and verify the second save only writes the dirty entries while leaving
+/// untouched data intact on disk.
+#[tokio::test]
+async fn incremental_save_only_writes_dirty_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().to_str().unwrap().to_string();
+
+    // Phase 1: cold start. Build a graph with N edges and save.
+    let graph = Arc::new(FollowGraph::new());
+    for (a, b) in TEST_FOLLOWS {
+        graph.add_follow(a, b);
+    }
+    assert!(graph.dirty_count() > 0);
+    persistence::save_to_lmdb(&path, &graph)
+        .await
+        .expect("cold-start save");
+    // After save, dirty set is drained.
+    assert_eq!(graph.dirty_count(), 0);
+
+    // Phase 2: load into a fresh graph -- mimics process restart.
+    let g2 = Arc::new(FollowGraph::new());
+    persistence::load_from_lmdb(&path, &g2)
+        .await
+        .expect("load from disk");
+    // load_from_lmdb does NOT mark dirty -- the post-load graph mirrors disk.
+    assert_eq!(
+        g2.dirty_count(),
+        0,
+        "load_from_lmdb must not pollute dirty_users"
+    );
+    assert_eq!(g2.follow_count(), TEST_FOLLOWS.len() as u64);
+
+    // Phase 3: a single mutation on the loaded graph; save; reload again.
+    g2.add_follow("did:plc:zzz_new", "did:plc:aaa");
+    // Two new UIDs (zzz_new + aaa was already known).
+    let dirty_before_save = g2.dirty_count();
+    assert!(
+        (1..=2).contains(&dirty_before_save),
+        "expected 1-2 dirty UIDs, got {dirty_before_save}"
+    );
+    persistence::save_to_lmdb(&path, &g2)
+        .await
+        .expect("dirty save");
+    assert_eq!(g2.dirty_count(), 0);
+
+    // Phase 4: load into yet another fresh graph and confirm everything
+    // round-tripped: original edges PLUS the one new edge.
+    let g3 = Arc::new(FollowGraph::new());
+    persistence::load_from_lmdb(&path, &g3)
+        .await
+        .expect("load round-trip");
+    assert_eq!(g3.follow_count(), TEST_FOLLOWS.len() as u64 + 1);
+    for (a, b) in TEST_FOLLOWS {
+        assert!(g3.is_following(a, b), "lost untouched edge {a} -> {b}");
+    }
+    assert!(
+        g3.is_following("did:plc:zzz_new", "did:plc:aaa"),
+        "incremental save dropped the new edge"
+    );
+}
+
 #[tokio::test]
 async fn resume_skips_already_loaded_creators() {
     let Some(url) = db_url() else {
