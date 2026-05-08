@@ -114,11 +114,12 @@ pub async fn load_from_lmdb(db_path: &str, graph: &FollowGraph) -> Result<usize,
     rtxn.commit()
         .map_err(|e| GraphError::Other(format!("read commit failed: {e}")))?;
 
-    // Rebuild bloom filters from loaded data
-    if count > 0 {
-        crate::bloom::build_all_bloom_filters(graph);
-    }
-
+    // Bloom filters are NOT rebuilt eagerly: at 25M+ users this is a
+    // multi-hour single-threaded CPU loop (each Bloom::new calls getrandom
+    // twice, plus 1.4B set() ops) that blocks api::serve and the bulk-load
+    // resume. blooms are repopulated incrementally as add_follow is called
+    // by firehose + bulk-load; absent blooms only forfeit the fast-reject
+    // optimization, the bitmap intersection still returns the correct answer.
     tracing::info!("loaded {count} users from LMDB, max_uid={max_uid}");
     Ok(count)
 }
