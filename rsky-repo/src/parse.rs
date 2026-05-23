@@ -14,7 +14,7 @@ pub struct RecordAndBytes {
 
 pub fn get_and_parse_record(blocks: &BlockMap, cid: Cid) -> Result<RecordAndBytes> {
     let bytes = blocks.get(cid);
-    return if let Some(b) = bytes {
+    if let Some(b) = bytes {
         let record = cbor_to_lex_record(b.clone())?;
         Ok(RecordAndBytes {
             record,
@@ -24,7 +24,7 @@ pub fn get_and_parse_record(blocks: &BlockMap, cid: Cid) -> Result<RecordAndByte
         Err(anyhow::Error::new(DataStoreError::MissingBlock(
             cid.to_string(),
         )))
-    };
+    }
 }
 
 pub fn get_and_parse_by_kind(
@@ -33,13 +33,13 @@ pub fn get_and_parse_by_kind(
     check: impl FnOnce(CborValue) -> bool,
 ) -> Result<ObjAndBytes> {
     let bytes = blocks.get(cid);
-    return if let Some(b) = bytes {
+    if let Some(b) = bytes {
         Ok(parse_obj_by_kind(b.clone(), cid, check)?)
     } else {
         Err(anyhow::Error::new(DataStoreError::MissingBlock(
             cid.to_string(),
         )))
-    };
+    }
 }
 
 pub fn parse_obj_by_kind(

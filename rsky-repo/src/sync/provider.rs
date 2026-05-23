@@ -63,10 +63,7 @@ pub async fn get_records(
             .read_obj_and_bytes(
                 &commit_cid,
                 Box::new(|obj: CborValue| {
-                    match serde_cbor::value::from_value::<Commit>(obj.clone()) {
-                        Ok(_) => true,
-                        Err(_) => false,
-                    }
+                    serde_cbor::value::from_value::<Commit>(obj.clone()).is_ok()
                 }),
             )
             .await?
@@ -78,11 +75,9 @@ pub async fn get_records(
         .then(|p| {
             let mut mst_clone = mst.clone();
             async move {
-                Ok::<Vec<Cid>, anyhow::Error>(
-                    mst_clone
-                        .cids_for_path(util::format_data_key(p.collection, p.rkey))
-                        .await?,
-                )
+                mst_clone
+                    .cids_for_path(util::format_data_key(p.collection, p.rkey))
+                    .await
             }
         })
         .collect::<Vec<_>>()
@@ -98,7 +93,7 @@ pub async fn get_records(
             });
     let storage_guard = storage.read().await;
     let found = storage_guard.get_blocks(all_cids.to_list()).await?;
-    if found.missing.len() > 0 {
+    if !found.missing.is_empty() {
         return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
             "writeRecordsToCarStream".to_owned(),
             found.missing,

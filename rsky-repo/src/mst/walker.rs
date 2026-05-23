@@ -93,7 +93,7 @@ impl MstWalker {
         match self.status {
             WalkerStatus::WalkerStatusDone(_) => return Ok(()),
             WalkerStatus::WalkerStatusProgress(ref mut p) => {
-                if let Some(_) = p.walking {
+                if p.walking.is_some() {
                     if let NodeEntry::MST(ref mut curr) = p.curr {
                         let next = curr.at_index(0).await?;
                         if let Some(next) = next {
@@ -107,23 +107,20 @@ impl MstWalker {
                     } else {
                         bail!("No tree at pointer, cannot step into");
                     }
-                } else {
-                    if let NodeEntry::MST(ref mut mst) = p.curr {
-                        let next = mst.at_index(0).await?;
-                        if let Some(next) = next {
-                            self.status =
-                                WalkerStatus::WalkerStatusProgress(WalkerStatusProgress {
-                                    done: false,
-                                    walking: Some(mst.clone()),
-                                    curr: next,
-                                    index: 0,
-                                });
-                        } else {
-                            self.status = WalkerStatus::WalkerStatusDone(WalkerStatusDone(true));
-                        }
+                } else if let NodeEntry::MST(ref mut mst) = p.curr {
+                    let next = mst.at_index(0).await?;
+                    if let Some(next) = next {
+                        self.status = WalkerStatus::WalkerStatusProgress(WalkerStatusProgress {
+                            done: false,
+                            walking: Some(mst.clone()),
+                            curr: next,
+                            index: 0,
+                        });
                     } else {
-                        bail!("The root of the tree cannot be a leaf");
+                        self.status = WalkerStatus::WalkerStatusDone(WalkerStatusDone(true));
                     }
+                } else {
+                    bail!("The root of the tree cannot be a leaf");
                 }
             }
         }

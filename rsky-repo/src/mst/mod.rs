@@ -36,7 +36,7 @@ use std::{fmt, mem};
 use tokio::io::DuplexStream;
 use tokio::sync::RwLock;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NodeIter {
     entries: Vec<NodeEntry>, // Contains the remaining children of a node,
     // The iterator of the parent node, if present
@@ -44,16 +44,6 @@ pub struct NodeIter {
     // without indirection
     parent: Option<Box<NodeIter>>,
     this: Option<NodeEntry>,
-}
-
-impl Default for NodeIter {
-    fn default() -> Self {
-        NodeIter {
-            entries: vec![],
-            parent: None,
-            this: None,
-        }
-    }
 }
 
 /// We want to traverse (i.e. iterate over) this kind of tree depth-first. This means that
@@ -131,21 +121,11 @@ impl NodeIter {
 }
 
 /// Alternative implementation of iterator
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NodeIterReachable {
     entries: Vec<NodeEntry>,
     parent: Option<Box<NodeIterReachable>>,
     this: Option<NodeEntry>,
-}
-
-impl Default for NodeIterReachable {
-    fn default() -> Self {
-        NodeIterReachable {
-            entries: vec![],
-            parent: None,
-            this: None,
-        }
-    }
 }
 
 impl NodeIterReachable {
@@ -248,10 +228,7 @@ pub struct TreeEntry {
 
 impl Debug for TreeEntry {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let t_string = match &self.t {
-            None => None,
-            Some(cid) => Some(cid.to_string()),
-        };
+        let t_string = self.t.as_ref().map(|cid| cid.to_string());
         f.debug_struct("TreeEntry")
             .field("p", &self.p)
             .field("k", &self.k)
@@ -271,10 +248,7 @@ pub struct NodeData {
 
 impl Debug for NodeData {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let cid = match &self.l {
-            None => None,
-            Some(cid) => Some(cid.to_string()),
-        };
+        let cid = self.l.as_ref().map(|cid| cid.to_string());
         f.debug_struct("NodeData")
             .field("l", &cid)
             .field("e", &self.e)
@@ -331,17 +305,11 @@ pub enum NodeEntry {
 
 impl NodeEntry {
     pub fn is_tree(&self) -> bool {
-        match self {
-            NodeEntry::MST(_) => true,
-            _ => false,
-        }
+        matches!(self, NodeEntry::MST(_))
     }
 
     pub fn is_leaf(&self) -> bool {
-        match self {
-            NodeEntry::Leaf(_) => true,
-            _ => false,
-        }
+        matches!(self, NodeEntry::Leaf(_))
     }
 
     fn iter(self) -> NodeIter {
@@ -492,7 +460,7 @@ impl Display for MST {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         fn pointer_str(mst: &MST) -> String {
             let cid_guard = mst.pointer.try_read().unwrap();
-            format!("*({})", util::short_cid(&*cid_guard))
+            format!("*({})", util::short_cid(&cid_guard))
         }
 
         fn fmt_mst(mst: &MST, f: &mut Formatter<'_>, prefix: &str, is_last: bool) -> fmt::Result {
@@ -566,7 +534,7 @@ impl MST {
         entries: Option<Vec<NodeEntry>>,
         layer: Option<u32>,
     ) -> Result<Self> {
-        let entries = entries.unwrap_or(Vec::new());
+        let entries = entries.unwrap_or_default();
         let pointer = util::cid_for_entries(entries.as_slice()).await?;
         Ok(MST::new(storage, pointer, Some(entries), layer))
     }
@@ -598,7 +566,7 @@ impl MST {
     pub async fn new_tree(&mut self, entries: Vec<NodeEntry>) -> Result<Self> {
         let mut mst = MST::new(
             self.storage.clone(),
-            self.pointer.read().await.clone(),
+            *self.pointer.read().await,
             Some(entries),
             self.layer,
         );
@@ -619,19 +587,16 @@ impl MST {
                 let pointer = self.pointer.read().await;
                 let data: CborValue = storage_guard
                     .read_obj(
-                        &*pointer,
+                        &pointer,
                         Box::new(|obj: CborValue| {
-                            match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
-                                Ok(_) => true,
-                                Err(_) => false,
-                            }
+                            serde_cbor::value::from_value::<NodeData>(obj.clone()).is_ok()
                         }),
                     )
                     .await?;
                 let data: NodeData = serde_cbor::value::from_value(data)?;
 
                 // Compute the layer
-                let first_leaf = data.e.get(0);
+                let first_leaf = data.e.first();
                 let layer = match first_leaf {
                     Some(first_leaf) => Some(util::leading_zeros_on_hash(&first_leaf.k)?),
                     None => None,
@@ -651,7 +616,7 @@ impl MST {
         guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No entries present"))
-            .map(|v| v.clone())
+            .cloned()
     }
 
     // We don't hash the node on every mutation for performance reasons
@@ -682,7 +647,7 @@ impl MST {
             }
         }
 
-        if outdated.len() > 0 {
+        if !outdated.is_empty() {
             for outdated_entry in &outdated {
                 let _ = outdated_entry.get_pointer().await?;
             }
@@ -765,9 +730,10 @@ impl MST {
 
     /// Adds a new leaf for the given key/value pair
     /// Throws if a leaf with that key already exists
+    #[allow(clippy::comparison_chain)]
     #[async_recursion(Sync)]
     pub async fn add(&mut self, key: &str, value: Cid, known_zeros: Option<u32>) -> Result<Self> {
-        util::ensure_valid_mst_key(&key)?;
+        util::ensure_valid_mst_key(key)?;
         let key_zeros: u32;
         if let Some(z) = known_zeros {
             key_zeros = z;
@@ -781,9 +747,10 @@ impl MST {
             value,
         };
 
+        // todo: rewrite as match
         return if key_zeros == layer {
             // it belongs in this layer
-            let index = self.find_gt_or_equal_leaf_index(&key).await?;
+            let index = self.find_gt_or_equal_leaf_index(key).await?;
 
             let found = self.at_index(index).await?;
             if let Some(NodeEntry::Leaf(l)) = found {
@@ -875,7 +842,7 @@ impl MST {
         }
         let prev = self.at_index(index - 1).await?;
         if let Some(NodeEntry::MST(mut p)) = prev {
-            return Ok(p.get(key).await?);
+            return p.get(key).await;
         }
         return Ok(None);
     }
@@ -913,7 +880,7 @@ impl MST {
     /// Deletes the value at the given key
     pub async fn delete(&mut self, key: &String) -> Result<Self> {
         let altered = self.delete_recurse(key).await?;
-        Ok(altered.trim_top().await?)
+        altered.trim_top().await
     }
 
     #[async_recursion(Sync)]
@@ -945,7 +912,7 @@ impl MST {
         return if let Some(NodeEntry::MST(mut p)) = prev {
             let subtree = &mut p.delete_recurse(key).await?;
             let subtree_entries = subtree.get_entries().await?;
-            if subtree_entries.len() == 0 {
+            if subtree_entries.is_empty() {
                 self.remove_entry(index - 1).await
             } else {
                 self.update_entry(index - 1, NodeEntry::MST(subtree.clone()))
@@ -962,11 +929,11 @@ impl MST {
     /// update entry in place
     pub async fn update_entry(&mut self, index: isize, entry: NodeEntry) -> Result<Self> {
         let mut update = Vec::new();
-        for e in self.slice(Some(0), Some(index)).await?.to_vec() {
+        for e in self.slice(Some(0), Some(index)).await?.iter().cloned() {
             update.push(e);
         }
         update.push(entry);
-        for e in self.slice(Some(index + 1), None).await?.to_vec() {
+        for e in self.slice(Some(index + 1), None).await?.iter().cloned() {
             update.push(e);
         }
         self.new_tree(update).await
@@ -999,10 +966,7 @@ impl MST {
     pub async fn at_index(&mut self, index: isize) -> Result<Option<NodeEntry>> {
         let entries = self.get_entries().await?;
         if index >= 0 {
-            Ok(entries
-                .into_iter()
-                .nth(index as usize)
-                .map(|entry| entry.clone()))
+            Ok(entries.into_iter().nth(index as usize))
         } else {
             Ok(None)
         }
@@ -1016,9 +980,9 @@ impl MST {
             (Some(start), Some(end)) => {
                 // Adapted from Javascript Array.prototype.slice()
                 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/slice
-                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                let start: usize = if start < 0 && start >= -entry_len {
                     (start + entry_len) as usize
-                } else if start < (-1 * entry_len) {
+                } else if start < -entry_len {
                     0
                 } else if start >= entry_len {
                     return Ok(vec![]);
@@ -1026,9 +990,9 @@ impl MST {
                     start as usize
                 };
 
-                let end: usize = if end < 0 && end >= (-1 * entry_len) {
+                let end: usize = if end < 0 && end >= -entry_len {
                     (end + entry_len) as usize
-                } else if end < (-1 * entry_len) {
+                } else if end < -entry_len {
                     0
                 } else if end >= entry_len {
                     entries.len()
@@ -1041,9 +1005,9 @@ impl MST {
                 Ok(entries[start..end].to_vec())
             }
             (Some(start), None) => {
-                let start: usize = if start < 0 && start >= (-1 * entry_len) {
+                let start: usize = if start < 0 && start >= -entry_len {
                     (start + entry_len) as usize
-                } else if start < (-1 * entry_len) {
+                } else if start < -entry_len {
                     0
                 } else if start >= entry_len {
                     return Ok(vec![]);
@@ -1053,9 +1017,9 @@ impl MST {
                 Ok(entries[start..].to_vec())
             }
             (None, Some(end)) => {
-                let end: usize = if end < 0 && end >= (-1 * entry_len) {
+                let end: usize = if end < 0 && end >= -entry_len {
                     (end + entry_len) as usize
-                } else if end < (-1 * entry_len) {
+                } else if end < -entry_len {
                     0
                 } else if end >= entry_len {
                     entries.len()
@@ -1073,11 +1037,11 @@ impl MST {
     /// inserts entry at index
     pub async fn splice_in(&mut self, entry: NodeEntry, index: isize) -> Result<Self> {
         let mut update = Vec::new();
-        for e in self.slice(Some(0), Some(index)).await?.to_vec() {
+        for e in self.slice(Some(0), Some(index)).await?.iter().cloned() {
             update.push(e);
         }
         update.push(entry);
-        for e in self.slice(Some(index), None).await?.to_vec() {
+        for e in self.slice(Some(index), None).await?.iter().cloned() {
             update.push(e);
         }
         self.new_tree(update).await
@@ -1158,16 +1122,15 @@ impl MST {
             }
         }
 
-        let left_output: Option<Self>;
-        match left.get_entries().await?.len() {
-            0 => left_output = None,
-            _ => left_output = Some(left),
+        let left_output = match left.get_entries().await?.len() {
+            0 => None,
+            _ => Some(left),
         };
-        let right_output: Option<Self>;
-        match right.get_entries().await?.len() {
-            0 => right_output = None,
-            _ => right_output = Some(right),
+        let right_output = match right.get_entries().await?.len() {
+            0 => None,
+            _ => Some(right),
         };
+
         Ok((left_output, right_output))
     }
 
@@ -1231,7 +1194,7 @@ impl MST {
         let entries = self.get_entries().await?;
         let maybe_index = entries.iter().position(|entry| match entry {
             NodeEntry::MST(_) => false,
-            NodeEntry::Leaf(entry) => entry.key >= key.to_string(),
+            NodeEntry::Leaf(entry) => entry.key.as_str() >= key,
         });
         // if we can't find, we're on the end
         if let Some(i) = maybe_index {
@@ -1261,9 +1224,8 @@ impl MST {
                 }
             }
         }
-        for i in index..entries.len() {
-            let entry = entries[i].clone();
-            match entry {
+        for entry in entries.iter().skip(index) {
+            match entry.clone() {
                 NodeEntry::Leaf(e) => iter.push(e),
                 NodeEntry::MST(mut e) => {
                     for leaf in e.walk_leaves_from(key).await {
@@ -1427,7 +1389,7 @@ impl MST {
                 let storage_guard = self.storage.read().await;
                 storage_guard.get_blocks(to_fetch.to_list()).await?
             };
-            if fetched.missing.len() > 0 {
+            if !fetched.missing.is_empty() {
                 return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                     "mst node".to_owned(),
                     fetched.missing,
@@ -1436,10 +1398,7 @@ impl MST {
             for cid in to_fetch.to_list() {
                 let found: ObjAndBytes =
                     parse::get_and_parse_by_kind(&fetched.blocks, cid, |obj: CborValue| {
-                        match serde_cbor::value::from_value::<NodeData>(obj.clone()) {
-                            Ok(_) => true,
-                            Err(_) => false,
-                        }
+                        serde_cbor::value::from_value::<NodeData>(obj.clone()).is_ok()
                     })?;
                 car.write(cid, found.bytes).await?;
                 let node_data: NodeData = serde_cbor::value::from_value(found.obj)?;
@@ -1458,7 +1417,7 @@ impl MST {
             let storage_guard = self.storage.read().await;
             storage_guard.get_blocks(leaves.to_list()).await?
         };
-        if leaf_data.missing.len() > 0 {
+        if !leaf_data.missing.is_empty() {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "mst leaf".to_owned(),
                 leaf_data.missing,
