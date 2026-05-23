@@ -139,6 +139,9 @@ jobs:
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
       - name: Run cargo test for ${{ matrix.package }}
+        env:
+          FJALL_CACHE_SIZE_MB: "64"
+          FJALL_WRITE_BUFFER_SIZE_MB: "64"
         run: cargo test --release -p ${{ matrix.package }}
 
   # Run formatting check on the entire workspace
