@@ -1314,6 +1314,7 @@ mod tests {
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
+                    pinned_post_uri: String::new(),
                 };
                 let rocket = before(config.clone());
 
@@ -1373,6 +1374,7 @@ mod tests {
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
+                    pinned_post_uri: String::new(),
                 };
                 let rocket = before(config.clone());
 
@@ -1431,6 +1433,7 @@ mod tests {
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
+                    pinned_post_uri: String::new(),
                 };
                 let rocket = before(config.clone());
 
@@ -1490,6 +1493,7 @@ mod tests {
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 0.5,
                     trending_percentile_min: 0.9,
+                    pinned_post_uri: String::new(),
                 };
                 let rocket = before(config.clone());
 
@@ -1561,6 +1565,7 @@ mod tests {
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
+                    pinned_post_uri: String::new(),
                 };
                 let rocket = before(config.clone());
 
