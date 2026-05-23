@@ -78,7 +78,7 @@ async fn validate_plc_request(
 
     let account = match account_manager
         .get_account(
-            &did.to_string(),
+            did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: None,

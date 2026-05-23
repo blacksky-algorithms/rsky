@@ -36,6 +36,7 @@ pub struct TransformedCreateAccountInput {
 }
 
 //TODO: Potential for taking advantage of async better
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.createAccount",

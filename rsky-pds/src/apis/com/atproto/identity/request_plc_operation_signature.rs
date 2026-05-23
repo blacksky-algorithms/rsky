@@ -32,7 +32,7 @@ async fn get_account(
         include_deactivated: Some(true),
     };
     match account_manager
-        .get_account(&requester_did.to_string(), Some(availability_flags))
+        .get_account(requester_did, Some(availability_flags))
         .await
     {
         Ok(account) => match account {
@@ -55,7 +55,7 @@ async fn create_email_token(
     account_manager: &AccountManager,
 ) -> Result<String, ApiError> {
     match account_manager
-        .create_email_token(&requester.to_string(), EmailTokenPurpose::PlcOperation)
+        .create_email_token(requester, EmailTokenPurpose::PlcOperation)
         .await
     {
         Ok(res) => Ok(res),
