@@ -211,6 +211,7 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           # Disable cache for forks to avoid permission issues
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: ""
@@ -227,6 +228,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           sbom: true
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
