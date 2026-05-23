@@ -35,6 +35,9 @@ pub struct AppConfig {
     pub daily_video_limit: u32,
     /// Daily byte upload limit per user (default: 10GB)
     pub daily_byte_limit: u64,
+
+    /// Path to ffmpeg binary for MOV->MP4 remuxing.
+    pub ffmpeg_path: String,
 }
 
 impl AppConfig {
@@ -74,6 +77,8 @@ impl AppConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10_737_418_240), // 10GB
+
+            ffmpeg_path: env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string()),
         })
     }
 }

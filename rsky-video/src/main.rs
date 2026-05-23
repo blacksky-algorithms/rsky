@@ -26,6 +26,7 @@ mod db;
 mod error;
 mod pds;
 mod signing;
+mod transcode;
 mod xrpc;
 
 pub use config::AppConfig;
