@@ -913,6 +913,7 @@ impl IngesterManager {
         timestamp: &str,
         handle_hint: Option<&str>,
     ) -> Result<(), WintermuteError> {
+        use crate::config::HANDLE_MAX_TRIES;
         use rsky_identity::IdResolver;
         use rsky_identity::types::IdentityResolverOpts;
 
@@ -948,11 +949,24 @@ impl IngesterManager {
                             }
                             _ => {
                                 tracing::debug!(
-                                    "handle {} does not resolve back to {} - setting handle to null",
+                                    "handle {} does not resolve back to {} - bumping retry count",
                                     h,
                                     did
                                 );
-                                return Ok(()); // Don't update if handle doesn't verify
+                                // Verify-back failed: bump retries so we don't
+                                // re-attempt this DID every cycle. The sweep
+                                // loop will revisit after the per-tries cooldown.
+                                let client = pool.get().await?;
+                                client
+                                    .execute(
+                                        "UPDATE actor \
+                                         SET \"indexedAt\" = $2, \
+                                             \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
+                                         WHERE did = $1",
+                                        &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                                    )
+                                    .await?;
+                                return Ok(());
                             }
                         }
                     }
@@ -961,20 +975,46 @@ impl IngesterManager {
                 }
                 Ok(None) => {
                     tracing::warn!("DID {} not found", did);
+                    let client = pool.get().await?;
+                    client
+                        .execute(
+                            "UPDATE actor \
+                             SET \"indexedAt\" = $2, \
+                                 \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
+                             WHERE did = $1",
+                            &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                        )
+                        .await?;
                     return Ok(());
                 }
                 Err(e) => {
                     tracing::warn!("failed to resolve DID {}: {}", did, e);
-                    return Ok(()); // Don't fail on resolution errors, just skip
+                    // Transient resolver error: bump anyway. A real outage
+                    // would otherwise wedge the queue indefinitely.
+                    let client = pool.get().await?;
+                    client
+                        .execute(
+                            "UPDATE actor \
+                             SET \"indexedAt\" = $2, \
+                                 \"handleResolveTries\" = LEAST(\"handleResolveTries\" + 1, $3) \
+                             WHERE did = $1",
+                            &[&did, &timestamp, &HANDLE_MAX_TRIES],
+                        )
+                        .await?;
+                    return Ok(());
                 }
             }
         };
 
-        // Update actor table
+        // Update actor table. Reset tries on success.
         let client = pool.get().await?;
         let result = client
             .execute(
-                "UPDATE actor SET handle = $1, \"indexedAt\" = $2 WHERE did = $3",
+                "UPDATE actor \
+                 SET handle = $1, \
+                     \"indexedAt\" = $2, \
+                     \"handleResolveTries\" = 0 \
+                 WHERE did = $3",
                 &[&handle, &timestamp, &did],
             )
             .await?;
