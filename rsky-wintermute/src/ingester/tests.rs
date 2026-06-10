@@ -965,4 +965,189 @@ mod ingester_tests {
             .unwrap();
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
+
+    mod account_event_time_guard {
+        use crate::ingester::IngesterManager;
+        use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+        use tokio_postgres::NoTls;
+
+        fn setup_test_pool() -> Pool {
+            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+            });
+            let mut pg_config = Config::new();
+            pg_config.url = Some(database_url);
+            pg_config.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            pg_config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap()
+        }
+
+        async fn seed_actor(pool: &Pool, did: &str) {
+            let client = pool.get().await.unwrap();
+            client
+                .execute("DELETE FROM actor WHERE did = $1", &[&did])
+                .await
+                .unwrap();
+            client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, NOW())",
+                    &[&did, &"test.example"],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn read_actor(
+            pool: &Pool,
+            did: &str,
+        ) -> (Option<String>, Option<chrono::DateTime<chrono::Utc>>) {
+            let client = pool.get().await.unwrap();
+            let row = client
+                .query_one(
+                    "SELECT \"upstreamStatus\", \"accountEventAt\" FROM actor WHERE did = $1",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+            (row.get(0), row.get(1))
+        }
+
+        #[tokio::test]
+        async fn applies_first_event_when_column_is_null() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-first-event";
+            seed_actor(&pool, did).await;
+
+            IngesterManager::process_account_event(
+                &pool,
+                did,
+                "2026-06-10T12:00:00Z",
+                false,
+                Some("deactivated"),
+            )
+            .await
+            .unwrap();
+
+            let (status, at) = read_actor(&pool, did).await;
+            assert_eq!(status.as_deref(), Some("deactivated"));
+            assert_eq!(
+                at,
+                Some(
+                    "2026-06-10T12:00:00Z"
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .unwrap()
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn newer_time_overwrites_older() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-newer-time";
+            seed_actor(&pool, did).await;
+
+            IngesterManager::process_account_event(
+                &pool,
+                did,
+                "2026-06-10T12:00:00Z",
+                false,
+                Some("deactivated"),
+            )
+            .await
+            .unwrap();
+            IngesterManager::process_account_event(&pool, did, "2026-06-10T12:00:05Z", true, None)
+                .await
+                .unwrap();
+
+            let (status, at) = read_actor(&pool, did).await;
+            assert!(status.is_none(), "expected active row, got {status:?}");
+            assert_eq!(
+                at,
+                Some(
+                    "2026-06-10T12:00:05Z"
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .unwrap()
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn stale_event_does_not_clobber_newer_state() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-stale-event";
+            seed_actor(&pool, did).await;
+
+            IngesterManager::process_account_event(&pool, did, "2026-06-10T12:00:05Z", true, None)
+                .await
+                .unwrap();
+            IngesterManager::process_account_event(
+                &pool,
+                did,
+                "2026-06-10T12:00:00Z",
+                false,
+                Some("deactivated"),
+            )
+            .await
+            .unwrap();
+
+            let (status, at) = read_actor(&pool, did).await;
+            assert!(status.is_none(), "stale deactivate clobbered active state");
+            assert_eq!(
+                at,
+                Some(
+                    "2026-06-10T12:00:05Z"
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .unwrap()
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn equal_time_is_idempotent_noop() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-equal-time";
+            seed_actor(&pool, did).await;
+
+            IngesterManager::process_account_event(
+                &pool,
+                did,
+                "2026-06-10T12:00:00Z",
+                false,
+                Some("deactivated"),
+            )
+            .await
+            .unwrap();
+            IngesterManager::process_account_event(&pool, did, "2026-06-10T12:00:00Z", true, None)
+                .await
+                .unwrap();
+
+            let (status, _at) = read_actor(&pool, did).await;
+            assert_eq!(
+                status.as_deref(),
+                Some("deactivated"),
+                "equal-time replay should not overwrite"
+            );
+        }
+
+        #[tokio::test]
+        async fn malformed_time_returns_error() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-malformed-time";
+            seed_actor(&pool, did).await;
+
+            let err =
+                IngesterManager::process_account_event(&pool, did, "not-a-timestamp", true, None)
+                    .await
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("invalid account event time"),
+                "unexpected error: {err}"
+            );
+
+            let (status, at) = read_actor(&pool, did).await;
+            assert!(status.is_none());
+            assert!(at.is_none());
+        }
+    }
 }

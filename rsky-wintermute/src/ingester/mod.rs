@@ -454,12 +454,14 @@ impl IngesterManager {
                     if let Some(ref account) = event.account {
                         let pool_clone = Arc::clone(pool);
                         let event_did = event.did.clone();
+                        let event_time = event.time.clone();
                         let active = account.active;
                         let status = account.status.clone();
                         tokio::spawn(async move {
                             if let Err(e) = Self::process_account_event(
                                 &pool_clone,
                                 &event_did,
+                                &event_time,
                                 active,
                                 status.as_deref(),
                             )
@@ -996,29 +998,34 @@ impl IngesterManager {
     async fn process_account_event(
         pool: &Pool,
         did: &str,
+        time: &str,
         active: bool,
         status: Option<&str>,
     ) -> Result<(), WintermuteError> {
         tracing::debug!(
-            "processing account event for {}: active={}, status={:?}",
+            "processing account event for {}: time={}, active={}, status={:?}",
             did,
+            time,
             active,
             status
         );
 
-        // Determine upstream_status based on active flag and status
+        let event_at = time.parse::<chrono::DateTime<chrono::Utc>>().map_err(|e| {
+            WintermuteError::Serialization(format!(
+                "invalid account event time '{time}' for {did}: {e}"
+            ))
+        })?;
+
         let upstream_status: Option<&str> = if active {
-            // Active accounts have no upstream status
             None
         } else {
-            // Inactive accounts: check for recognized statuses
             match status {
                 Some(s) if ["deactivated", "suspended", "takendown", "deleted"].contains(&s) => {
                     Some(s)
                 }
                 Some(s) => {
                     tracing::warn!("unrecognized account status '{}' for {}", s, did);
-                    Some(s) // Still store it, just log a warning
+                    Some(s)
                 }
                 None => {
                     tracing::warn!("inactive account {} has no status", did);
@@ -1027,23 +1034,30 @@ impl IngesterManager {
             }
         };
 
-        // Update actor table
         let client = pool.get().await?;
         let result = client
             .execute(
-                "UPDATE actor SET \"upstreamStatus\" = $1 WHERE did = $2",
-                &[&upstream_status, &did],
+                "UPDATE actor
+                    SET \"upstreamStatus\" = $1, \"accountEventAt\" = $2
+                  WHERE did = $3
+                    AND (\"accountEventAt\" IS NULL OR \"accountEventAt\" < $2)",
+                &[&upstream_status, &event_at, &did],
             )
             .await?;
 
         if result > 0 {
             tracing::info!(
-                "updated upstream_status for {} to {:?}",
+                "updated upstream_status for {} to {:?} at {}",
                 did,
-                upstream_status.unwrap_or("null")
+                upstream_status.unwrap_or("null"),
+                event_at
             );
         } else {
-            tracing::debug!("no actor found to update status for {}", did);
+            tracing::debug!(
+                "skipped account event for {} (stale or actor missing); time={}",
+                did,
+                event_at
+            );
         }
 
         Ok(())
