@@ -166,3 +166,95 @@ pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .and_then(|s| s.parse().ok())
         .unwrap_or(32) // Default: 32 connections for backfiller (matches worker count)
 });
+
+// Comma-separated NSID prefixes (e.g. "app.bsky.,chat.bsky.,site.standard.") allowed in the record store. Empty = unset.
+pub static RECORD_COLLECTION_ALLOWLIST: LazyLock<Vec<String>> = LazyLock::new(|| {
+    std::env::var("RECORD_COLLECTION_ALLOWLIST")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+});
+
+const LEGACY_INGEST_PREFIXES: [&str; 2] = ["app.bsky.", "chat.bsky."];
+
+fn record_allowed(allow: &[String], collection: &str) -> bool {
+    allow.is_empty() || allow.iter().any(|p| collection.starts_with(p.as_str()))
+}
+
+fn ingest_allowed(allow: &[String], collection: &str) -> bool {
+    if allow.is_empty() {
+        LEGACY_INGEST_PREFIXES
+            .iter()
+            .any(|p| collection.starts_with(p))
+    } else {
+        allow.iter().any(|p| collection.starts_with(p.as_str()))
+    }
+}
+
+// Live indexer: unset allowlist allows all collections.
+#[must_use]
+pub fn record_collection_allowed(collection: &str) -> bool {
+    record_allowed(&RECORD_COLLECTION_ALLOWLIST, collection)
+}
+
+// Backfiller/direct-index: unset allowlist falls back to the legacy bsky/chat filter.
+#[must_use]
+pub fn ingest_collection_allowed(collection: &str) -> bool {
+    ingest_allowed(&RECORD_COLLECTION_ALLOWLIST, collection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prefixes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn record_allowed_empty_allows_everything() {
+        let allow: Vec<String> = Vec::new();
+        assert!(record_allowed(&allow, "app.bsky.feed.post"));
+        assert!(record_allowed(&allow, "com.whtwnd.blog.entry"));
+    }
+
+    #[test]
+    fn record_allowed_filters_by_prefix() {
+        let allow = prefixes(&["app.bsky.", "chat.bsky.", "site.standard."]);
+        assert!(record_allowed(&allow, "app.bsky.feed.post"));
+        assert!(record_allowed(&allow, "chat.bsky.actor.declaration"));
+        assert!(record_allowed(&allow, "site.standard.profile"));
+        assert!(!record_allowed(&allow, "com.whtwnd.blog.entry"));
+        assert!(!record_allowed(&allow, "app.popsky.feed.post"));
+    }
+
+    #[test]
+    fn ingest_allowed_empty_uses_legacy_bsky_chat() {
+        let allow: Vec<String> = Vec::new();
+        assert!(ingest_allowed(&allow, "app.bsky.feed.post"));
+        assert!(ingest_allowed(&allow, "chat.bsky.actor.declaration"));
+        assert!(!ingest_allowed(&allow, "site.standard.profile"));
+        assert!(!ingest_allowed(&allow, "com.whtwnd.blog.entry"));
+    }
+
+    #[test]
+    fn ingest_allowed_uses_configured_allowlist_when_set() {
+        let allow = prefixes(&["app.bsky.", "chat.bsky.", "site.standard."]);
+        assert!(ingest_allowed(&allow, "site.standard.profile"));
+        assert!(ingest_allowed(&allow, "app.bsky.feed.post"));
+        assert!(!ingest_allowed(&allow, "com.whtwnd.blog.entry"));
+    }
+
+    #[test]
+    fn public_wrappers_use_env_allowlist() {
+        // Unset in the test process: live allows all, ingest uses legacy filter.
+        assert!(record_collection_allowed("com.whtwnd.blog.entry"));
+        assert!(ingest_collection_allowed("app.bsky.feed.post"));
+        assert!(!ingest_collection_allowed("com.whtwnd.blog.entry"));
+    }
+}

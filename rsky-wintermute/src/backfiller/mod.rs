@@ -340,7 +340,7 @@ impl BackfillerManager {
                 continue;
             };
 
-            if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+            if !crate::config::ingest_collection_allowed(collection) {
                 metrics::BACKFILLER_RECORDS_FILTERED_TOTAL.inc();
                 continue;
             }

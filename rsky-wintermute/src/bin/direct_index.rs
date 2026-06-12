@@ -193,8 +193,7 @@ async fn process_did(
         let collection = uri.get_collection();
         let rkey = uri.get_rkey();
 
-        // Filter to bsky/chat records
-        if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+        if !rsky_wintermute::config::ingest_collection_allowed(&collection) {
             skipped_count += 1;
             continue;
         }

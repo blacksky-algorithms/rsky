@@ -1108,6 +1108,12 @@ impl IndexerManager {
 
         tracing::debug!("parsed uri: did={did}, collection={collection}, rkey={rkey}");
 
+        if !crate::config::record_collection_allowed(&collection) {
+            metrics::INDEXER_RECORDS_FILTERED_TOTAL.inc();
+            tracing::debug!("skipping non-allowlisted collection: {collection}");
+            return Ok(());
+        }
+
         let client = pool.get().await?;
         tracing::debug!("got database client");
 
@@ -1536,6 +1542,16 @@ impl IndexerManager {
             }
         }
         let parse_ms = parse_start.elapsed().as_millis();
+
+        parsed_jobs.retain(|p| {
+            if crate::config::record_collection_allowed(&p.collection) {
+                true
+            } else {
+                metrics::INDEXER_RECORDS_FILTERED_TOTAL.inc();
+                results.push(((*p.key).clone(), Ok(())));
+                false
+            }
+        });
 
         if parsed_jobs.is_empty() {
             return results;
