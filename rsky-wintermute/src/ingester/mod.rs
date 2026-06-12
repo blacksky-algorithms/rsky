@@ -227,14 +227,16 @@ impl IngesterManager {
         // Use AtomicI64 for cheap, lock-free cursor updates (like indigo/tap's lastSeq)
         let last_seq = Arc::new(AtomicI64::new(0));
 
-        // Get cursor from postgres (survives Fjall corruption)
-        let cursor = match get_cursor_from_postgres(pool, &cursor_key).await {
+        // Get cursor from postgres (survives Fjall corruption). A saved cursor resumes;
+        // a fresh subscription falls back to FIREHOSE_INITIAL_CURSOR (None=live, Some(0)=oldest).
+        let saved = match get_cursor_from_postgres(pool, &cursor_key).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("failed to get cursor from postgres: {e}");
                 return ConnectionResult::Error(e);
             }
         };
+        let start_cursor = resolve_start_cursor(saved, *crate::config::FIREHOSE_INITIAL_CURSOR);
 
         let clean_hostname = hostname
             .trim_start_matches("https://")
@@ -245,13 +247,7 @@ impl IngesterManager {
             "wss://{clean_hostname}/xrpc/com.atproto.sync.subscribeRepos"
         )) {
             Ok(mut u) => {
-                // Only add cursor if we have a saved position
-                // No cursor = start from current stream position (live)
-                // cursor=N = resume from seq N (may be in rollback window)
-                if cursor > 0 {
-                    u.query_pairs_mut()
-                        .append_pair("cursor", &cursor.to_string());
-                }
+                append_cursor_param(&mut u, start_cursor);
                 u
             }
             Err(e) => {
@@ -261,8 +257,8 @@ impl IngesterManager {
             }
         };
 
-        if cursor > 0 {
-            tracing::info!("connecting to {url} resuming from cursor {cursor}");
+        if let Some(c) = start_cursor {
+            tracing::info!("connecting to {url} starting from cursor {c}");
         } else {
             tracing::info!("connecting to {url} starting from live stream");
         }
@@ -1064,7 +1060,10 @@ impl IngesterManager {
     }
 }
 
-async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, WintermuteError> {
+async fn get_cursor_from_postgres(
+    pool: &Pool,
+    service: &str,
+) -> Result<Option<i64>, WintermuteError> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
@@ -1073,7 +1072,20 @@ async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, Win
         )
         .await?;
 
-    Ok(row.map_or(0, |r| r.get::<_, i64>("cursor")))
+    Ok(row.map(|r| r.get::<_, i64>("cursor")))
+}
+
+// Resolve the start cursor for a connection: a saved cursor wins; otherwise fall back to the
+// configured initial cursor (None = start live, Some(0) = oldest/full backfill window).
+fn resolve_start_cursor(saved: Option<i64>, initial: Option<i64>) -> Option<i64> {
+    saved.or(initial)
+}
+
+// Append the cursor query param when a start cursor is set, including cursor=0.
+fn append_cursor_param(url: &mut url::Url, start_cursor: Option<i64>) {
+    if let Some(c) = start_cursor {
+        url.query_pairs_mut().append_pair("cursor", &c.to_string());
+    }
 }
 
 async fn set_cursor_in_postgres(
@@ -1099,4 +1111,47 @@ async fn delete_cursor_from_postgres(pool: &Pool, service: &str) -> Result<(), W
         .execute("DELETE FROM sub_state WHERE service = $1", &[&service])
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::{append_cursor_param, resolve_start_cursor};
+
+    fn subscribe_url() -> url::Url {
+        url::Url::parse("wss://relay.example/xrpc/com.atproto.sync.subscribeRepos").unwrap()
+    }
+
+    #[test]
+    fn saved_cursor_takes_precedence_over_initial() {
+        assert_eq!(resolve_start_cursor(Some(100), Some(0)), Some(100));
+        assert_eq!(resolve_start_cursor(Some(5), None), Some(5));
+    }
+
+    #[test]
+    fn fresh_subscription_uses_initial_cursor() {
+        assert_eq!(resolve_start_cursor(None, Some(0)), Some(0));
+        assert_eq!(resolve_start_cursor(None, Some(42)), Some(42));
+        assert_eq!(resolve_start_cursor(None, None), None);
+    }
+
+    #[test]
+    fn append_cursor_param_emits_zero_explicitly() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, Some(0));
+        assert_eq!(u.query(), Some("cursor=0"));
+    }
+
+    #[test]
+    fn append_cursor_param_omits_when_none() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, None);
+        assert_eq!(u.query(), None);
+    }
+
+    #[test]
+    fn append_cursor_param_sets_positive_seq() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, Some(12345));
+        assert_eq!(u.query(), Some("cursor=12345"));
+    }
 }
