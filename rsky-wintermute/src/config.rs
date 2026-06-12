@@ -41,6 +41,13 @@ pub static CURSOR_SAVE_INTERVAL: LazyLock<Duration> = LazyLock::new(|| {
     Duration::from_secs(secs)
 });
 
+// Fresh-subscription start cursor: unset = live; 0 = oldest (full backfill window); N = from seq N.
+pub static FIREHOSE_INITIAL_CURSOR: LazyLock<Option<i64>> = LazyLock::new(|| {
+    std::env::var("FIREHOSE_INITIAL_CURSOR")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+});
+
 // Indexer config - tunable via environment variables
 pub static WORKERS_INDEXER: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("INDEXER_WORKERS")
