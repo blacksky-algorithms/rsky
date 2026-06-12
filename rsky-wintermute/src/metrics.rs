@@ -367,6 +367,14 @@ pub static INDEXER_STALE_WRITES_SKIPPED_TOTAL: LazyLock<IntCounter> = LazyLock::
     .unwrap()
 });
 
+pub static INDEXER_RECORDS_FILTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "indexer_records_filtered_total",
+        "Total number of records skipped (collection not in allowlist)"
+    )
+    .unwrap()
+});
+
 pub static INDEXER_QUEUE_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
         "indexer_queue_length",
