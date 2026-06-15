@@ -557,7 +557,7 @@ impl IndexerManager {
 
             // Process the entire batch with batch INSERT statements
             let process_start = Instant::now();
-            let results = Self::process_jobs_batch(&pool, &jobs).await;
+            let results = Self::process_jobs_batch(&pool, &jobs, false).await;
             let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue
@@ -1452,6 +1452,7 @@ impl IndexerManager {
     pub async fn process_jobs_batch(
         pool: &Pool,
         jobs: &[(Vec<u8>, IndexJob)],
+        bulk_load: bool,
     ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
         use crate::metrics;
 
@@ -1475,7 +1476,7 @@ impl IndexerManager {
 
         // Process creates in batch (uses parallel COPY for different collection types)
         if !creates.is_empty() {
-            let batch_results = Self::batch_insert_records(pool, &creates).await;
+            let batch_results = Self::batch_insert_records(pool, &creates, bulk_load).await;
             results.extend(batch_results);
         }
 
@@ -1494,6 +1495,7 @@ impl IndexerManager {
     async fn batch_insert_records(
         pool: &Pool,
         jobs: &[&(Vec<u8>, IndexJob)],
+        bulk_load: bool,
     ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
         use crate::metrics;
         use std::time::Instant;
@@ -1644,9 +1646,9 @@ impl IndexerManager {
             blocks_result,
             profiles_result,
         ) = tokio::join!(
-            Self::parallel_copy_posts(pool, &posts),
-            Self::parallel_copy_likes(pool, &likes),
-            Self::parallel_copy_follows(pool, &follows),
+            Self::parallel_copy_posts(pool, &posts, bulk_load),
+            Self::parallel_copy_likes(pool, &likes, bulk_load),
+            Self::parallel_copy_follows(pool, &follows, bulk_load),
             Self::parallel_copy_reposts(pool, &reposts),
             Self::parallel_copy_blocks(pool, &blocks),
             Self::parallel_copy_profiles(pool, &profiles),
@@ -2255,6 +2257,7 @@ impl IndexerManager {
         let mut descriptions: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut avatar_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
         let mut banner_cids: Vec<Option<String>> = Vec::with_capacity(jobs.len());
+        let mut created_ats: Vec<String> = Vec::with_capacity(jobs.len());
         let mut indexed_ats: Vec<String> = Vec::with_capacity(jobs.len());
 
         for pj in jobs {
@@ -2274,6 +2277,12 @@ impl IndexerManager {
                     .and_then(|v| v.get("$link"))
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                // profile.createdAt is NOT NULL; records often omit it, so fall back to indexedAt.
+                let created_at = record
+                    .get("createdAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&pj.job.indexed_at)
+                    .to_owned();
 
                 uris.push(uri);
                 cids.push(pj.job.cid.clone());
@@ -2282,6 +2291,7 @@ impl IndexerManager {
                 descriptions.push(description);
                 avatar_cids.push(avatar_cid);
                 banner_cids.push(banner_cid);
+                created_ats.push(created_at);
                 indexed_ats.push(pj.job.indexed_at.clone());
 
                 metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
@@ -2290,8 +2300,8 @@ impl IndexerManager {
 
         client
             .execute(
-                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"indexedAt\")
-                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[])
+                "INSERT INTO profile (uri, cid, creator, \"displayName\", description, \"avatarCid\", \"bannerCid\", \"createdAt\", \"indexedAt\")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
                  ON CONFLICT (uri) DO UPDATE SET
                    cid = EXCLUDED.cid,
                    \"displayName\" = EXCLUDED.\"displayName\",
@@ -2299,7 +2309,7 @@ impl IndexerManager {
                    \"avatarCid\" = EXCLUDED.\"avatarCid\",
                    \"bannerCid\" = EXCLUDED.\"bannerCid\",
                    \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&uris, &cids, &creators, &display_names, &descriptions, &avatar_cids, &banner_cids, &indexed_ats],
+                &[&uris, &cids, &creators, &display_names, &descriptions, &avatar_cids, &banner_cids, &created_ats, &indexed_ats],
             )
             .await?;
 
@@ -2312,6 +2322,7 @@ impl IndexerManager {
     async fn parallel_copy_posts(
         pool: &Pool,
         jobs: &[&ParsedJob<'_>],
+        bulk_load: bool,
     ) -> (u128, usize, Option<WintermuteError>) {
         let count = jobs.len();
         if count == 0 {
@@ -2322,13 +2333,16 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_posts(&client, jobs).await.err();
+        let err = Self::copy_batch_insert_posts(&client, jobs, !bulk_load)
+            .await
+            .err();
         (start.elapsed().as_millis(), count, err)
     }
 
     async fn parallel_copy_likes(
         pool: &Pool,
         jobs: &[&ParsedJob<'_>],
+        bulk_load: bool,
     ) -> (u128, usize, Option<WintermuteError>) {
         let count = jobs.len();
         if count == 0 {
@@ -2336,10 +2350,13 @@ impl IndexerManager {
         }
         let start = std::time::Instant::now();
 
-        // Acquire semaphore to serialize like inserts across workers.
-        // The like table's 133GB index causes severe contention when
-        // multiple workers hit it simultaneously.
-        let _permit = LIKE_INSERT_SEMAPHORE.acquire().await;
+        // Serialize live like inserts across workers (the like index causes contention).
+        // The bulk CAR load runs with indexes dropped, so the semaphore would only throttle it.
+        let _permit = if bulk_load {
+            None
+        } else {
+            Some(LIKE_INSERT_SEMAPHORE.acquire().await)
+        };
 
         let client = match pool.get().await {
             Ok(c) => c,
@@ -2352,6 +2369,7 @@ impl IndexerManager {
     async fn parallel_copy_follows(
         pool: &Pool,
         jobs: &[&ParsedJob<'_>],
+        bulk_load: bool,
     ) -> (u128, usize, Option<WintermuteError>) {
         let count = jobs.len();
         if count == 0 {
@@ -2362,7 +2380,9 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_follows(&client, jobs).await.err();
+        let err = Self::copy_batch_insert_follows(&client, jobs, !bulk_load)
+            .await
+            .err();
         (start.elapsed().as_millis(), count, err)
     }
 
@@ -2422,6 +2442,7 @@ impl IndexerManager {
     async fn copy_batch_insert_posts(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
+        compute_agg: bool,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
@@ -2483,7 +2504,7 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_posts(client, &post_data).await?;
+        bulk::copy_insert_posts(client, &post_data, compute_agg).await?;
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
         bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
         bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
@@ -2623,6 +2644,7 @@ impl IndexerManager {
     async fn copy_batch_insert_follows(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
+        compute_agg: bool,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
@@ -2655,7 +2677,7 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_follows(client, &follow_data).await
+        bulk::copy_insert_follows(client, &follow_data, compute_agg).await
     }
 
     async fn copy_batch_insert_reposts(

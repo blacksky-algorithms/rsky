@@ -215,6 +215,7 @@ pub async fn copy_ensure_actors(
 pub async fn copy_insert_posts(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, text, created_at, indexed_at
+    compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<(), WintermuteError> {
     use std::time::Instant;
 
@@ -279,18 +280,20 @@ pub async fn copy_insert_posts(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg postsCount for affected creators
+    // Phase 4: Update profile_agg postsCount for affected creators (skipped during bulk load)
     let agg_start = Instant::now();
-    client
-        .execute(
-            "INSERT INTO profile_agg (did, \"postsCount\")
-             SELECT creator, COUNT(*) FROM post
-             WHERE creator IN (SELECT DISTINCT creator FROM _bulk_post)
-             GROUP BY creator
-             ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
-            &[],
-        )
-        .await?;
+    if compute_agg {
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"postsCount\")
+                 SELECT creator, COUNT(*) FROM post
+                 WHERE creator IN (SELECT DISTINCT creator FROM _bulk_post)
+                 GROUP BY creator
+                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
+                &[],
+            )
+            .await?;
+    }
     let agg_ms = agg_start.elapsed().as_millis();
 
     // Log if total > 100ms (worth investigating)
@@ -481,6 +484,7 @@ pub async fn copy_insert_likes(
 pub async fn copy_insert_follows(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
+    compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<(), WintermuteError> {
     use std::time::Instant;
 
@@ -544,30 +548,32 @@ pub async fn copy_insert_follows(
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg followsCount and followersCount
+    // Phase 4: Update profile_agg followsCount and followersCount (skipped during bulk load)
     let agg_start = Instant::now();
-    // Update followsCount for creators (those who are following)
-    client
-        .execute(
-            "INSERT INTO profile_agg (did, \"followsCount\")
-             SELECT creator, COUNT(*) FROM follow
-             WHERE creator IN (SELECT DISTINCT creator FROM _bulk_follow)
-             GROUP BY creator
-             ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
-            &[],
-        )
-        .await?;
-    // Update followersCount for subjects (those who are followed)
-    client
-        .execute(
-            "INSERT INTO profile_agg (did, \"followersCount\")
-             SELECT \"subjectDid\", COUNT(*) FROM follow
-             WHERE \"subjectDid\" IN (SELECT DISTINCT subject_did FROM _bulk_follow)
-             GROUP BY \"subjectDid\"
-             ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
-            &[],
-        )
-        .await?;
+    if compute_agg {
+        // Update followsCount for creators (those who are following)
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"followsCount\")
+                 SELECT creator, COUNT(*) FROM follow
+                 WHERE creator IN (SELECT DISTINCT creator FROM _bulk_follow)
+                 GROUP BY creator
+                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
+                &[],
+            )
+            .await?;
+        // Update followersCount for subjects (those who are followed)
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"followersCount\")
+                 SELECT \"subjectDid\", COUNT(*) FROM follow
+                 WHERE \"subjectDid\" IN (SELECT DISTINCT subject_did FROM _bulk_follow)
+                 GROUP BY \"subjectDid\"
+                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
+                &[],
+            )
+            .await?;
+    }
     let agg_ms = agg_start.elapsed().as_millis();
 
     // Log if total > 100ms (worth investigating)
