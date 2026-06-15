@@ -3253,19 +3253,13 @@ impl IndexerManager {
         if let (Some(embed_uri), Some(embed_cid)) = (embed_uri, embed_cid) {
             // Only process if it's a post being quoted
             if embed_uri.contains("/app.bsky.feed.post/") {
-                // Calculate sortAt (earlier of indexed_at and created_at)
-                let sort_at_quote = if indexed_at < created_at {
-                    indexed_at
-                } else {
-                    created_at
-                };
-                // Insert into quote table
+                // sortAt is GENERATED ALWAYS; creator is unread by rsky/atproto appview (verified) so neither is written.
                 client
                     .execute(
-                        "INSERT INTO quote (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", \"sortAt\")
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        "INSERT INTO quote (uri, cid, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+                         VALUES ($1, $2, $3, $4, $5, $6)
                          ON CONFLICT DO NOTHING",
-                        &[&post_uri, &post_cid, &creator, &embed_uri, &embed_cid, &created_at, &indexed_at, &sort_at_quote],
+                        &[&post_uri, &post_cid, &embed_uri, &embed_cid, &created_at, &indexed_at],
                     )
                     .await?;
 
