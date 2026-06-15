@@ -34,6 +34,7 @@ rand = "0.8.5"
 rand_core = "0.6.4"
 secp256k1 = { version = "0.28.2", features = ["global-context", "serde", "rand", "hashes","rand-std"] }
 serde_json = { version = "1.0.96",features = ["preserve_order"] }
+rusqlite = { version = "0.36", features = ["bundled"] }
 rsky-lexicon = {path = "rsky-lexicon", version = "0.2.8"}
 rsky-identity = {path = "rsky-identity", version = "0.1.0"}
 rsky-crypto = {path = "rsky-crypto", version = "0.1.1"}

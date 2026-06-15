@@ -8335,7 +8335,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -8503,7 +8503,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -8525,6 +8525,7 @@ dependencies = [
  "iroh-car",
  "mimalloc",
  "mockito",
+ "num_cpus",
  "prometheus",
  "rand 0.8.5",
  "reqwest 0.12.23",
@@ -8535,6 +8536,7 @@ dependencies = [
  "rsky-repo",
  "rsky-syntax",
  "rtrb",
+ "rusqlite",
  "rustls 0.23.31",
  "serde",
  "serde_bytes",
