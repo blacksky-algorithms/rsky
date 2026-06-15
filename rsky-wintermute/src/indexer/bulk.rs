@@ -12,6 +12,15 @@ use futures::SinkExt;
 use futures::pin_mut;
 use std::io::Write;
 
+// Escape a field for COPY text format (backslash first, then tab/newline/cr).
+fn escape_copy_field(s: impl AsRef<str>) -> String {
+    s.as_ref()
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Bulk insert records using `COPY` protocol.
 /// Returns vector of booleans indicating which records were applied (not stale).
 pub async fn copy_insert_records(
@@ -74,11 +83,7 @@ pub async fn copy_insert_records(
         // - Tab (0x09 -> \t)
         // - Newline (0x0a -> \n)
         // - Carriage return (0x0d -> \r)
-        let escaped_json = json
-            .replace('\\', "\\\\")
-            .replace('\t', "\\t")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
+        let escaped_json = escape_copy_field(json);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{did}\t{escaped_json}\t{rev}\t{indexed_at}"
@@ -249,13 +254,7 @@ pub async fn copy_insert_posts(
 
     let mut buffer = Vec::with_capacity(data.len() * 300);
     for (uri, cid, creator, text, created_at, indexed_at) in data {
-        let escaped_text: String = text
-            .chars()
-            .map(|c| match c {
-                '\t' | '\n' | '\r' => ' ',
-                _ => c,
-            })
-            .collect();
+        let escaped_text = escape_copy_field(text);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{escaped_text}\t{created_at}\t{indexed_at}"
@@ -798,14 +797,7 @@ pub async fn copy_insert_post_embed_images(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, position, image_cid, alt) in data {
-        // Escape alt text for tabs/newlines
-        let escaped_alt: String = alt
-            .chars()
-            .map(|c| match c {
-                '\t' | '\n' | '\r' => ' ',
-                _ => c,
-            })
-            .collect();
+        let escaped_alt = escape_copy_field(alt);
         writeln!(buffer, "{post_uri}\t{position}\t{image_cid}\t{escaped_alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -885,17 +877,9 @@ pub async fn copy_insert_post_embed_videos(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, video_cid, alt) in data {
-        let escaped_alt = alt.as_ref().map_or_else(
-            || "\\N".to_owned(), // PostgreSQL NULL marker
-            |a| {
-                a.chars()
-                    .map(|c| match c {
-                        '\t' | '\n' | '\r' => ' ',
-                        _ => c,
-                    })
-                    .collect::<String>()
-            },
-        );
+        let escaped_alt = alt
+            .as_ref()
+            .map_or_else(|| "\\N".to_owned(), escape_copy_field);
         writeln!(buffer, "{post_uri}\t{video_cid}\t{escaped_alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -935,10 +919,22 @@ pub async fn copy_insert_post_embed_videos(
 
 #[cfg(test)]
 mod tests {
+    use super::escape_copy_field;
+
     #[test]
-    fn test_escape_tsv() {
-        let text = "hello\tworld\nnewline";
-        let escaped = text.replace(['\t', '\n'], " ");
-        assert_eq!(escaped, "hello world newline");
+    fn escapes_backslash_and_whitespace_for_copy() {
+        // Backslash is doubled first (it is the COPY escape char), then tab/newline/cr.
+        assert_eq!(escape_copy_field("a\\b"), "a\\\\b");
+        assert_eq!(
+            escape_copy_field("hello\tworld\nline\r"),
+            "hello\\tworld\\nline\\r"
+        );
+        assert_eq!(escape_copy_field("plain text"), "plain text");
+    }
+
+    #[test]
+    fn escapes_trailing_backslash_so_row_is_not_corrupted() {
+        // A trailing backslash previously escaped the tab delimiter and shifted columns.
+        assert_eq!(escape_copy_field("path\\"), "path\\\\");
     }
 }
