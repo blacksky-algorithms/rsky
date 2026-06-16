@@ -677,6 +677,86 @@ pub async fn copy_insert_reposts(
     Ok(())
 }
 
+/// Bulk insert quotes using `COPY` protocol.
+pub async fn copy_insert_quotes(
+    client: &deadpool_postgres::Client,
+    data: &[(String, String, String, String, String, String)], // uri, cid, subject, subject_cid, created_at, indexed_at
+) -> Result<(), WintermuteError> {
+    use std::time::Instant;
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let count = data.len();
+
+    let setup_start = Instant::now();
+    client
+        .execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _bulk_quote (
+                uri text NOT NULL,
+                cid text NOT NULL,
+                subject text NOT NULL,
+                subject_cid text NOT NULL,
+                created_at text NOT NULL,
+                indexed_at text NOT NULL
+            )",
+            &[],
+        )
+        .await?;
+
+    client.execute("TRUNCATE _bulk_quote", &[]).await?;
+    let setup_ms = setup_start.elapsed().as_millis();
+
+    let copy_start = Instant::now();
+    let copy_stmt = client
+        .copy_in("COPY _bulk_quote (uri, cid, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .await?;
+
+    let sink = copy_stmt;
+    pin_mut!(sink);
+
+    let mut buffer = Vec::with_capacity(data.len() * 250);
+    for (uri, cid, subject, subject_cid, created_at, indexed_at) in data {
+        writeln!(
+            buffer,
+            "{uri}\t{cid}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+        )
+        .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+    }
+
+    sink.send(bytes::Bytes::from(buffer)).await?;
+    sink.close().await?;
+    let copy_ms = copy_start.elapsed().as_millis();
+
+    // sortAt is GENERATED ALWAYS; creator is unread by the appview so neither is written.
+    let insert_start = Instant::now();
+    client
+        .execute(
+            "INSERT INTO quote (uri, cid, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
+             SELECT uri, cid, subject, subject_cid, created_at, indexed_at
+             FROM _bulk_quote
+             ON CONFLICT DO NOTHING",
+            &[],
+        )
+        .await?;
+    let insert_ms = insert_start.elapsed().as_millis();
+
+    let total_ms = setup_ms + copy_ms + insert_ms;
+    if total_ms > 100 {
+        tracing::warn!(
+            "SLOW quote bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            total_ms,
+            setup_ms,
+            copy_ms,
+            insert_ms,
+            count
+        );
+    }
+
+    Ok(())
+}
+
 /// Bulk insert blocks using `COPY` protocol.
 pub async fn copy_insert_blocks(
     client: &deadpool_postgres::Client,

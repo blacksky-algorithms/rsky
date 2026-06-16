@@ -2456,6 +2456,7 @@ impl IndexerManager {
             Vec::with_capacity(jobs.len());
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
         let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut quote_data: Vec<(String, String, String, String, String, String)> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -2477,7 +2478,7 @@ impl IndexerManager {
                     pj.job.cid.clone(),
                     pj.did.clone(),
                     text,
-                    created_at,
+                    created_at.clone(),
                     pj.job.indexed_at.clone(),
                 ));
 
@@ -2498,6 +2499,14 @@ impl IndexerManager {
                         &mut embed_image_data,
                         &mut embed_video_data,
                     );
+                    Self::extract_quote(
+                        embed,
+                        &uri,
+                        &pj.job.cid,
+                        &created_at,
+                        &pj.job.indexed_at,
+                        &mut quote_data,
+                    );
                 }
 
                 metrics::INDEXER_POST_EVENTS_TOTAL.inc();
@@ -2508,8 +2517,44 @@ impl IndexerManager {
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
         bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
         bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
+        bulk::copy_insert_quotes(client, &quote_data).await?;
 
         Ok(())
+    }
+
+    /// Extract a quote subject (uri, cid) from a post's embed, mirroring the live path.
+    fn extract_quote(
+        embed: &serde_json::Value,
+        post_uri: &str,
+        post_cid: &str,
+        created_at: &str,
+        indexed_at: &str,
+        quote_data: &mut Vec<(String, String, String, String, String, String)>,
+    ) {
+        let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+        let quoted = if embed_type == "app.bsky.embed.record" {
+            embed.get("record")
+        } else if embed_type == "app.bsky.embed.recordWithMedia" {
+            embed.get("record").and_then(|r| r.get("record"))
+        } else {
+            None
+        };
+        if let Some(quoted) = quoted {
+            let subject = quoted.get("uri").and_then(|v| v.as_str());
+            let subject_cid = quoted.get("cid").and_then(|v| v.as_str());
+            if let (Some(subject), Some(subject_cid)) = (subject, subject_cid) {
+                if subject.contains("/app.bsky.feed.post/") {
+                    quote_data.push((
+                        post_uri.to_owned(),
+                        post_cid.to_owned(),
+                        subject.to_owned(),
+                        subject_cid.to_owned(),
+                        created_at.to_owned(),
+                        indexed_at.to_owned(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Extract embed data (images and videos) from a post's embed field
