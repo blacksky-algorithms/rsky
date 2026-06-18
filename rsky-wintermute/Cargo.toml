@@ -29,6 +29,10 @@ path = "src/bin/label_sync.rs"
 name = "car_loader"
 path = "src/bin/car_loader.rs"
 
+[[bin]]
+name = "cleanup_stale_deactivated"
+path = "src/bin/cleanup_stale_deactivated.rs"
+
 [dependencies]
 base64 = "0.22"
 bytes = "1"
