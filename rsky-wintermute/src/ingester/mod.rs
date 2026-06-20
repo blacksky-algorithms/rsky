@@ -454,6 +454,18 @@ impl IngesterManager {
                         let active = account.active;
                         let status = account.status.clone();
                         tokio::spawn(async move {
+                            if !active && Self::pds_says_active(&event_did).await == Some(true) {
+                                tracing::info!(
+                                    "skipped account event for {} (active=false, status={:?}): \
+                                     authoritative PDS reports active=true",
+                                    event_did,
+                                    status.as_deref()
+                                );
+                                metrics::INGESTER_ERRORS_TOTAL
+                                    .with_label_values(&["account_skipped_stale_source"])
+                                    .inc();
+                                return;
+                            }
                             if let Err(e) = Self::process_account_event(
                                 &pool_clone,
                                 &event_did,
@@ -1058,6 +1070,56 @@ impl IngesterManager {
 
         Ok(())
     }
+
+    /// Resolves the actor's current PDS via PLC and queries its `getRepoStatus`.
+    /// Returns `Some(true)` if the PDS reports `active: true`, `Some(false)` if `active: false`,
+    /// `None` on any resolution or transport error.
+    ///
+    /// Used to filter out `#account active:false` events emitted by a PDS the actor has
+    /// already migrated away from. The relay forwards them unaware of the migration; the
+    /// PLC log is the authoritative answer.
+    async fn pds_says_active(did: &str) -> Option<bool> {
+        use rsky_identity::IdResolver;
+        use rsky_identity::types::IdentityResolverOpts;
+        let mut resolver = IdResolver::new(IdentityResolverOpts {
+            timeout: Some(std::time::Duration::from_secs(5)),
+            plc_url: None,
+            did_cache: None,
+            backup_nameservers: None,
+        });
+        let Ok(Some(doc)) = resolver.did.resolve(did.to_owned(), None).await else {
+            return None;
+        };
+        let pds_endpoint = doc.service.as_ref()?.iter().find_map(|s| {
+            if s.id == "#atproto_pds" {
+                Some(s.service_endpoint.clone())
+            } else {
+                None
+            }
+        })?;
+        let url = format!(
+            "{}/xrpc/com.atproto.sync.getRepoStatus?did={}",
+            pds_endpoint.trim_end_matches('/'),
+            did
+        );
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.text().await.ok()?;
+        parse_active_flag(&body)
+    }
+}
+
+/// Parses the `active` boolean out of a `com.atproto.sync.getRepoStatus` JSON body.
+/// Returns `Some(true)`/`Some(false)` if present, `None` if missing or malformed.
+fn parse_active_flag(body: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("active").and_then(serde_json::Value::as_bool)
 }
 
 async fn get_cursor_from_postgres(

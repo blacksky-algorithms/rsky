@@ -1150,4 +1150,42 @@ mod ingester_tests {
             assert!(at.is_none());
         }
     }
+
+    mod pds_verification {
+        use crate::ingester::parse_active_flag;
+
+        #[test]
+        fn typical_active_true() {
+            let body = r#"{"did":"did:plc:abc","active":true,"rev":"3xx"}"#;
+            assert_eq!(parse_active_flag(body), Some(true));
+        }
+
+        #[test]
+        fn deactivated_with_status() {
+            let body = r#"{"did":"did:plc:abc","active":false,"status":"deactivated"}"#;
+            assert_eq!(parse_active_flag(body), Some(false));
+        }
+
+        #[test]
+        fn missing_active_field() {
+            let body = r#"{"did":"did:plc:abc"}"#;
+            assert_eq!(parse_active_flag(body), None);
+        }
+
+        #[test]
+        fn non_boolean_active() {
+            let body = r#"{"did":"did:plc:abc","active":"yes"}"#;
+            assert_eq!(parse_active_flag(body), None);
+        }
+
+        #[test]
+        fn malformed_json() {
+            assert_eq!(parse_active_flag("not json"), None);
+        }
+
+        #[test]
+        fn empty_body() {
+            assert_eq!(parse_active_flag(""), None);
+        }
+    }
 }
