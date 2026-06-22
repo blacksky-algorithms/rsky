@@ -295,8 +295,16 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
                     rx.recv().await
                 };
                 let Some(row) = row else { break };
-                match parse_repo_to_jobs(&args.car_dump_dir, &row).await {
-                    Ok(mut parsed) => {
+                // Isolate parsing in a child task so a panic in rsky-repo (e.g. an
+                // invalid MST key) is recorded as a repo failure instead of killing
+                // the worker, which would otherwise deplete the pool and stall.
+                let cdd = args.car_dump_dir.clone();
+                let row_for_parse = row.clone();
+                let parse_result =
+                    tokio::spawn(async move { parse_repo_to_jobs(&cdd, &row_for_parse).await })
+                        .await;
+                match parse_result {
+                    Ok(Ok(mut parsed)) => {
                         let failures = std::mem::take(&mut parsed.record_failures);
                         if !failures.is_empty() {
                             counters
@@ -306,12 +314,20 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
                         }
                         let _ = parsed_tx.send(parsed).await;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         counters.repos_failed.fetch_add(1, Ordering::Relaxed);
                         let _ = state_tx.send(StateMsg::RepoFailed {
                             did: row.did.clone(),
                             path: row.path.clone(),
                             error: format!("{e:#}"),
+                        });
+                    }
+                    Err(join_err) => {
+                        counters.repos_failed.fetch_add(1, Ordering::Relaxed);
+                        let _ = state_tx.send(StateMsg::RepoFailed {
+                            did: row.did.clone(),
+                            path: row.path.clone(),
+                            error: format!("parse panicked: {join_err}"),
                         });
                     }
                 }
