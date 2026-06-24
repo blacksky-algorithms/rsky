@@ -422,8 +422,7 @@ async fn write_batch(
 
     let n = batch_jobs.len() as u64;
     // bulk_load = true: skip inline aggregates + the like-insert semaphore.
-    let (_results, batch_failed) =
-        IndexerManager::process_jobs_batch(pool, batch_jobs, true).await;
+    let (_results, batch_failed) = IndexerManager::process_jobs_batch(pool, batch_jobs, true).await;
     batch_jobs.clear();
 
     if batch_failed {

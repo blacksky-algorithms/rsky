@@ -14,7 +14,9 @@ use std::io::Write;
 
 // Escape a field for COPY text format; borrows when no escaping is needed.
 fn escape_copy_field(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.bytes().any(|b| matches!(b, b'\\' | b'\t' | b'\n' | b'\r')) {
+    if s.bytes()
+        .any(|b| matches!(b, b'\\' | b'\t' | b'\n' | b'\r'))
+    {
         std::borrow::Cow::Owned(
             s.replace('\\', "\\\\")
                 .replace('\t', "\\t")
@@ -1014,10 +1016,9 @@ pub async fn copy_insert_post_embed_videos(
     for (post_uri, video_cid, alt) in data {
         let post_uri = escape_copy_field(post_uri);
         let video_cid = escape_copy_field(video_cid);
-        let alt = match alt.as_ref() {
-            Some(s) => escape_copy_field(s),
-            None => std::borrow::Cow::Borrowed("\\N"),
-        };
+        let alt = alt
+            .as_ref()
+            .map_or(std::borrow::Cow::Borrowed("\\N"), |s| escape_copy_field(s));
         writeln!(buffer, "{post_uri}\t{video_cid}\t{alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
