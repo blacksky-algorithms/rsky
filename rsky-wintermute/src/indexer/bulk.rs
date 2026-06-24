@@ -12,13 +12,18 @@ use futures::SinkExt;
 use futures::pin_mut;
 use std::io::Write;
 
-// Escape a field for COPY text format (backslash first, then tab/newline/cr).
-fn escape_copy_field(s: impl AsRef<str>) -> String {
-    s.as_ref()
-        .replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+// Escape a field for COPY text format; borrows when no escaping is needed.
+fn escape_copy_field(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.bytes().any(|b| matches!(b, b'\\' | b'\t' | b'\n' | b'\r')) {
+        std::borrow::Cow::Owned(
+            s.replace('\\', "\\\\")
+                .replace('\t', "\\t")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r"),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 /// Bulk insert records using `COPY` protocol.
@@ -78,17 +83,14 @@ pub async fn copy_insert_records(
             continue;
         }
 
-        // Escape for PostgreSQL COPY text format:
-        // - Backslash first (\ -> \\) so we don't double-escape other escapes
-        // - Tab (0x09 -> \t)
-        // - Newline (0x0a -> \n)
-        // - Carriage return (0x0d -> \r)
-        let escaped_json = escape_copy_field(json);
-        writeln!(
-            buffer,
-            "{uri}\t{cid}\t{did}\t{escaped_json}\t{rev}\t{indexed_at}"
-        )
-        .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let did = escape_copy_field(did);
+        let json = escape_copy_field(&json);
+        let rev = escape_copy_field(rev);
+        let indexed_at = escape_copy_field(indexed_at);
+        writeln!(buffer, "{uri}\t{cid}\t{did}\t{json}\t{rev}\t{indexed_at}")
+            .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
     sink.send(bytes::Bytes::from(buffer)).await?;
@@ -174,6 +176,7 @@ pub async fn copy_ensure_actors(
 
     let mut buffer = Vec::with_capacity(dids.len() * 50);
     for did in dids {
+        let did = escape_copy_field(did);
         writeln!(buffer, "{did}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -255,10 +258,15 @@ pub async fn copy_insert_posts(
 
     let mut buffer = Vec::with_capacity(data.len() * 300);
     for (uri, cid, creator, text, created_at, indexed_at) in data {
-        let escaped_text = escape_copy_field(text);
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let creator = escape_copy_field(creator);
+        let text = escape_copy_field(text);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{escaped_text}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{text}\t{created_at}\t{indexed_at}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -356,6 +364,12 @@ pub async fn copy_insert_feed_items(
 
     let mut buffer = Vec::with_capacity(data.len() * 200);
     for (item_type, uri, cid, post_uri, originator_did, sort_at) in data {
+        let item_type = escape_copy_field(item_type);
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let post_uri = escape_copy_field(post_uri);
+        let originator_did = escape_copy_field(originator_did);
+        let sort_at = escape_copy_field(sort_at);
         writeln!(
             buffer,
             "{item_type}\t{uri}\t{cid}\t{post_uri}\t{originator_did}\t{sort_at}"
@@ -440,6 +454,13 @@ pub async fn copy_insert_likes(
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
     for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let creator = escape_copy_field(creator);
+        let subject = escape_copy_field(subject);
+        let subject_cid = escape_copy_field(subject_cid);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
@@ -524,6 +545,12 @@ pub async fn copy_insert_follows(
 
     let mut buffer = Vec::with_capacity(data.len() * 200);
     for (uri, cid, creator, subject_did, created_at, indexed_at) in data {
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let creator = escape_copy_field(creator);
+        let subject_did = escape_copy_field(subject_did);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}"
@@ -637,6 +664,13 @@ pub async fn copy_insert_reposts(
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
     for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let creator = escape_copy_field(creator);
+        let subject = escape_copy_field(subject);
+        let subject_cid = escape_copy_field(subject_cid);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
@@ -718,6 +752,12 @@ pub async fn copy_insert_quotes(
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
     for (uri, cid, subject, subject_cid, created_at, indexed_at) in data {
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let subject = escape_copy_field(subject);
+        let subject_cid = escape_copy_field(subject_cid);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
@@ -800,6 +840,12 @@ pub async fn copy_insert_blocks(
 
     let mut buffer = Vec::with_capacity(data.len() * 200);
     for (uri, cid, creator, subject, created_at, indexed_at) in data {
+        let uri = escape_copy_field(uri);
+        let cid = escape_copy_field(cid);
+        let creator = escape_copy_field(creator);
+        let subject = escape_copy_field(subject);
+        let created_at = escape_copy_field(created_at);
+        let indexed_at = escape_copy_field(indexed_at);
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject}\t{created_at}\t{indexed_at}"
@@ -883,8 +929,11 @@ pub async fn copy_insert_post_embed_images(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, position, image_cid, alt) in data {
-        let escaped_alt = escape_copy_field(alt);
-        writeln!(buffer, "{post_uri}\t{position}\t{image_cid}\t{escaped_alt}")
+        let post_uri = escape_copy_field(post_uri);
+        let position = escape_copy_field(position);
+        let image_cid = escape_copy_field(image_cid);
+        let alt = escape_copy_field(alt);
+        writeln!(buffer, "{post_uri}\t{position}\t{image_cid}\t{alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
@@ -963,10 +1012,13 @@ pub async fn copy_insert_post_embed_videos(
 
     let mut buffer = Vec::with_capacity(data.len() * 150);
     for (post_uri, video_cid, alt) in data {
-        let escaped_alt = alt
-            .as_ref()
-            .map_or_else(|| "\\N".to_owned(), escape_copy_field);
-        writeln!(buffer, "{post_uri}\t{video_cid}\t{escaped_alt}")
+        let post_uri = escape_copy_field(post_uri);
+        let video_cid = escape_copy_field(video_cid);
+        let alt = match alt.as_ref() {
+            Some(s) => escape_copy_field(s),
+            None => std::borrow::Cow::Borrowed("\\N"),
+        };
+        writeln!(buffer, "{post_uri}\t{video_cid}\t{alt}")
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 

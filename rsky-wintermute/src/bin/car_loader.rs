@@ -392,19 +392,40 @@ async fn write_batch(
     state_tx: &std::sync::mpsc::Sender<StateMsg>,
     counters: &Counters,
 ) {
-    let repos = batch_dids.len() as u64;
-    if !batch_jobs.is_empty() {
-        let n = batch_jobs.len() as u64;
-        // bulk_load = true: skip inline aggregates + the like-insert semaphore.
-        let _ = IndexerManager::process_jobs_batch(pool, batch_jobs, true).await;
-        counters.records_written.fetch_add(n, Ordering::Relaxed);
-        batch_jobs.clear();
+    if batch_jobs.is_empty() {
+        // Repos with no persistable records are still done (nothing to write).
+        if !batch_dids.is_empty() {
+            counters
+                .repos_done
+                .fetch_add(batch_dids.len() as u64, Ordering::Relaxed);
+            let _ = state_tx.send(StateMsg::ReposDone(std::mem::take(batch_dids)));
+            let _ = state_tx.send(StateMsg::Sample);
+        }
+        return;
     }
-    if repos > 0 {
-        counters.repos_done.fetch_add(repos, Ordering::Relaxed);
-        let _ = state_tx.send(StateMsg::ReposDone(std::mem::take(batch_dids)));
-        let _ = state_tx.send(StateMsg::Sample);
+
+    let n = batch_jobs.len() as u64;
+    // bulk_load = true: skip inline aggregates + the like-insert semaphore.
+    let (_results, batch_failed) =
+        IndexerManager::process_jobs_batch(pool, batch_jobs, true).await;
+    batch_jobs.clear();
+
+    if batch_failed {
+        // Rows were not persisted: leave these repos NOT done so a resume re-processes them
+        // (from the manifest, with the correct path) instead of silently dropping them.
+        let repos = batch_dids.len() as u64;
+        counters.repos_failed.fetch_add(repos, Ordering::Relaxed);
+        tracing::warn!("batch copy failed; {repos} repos left not-done for resume");
+        batch_dids.clear();
+        return;
     }
+
+    counters.records_written.fetch_add(n, Ordering::Relaxed);
+    counters
+        .repos_done
+        .fetch_add(batch_dids.len() as u64, Ordering::Relaxed);
+    let _ = state_tx.send(StateMsg::ReposDone(std::mem::take(batch_dids)));
+    let _ = state_tx.send(StateMsg::Sample);
 }
 
 /// Log throughput (records/s, repos/s, percent via the state file) every 30s.
@@ -449,7 +470,6 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
     // Read-write so a fresh run can create the table; reads the prior run's `done` for resume.
     let state = rusqlite::Connection::open(&args.state_file)?;
     state.execute_batch("CREATE TABLE IF NOT EXISTS done (did TEXT PRIMARY KEY)")?;
-    let mut is_done = state.prepare("SELECT 1 FROM done WHERE did = ?1")?;
 
     if args.retry_failed {
         let mut stmt = state.prepare("SELECT did, path FROM failed")?;
@@ -462,6 +482,16 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
         return Ok(());
     }
 
+    // Load done DIDs into memory once; an O(1) skip avoids millions of per-row SQLite lookups.
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = state.prepare("SELECT did FROM done")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for did in rows {
+            done.insert(did?);
+        }
+    }
+
     let mut stmt = manifest.prepare(
         "SELECT did, path FROM repo_dumps \
          WHERE (?1 = 1 OR rowid % ?1 = ?2) ORDER BY did",
@@ -469,7 +499,7 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
     let rows = stmt.query_map(rusqlite::params![args.shards, args.shard], manifest_row)?;
     for row in rows {
         let row = row?;
-        if is_done.exists([&row.did])? {
+        if done.contains(&row.did) {
             continue;
         }
         if work_tx.blocking_send(row).is_err() {
@@ -631,9 +661,12 @@ async fn load_single_repo(args: &Args, pool: &Pool, did: &str) -> Result<()> {
         .into_iter()
         .map(|j| (j.uri.clone().into_bytes(), j))
         .collect();
-    let results = IndexerManager::process_jobs_batch(pool, &jobs, true).await;
+    let (results, batch_failed) = IndexerManager::process_jobs_batch(pool, &jobs, true).await;
     let errs = results.iter().filter(|(_, r)| r.is_err()).count();
     jobs.clear();
-    tracing::info!("wrote {} records ({errs} write errors)", results.len());
+    tracing::info!(
+        "wrote {} records ({errs} write errors, batch_failed={batch_failed})",
+        results.len()
+    );
     Ok(())
 }
