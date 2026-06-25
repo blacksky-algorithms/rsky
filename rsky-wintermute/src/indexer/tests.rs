@@ -104,6 +104,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_index_job_processing() {
         let (storage, _dir) = setup_test_storage();
         let pool = setup_test_pool();
@@ -357,6 +358,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_notification_creation() {
         let (storage, _dir) = setup_test_storage();
         let pool = setup_test_pool();
@@ -428,6 +430,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_valid_uri_processing() {
         let pool = setup_test_pool();
 
@@ -484,6 +487,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_single_label() {
         let pool = setup_test_pool();
         let test_src = "did:plc:test_labeler_single";
@@ -543,6 +547,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_multiple_labels() {
         let pool = setup_test_pool();
         let test_src = "did:plc:test_labeler_multi";
@@ -631,6 +636,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_upsert_behavior() {
         let pool = setup_test_pool();
         let test_src = "did:plc:test_labeler_upsert";
@@ -709,6 +715,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_multiple_labelers_same_uri() {
         let pool = setup_test_pool();
         let test_src1 = "did:plc:labeler1";
@@ -771,6 +778,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_different_vals_same_labeler_uri() {
         let pool = setup_test_pool();
         let test_src = "did:plc:labeler_multival";
@@ -830,6 +838,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_storage_and_indexing_roundtrip() {
         let (storage, _dir) = setup_test_storage();
         let pool = setup_test_pool();
@@ -885,6 +894,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_negation() {
         let pool = setup_test_pool();
         let test_src = "did:plc:test_labeler_negation";
@@ -965,6 +975,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_negation_cid_mismatch() {
         // When a negation arrives with a different CID than the original label,
         // the original should still be negated. This is the scenario that caused
@@ -1054,6 +1065,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_label_indexing_empty_labels_array() {
         let pool = setup_test_pool();
 
@@ -1229,6 +1241,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_firehose_live_pipeline() {
         use crate::ingester::IngesterManager;
         use crate::types::{CommitData, FirehoseEvent, IndexJob, RepoOp};
@@ -1379,6 +1392,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_index_job_create_without_record() {
         use crate::types::{IndexJob, WriteAction};
 
@@ -1405,6 +1419,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_index_job_delete_operation() {
         use crate::types::{IndexJob, WriteAction};
 
@@ -1465,6 +1480,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_index_job_stale_write_detection() {
         use crate::types::{IndexJob, WriteAction};
 
@@ -1681,6 +1697,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_process_label_event_empty() {
         let pool = setup_test_pool();
 
@@ -1696,6 +1713,7 @@ mod indexer_tests {
     // Test delete operations for existing collection types
     // This tests the delete_* functions which are largely uncovered
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_delete_operations() {
         use crate::types::{IndexJob, WriteAction};
         use serde_json::json;
@@ -1789,6 +1807,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires PostgreSQL
     async fn test_newer_collection_types() {
         use crate::types::{IndexJob, WriteAction};
         use serde_json::json;
