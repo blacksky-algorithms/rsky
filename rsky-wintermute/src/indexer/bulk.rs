@@ -13,15 +13,17 @@ use futures::pin_mut;
 use std::io::Write;
 
 // Escape a field for COPY text format; borrows when no escaping is needed.
+// NUL is stripped (Postgres text columns reject 0x00), the rest are escaped.
 fn escape_copy_field(s: &str) -> std::borrow::Cow<'_, str> {
     if s.bytes()
-        .any(|b| matches!(b, b'\\' | b'\t' | b'\n' | b'\r'))
+        .any(|b| matches!(b, b'\\' | b'\t' | b'\n' | b'\r' | b'\0'))
     {
         std::borrow::Cow::Owned(
             s.replace('\\', "\\\\")
                 .replace('\t', "\\t")
                 .replace('\n', "\\n")
-                .replace('\r', "\\r"),
+                .replace('\r', "\\r")
+                .replace('\0', ""),
         )
     } else {
         std::borrow::Cow::Borrowed(s)
