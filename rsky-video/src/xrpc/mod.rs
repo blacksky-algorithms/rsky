@@ -20,7 +20,7 @@ use crate::{
     bunny::WebhookPayload,
     db::{self, job_state},
     error::{Error, Result},
-    pds,
+    pds, transcode,
 };
 
 /// Query parameters for getUploadLimits
@@ -192,6 +192,21 @@ pub async fn upload_video(
 
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
+
+    // PDS sniffs blob bytes; iPhone .mov gets tagged video/quicktime and the bsky lexicon rejects it.
+    let body = if transcode::is_quicktime_container(&body) {
+        info!("Detected QuickTime/MOV container, remuxing to MP4");
+        match transcode::convert_mov_to_mp4(&state.config.ffmpeg_path, body).await {
+            Ok(mp4) => mp4,
+            Err(e) => {
+                error!("MOV->MP4 remux failed: {}", e);
+                db::fail_job(&state.db_pool, job_id, &format!("remux failed: {}", e)).await?;
+                return Err(e);
+            }
+        }
+    } else {
+        body
+    };
 
     // STEP 1: Upload blob to user's PDS FIRST
     // Forward the client's service auth token to the PDS.
