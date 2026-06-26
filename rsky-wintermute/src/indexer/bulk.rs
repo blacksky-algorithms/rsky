@@ -30,6 +30,28 @@ fn escape_copy_field(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+// Escape an optional COPY field, emitting the \N NULL marker when the value is absent.
+fn escape_copy_opt(v: Option<&str>) -> std::borrow::Cow<'_, str> {
+    v.map_or(std::borrow::Cow::Borrowed("\\N"), escape_copy_field)
+}
+
+/// A post row for bulk `COPY`. `reply_*` are `None` for non-replies; `langs`/`tags`
+/// hold compact JSON text destined for the `jsonb` columns, `None` when absent.
+pub struct PostCopyRow {
+    pub uri: String,
+    pub cid: String,
+    pub creator: String,
+    pub text: String,
+    pub reply_root: Option<String>,
+    pub reply_root_cid: Option<String>,
+    pub reply_parent: Option<String>,
+    pub reply_parent_cid: Option<String>,
+    pub created_at: String,
+    pub indexed_at: String,
+    pub langs: Option<String>,
+    pub tags: Option<String>,
+}
+
 /// Bulk insert records using `COPY` protocol.
 /// Returns vector of booleans indicating which records were applied (not stale).
 pub async fn copy_insert_records(
@@ -221,7 +243,7 @@ pub async fn copy_ensure_actors(
 /// Bulk insert posts using `COPY` protocol.
 pub async fn copy_insert_posts(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String)], // uri, cid, creator, text, created_at, indexed_at
+    data: &[PostCopyRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<(), WintermuteError> {
     use std::time::Instant;
@@ -241,8 +263,14 @@ pub async fn copy_insert_posts(
                 cid text NOT NULL,
                 creator text NOT NULL,
                 text text,
+                reply_root text,
+                reply_root_cid text,
+                reply_parent text,
+                reply_parent_cid text,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
+                indexed_at text NOT NULL,
+                langs jsonb,
+                tags jsonb
             )",
             &[],
         )
@@ -251,26 +279,33 @@ pub async fn copy_insert_posts(
     client.execute("TRUNCATE _bulk_post", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
-    // Phase 2: COPY data (no NULL clause - text column is NOT NULL so empty string must be preserved)
+    // Phase 2: COPY data. text is NOT NULL so empty string is preserved; reply_*/langs/tags
+    // use the \N NULL marker when absent.
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_post (uri, cid, creator, text, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
+        .copy_in("COPY _bulk_post (uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs, tags) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 300);
-    for (uri, cid, creator, text, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let text = escape_copy_field(text);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let text = escape_copy_field(&row.text);
+        let reply_root = escape_copy_opt(row.reply_root.as_deref());
+        let reply_root_cid = escape_copy_opt(row.reply_root_cid.as_deref());
+        let reply_parent = escape_copy_opt(row.reply_parent.as_deref());
+        let reply_parent_cid = escape_copy_opt(row.reply_parent_cid.as_deref());
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let langs = escape_copy_opt(row.langs.as_deref());
+        let tags = escape_copy_opt(row.tags.as_deref());
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{text}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{text}\t{reply_root}\t{reply_root_cid}\t{reply_parent}\t{reply_parent_cid}\t{created_at}\t{indexed_at}\t{langs}\t{tags}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -283,8 +318,8 @@ pub async fn copy_insert_posts(
     let insert_start = Instant::now();
     client
         .execute(
-            "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, text, created_at, indexed_at
+            "INSERT INTO post (uri, cid, creator, text, \"replyRoot\", \"replyRootCid\", \"replyParent\", \"replyParentCid\", \"createdAt\", \"indexedAt\", langs, tags)
+             SELECT uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs, tags
              FROM _bulk_post
              ON CONFLICT DO NOTHING",
             &[],
@@ -1060,7 +1095,7 @@ pub async fn copy_insert_post_embed_videos(
 
 #[cfg(test)]
 mod tests {
-    use super::escape_copy_field;
+    use super::{escape_copy_field, escape_copy_opt};
 
     #[test]
     fn escapes_backslash_and_whitespace_for_copy() {
@@ -1077,5 +1112,16 @@ mod tests {
     fn escapes_trailing_backslash_so_row_is_not_corrupted() {
         // A trailing backslash previously escaped the tab delimiter and shifted columns.
         assert_eq!(escape_copy_field("path\\"), "path\\\\");
+    }
+
+    #[test]
+    fn optional_field_emits_null_marker_when_absent() {
+        // None -> \N (COPY NULL); Some -> escaped value, so reply_*/langs/tags load correctly.
+        assert_eq!(escape_copy_opt(None), "\\N");
+        assert_eq!(
+            escape_copy_opt(Some("at://did/app.bsky.feed.post/x")),
+            "at://did/app.bsky.feed.post/x"
+        );
+        assert_eq!(escape_copy_opt(Some("a\tb")), "a\\tb");
     }
 }

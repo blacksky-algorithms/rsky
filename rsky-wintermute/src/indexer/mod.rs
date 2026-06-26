@@ -2461,8 +2461,7 @@ impl IndexerManager {
             return Ok(());
         }
 
-        let mut post_data: Vec<(String, String, String, String, String, String)> =
-            Vec::with_capacity(jobs.len());
+        let mut post_data: Vec<bulk::PostCopyRow> = Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
@@ -2484,14 +2483,51 @@ impl IndexerManager {
                     created_at.clone()
                 };
 
-                post_data.push((
-                    uri.clone(),
-                    pj.job.cid.clone(),
-                    pj.did.clone(),
+                // Reply linkage and langs/tags (omitted by the bulk path before; index_post has reply).
+                let reply = record.get("reply");
+                let reply_root = reply
+                    .and_then(|r| r.get("root"))
+                    .and_then(|r| r.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_root_cid = reply
+                    .and_then(|r| r.get("root"))
+                    .and_then(|r| r.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_parent = reply
+                    .and_then(|r| r.get("parent"))
+                    .and_then(|r| r.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_parent_cid = reply
+                    .and_then(|r| r.get("parent"))
+                    .and_then(|r| r.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let langs = record
+                    .get("langs")
+                    .filter(|v| !v.is_null())
+                    .map(std::string::ToString::to_string);
+                let tags = record
+                    .get("tags")
+                    .filter(|v| !v.is_null())
+                    .map(std::string::ToString::to_string);
+
+                post_data.push(bulk::PostCopyRow {
+                    uri: uri.clone(),
+                    cid: pj.job.cid.clone(),
+                    creator: pj.did.clone(),
                     text,
-                    created_at.clone(),
-                    pj.job.indexed_at.clone(),
-                ));
+                    reply_root,
+                    reply_root_cid,
+                    reply_parent,
+                    reply_parent_cid,
+                    created_at: created_at.clone(),
+                    indexed_at: pj.job.indexed_at.clone(),
+                    langs,
+                    tags,
+                });
 
                 feed_item_data.push((
                     "post".to_owned(),
