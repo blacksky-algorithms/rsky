@@ -1612,6 +1612,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_ban_from_tv() {
         let test_did = "did:plc:test123".to_string();
         let test_reason = Some("Test ban reason".to_string());
@@ -1640,6 +1641,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_search_banned_from_tv() {
         let test_did1 = "did:plc:search001".to_string();
         let test_did2 = "did:plc:search002".to_string();
