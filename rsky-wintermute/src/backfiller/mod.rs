@@ -271,6 +271,21 @@ impl BackfillerManager {
         }
 
         let car_bytes = response.bytes().await?;
+        Self::process_car_bytes(storage, did, &car_bytes, job.priority).await?;
+
+        metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
+
+        Ok(())
+    }
+
+    pub async fn process_car_bytes(
+        storage: &Storage,
+        did: &str,
+        car_bytes: &[u8],
+        priority: bool,
+    ) -> Result<usize, WintermuteError> {
+        use crate::metrics;
+
         let mut reader = match CarReader::new(Cursor::new(car_bytes.to_vec())).await {
             Ok(r) => r,
             Err(e) => {
@@ -366,16 +381,14 @@ impl BackfillerManager {
         }
 
         if !batch_jobs.is_empty() {
-            if job.priority {
+            if priority {
                 storage.enqueue_firehose_backfill_priority_batch(&batch_jobs)?;
             } else {
                 storage.enqueue_firehose_backfill_batch(&batch_jobs)?;
             }
         }
 
-        metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
-
-        Ok(())
+        Ok(batch_jobs.len())
     }
 }
 

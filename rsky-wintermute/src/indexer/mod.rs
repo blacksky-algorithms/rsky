@@ -557,7 +557,7 @@ impl IndexerManager {
 
             // Process the entire batch with batch INSERT statements
             let process_start = Instant::now();
-            let results = Self::process_jobs_batch(&pool, &jobs, false).await;
+            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, false).await;
             let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue
@@ -1453,13 +1453,14 @@ impl IndexerManager {
         pool: &Pool,
         jobs: &[(Vec<u8>, IndexJob)],
         bulk_load: bool,
-    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+    ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         use crate::metrics;
 
         if jobs.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
+        let mut batch_failed = false;
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
@@ -1476,7 +1477,8 @@ impl IndexerManager {
 
         // Process creates in batch (uses parallel COPY for different collection types)
         if !creates.is_empty() {
-            let batch_results = Self::batch_insert_records(pool, &creates, bulk_load).await;
+            let (batch_results, bf) = Self::batch_insert_records(pool, &creates, bulk_load).await;
+            batch_failed |= bf;
             results.extend(batch_results);
         }
 
@@ -1487,7 +1489,7 @@ impl IndexerManager {
             results.push((key.clone(), result));
         }
 
-        results
+        (results, batch_failed)
     }
 
     /// Batch insert records using `PostgreSQL` `COPY` protocol for high throughput.
@@ -1496,11 +1498,13 @@ impl IndexerManager {
         pool: &Pool,
         jobs: &[&(Vec<u8>, IndexJob)],
         bulk_load: bool,
-    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+    ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         use crate::metrics;
         use std::time::Instant;
 
         let batch_start = Instant::now();
+        // Set on any COPY/connection failure so callers don't treat the batch as persisted.
+        let mut batch_failed = false;
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
@@ -1512,7 +1516,7 @@ impl IndexerManager {
                 for (key, _) in jobs {
                     results.push(((*key).clone(), Err(WintermuteError::Other(err_msg.clone()))));
                 }
-                return results;
+                return (results, true);
             }
         };
 
@@ -1556,7 +1560,7 @@ impl IndexerManager {
         });
 
         if parsed_jobs.is_empty() {
-            return results;
+            return (results, batch_failed);
         }
 
         // Batch 1: Ensure all actors exist using COPY
@@ -1570,7 +1574,7 @@ impl IndexerManager {
 
         if let Err(e) = bulk::copy_ensure_actors(&client, &unique_dids).await {
             tracing::error!("COPY actor insert failed: {e}");
-            // Continue anyway, individual records may still work
+            batch_failed = true;
         }
         let actors_ms = actors_start.elapsed().as_millis();
 
@@ -1598,6 +1602,7 @@ impl IndexerManager {
             Ok(results) => results,
             Err(e) => {
                 tracing::error!("COPY record insert failed: {e}");
+                batch_failed = true;
                 vec![false; parsed_jobs.len()]
             }
         };
@@ -1663,6 +1668,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for posts failed: {e}");
+            batch_failed = true;
         }
 
         let (ms, count, err) = likes_result;
@@ -1671,6 +1677,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for likes failed: {e}");
+            batch_failed = true;
         }
 
         let (ms, count, err) = follows_result;
@@ -1679,6 +1686,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for follows failed: {e}");
+            batch_failed = true;
         }
 
         let (ms, count, err) = reposts_result;
@@ -1687,6 +1695,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for reposts failed: {e}");
+            batch_failed = true;
         }
 
         let (ms, count, err) = blocks_result;
@@ -1695,6 +1704,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for blocks failed: {e}");
+            batch_failed = true;
         }
 
         let (ms, count, err) = profiles_result;
@@ -1703,6 +1713,7 @@ impl IndexerManager {
         }
         if let Some(e) = err {
             tracing::error!("COPY batch insert for profiles failed: {e}");
+            batch_failed = true;
         }
 
         // Process "other" collection types sequentially (less common)
@@ -1764,7 +1775,7 @@ impl IndexerManager {
             applied_count
         );
 
-        results
+        (results, batch_failed)
     }
 
     // Legacy batch functions - kept as fallbacks (now using COPY protocol)
@@ -2450,8 +2461,7 @@ impl IndexerManager {
             return Ok(());
         }
 
-        let mut post_data: Vec<(String, String, String, String, String, String)> =
-            Vec::with_capacity(jobs.len());
+        let mut post_data: Vec<bulk::PostCopyRow> = Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
@@ -2473,14 +2483,51 @@ impl IndexerManager {
                     created_at.clone()
                 };
 
-                post_data.push((
-                    uri.clone(),
-                    pj.job.cid.clone(),
-                    pj.did.clone(),
+                // Reply linkage and langs/tags (omitted by the bulk path before; index_post has reply).
+                let reply = record.get("reply");
+                let reply_root = reply
+                    .and_then(|r| r.get("root"))
+                    .and_then(|r| r.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_root_cid = reply
+                    .and_then(|r| r.get("root"))
+                    .and_then(|r| r.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_parent = reply
+                    .and_then(|r| r.get("parent"))
+                    .and_then(|r| r.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let reply_parent_cid = reply
+                    .and_then(|r| r.get("parent"))
+                    .and_then(|r| r.get("cid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let langs = record
+                    .get("langs")
+                    .filter(|v| !v.is_null())
+                    .map(std::string::ToString::to_string);
+                let tags = record
+                    .get("tags")
+                    .filter(|v| !v.is_null())
+                    .map(std::string::ToString::to_string);
+
+                post_data.push(bulk::PostCopyRow {
+                    uri: uri.clone(),
+                    cid: pj.job.cid.clone(),
+                    creator: pj.did.clone(),
                     text,
-                    created_at.clone(),
-                    pj.job.indexed_at.clone(),
-                ));
+                    reply_root,
+                    reply_root_cid,
+                    reply_parent,
+                    reply_parent_cid,
+                    created_at: created_at.clone(),
+                    indexed_at: pj.job.indexed_at.clone(),
+                    langs,
+                    tags,
+                });
 
                 feed_item_data.push((
                     "post".to_owned(),
