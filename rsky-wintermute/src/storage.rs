@@ -7,8 +7,13 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// LMDB max map size: 4TB for `firehose_backfill` queue
-const LMDB_MAP_SIZE: usize = 4 * 1024 * 1024 * 1024 * 1024;
+/// LMDB max map size: 4TB for `firehose_backfill` queue.
+/// Tests use 1GB: repeated 4TB reservations exhaust macOS address space.
+const LMDB_MAP_SIZE: usize = if cfg!(test) {
+    1024 * 1024 * 1024
+} else {
+    4 * 1024 * 1024 * 1024 * 1024
+};
 
 pub struct Storage {
     #[allow(dead_code)] // Kept for Fjall keyspace - partitions reference it internally

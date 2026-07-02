@@ -54,6 +54,54 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    async fn test_process_car_bytes_with_fixture_repo() {
+        let (storage, _dir) = setup_test_storage();
+
+        let car_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rsky-repo/resources/test/valid_repo.car"
+        ))
+        .unwrap();
+
+        let enqueued = BackfillerManager::process_car_bytes(
+            &storage,
+            "did:plc:r7fdhqmw3h2cifeakw5hmvy6",
+            &car_bytes,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // valid_repo.car's MST references exactly 6 live records
+        let queue_len = storage.firehose_backfill_len().unwrap();
+        assert_eq!(enqueued, queue_len);
+        assert_eq!(enqueued, 6);
+    }
+
+    #[tokio::test]
+    async fn test_process_car_bytes_rejects_did_mismatch() {
+        let (storage, _dir) = setup_test_storage();
+
+        let car_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rsky-repo/resources/test/valid_repo.car"
+        ))
+        .unwrap();
+
+        let result = BackfillerManager::process_car_bytes(
+            &storage,
+            "did:plc:someotherdidentirely00000",
+            &car_bytes,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(storage.firehose_backfill_len().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live network; run manually with --ignored"]
     async fn test_process_job_with_real_repo() {
         let (storage, _dir) = setup_test_storage();
 
@@ -68,22 +116,11 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+            .await
+            .unwrap();
 
-        match result {
-            Ok(()) => {
-                let queue_len = storage.firehose_backfill_len().unwrap();
-                assert!(
-                    queue_len > 7000,
-                    "expected more than 20000 records to be enqueued for indexing, found {queue_len}"
-                );
-            }
-            Err(e) => {
-                panic!("backfill job failed: {e}");
-            }
-        }
+        assert!(storage.firehose_backfill_len().unwrap() > 0);
     }
 
     #[tokio::test]

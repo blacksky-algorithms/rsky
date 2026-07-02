@@ -989,10 +989,14 @@ mod ingester_tests {
                 .execute("DELETE FROM actor WHERE did = $1", &[&did])
                 .await
                 .unwrap();
+            // actor.handle is unique in the canonical schema; derive one per did
+            let handle = format!("{}.test", did.rsplit(':').next().unwrap());
             client
                 .execute(
-                    "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, NOW())",
-                    &[&did, &"test.example"],
+                    "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, NOW()) \
+                     ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
+                     \"upstreamStatus\" = NULL, \"accountEventAt\" = NULL",
+                    &[&did, &handle],
                 )
                 .await
                 .unwrap();
