@@ -1,0 +1,29 @@
+[package]
+name = "rsky-space-host"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "atproto permissioned-data space authority/host: issues space credentials, manages a space, routes write notifications"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "rsky-space-host"
+path = "src/main.rs"
+
+[dependencies]
+rsky-space = { path = "../rsky-space", version = "0.1.0" }
+rsky-common = { workspace = true }
+rsky-crypto = { workspace = true }
+rsky-syntax = { workspace = true }
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1.0"
+async-trait = "0.1"
+hex = "0.4"
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }

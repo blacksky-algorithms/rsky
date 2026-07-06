@@ -8123,6 +8123,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-daemon"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "hex",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-identity",
+ "rsky-space",
+ "rsky-syntax",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rsky-feedgen"
 version = "1.1.4"
 dependencies = [
@@ -8465,6 +8488,27 @@ dependencies = [
  "sha2",
  "subtle",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rsky-space-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "hex",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-space",
+ "rsky-syntax",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
