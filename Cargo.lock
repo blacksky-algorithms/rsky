@@ -8448,6 +8448,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-space"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-syntax",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rsky-syntax"
 version = "0.1.0"
 dependencies = [

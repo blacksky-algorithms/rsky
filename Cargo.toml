@@ -13,6 +13,7 @@ members = [
   "rsky-relay",
   "rsky-repo",
   "rsky-satnav",
+  "rsky-space",
   "rsky-syntax",
   "rsky-video",
   "rsky-wintermute",

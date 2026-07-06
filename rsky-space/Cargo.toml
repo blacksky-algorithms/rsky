@@ -1,0 +1,26 @@
+[package]
+name = "rsky-space"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "atproto permissioned-data (spaces) primitives: LtHash commits, credentials, space repos"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+rsky-common = { workspace = true }
+rsky-crypto = { workspace = true }
+rsky-syntax = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+sha2 = { workspace = true }
+thiserror = "1.0"
+# Parallel-protocol crypto not present in rsky-crypto today (crate-local for now;
+# candidates to upstream into rsky-crypto alongside p256/secp256k1).
+blake3 = "1"
+hkdf = "0.12"
+hmac = "0.12"
+subtle = "2"
+base64 = "0.22"
+hex = "0.4"
