@@ -6,10 +6,7 @@ mod tests;
 
 use crate::SHUTDOWN;
 use crate::backfiller::convert_record_to_ipld;
-use crate::config::{
-    CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL,
-    WORKERS_INGESTER,
-};
+use crate::config::{CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
