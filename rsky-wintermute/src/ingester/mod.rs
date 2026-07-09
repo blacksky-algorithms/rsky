@@ -7,10 +7,9 @@ mod tests;
 use crate::SHUTDOWN;
 use crate::backfiller::convert_record_to_ipld;
 use crate::config::{
-    CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY,
+    CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL,
     WORKERS_INGESTER,
 };
-use crate::indexer::IndexerManager;
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -20,7 +19,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
@@ -149,11 +147,6 @@ impl IngesterManager {
             }
         };
 
-        // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
-        let concurrency = *INLINE_CONCURRENCY;
-        tracing::info!("firehose inline concurrency: {concurrency}");
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s max
         let max_backoff_secs = 60u64;
         let mut backoff_secs = 1u64;
@@ -165,7 +158,7 @@ impl IngesterManager {
             }
 
             let connect_start = std::time::Instant::now();
-            match Self::connect_and_stream(&storage, &hostname, &pool, &semaphore).await {
+            match Self::connect_and_stream(&storage, &hostname, &pool).await {
                 ConnectionResult::Closed => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
@@ -215,10 +208,9 @@ impl IngesterManager {
     }
 
     async fn connect_and_stream(
-        _storage: &Storage,
+        storage: &Storage,
         hostname: &str,
         pool: &Arc<Pool>,
-        semaphore: &Arc<Semaphore>,
     ) -> ConnectionResult {
         use crate::metrics;
 
@@ -509,24 +501,17 @@ impl IngesterManager {
                     continue;
                 }
 
-                // Process inline: parse event and spawn indexing tasks directly (skip Fjall queue)
+                // Queue to Fjall so live intake never blocks on indexing speed; the
+                // firehose_live processor loop consumes and indexes from the queue.
                 match Self::parse_event_to_jobs(&event).await {
                     Ok(jobs) => {
                         for job in jobs {
-                            // Acquire semaphore permit (like rsky-firehose)
-                            let Ok(permit) = semaphore.clone().acquire_owned().await else {
-                                tracing::error!("semaphore closed during firehose processing");
-                                break;
-                            };
-                            let pool_clone = Arc::clone(pool);
-                            tokio::spawn(async move {
-                                if let Err(e) = IndexerManager::process_job(&pool_clone, &job).await
-                                {
-                                    tracing::error!("inline indexing failed: {e}");
-                                    metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                                }
-                                drop(permit);
-                            });
+                            if let Err(e) = storage.enqueue_firehose_live(&job) {
+                                tracing::error!("failed to enqueue firehose_live job: {e}");
+                                metrics::INGESTER_ERRORS_TOTAL
+                                    .with_label_values(&["enqueue_failed"])
+                                    .inc();
+                            }
                         }
                     }
                     Err(e) => {
