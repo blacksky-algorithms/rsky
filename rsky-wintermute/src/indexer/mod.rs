@@ -557,7 +557,8 @@ impl IndexerManager {
 
             // Process the entire batch with batch INSERT statements
             let process_start = Instant::now();
-            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, false).await;
+            let bulk_mode = !*crate::config::LIVE_AGGREGATES;
+            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, bulk_mode).await;
             let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue

@@ -142,6 +142,14 @@ pub fn backfiller_timeout() -> Duration {
 
 // Inline processing concurrency for firehose events
 // Should be proportional to DB_POOL_SIZE to avoid excessive connection contention
+/// Live indexing updates aggregates inline (`post_agg`/`profile_agg`). Set `LIVE_AGGREGATES=false`
+/// to defer them (e.g. while a bulk load runs and a full recompute will follow).
+pub static LIVE_AGGREGATES: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("LIVE_AGGREGATES")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true)
+});
+
 pub static INLINE_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("INLINE_CONCURRENCY")
         .ok()
