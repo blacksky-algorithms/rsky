@@ -7,7 +7,7 @@ use crate::config::{
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
-use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
+use crate::config::{FIREHOSE_LIVE_DRAIN_BATCH, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
@@ -53,7 +53,6 @@ type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
 type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
-type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
@@ -334,61 +333,28 @@ impl IndexerManager {
     }
 
     async fn process_firehose_live_loop(&self) {
-        let max_concurrent = *INLINE_CONCURRENCY;
+        let batch_size = *FIREHOSE_LIVE_DRAIN_BATCH;
 
-        tracing::info!(max_concurrent, "firehose_live processor started");
-        let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
+        tracing::info!(batch_size, "firehose_live processor started (batch drain)");
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!(
-                    "shutdown requested for firehose_live processor, draining {} in-flight tasks",
-                    in_flight.len()
-                );
-                // Drain with timeout to avoid hanging forever
-                let drain_start = std::time::Instant::now();
-                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
-                    tokio::select! {
-                        Some(result) = in_flight.next() => {
-                            self.handle_single_job_result(result);
-                        }
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    }
-                }
-                if !in_flight.is_empty() {
-                    tracing::warn!(
-                        "firehose_live: {} tasks still in-flight after drain timeout",
-                        in_flight.len()
-                    );
-                }
+                tracing::info!("shutdown requested for firehose_live processor");
                 break;
             }
 
             self.update_queue_metrics();
 
-            // First, drain all completed tasks (non-blocking)
-            while let Some(result) = in_flight.next().now_or_never().flatten() {
-                self.handle_single_job_result(result);
-                processed_count += 1;
-            }
-
-            // Dequeue jobs up to max concurrent limit (matches pool capacity)
-            while in_flight.len() < max_concurrent {
-                if SHUTDOWN.load(Ordering::Relaxed) {
+            let mut batch: Vec<(Vec<u8>, IndexJob)> = Vec::with_capacity(batch_size);
+            loop {
+                if batch.len() >= batch_size {
                     break;
                 }
                 match self.storage.dequeue_firehose_live() {
-                    Ok(Some((key, job))) => {
-                        let pool = self.pool_live.clone();
-                        let task = tokio::spawn(async move {
-                            let result = Self::process_job(&pool, &job).await;
-                            (key, QueueSource::FirehoseLive, result)
-                        });
-                        in_flight.push(task);
-                    }
+                    Ok(Some((key, job))) => batch.push((key, job)),
                     Ok(None) => break,
                     Err(e) => {
                         tracing::error!("failed to dequeue firehose_live job: {e}");
@@ -397,30 +363,28 @@ impl IndexerManager {
                 }
             }
 
-            // Wait for at least one task to complete before next iteration
-            if in_flight.is_empty() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= max_concurrent {
-                // At capacity - wait for one to complete
-                if let Some(result) = in_flight.next().await {
-                    self.handle_single_job_result(result);
-                    processed_count += 1;
-                }
-            } else {
-                tokio::task::yield_now().await;
+            if batch.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
             }
 
-            // Log progress periodically - only if work was done
+            let bulk_mode = !*crate::config::LIVE_AGGREGATES;
+            let (results, _batch_failed) =
+                Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode).await;
+            for (key, result) in results {
+                processed_count += 1;
+                self.handle_single_job_result(Ok((key, QueueSource::FirehoseLive, result)));
+            }
+
             if last_log.elapsed() > Duration::from_secs(5) {
                 let elapsed_secs = last_log.elapsed().as_secs_f64();
                 #[allow(clippy::cast_precision_loss)]
                 let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
                 if processed_count > last_processed_count {
                     tracing::info!(
-                        "firehose_live: {} indexed ({:.1}/s), {} in_flight",
-                        processed_count - last_processed_count,
-                        rate,
-                        in_flight.len()
+                        "firehose_live: {} indexed ({:.1}/s), queue draining in batches",
+                        processed_count,
+                        rate
                     );
                 }
                 last_processed_count = processed_count;

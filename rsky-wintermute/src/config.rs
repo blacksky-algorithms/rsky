@@ -150,6 +150,14 @@ pub static LIVE_AGGREGATES: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(true)
 });
 
+/// Jobs drained from the `firehose_live` queue per indexing batch.
+pub static FIREHOSE_LIVE_DRAIN_BATCH: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("FIREHOSE_LIVE_DRAIN_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000)
+});
+
 pub static INLINE_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("INLINE_CONCURRENCY")
         .ok()
