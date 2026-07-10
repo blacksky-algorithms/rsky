@@ -1447,11 +1447,27 @@ impl IndexerManager {
             results.extend(batch_results);
         }
 
-        // Process deletes individually (they're less common and more complex)
-        for (key, job) in deletes {
-            let result = Self::process_job(pool, job).await;
-            metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
-            results.push((key.clone(), result));
+        // Deletes touch independent rows (creates were flushed above), so run them
+        // concurrently instead of serially awaiting each round trip.
+        if !deletes.is_empty() {
+            let owned: Vec<(Vec<u8>, IndexJob)> = deletes
+                .into_iter()
+                .map(|(k, j)| (k.clone(), j.clone()))
+                .collect();
+            let delete_results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
+                futures::stream::iter(owned)
+                    .map(|(key, job)| {
+                        let pool = pool.clone();
+                        async move {
+                            let result = Self::process_job(&pool, &job).await;
+                            metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
+                            (key, result)
+                        }
+                    })
+                    .buffer_unordered(16)
+                    .collect()
+                    .await;
+            results.extend(delete_results);
         }
 
         (results, batch_failed)
