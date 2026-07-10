@@ -1,6 +1,6 @@
 [package]
 name = "rsky-wintermute"
-version = "0.3.8"
+version = "0.4.0"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Monolithic indexer combining ingester, backfiller, and indexer"

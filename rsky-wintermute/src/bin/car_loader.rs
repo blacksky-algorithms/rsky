@@ -78,6 +78,15 @@ struct Args {
     /// Print progress (percent complete, rates) from the state file and exit.
     #[arg(long, default_value_t = false)]
     status: bool,
+
+    /// TSV of `did<TAB>rev` already loaded (export: COPY (SELECT did, max(rev) FROM record
+    /// GROUP BY did) TO ... ). Repos whose manifest rev is not newer are skipped.
+    #[arg(long, env = "CAR_LOADER_DELTA_REVS")]
+    delta_revs: Option<PathBuf>,
+
+    /// After parsing each repo, delete its DB records absent from the CAR (gap deletes).
+    #[arg(long, default_value_t = false)]
+    reconcile_deletes: bool,
 }
 
 impl Args {
@@ -93,6 +102,7 @@ impl Args {
 struct ManifestRow {
     did: String,
     path: String,
+    rev: String,
 }
 
 /// A parsed repo: index jobs to write plus any per-record extraction failures.
@@ -288,6 +298,7 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
         let state_tx = state_tx.clone();
         let args = Arc::clone(&args);
         let counters = Arc::clone(&counters);
+        let pool = pool.clone();
         worker_handles.push(tokio::spawn(async move {
             loop {
                 let row = {
@@ -311,6 +322,17 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
                                 .records_failed
                                 .fetch_add(failures.len() as u64, Ordering::Relaxed);
                             let _ = state_tx.send(StateMsg::RecordsFailed(failures));
+                        }
+                        if args.reconcile_deletes {
+                            if let Err(e) = reconcile_stale_records(&pool, &parsed).await {
+                                counters.repos_failed.fetch_add(1, Ordering::Relaxed);
+                                let _ = state_tx.send(StateMsg::RepoFailed {
+                                    did: row.did.clone(),
+                                    path: row.path.clone(),
+                                    error: format!("reconcile failed: {e:#}"),
+                                });
+                                continue;
+                            }
                         }
                         let _ = parsed_tx.send(parsed).await;
                     }
@@ -475,6 +497,84 @@ fn spawn_repo_enqueuer(args: &Arc<Args>, work_tx: tokio::sync::mpsc::Sender<Mani
     });
 }
 
+/// Tables holding rows keyed by a record's URI, per collection ("uri column", table).
+fn collection_tables(collection: &str) -> &'static [(&'static str, &'static str)] {
+    match collection {
+        "app.bsky.feed.post" => &[
+            ("post", "uri"),
+            ("feed_item", "uri"),
+            ("quote", "uri"),
+            ("post_embed_image", "\"postUri\""),
+            ("post_embed_video", "\"postUri\""),
+        ],
+        "app.bsky.feed.repost" => &[("repost", "uri"), ("feed_item", "uri")],
+        "app.bsky.feed.like" => &[("\"like\"", "uri")],
+        "app.bsky.graph.follow" => &[("follow", "uri")],
+        "app.bsky.graph.block" => &[("actor_block", "uri")],
+        "app.bsky.actor.profile" => &[("profile", "uri")],
+        "app.bsky.graph.list" => &[("list", "uri")],
+        "app.bsky.graph.listitem" => &[("list_item", "uri")],
+        "app.bsky.graph.listblock" => &[("list_block", "uri")],
+        "app.bsky.feed.threadgate" => &[("thread_gate", "uri")],
+        "app.bsky.feed.postgate" => &[("post_gate", "uri")],
+        "app.bsky.feed.generator" => &[("feed_generator", "uri")],
+        "app.bsky.labeler.service" => &[("labeler", "uri")],
+        "app.bsky.graph.starterpack" => &[("starter_pack", "uri")],
+        "app.bsky.graph.verification" => &[("verification", "uri")],
+        _ => &[],
+    }
+}
+
+/// The collection segment of `at://did/collection/rkey`.
+fn uri_collection(uri: &str) -> Option<&str> {
+    uri.split('/').nth(3)
+}
+
+/// Delete this repo's DB records that are absent from the freshly parsed CAR. Safe to run
+/// before the repo's inserts: the stale and incoming URI sets are disjoint.
+async fn reconcile_stale_records(pool: &Pool, parsed: &ParsedRepo) -> Result<()> {
+    let parsed_uris: std::collections::HashSet<&str> =
+        parsed.jobs.iter().map(|j| j.uri.as_str()).collect();
+    let client = pool.get().await?;
+    let rows = client
+        .query("SELECT uri FROM record WHERE did = $1", &[&parsed.did])
+        .await?;
+    let stale: Vec<String> = rows
+        .into_iter()
+        .map(|r| r.get::<_, String>(0))
+        .filter(|u| !parsed_uris.contains(u.as_str()))
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    client
+        .execute("DELETE FROM record WHERE uri = ANY($1)", &[&stale])
+        .await?;
+    let mut by_collection: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for uri in &stale {
+        if let Some(c) = uri_collection(uri) {
+            by_collection.entry(c).or_default().push(uri.clone());
+        }
+    }
+    for (collection, uris) in by_collection {
+        for (table, col) in collection_tables(collection) {
+            client
+                .execute(
+                    &format!("DELETE FROM {table} WHERE {col} = ANY($1)"),
+                    &[&uris],
+                )
+                .await?;
+        }
+    }
+    tracing::debug!(
+        "reconciled {} stale records for {}",
+        stale.len(),
+        parsed.did
+    );
+    Ok(())
+}
+
 /// Stream manifest rows (skipping already-done DIDs) into the work channel; or the recorded
 /// failures when `--retry-failed`.
 fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) -> Result<()> {
@@ -487,7 +587,7 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
     state.execute_batch("CREATE TABLE IF NOT EXISTS done (did TEXT PRIMARY KEY)")?;
 
     if args.retry_failed {
-        let mut stmt = state.prepare("SELECT did, path FROM failed")?;
+        let mut stmt = state.prepare("SELECT did, path, '' FROM failed")?;
         let rows = stmt.query_map([], manifest_row)?;
         for row in rows {
             if work_tx.blocking_send(row?).is_err() {
@@ -507,8 +607,13 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
         }
     }
 
+    let loaded_revs = match &args.delta_revs {
+        Some(path) => Some(load_delta_revs(path)?),
+        None => None,
+    };
+
     let mut stmt = manifest.prepare(
-        "SELECT did, path FROM repo_dumps \
+        "SELECT did, path, rev FROM repo_dumps \
          WHERE (?1 = 1 OR rowid % ?1 = ?2) ORDER BY did",
     )?;
     let rows = stmt.query_map(rusqlite::params![args.shards, args.shard], manifest_row)?;
@@ -517,6 +622,11 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
         if done.contains(&row.did) {
             continue;
         }
+        if let Some(revs) = &loaded_revs {
+            if !manifest_rev_is_newer(revs.get(row.did.as_str()), &row.rev) {
+                continue;
+            }
+        }
         if work_tx.blocking_send(row).is_err() {
             break;
         }
@@ -524,10 +634,36 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
     Ok(())
 }
 
+/// Load the `did<TAB>rev` export of already-loaded repo revs.
+fn load_delta_revs(path: &std::path::Path) -> Result<std::collections::HashMap<String, String>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| color_eyre::eyre::eyre!("open delta revs {}: {e}", path.display()))?;
+    let mut map = std::collections::HashMap::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if let Some((did, rev)) = line.split_once('\t') {
+            map.insert(did.to_owned(), rev.to_owned());
+        }
+    }
+    tracing::info!("delta mode: {} loaded repo revs", map.len());
+    Ok(map)
+}
+
+/// TIDs order lexicographically, so a plain string compare decides freshness.
+/// A repo we have no rev for (new account) is always loaded.
+fn manifest_rev_is_newer(loaded: Option<&String>, manifest_rev: &str) -> bool {
+    match loaded {
+        Some(loaded) => manifest_rev > loaded.as_str(),
+        None => true,
+    }
+}
+
 fn manifest_row(r: &rusqlite::Row) -> rusqlite::Result<ManifestRow> {
     Ok(ManifestRow {
         did: r.get(0)?,
         path: r.get(1)?,
+        rev: r.get(2)?,
     })
 }
 
@@ -684,4 +820,42 @@ async fn load_single_repo(args: &Args, pool: &Pool, did: &str) -> Result<()> {
         results.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collection_tables, manifest_rev_is_newer, uri_collection};
+
+    #[test]
+    fn rev_compare_decides_delta_load() {
+        let loaded = String::from("3lb2aaaaaaa2a");
+        assert!(manifest_rev_is_newer(Some(&loaded), "3lb2bbbbbbb2b"));
+        assert!(!manifest_rev_is_newer(Some(&loaded), "3lb2aaaaaaa2a"));
+        assert!(!manifest_rev_is_newer(Some(&loaded), "3lb19999999zz"));
+        assert!(manifest_rev_is_newer(None, "3lb2aaaaaaa2a"));
+    }
+
+    #[test]
+    fn uri_collection_extracts_segment() {
+        assert_eq!(
+            uri_collection("at://did:plc:abc/app.bsky.feed.post/3kabc"),
+            Some("app.bsky.feed.post")
+        );
+        assert_eq!(uri_collection("at://did:plc:abc"), None);
+    }
+
+    #[test]
+    fn post_deletes_cover_dependent_tables() {
+        let tables: Vec<&str> = collection_tables("app.bsky.feed.post")
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+        assert!(tables.contains(&"post"));
+        assert!(tables.contains(&"feed_item"));
+        assert!(tables.contains(&"post_embed_image"));
+        assert_eq!(
+            collection_tables("com.example.custom"),
+            &[] as &[(&str, &str)]
+        );
+    }
 }
