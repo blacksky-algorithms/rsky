@@ -193,6 +193,26 @@ pub async fn upload_video(
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
 
+    // Bunny cannot transcode GIF input, so convert GIFs to MP4 up front; the
+    // PDS blob and Bunny then both receive real video/mp4 bytes.
+    let body = if crate::transcode::is_gif(&body) {
+        match crate::transcode::gif_to_mp4(&body).await {
+            Ok(mp4) => Bytes::from(mp4),
+            Err(e) => {
+                error!("GIF transcode failed: {}", e);
+                db::fail_job(
+                    &state.db_pool,
+                    job_id,
+                    &format!("GIF transcode failed: {}", e),
+                )
+                .await?;
+                return Err(e);
+            }
+        }
+    } else {
+        body
+    };
+
     // STEP 1: Upload blob to user's PDS FIRST
     // Forward the client's service auth token to the PDS.
     // The token should have aud: user's PDS DID (not video service).
