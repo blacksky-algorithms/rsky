@@ -1,6 +1,6 @@
 [package]
 name = "rsky-video"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Blacksky video service - handles video uploads, transcoding via Bunny Stream, and playback"
@@ -66,6 +66,7 @@ prometheus = { version = "0.13", features = ["process"] }
 # rsky crates
 rsky-syntax = { workspace = true }
 
+tempfile = "3"
+
 [dev-dependencies]
 mockito = "1.7.0"
-tempfile = "3"

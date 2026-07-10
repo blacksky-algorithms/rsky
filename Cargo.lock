@@ -8463,7 +8463,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-video"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "atrium-api 0.25.7",
  "atrium-xrpc",
