@@ -308,6 +308,40 @@ impl Storage {
         Ok(())
     }
 
+    /// Dequeue up to `limit` `firehose_live` jobs with a single iterator pass.
+    /// One LSM scan amortizes tombstone skipping across the whole batch instead
+    /// of paying it per item. Undeserializable entries are removed and skipped
+    /// so a poison entry cannot wedge the queue head.
+    pub fn dequeue_firehose_live_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let mut results = Vec::with_capacity(limit);
+        let mut poisoned: Vec<Vec<u8>> = Vec::new();
+
+        for entry in self.firehose_live.iter().take(limit) {
+            let (key, value) = entry?;
+            match ciborium::from_reader(value.as_ref()) {
+                Ok(job) => results.push((key.to_vec(), job)),
+                Err(e) => {
+                    tracing::error!("dropping undeserializable firehose_live entry: {e}");
+                    poisoned.push(key.to_vec());
+                }
+            }
+        }
+
+        for (key, _) in &results {
+            self.firehose_live.remove(key.as_slice())?;
+        }
+        for key in &poisoned {
+            self.firehose_live.remove(key.as_slice())?;
+        }
+
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.sub((results.len() + poisoned.len()) as i64);
+        Ok(results)
+    }
+
     // Firehose backfill queue (from backfiller) - uses LMDB for consistent sub-ms iteration
     // Uses key-prefix partitioning for fast parallel dequeue:
     // - Priority items: prefix "0:" (processed first by all workers)

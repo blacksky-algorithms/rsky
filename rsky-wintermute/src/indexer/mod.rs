@@ -348,20 +348,14 @@ impl IndexerManager {
 
             self.update_queue_metrics();
 
-            let mut batch: Vec<(Vec<u8>, IndexJob)> = Vec::with_capacity(batch_size);
-            loop {
-                if batch.len() >= batch_size {
-                    break;
-                }
-                match self.storage.dequeue_firehose_live() {
-                    Ok(Some((key, job))) => batch.push((key, job)),
-                    Ok(None) => break,
+            let batch: Vec<(Vec<u8>, IndexJob)> =
+                match self.storage.dequeue_firehose_live_batch(batch_size) {
+                    Ok(jobs) => jobs,
                     Err(e) => {
-                        tracing::error!("failed to dequeue firehose_live job: {e}");
-                        break;
+                        tracing::error!("failed to dequeue firehose_live batch: {e}");
+                        Vec::new()
                     }
-                }
-            }
+                };
 
             if batch.is_empty() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
