@@ -78,6 +78,10 @@ async fn main() -> color_eyre::Result<()> {
         config.bunny_library_id.clone(),
         config.bunny_api_key.clone(),
         config.bunny_pull_zone.clone(),
+        config.bunny_token_key.clone(),
+        config
+            .playlist_redirect_max_age_secs
+            .max(config.thumbnail_redirect_max_age_secs),
     );
 
     // Initialize HTTP client for PDS uploads

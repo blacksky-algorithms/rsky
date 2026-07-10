@@ -454,7 +454,13 @@ pub async fn proxy_playlist(
     Ok(Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
         .header(header::LOCATION, redirect_url)
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .header(
+            header::CACHE_CONTROL,
+            format!(
+                "public, max-age={}",
+                state.config.playlist_redirect_max_age_secs
+            ),
+        )
         .body(Body::empty())
         .unwrap())
 }
@@ -490,7 +496,13 @@ pub async fn proxy_thumbnail(
     Ok(Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
         .header(header::LOCATION, redirect_url)
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(
+            header::CACHE_CONTROL,
+            format!(
+                "public, max-age={}",
+                state.config.thumbnail_redirect_max_age_secs
+            ),
+        )
         .body(Body::empty())
         .unwrap())
 }
