@@ -26,6 +26,10 @@ pub struct Storage {
     // LMDB for firehose_backfill - eliminates L0 compaction stalls
     lmdb_env: Env,
     firehose_backfill_db: HeedDatabase<Bytes, Bytes>,
+    // Sweep cursor: keys are uri-first, so intake interleaves with the dequeue
+    // head and tombstones pile up there; scanning from the last dequeued key
+    // (wrapping when exhausted) avoids re-walking them every batch.
+    firehose_live_cursor: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl Storage {
@@ -144,6 +148,7 @@ impl Storage {
             cursors,
             lmdb_env,
             firehose_backfill_db,
+            firehose_live_cursor: std::sync::Mutex::new(None),
         })
     }
 
@@ -308,18 +313,13 @@ impl Storage {
         Ok(())
     }
 
-    /// Dequeue up to `limit` `firehose_live` jobs with a single iterator pass.
-    /// One LSM scan amortizes tombstone skipping across the whole batch instead
-    /// of paying it per item. Undeserializable entries are removed and skipped
-    /// so a poison entry cannot wedge the queue head.
-    pub fn dequeue_firehose_live_batch(
-        &self,
+    fn collect_live_entries(
+        iter: impl Iterator<Item = Result<(fjall::Slice, fjall::Slice), fjall::Error>>,
         limit: usize,
-    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
-        let mut results = Vec::with_capacity(limit);
-        let mut poisoned: Vec<Vec<u8>> = Vec::new();
-
-        for entry in self.firehose_live.iter().take(limit) {
+        results: &mut Vec<(Vec<u8>, IndexJob)>,
+        poisoned: &mut Vec<Vec<u8>>,
+    ) -> Result<(), WintermuteError> {
+        for entry in iter.take(limit - results.len()) {
             let (key, value) = entry?;
             match ciborium::from_reader(value.as_ref()) {
                 Ok(job) => results.push((key.to_vec(), job)),
@@ -328,6 +328,54 @@ impl Storage {
                     poisoned.push(key.to_vec());
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Dequeue up to `limit` `firehose_live` jobs with a single sweep-cursor
+    /// range scan. Scanning resumes after the last dequeued key and wraps to
+    /// the partition start when exhausted, so each batch walks fresh keyspace
+    /// instead of re-skipping the tombstones of every prior batch. Per-record
+    /// ordering holds because keys are uri-first with a timestamp suffix.
+    /// Undeserializable entries are removed and skipped so a poison entry
+    /// cannot wedge the sweep.
+    pub fn dequeue_firehose_live_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let cursor = self.firehose_live_cursor.lock().map_or(None, |c| c.clone());
+
+        let mut results = Vec::with_capacity(limit);
+        let mut poisoned: Vec<Vec<u8>> = Vec::new();
+
+        if let Some(after) = cursor {
+            let range = (
+                std::ops::Bound::Excluded(after),
+                std::ops::Bound::<Vec<u8>>::Unbounded,
+            );
+            Self::collect_live_entries(
+                self.firehose_live.range(range),
+                limit,
+                &mut results,
+                &mut poisoned,
+            )?;
+        }
+        if results.is_empty() && poisoned.is_empty() {
+            // Wrap to the partition start to sweep keys behind the cursor
+            Self::collect_live_entries(
+                self.firehose_live.iter(),
+                limit,
+                &mut results,
+                &mut poisoned,
+            )?;
+        }
+
+        let last_key = results
+            .last()
+            .map(|(k, _)| k.clone())
+            .or_else(|| poisoned.last().cloned());
+        if let (Some(key), Ok(mut guard)) = (last_key, self.firehose_live_cursor.lock()) {
+            *guard = Some(key);
         }
 
         for (key, _) in &results {

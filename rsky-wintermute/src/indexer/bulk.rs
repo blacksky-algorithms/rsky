@@ -128,8 +128,9 @@ pub async fn copy_insert_records(
     let rows = client
         .query(
             "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
-             SELECT uri, cid, did, json, rev, indexed_at
+             SELECT DISTINCT ON (uri) uri, cid, did, json, rev, indexed_at
              FROM _bulk_record
+             ORDER BY uri, rev DESC
              ON CONFLICT (uri) DO UPDATE SET
                rev = EXCLUDED.rev,
                cid = EXCLUDED.cid,

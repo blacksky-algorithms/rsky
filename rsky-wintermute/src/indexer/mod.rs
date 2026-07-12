@@ -51,8 +51,8 @@ pub enum QueueSource {
 type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 #[cfg(test)]
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
+#[cfg(test)]
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
-type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
@@ -365,9 +365,25 @@ impl IndexerManager {
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
             let (results, _batch_failed) =
                 Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode).await;
+            let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> =
+                batch.iter().map(|(k, j)| (k.as_slice(), j)).collect();
             for (key, result) in results {
                 processed_count += 1;
-                self.handle_single_job_result(Ok((key, QueueSource::FirehoseLive, result)));
+                if let Err(e) = result {
+                    crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                    let msg = e.to_string();
+                    // Dequeue already removed the entry, so a failed job must be
+                    // re-enqueued or the event is lost; only unparseable jobs
+                    // can never succeed and are dropped.
+                    if msg.contains("invalid uri") {
+                        tracing::error!("dropping unprocessable firehose_live job: {msg}");
+                    } else if let Some(job) = jobs_by_key.get(key.as_slice()) {
+                        tracing::warn!("requeueing failed firehose_live job {}: {msg}", job.uri);
+                        if let Err(e2) = self.storage.enqueue_firehose_live(job) {
+                            tracing::error!("failed to requeue firehose_live job: {e2}");
+                        }
+                    }
+                }
             }
 
             if last_log.elapsed() > Duration::from_secs(5) {
@@ -739,28 +755,6 @@ impl IndexerManager {
         }
         let label_jobs = self.dequeue_label_jobs();
         (jobs, label_jobs)
-    }
-
-    fn handle_single_job_result(&self, result: JobTaskJoinResult) {
-        match result {
-            Ok((key, source, Ok(()))) => {
-                let remove_result = match source {
-                    QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
-                    QueueSource::FirehoseBackfill => self.storage.remove_firehose_backfill(&key),
-                    QueueSource::LabelLive => self.storage.remove_label_live(&key),
-                };
-                if let Err(e) = remove_result {
-                    tracing::error!("failed to remove index job from {:?}: {e}", source);
-                }
-            }
-            Ok((_, _, Err(e))) => {
-                crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                tracing::error!("index job failed: {e}");
-            }
-            Err(e) => {
-                tracing::error!("task panicked: {e}");
-            }
-        }
     }
 
     #[cfg(test)]
@@ -1829,8 +1823,16 @@ impl IndexerManager {
             Ok(results) => results,
             Err(e) => {
                 tracing::error!("COPY record insert failed: {e}");
-                batch_failed = true;
-                vec![false; parsed_jobs.len()]
+                // Fail every job in the batch so callers can requeue; treating
+                // them as stale-skips would silently drop the events.
+                let err_msg = format!("record COPY failed: {e}");
+                for pj in &parsed_jobs {
+                    results.push((
+                        (*pj.key).clone(),
+                        Err(WintermuteError::Other(err_msg.clone())),
+                    ));
+                }
+                return (results, true);
             }
         };
         let records_ms = records_start.elapsed().as_millis();
