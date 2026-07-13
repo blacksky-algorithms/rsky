@@ -340,13 +340,19 @@ impl IndexerManager {
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
+        // Seed queue gauges once off the hot path: recomputing them per
+        // iteration is an O(n) partition scan that dominated the drain cycle.
+        // The gauges stay current via inc/sub in enqueue/dequeue.
+        let metrics_storage = Arc::clone(&self.storage);
+        drop(tokio::task::spawn_blocking(move || {
+            Self::update_queue_metrics_for(&metrics_storage);
+        }));
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for firehose_live processor");
                 break;
             }
-
-            self.update_queue_metrics();
 
             let batch: Vec<(Vec<u8>, IndexJob)> =
                 match self.storage.dequeue_firehose_live_batch(batch_size) {
@@ -682,16 +688,21 @@ impl IndexerManager {
         }
     }
 
+    #[cfg(test)]
     fn update_queue_metrics(&self) {
-        if let Ok(live_len) = self.storage.firehose_live_len() {
+        Self::update_queue_metrics_for(&self.storage);
+    }
+
+    fn update_queue_metrics_for(storage: &Storage) {
+        if let Ok(live_len) = storage.firehose_live_len() {
             crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
                 .set(i64::try_from(live_len).unwrap_or(i64::MAX));
         }
-        if let Ok(backfill_len) = self.storage.firehose_backfill_len() {
+        if let Ok(backfill_len) = storage.firehose_backfill_len() {
             crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
                 .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
         }
-        if let Ok(label_len) = self.storage.label_live_len() {
+        if let Ok(label_len) = storage.label_live_len() {
             crate::metrics::INGESTER_LABEL_LIVE_LENGTH
                 .set(i64::try_from(label_len).unwrap_or(i64::MAX));
         }
@@ -2489,6 +2500,16 @@ impl IndexerManager {
         if jobs.is_empty() {
             return Ok(());
         }
+
+        // Keep only the last event per uri: duplicates in one batch would make
+        // the single-statement upsert illegal.
+        let mut seen = std::collections::HashSet::new();
+        let mut jobs: Vec<&&ParsedJob<'_>> = jobs
+            .iter()
+            .rev()
+            .filter(|pj| seen.insert(pj.uri.to_string()))
+            .collect();
+        jobs.reverse();
 
         let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
         let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
