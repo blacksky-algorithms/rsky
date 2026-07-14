@@ -28,8 +28,9 @@ WORKSPACE_MEMBERS=()
 
 # Look for members section in Cargo.toml
 if grep -q '\[workspace\]' Cargo.toml; then
-  # Extract the members section
-  MEMBERS_SECTION=$(sed -n '/\[workspace\]/,/\[/p' Cargo.toml | grep -A 20 'members.*=' | grep -v '^\[')
+  # Extract the members section: print from the members key to the closing
+  # bracket, regardless of how many lines the array spans
+  MEMBERS_SECTION=$(awk '/^[[:space:]]*members[[:space:]]*=/ { in_members=1 } in_members { print; if (index($0, "]")) exit }' Cargo.toml)
   
   # Extract member paths - handle both array and table formats
   if echo "$MEMBERS_SECTION" | grep -q 'members.*=.*\['; then
