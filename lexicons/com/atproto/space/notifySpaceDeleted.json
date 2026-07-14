@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.notifySpaceDeleted",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Notify that a space was deleted by its authority. Sent by the authority to members' repo hosts and registered syncers; delivery is best-effort. Syncers should delete every copy of the space's data they hold; repo hosts should flag the member's repo as belonging to a deleted space. Authenticated with service auth.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            }
+          }
+        }
+      }
+    }
+  }
+}

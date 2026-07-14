@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.defs",
+  "defs": {
+    "config": {
+      "type": "object",
+      "description": "Configuration for a simplespace-managed space. A user must be authorized by the policy and their app by appAccess for a credential to be minted.",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "knownValues": ["public", "member-list", "managing-app"],
+          "default": "member-list",
+          "description": "How the authority decides whether to authorize a user: any requester (public), requesters on the member list (member-list), or by asking the managing app via checkUserAccess (managing-app)."
+        },
+        "appAccess": {
+          "type": "union",
+          "refs": ["#appAccessOpen", "#appAccessAllowList"],
+          "description": "How the authority decides whether to authorize an app. Defaults to open."
+        },
+        "managingApp": {
+          "type": "string",
+          "description": "Service identifier (a DID with a service fragment) of the application that manages this space. Used to route application-level requests, and as the checkUserAccess target when policy is managing-app."
+        }
+      }
+    },
+    "appAccessOpen": {
+      "type": "object",
+      "description": "Any application may access the space. No client attestation is required, so public clients work.",
+      "properties": {}
+    },
+    "appAccessAllowList": {
+      "type": "object",
+      "description": "Only the listed applications may access the space. Evaluated against the attested client_id from the verified client attestation.",
+      "required": ["allowed"],
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "An OAuth client_id permitted to access the space."
+          }
+        }
+      }
+    }
+  }
+}

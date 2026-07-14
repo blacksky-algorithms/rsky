@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.listMembers",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List the current members of a simplespace-managed space. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 500
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["members"],
+          "properties": {
+            "cursor": { "type": "string" },
+            "members": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "#member" }
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    },
+    "member": {
+      "type": "object",
+      "required": ["did"],
+      "properties": {
+        "did": { "type": "string", "format": "did" }
+      }
+    }
+  }
+}

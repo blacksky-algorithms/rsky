@@ -1,0 +1,56 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.getRecord",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Fetch a single record's value from a permissioned repo. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "did", "collection", "rkey"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the repo's author."
+          },
+          "collection": {
+            "type": "string",
+            "format": "nsid",
+            "description": "The NSID of the record collection."
+          },
+          "rkey": {
+            "type": "string",
+            "format": "record-key",
+            "description": "The Record Key."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "The CID of the version of the record. If not specified, then return the most recent version."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri", "value"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "description": "Permissioned record URI, in the form at://{authority}/space/{spaceType}/{skey}/{authorDid}/{collection}/{rkey}. Not a standard at-uri."
+            },
+            "cid": { "type": "string", "format": "cid" },
+            "value": { "type": "unknown" }
+          }
+        }
+      },
+      "errors": [{ "name": "RecordNotFound" }, { "name": "RepoNotFound" }]
+    }
+  }
+}
