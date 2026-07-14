@@ -142,3 +142,42 @@ pub fn pref_match_namespace(namespace: &String, fullname: &String) -> bool {
 }
 
 pub mod util;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_pref_type_in_namespace_is_accepted() {
+        let pref: RefPreferences = serde_json::from_value(serde_json::json!({
+            "$type": "app.bsky.actor.defs#skyfeedBuilderFeedsPref",
+            "feeds": [],
+        }))
+        .unwrap();
+        let namespace = "app.bsky".to_string();
+        assert!(pref_match_namespace(&namespace, &pref.get_type()));
+        assert!(util::pref_in_scope(AuthScope::AppPass, pref.get_type()));
+    }
+
+    #[test]
+    fn pref_outside_namespace_is_rejected() {
+        let pref: RefPreferences = serde_json::from_value(serde_json::json!({
+            "$type": "com.example.defs#somePref",
+        }))
+        .unwrap();
+        assert!(!pref_match_namespace(
+            &"app.bsky".to_string(),
+            &pref.get_type()
+        ));
+    }
+
+    #[test]
+    fn pref_without_type_is_rejected() {
+        let pref: RefPreferences =
+            serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
+        assert!(!pref_match_namespace(
+            &"app.bsky".to_string(),
+            &pref.get_type()
+        ));
+    }
+}
