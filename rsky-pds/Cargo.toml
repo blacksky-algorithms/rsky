@@ -37,6 +37,7 @@ ipld-core = { workspace = true }
 jwt-simple = { version = "0.12.9", default-features = false, features = ["pure-rust"] }
 lazy_static = "1.4.0"
 lexicon_cid = { workspace = true }
+lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
 rand = { workspace = true }
@@ -44,6 +45,7 @@ rand_core = { workspace = true }
 regex = "1.10.3"
 reqwest = { version = "0.12.3", features = ["json", "blocking"] }
 rocket = { version = "=0.5.1", features = ["json", "tls"] }
+rusqlite = { workspace = true }
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }
 rsky-identity = { workspace = true }
@@ -70,6 +72,7 @@ ws = { package = "rocket_ws", version = "0.1.1" }
 
 
 [dev-dependencies]
+tempfile = "3.10"
 testcontainers = "0.23.2"
 testcontainers-modules = { version = "0.11.6", features = ["postgres", "blocking"] }
 diesel_migrations = {version = "2.1.0", features = ["postgres"]}

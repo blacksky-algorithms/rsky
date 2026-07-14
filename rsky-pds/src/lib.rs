@@ -12,6 +12,7 @@ pub mod account_manager;
 pub mod actor_store;
 pub mod apis;
 pub mod auth_verifier;
+pub mod background;
 pub mod config;
 pub mod context;
 pub mod crawlers;

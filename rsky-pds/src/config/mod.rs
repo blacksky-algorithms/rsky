@@ -14,6 +14,45 @@ pub struct ServerConfig {
     pub invites: InvitesConfig,
     pub identity: IdentityConfig,
     pub crawlers: Vec<String>,
+    pub actor_store: ActorStoreConfig,
+    pub service_db: ServiceDbConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorStoreConfig {
+    pub directory: String,
+    pub cache_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceDbConfig {
+    pub account_db_location: String,
+    pub sequencer_db_location: String,
+    pub did_cache_db_location: String,
+}
+
+pub fn storage_cfg_from(
+    data_directory: Option<String>,
+    actor_store_directory: Option<String>,
+    actor_store_cache_size: Option<usize>,
+    account_db_location: Option<String>,
+    sequencer_db_location: Option<String>,
+    did_cache_db_location: Option<String>,
+) -> (ActorStoreConfig, ServiceDbConfig) {
+    let db_loc = |name: &str| match &data_directory {
+        Some(data_directory) => format!("{data_directory}/{name}"),
+        None => name.to_string(),
+    };
+    let actor_store = ActorStoreConfig {
+        directory: actor_store_directory.unwrap_or_else(|| db_loc("actors")),
+        cache_size: actor_store_cache_size.unwrap_or(100),
+    };
+    let service_db = ServiceDbConfig {
+        account_db_location: account_db_location.unwrap_or_else(|| db_loc("account.sqlite")),
+        sequencer_db_location: sequencer_db_location.unwrap_or_else(|| db_loc("sequencer.sqlite")),
+        did_cache_db_location: did_cache_db_location.unwrap_or_else(|| db_loc("did_cache.sqlite")),
+    };
+    (actor_store, service_db)
 }
 
 /// BksyAppViewConfig, ModServiceConfig, ReportServiceConfig, etc.
@@ -151,6 +190,14 @@ pub fn env_to_cfg() -> ServerConfig {
         },
     };
     let crawlers_cfg = env_list("PDS_CRAWLERS");
+    let (actor_store_cfg, service_db_cfg) = storage_cfg_from(
+        env_str("PDS_DATA_DIRECTORY"),
+        env_str("PDS_ACTOR_STORE_DIRECTORY"),
+        env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
+        env_str("PDS_ACCOUNT_DB_LOCATION"),
+        env_str("PDS_SEQUENCER_DB_LOCATION"),
+        env_str("PDS_DID_CACHE_DB_LOCATION"),
+    );
 
     ServerConfig {
         service: service_cfg,
@@ -161,6 +208,8 @@ pub fn env_to_cfg() -> ServerConfig {
         invites: invites_cfg,
         crawlers: crawlers_cfg,
         identity: identity_cfg,
+        actor_store: actor_store_cfg,
+        service_db: service_db_cfg,
     }
 }
 
@@ -172,5 +221,47 @@ impl ServerConfig {
                 context::service_auth_headers(did, &bsky_app_view.did, lxm).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_cfg_defaults_without_data_directory() {
+        let (actor_store, service_db) = storage_cfg_from(None, None, None, None, None, None);
+        assert_eq!(actor_store.directory, "actors");
+        assert_eq!(actor_store.cache_size, 100);
+        assert_eq!(service_db.account_db_location, "account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "did_cache.sqlite");
+    }
+
+    #[test]
+    fn storage_cfg_defaults_under_data_directory() {
+        let (actor_store, service_db) =
+            storage_cfg_from(Some("/data".to_owned()), None, None, None, None, None);
+        assert_eq!(actor_store.directory, "/data/actors");
+        assert_eq!(service_db.account_db_location, "/data/account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "/data/sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "/data/did_cache.sqlite");
+    }
+
+    #[test]
+    fn storage_cfg_explicit_values_win() {
+        let (actor_store, service_db) = storage_cfg_from(
+            Some("/data".to_owned()),
+            Some("/elsewhere/actors".to_owned()),
+            Some(5),
+            Some("/dbs/account.sqlite".to_owned()),
+            Some("/dbs/sequencer.sqlite".to_owned()),
+            Some("/dbs/did_cache.sqlite".to_owned()),
+        );
+        assert_eq!(actor_store.directory, "/elsewhere/actors");
+        assert_eq!(actor_store.cache_size, 5);
+        assert_eq!(service_db.account_db_location, "/dbs/account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "/dbs/sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "/dbs/did_cache.sqlite");
     }
 }

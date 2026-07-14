@@ -8112,7 +8112,7 @@ dependencies = [
  "multibase",
  "p256 0.13.2",
  "secp256k1",
- "sha2",
+ "sha2 0.10.9",
  "unsigned-varint 0.8.0",
 ]
 
@@ -8294,6 +8294,7 @@ dependencies = [
  "ipld-core",
  "jwt-simple",
  "lazy_static",
+ "lru 0.14.0",
  "mailchecker",
  "mailgun-rs",
  "rand 0.8.5",
@@ -8309,6 +8310,7 @@ dependencies = [
  "rsky-lexicon",
  "rsky-repo",
  "rsky-syntax",
+ "rusqlite",
  "secp256k1",
  "serde",
  "serde_bytes",
@@ -8318,6 +8320,7 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "sha2 0.10.9",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 1.0.69",
