@@ -8113,12 +8113,13 @@ dependencies = [
 
 [[package]]
 name = "rsky-crypto"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "multibase",
  "p256 0.13.2",
  "secp256k1",
+ "sha2",
  "unsigned-varint 0.8.0",
 ]
 
@@ -8186,9 +8187,12 @@ name = "rsky-identity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "hickory-resolver 0.24.4",
+ "multibase",
  "reqwest 0.12.23",
  "rsky-crypto",
+ "secp256k1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
