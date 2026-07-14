@@ -1,6 +1,6 @@
 [package]
 name = "rsky-lexicon"
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
 publish = true
 description = "Bluesky API library"
@@ -13,6 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/rsky-lexicon"
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4.24", features = ["serde"] }
 derive_builder = "0.12.0"
 miette = "5.8.0"

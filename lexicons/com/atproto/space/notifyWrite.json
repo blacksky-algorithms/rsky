@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.notifyWrite",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Notify that a permissioned repo in a space has advanced to a new revision. Sent by a repo host to the space host, and forwarded by the space host to registered syncers. Carries no record data; delivery is best-effort. Authenticated with service auth.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "did", "rev"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID of the repo that advanced."
+            },
+            "rev": {
+              "type": "string",
+              "format": "tid",
+              "description": "The repo's new commit revision."
+            }
+          }
+        }
+      }
+    }
+  }
+}

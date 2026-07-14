@@ -4,7 +4,7 @@ use color_eyre::Result;
 use std::env;
 
 /// Application configuration loaded from environment variables
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     /// Host to bind to
     pub host: String,
@@ -17,8 +17,20 @@ pub struct AppConfig {
     pub bunny_library_id: String,
     /// Bunny Stream API Key
     pub bunny_api_key: String,
-    /// Bunny Pull Zone hostname (e.g., "blacksky-video.b-cdn.net")
+    /// Bunny Pull Zone subdomain, without the `.b-cdn.net` suffix.
     pub bunny_pull_zone: String,
+    /// Bunny URL Token Authentication key (Stream > Library > Security).
+    /// Distinct from `bunny_api_key`. Used to sign CDN playback URLs.
+    /// `None` when CDN_TOKEN_AUTH=false: playback URLs are left unsigned, for
+    /// cutover phases where the pull zone does not enforce token auth yet.
+    pub bunny_token_key: Option<String>,
+    /// Cache-Control max-age of the playlist 307 redirect, in seconds.
+    /// The CDN token TTL is derived from the longest of these max-ages, so a
+    /// cached redirect never carries an expired token. Override (together with
+    /// the thumbnail one) to drain caches during a token-auth cutover.
+    pub playlist_redirect_max_age_secs: i64,
+    /// Cache-Control max-age of the thumbnail 307 redirect, in seconds.
+    pub thumbnail_redirect_max_age_secs: i64,
 
     /// This service's DID (e.g., "did:web:video.blacksky.community")
     pub service_did: String,
@@ -40,6 +52,15 @@ pub struct AppConfig {
 impl AppConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
+        let cdn_token_auth = env::var("CDN_TOKEN_AUTH")
+            .map(|v| v.parse().expect("CDN_TOKEN_AUTH must be 'true' or 'false'"))
+            .unwrap_or(true);
+        let bunny_token_key = if cdn_token_auth {
+            Some(env::var("BUNNY_TOKEN_KEY").expect("BUNNY_TOKEN_KEY must be set"))
+        } else {
+            None
+        };
+
         Ok(Self {
             host: env::var("VIDEO_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("VIDEO_PORT")
@@ -51,6 +72,21 @@ impl AppConfig {
             bunny_library_id: env::var("BUNNY_LIBRARY_ID").expect("BUNNY_LIBRARY_ID must be set"),
             bunny_api_key: env::var("BUNNY_API_KEY").expect("BUNNY_API_KEY must be set"),
             bunny_pull_zone: env::var("BUNNY_PULL_ZONE").expect("BUNNY_PULL_ZONE must be set"),
+            bunny_token_key,
+            // Cutover knobs: fail loudly on unparseable values instead of
+            // silently falling back to the long defaults.
+            playlist_redirect_max_age_secs: env::var("PLAYLIST_REDIRECT_MAX_AGE_SECS")
+                .map(|s| {
+                    s.parse()
+                        .expect("PLAYLIST_REDIRECT_MAX_AGE_SECS must be an integer")
+                })
+                .unwrap_or(3600), // 1 hour
+            thumbnail_redirect_max_age_secs: env::var("THUMBNAIL_REDIRECT_MAX_AGE_SECS")
+                .map(|s| {
+                    s.parse()
+                        .expect("THUMBNAIL_REDIRECT_MAX_AGE_SECS must be an integer")
+                })
+                .unwrap_or(86400), // 24 hours
 
             service_did: env::var("VIDEO_SERVICE_DID")
                 .unwrap_or_else(|_| "did:web:video.blacksky.community".to_string()),

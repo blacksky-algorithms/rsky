@@ -7,7 +7,7 @@ use crate::config::{
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
-use crate::config::{INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
+use crate::config::{FIREHOSE_LIVE_DRAIN_BATCH, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
@@ -53,7 +53,6 @@ type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
 type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
-type JobTaskHandle = tokio::task::JoinHandle<JobTaskResult>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
@@ -334,93 +333,52 @@ impl IndexerManager {
     }
 
     async fn process_firehose_live_loop(&self) {
-        let max_concurrent = *INLINE_CONCURRENCY;
+        let batch_size = *FIREHOSE_LIVE_DRAIN_BATCH;
 
-        tracing::info!(max_concurrent, "firehose_live processor started");
-        let mut in_flight: FuturesUnordered<JobTaskHandle> = FuturesUnordered::new();
+        tracing::info!(batch_size, "firehose_live processor started (batch drain)");
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!(
-                    "shutdown requested for firehose_live processor, draining {} in-flight tasks",
-                    in_flight.len()
-                );
-                // Drain with timeout to avoid hanging forever
-                let drain_start = std::time::Instant::now();
-                while !in_flight.is_empty() && drain_start.elapsed() < Duration::from_secs(5) {
-                    tokio::select! {
-                        Some(result) = in_flight.next() => {
-                            self.handle_single_job_result(result);
-                        }
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    }
-                }
-                if !in_flight.is_empty() {
-                    tracing::warn!(
-                        "firehose_live: {} tasks still in-flight after drain timeout",
-                        in_flight.len()
-                    );
-                }
+                tracing::info!("shutdown requested for firehose_live processor");
                 break;
             }
 
             self.update_queue_metrics();
 
-            // First, drain all completed tasks (non-blocking)
-            while let Some(result) = in_flight.next().now_or_never().flatten() {
-                self.handle_single_job_result(result);
-                processed_count += 1;
-            }
-
-            // Dequeue jobs up to max concurrent limit (matches pool capacity)
-            while in_flight.len() < max_concurrent {
-                if SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-                match self.storage.dequeue_firehose_live() {
-                    Ok(Some((key, job))) => {
-                        let pool = self.pool_live.clone();
-                        let task = tokio::spawn(async move {
-                            let result = Self::process_job(&pool, &job).await;
-                            (key, QueueSource::FirehoseLive, result)
-                        });
-                        in_flight.push(task);
-                    }
-                    Ok(None) => break,
+            let batch: Vec<(Vec<u8>, IndexJob)> =
+                match self.storage.dequeue_firehose_live_batch(batch_size) {
+                    Ok(jobs) => jobs,
                     Err(e) => {
-                        tracing::error!("failed to dequeue firehose_live job: {e}");
-                        break;
+                        tracing::error!("failed to dequeue firehose_live batch: {e}");
+                        Vec::new()
                     }
-                }
+                };
+
+            if batch.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
             }
 
-            // Wait for at least one task to complete before next iteration
-            if in_flight.is_empty() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            } else if in_flight.len() >= max_concurrent {
-                // At capacity - wait for one to complete
-                if let Some(result) = in_flight.next().await {
-                    self.handle_single_job_result(result);
-                    processed_count += 1;
-                }
-            } else {
-                tokio::task::yield_now().await;
+            let bulk_mode = !*crate::config::LIVE_AGGREGATES;
+            let (results, _batch_failed) =
+                Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode).await;
+            for (key, result) in results {
+                processed_count += 1;
+                self.handle_single_job_result(Ok((key, QueueSource::FirehoseLive, result)));
             }
 
-            // Log progress periodically - only if work was done
             if last_log.elapsed() > Duration::from_secs(5) {
                 let elapsed_secs = last_log.elapsed().as_secs_f64();
                 #[allow(clippy::cast_precision_loss)]
                 let rate = (processed_count - last_processed_count) as f64 / elapsed_secs;
                 if processed_count > last_processed_count {
                     tracing::info!(
-                        "firehose_live: {} indexed ({:.1}/s), {} in_flight",
-                        processed_count - last_processed_count,
-                        rate,
-                        in_flight.len()
+                        "firehose_live: {} indexed ({:.1}/s), queue draining in batches",
+                        processed_count,
+                        rate
                     );
                 }
                 last_processed_count = processed_count;
@@ -557,7 +515,8 @@ impl IndexerManager {
 
             // Process the entire batch with batch INSERT statements
             let process_start = Instant::now();
-            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, false).await;
+            let bulk_mode = !*crate::config::LIVE_AGGREGATES;
+            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, bulk_mode).await;
             let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue
@@ -1454,8 +1413,6 @@ impl IndexerManager {
         jobs: &[(Vec<u8>, IndexJob)],
         bulk_load: bool,
     ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
-        use crate::metrics;
-
         if jobs.is_empty() {
             return (Vec::new(), false);
         }
@@ -1482,14 +1439,284 @@ impl IndexerManager {
             results.extend(batch_results);
         }
 
-        // Process deletes individually (they're less common and more complex)
-        for (key, job) in deletes {
-            let result = Self::process_job(pool, job).await;
-            metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
-            results.push((key.clone(), result));
+        if !deletes.is_empty() {
+            let (delete_results, bf) = Self::batch_delete_records(pool, &deletes, bulk_load).await;
+            batch_failed |= bf;
+            results.extend(delete_results);
         }
 
         (results, batch_failed)
+    }
+
+    /// Batch delete records using set-based statements (uri = ANY) instead of
+    /// per-record round-trips, preserving the rev gate and aggregate decrements.
+    async fn batch_delete_records(
+        pool: &Pool,
+        jobs: &[&(Vec<u8>, IndexJob)],
+        bulk_load: bool,
+    ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
+        use crate::metrics;
+        use std::collections::{BTreeMap, HashSet};
+        use std::time::Instant;
+
+        struct ParsedDelete<'a> {
+            key: &'a Vec<u8>,
+            job: &'a IndexJob,
+            uri: String,
+            collection: String,
+            did: String,
+            rkey: String,
+        }
+
+        let start = Instant::now();
+        let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
+            Vec::with_capacity(jobs.len());
+
+        let mut parsed: Vec<ParsedDelete<'_>> = Vec::with_capacity(jobs.len());
+        for (key, job) in jobs {
+            match AtUri::new(job.uri.clone(), None) {
+                Ok(uri) => {
+                    let collection = uri.get_collection();
+                    if crate::config::record_collection_allowed(&collection) {
+                        parsed.push(ParsedDelete {
+                            key,
+                            job,
+                            uri: uri.to_string(),
+                            did: uri.get_hostname().clone(),
+                            rkey: uri.get_rkey().clone(),
+                            collection,
+                        });
+                    } else {
+                        metrics::INDEXER_RECORDS_FILTERED_TOTAL.inc();
+                        results.push(((*key).clone(), Ok(())));
+                    }
+                }
+                Err(e) => {
+                    results.push((
+                        (*key).clone(),
+                        Err(WintermuteError::Other(format!("invalid uri: {e}"))),
+                    ));
+                }
+            }
+        }
+        metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc_by(parsed.len() as u64);
+
+        if parsed.is_empty() {
+            return (results, false);
+        }
+
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("pool error: {e}");
+                for p in &parsed {
+                    results.push((p.key.clone(), Err(WintermuteError::Other(err_msg.clone()))));
+                }
+                return (results, true);
+            }
+        };
+
+        let uris: Vec<String> = parsed.iter().map(|p| p.uri.clone()).collect();
+        let revs: Vec<String> = parsed.iter().map(|p| p.job.rev.clone()).collect();
+
+        // Rev-gated generic record delete; only applied uris get collection cleanup
+        let applied: HashSet<String> = match client
+            .query(
+                "DELETE FROM record r
+                 USING unnest($1::text[], $2::text[]) AS d(uri, rev)
+                 WHERE r.uri = d.uri AND r.rev <= d.rev
+                 RETURNING r.uri",
+                &[&uris, &revs],
+            )
+            .await
+        {
+            Ok(rows) => rows.iter().map(|r| r.get(0)).collect(),
+            Err(e) => {
+                let err_msg = format!("batch record delete failed: {e}");
+                tracing::error!("{err_msg}");
+                for p in &parsed {
+                    results.push((p.key.clone(), Err(WintermuteError::Other(err_msg.clone()))));
+                }
+                return (results, false);
+            }
+        };
+
+        if let Err(e) = client
+            .execute("DELETE FROM duplicate_record WHERE uri = ANY($1)", &[&uris])
+            .await
+        {
+            tracing::warn!("batch duplicate_record delete failed: {e}");
+        }
+
+        let mut by_collection: BTreeMap<&str, Vec<&ParsedDelete<'_>>> = BTreeMap::new();
+        for p in &parsed {
+            if applied.contains(&p.uri) {
+                by_collection
+                    .entry(p.collection.as_str())
+                    .or_default()
+                    .push(p);
+            } else {
+                results.push((p.key.clone(), Ok(())));
+            }
+        }
+
+        for (collection, group) in by_collection {
+            let group_uris: Vec<String> = group.iter().map(|p| p.uri.clone()).collect();
+            let group_result: Result<(), WintermuteError> = async {
+                match collection {
+                    "app.bsky.feed.like" => {
+                        client
+                            .execute("DELETE FROM \"like\" WHERE uri = ANY($1)", &[&group_uris])
+                            .await?;
+                    }
+                    "app.bsky.graph.block" => {
+                        client
+                            .execute(
+                                "DELETE FROM actor_block WHERE uri = ANY($1)",
+                                &[&group_uris],
+                            )
+                            .await?;
+                    }
+                    "app.bsky.feed.repost" => {
+                        client
+                            .execute("DELETE FROM repost WHERE uri = ANY($1)", &[&group_uris])
+                            .await?;
+                        client
+                            .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
+                            .await?;
+                    }
+                    "app.bsky.feed.post" => {
+                        let creators: Vec<String> = client
+                            .query(
+                                "DELETE FROM post WHERE uri = ANY($1) RETURNING creator",
+                                &[&group_uris],
+                            )
+                            .await?
+                            .iter()
+                            .filter_map(|r| r.get::<_, Option<String>>(0))
+                            .collect();
+                        client
+                            .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
+                            .await?;
+                        if !bulk_load && !creators.is_empty() {
+                            client
+                                .execute(
+                                    "UPDATE profile_agg p
+                                     SET \"postsCount\" = GREATEST(p.\"postsCount\" - d.c, 0)
+                                     FROM (SELECT did, count(*)::int AS c
+                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
+                                     WHERE p.did = d.did",
+                                    &[&creators],
+                                )
+                                .await?;
+                        }
+                    }
+                    "app.bsky.graph.follow" => {
+                        let pairs: Vec<(String, String)> = client
+                            .query(
+                                "DELETE FROM follow WHERE uri = ANY($1)
+                                 RETURNING creator, \"subjectDid\"",
+                                &[&group_uris],
+                            )
+                            .await?
+                            .iter()
+                            .map(|r| (r.get(0), r.get(1)))
+                            .collect();
+                        if !bulk_load && !pairs.is_empty() {
+                            let creators: Vec<String> =
+                                pairs.iter().map(|(c, _)| c.clone()).collect();
+                            let subjects: Vec<String> =
+                                pairs.iter().map(|(_, s)| s.clone()).collect();
+                            client
+                                .execute(
+                                    "UPDATE profile_agg p
+                                     SET \"followsCount\" = GREATEST(p.\"followsCount\" - d.c, 0)
+                                     FROM (SELECT did, count(*)::int AS c
+                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
+                                     WHERE p.did = d.did",
+                                    &[&creators],
+                                )
+                                .await?;
+                            client
+                                .execute(
+                                    "UPDATE profile_agg p
+                                     SET \"followersCount\" = GREATEST(p.\"followersCount\" - d.c, 0)
+                                     FROM (SELECT did, count(*)::int AS c
+                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
+                                     WHERE p.did = d.did",
+                                    &[&subjects],
+                                )
+                                .await?;
+                        }
+                    }
+                    _ => {
+                        for p in &group {
+                            Self::delete_collection_record(
+                                &client,
+                                collection,
+                                p.did.as_str(),
+                                p.rkey.as_str(),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            .await;
+
+            match group_result {
+                Ok(()) => {
+                    for p in &group {
+                        results.push((p.key.clone(), Ok(())));
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("batch delete for {collection} failed: {e}");
+                    tracing::error!("{err_msg}");
+                    for p in &group {
+                        results.push((p.key.clone(), Err(WintermuteError::Other(err_msg.clone()))));
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "batch deletes: total={}ms, n={}, applied={}",
+            start.elapsed().as_millis(),
+            parsed.len(),
+            applied.len()
+        );
+
+        (results, false)
+    }
+
+    /// Route a low-volume collection delete to its existing per-record helper.
+    async fn delete_collection_record(
+        client: &deadpool_postgres::Client,
+        collection: &str,
+        did: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        match collection {
+            "app.bsky.actor.profile" => Self::delete_profile(client, did, rkey).await,
+            "app.bsky.feed.generator" => Self::delete_feed_generator(client, did, rkey).await,
+            "app.bsky.graph.list" => Self::delete_list(client, did, rkey).await,
+            "app.bsky.graph.listitem" => Self::delete_list_item(client, did, rkey).await,
+            "app.bsky.graph.listblock" => Self::delete_list_block(client, did, rkey).await,
+            "app.bsky.graph.starterpack" => Self::delete_starter_pack(client, did, rkey).await,
+            "app.bsky.labeler.service" => Self::delete_labeler(client, did, rkey).await,
+            "app.bsky.feed.threadgate" => Self::delete_threadgate(client, did, rkey).await,
+            "app.bsky.feed.postgate" => Self::delete_postgate(client, did, rkey).await,
+            "chat.bsky.actor.declaration" => Self::delete_chat_declaration(client, did, rkey).await,
+            "app.bsky.notification.declaration" => {
+                Self::delete_notif_declaration(client, did, rkey).await
+            }
+            "app.bsky.actor.status" => Self::delete_status(client, did, rkey).await,
+            "app.bsky.graph.verification" => Self::delete_verification(client, did, rkey).await,
+            "community.blacksky.feed.post" => Self::delete_community_post(client, did, rkey).await,
+            _ => Ok(()),
+        }
     }
 
     /// Batch insert records using `PostgreSQL` `COPY` protocol for high throughput.

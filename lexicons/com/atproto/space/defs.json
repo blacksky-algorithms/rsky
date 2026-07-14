@@ -1,0 +1,98 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.defs",
+  "defs": {
+    "signedCommit": {
+      "type": "object",
+      "description": "A signed commit summarizing the current contents of a permissioned repo. The signature covers only the (space, author, rev, ikm) context; the content digest is bound by a symmetric MAC keyed from the public ikm, so a rebroadcast commit is deniable.",
+      "required": ["ver", "hash", "ikm", "sig", "mac", "rev"],
+      "properties": {
+        "ver": {
+          "type": "integer",
+          "description": "Commit format version, currently 1."
+        },
+        "hash": {
+          "type": "bytes",
+          "description": "sha256 of the repo's LtHash state (32 bytes).",
+          "maxLength": 32
+        },
+        "ikm": {
+          "type": "bytes",
+          "description": "Per-signature nonce (32 random bytes), freshly generated for each reader the commit is served to.",
+          "maxLength": 32
+        },
+        "sig": {
+          "type": "bytes",
+          "description": "Signature over the domain-separated commit context by the account's signing key."
+        },
+        "mac": {
+          "type": "bytes",
+          "description": "HMAC-SHA256(HKDF-SHA256(ikm, ctx), hash), binding the repo hash to this commit's context.",
+          "maxLength": 32
+        },
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "Commit revision (TID), also bound into the commit context."
+        }
+      }
+    },
+    "repoOp": {
+      "type": "object",
+      "description": "A single entry in a permissioned repo's operation log. Operations applied atomically share a rev.",
+      "required": ["rev", "collection", "rkey"],
+      "nullable": ["cid"],
+      "properties": {
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "The revision this operation was committed at."
+        },
+        "collection": { "type": "string", "format": "nsid" },
+        "rkey": { "type": "string", "format": "record-key" },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "For creates and updates, the new record CID. Absent or null for deletes."
+        },
+        "prev": {
+          "type": "string",
+          "format": "cid",
+          "description": "For updates and deletes, the previous record CID. Absent for creates."
+        },
+        "value": {
+          "type": "unknown",
+          "description": "The record's current value, inlined by default. Omitted when excludeValues is set, or when a later operation has superseded this path."
+        }
+      }
+    },
+    "repoRef": {
+      "type": "object",
+      "description": "A repo in a space's writer set: an account that has written at least one record into the space, with its current head as far as the space host has been notified.",
+      "required": ["did", "rev"],
+      "properties": {
+        "did": { "type": "string", "format": "did" },
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "The repo's current commit revision."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Hex-encoded sha256 of the repo's current LtHash state, if the space host tracks it."
+        }
+      }
+    },
+    "commitMeta": {
+      "type": "object",
+      "required": ["rev", "hash"],
+      "properties": {
+        "rev": { "type": "string", "format": "tid" },
+        "hash": {
+          "type": "string",
+          "description": "Hex-encoded sha256 of the repo's LtHash state after this commit."
+        }
+      }
+    }
+  }
+}
