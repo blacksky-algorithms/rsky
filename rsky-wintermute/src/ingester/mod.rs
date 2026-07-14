@@ -1063,7 +1063,7 @@ impl IngesterManager {
     async fn pds_says_active(did: &str) -> Option<bool> {
         use rsky_identity::IdResolver;
         use rsky_identity::types::IdentityResolverOpts;
-        let mut resolver = IdResolver::new(IdentityResolverOpts {
+        let resolver = IdResolver::new(IdentityResolverOpts {
             timeout: Some(std::time::Duration::from_secs(5)),
             plc_url: None,
             did_cache: None,

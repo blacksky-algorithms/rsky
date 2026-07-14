@@ -876,7 +876,7 @@ impl IndexerManager {
         // Resolve DID document to get handle
         // Clone the resolver so each task gets its own instance without mutex contention
         let did_doc = {
-            let mut resolver = id_resolver.as_ref().clone();
+            let resolver = id_resolver.as_ref().clone();
             match resolver.did.resolve(did.to_owned(), Some(true)).await {
                 Ok(Some(doc)) => doc,
                 Ok(None) => {
