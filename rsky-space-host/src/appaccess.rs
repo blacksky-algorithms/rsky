@@ -45,6 +45,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_is_open() {
+        assert!(matches!(AppAccess::default(), AppAccess::Open));
+    }
+
+    #[test]
     fn open_permits_any_client() {
         assert!(AppAccess::Open.permits(None));
         assert!(AppAccess::Open.permits(Some("https://app.example/client")));

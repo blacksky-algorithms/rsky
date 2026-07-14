@@ -276,6 +276,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn page_without_commit_advances_unverified() {
+        let coll = "community.blacksky.feed.post";
+        let host = StaticHost(OplogPage {
+            ops: vec![op(coll, "3ka", Some("bafyA"), "3rev")],
+            commit: None,
+        });
+        let index = InMemoryIndex::new();
+        let keys = FixedKey(author().did_key);
+        let outcome = sync_repo(&host, &index, &keys, SPACE, AUTHOR)
+            .await
+            .unwrap();
+        assert_eq!(outcome.ops_applied, 1);
+        assert!(!outcome.commit_verified);
+        assert_eq!(outcome.rev.as_deref(), Some("3rev"));
+        assert_eq!(
+            index.last_rev(AUTHOR).await.unwrap().as_deref(),
+            Some("3rev")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_page_without_commit_is_a_noop() {
+        let host = StaticHost(OplogPage {
+            ops: vec![],
+            commit: None,
+        });
+        let index = InMemoryIndex::new();
+        let keys = FixedKey(author().did_key);
+        let outcome = sync_repo(&host, &index, &keys, SPACE, AUTHOR)
+            .await
+            .unwrap();
+        assert_eq!(outcome.ops_applied, 0);
+        assert_eq!(outcome.rev, None);
+        assert_eq!(index.last_rev(AUTHOR).await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn divergent_hash_is_rejected() {
         let a = author();
         let coll = "community.blacksky.feed.post";

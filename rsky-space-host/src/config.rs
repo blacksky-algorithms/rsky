@@ -41,3 +41,47 @@ impl Config {
         SPACE_SKEY
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One sequential test: the env-var section mutates process-global state,
+    // which would race sibling tests run in parallel.
+    #[test]
+    fn parses_args_env_and_requirements() {
+        assert!(Config::try_parse_from(["rsky-space-host"]).is_err());
+
+        let cfg = Config::try_parse_from([
+            "rsky-space-host",
+            "--authority-did",
+            "did:plc:authority",
+            "--signing-key-hex",
+            "aa".repeat(32).as_str(),
+        ])
+        .unwrap();
+        assert_eq!(cfg.authority_did, "did:plc:authority");
+        assert_eq!(cfg.bind, "0.0.0.0:3600");
+        assert_eq!(cfg.space_type(), SPACE_TYPE);
+        assert_eq!(cfg.space_skey(), SPACE_SKEY);
+
+        std::env::set_var("SPACEHOST_AUTHORITY_DID", "did:plc:envauthority");
+        std::env::set_var("SPACEHOST_SIGNING_KEY_HEX", "bb".repeat(32));
+        std::env::set_var("SPACEHOST_MANAGING_APP", "did:web:app#svc");
+        std::env::set_var("SPACEHOST_MEMBERSHIP_DB_URL", "postgres://env");
+        std::env::set_var("SPACEHOST_BIND", "127.0.0.1:1234");
+        let cfg = Config::try_parse_from(["rsky-space-host"]).unwrap();
+        for k in [
+            "SPACEHOST_AUTHORITY_DID",
+            "SPACEHOST_SIGNING_KEY_HEX",
+            "SPACEHOST_MANAGING_APP",
+            "SPACEHOST_MEMBERSHIP_DB_URL",
+            "SPACEHOST_BIND",
+        ] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(cfg.authority_did, "did:plc:envauthority");
+        assert_eq!(cfg.managing_app, "did:web:app#svc");
+        assert_eq!(cfg.bind, "127.0.0.1:1234");
+    }
+}

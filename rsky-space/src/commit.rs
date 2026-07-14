@@ -10,7 +10,7 @@
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Result, SpaceError};
@@ -86,7 +86,8 @@ pub fn verify_commit(
     hash: &[u8],
 ) -> Result<()> {
     let ctx = build_ctx(space, author, rev, ikm);
-    let ok = rsky_crypto::verify::verify_signature(&did_key.to_string(), &ctx, sig, None)
+    let digest = Sha256::digest(&ctx);
+    let ok = rsky_crypto::verify::verify_signature_digest(&did_key.to_string(), &digest, sig, None)
         .map_err(|e| SpaceError::Crypto(e.to_string()))?;
     if !ok {
         return Err(SpaceError::BadSignature);

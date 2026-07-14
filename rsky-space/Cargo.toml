@@ -1,6 +1,6 @@
 [package]
 name = "rsky-space"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "atproto permissioned-data (spaces) primitives: LtHash commits, credentials, space repos"
 edition = "2021"
@@ -24,3 +24,7 @@ hmac = "0.12"
 subtle = "2"
 base64 = "0.22"
 hex = "0.4"
+
+[dev-dependencies]
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+secp256k1 = { workspace = true }

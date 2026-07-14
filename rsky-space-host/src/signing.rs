@@ -52,3 +52,34 @@ pub(crate) fn test_signer() -> Signer {
     let secret = SecretKey::from_slice(&[0x11u8; 32]).unwrap();
     Signer::from_secret(secret)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_hex_roundtrip_and_signing() {
+        let hex_key = hex::encode([0x11u8; 32]);
+        let signer = Signer::from_hex(&format!(" {hex_key}\n")).unwrap();
+        assert_eq!(signer.did_key(), test_signer().did_key());
+
+        // Signature verifies as a digest signature under the derived did:key.
+        use sha2::{Digest, Sha256};
+        let sig = signer.sign(b"payload").unwrap();
+        let digest = Sha256::digest(b"payload");
+        assert!(rsky_crypto::verify::verify_signature_digest(
+            &signer.did_key().to_string(),
+            &digest,
+            &sig,
+            None
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn from_hex_rejects_bad_input() {
+        assert!(matches!(Signer::from_hex("zz"), Err(HostError::Key(_))));
+        // Valid hex, invalid key length.
+        assert!(matches!(Signer::from_hex("aabb"), Err(HostError::Key(_))));
+    }
+}

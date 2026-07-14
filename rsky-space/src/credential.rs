@@ -22,6 +22,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::error::{Result, SpaceError};
 
@@ -103,10 +104,14 @@ where
 }
 
 /// Verify a JWT's signature against a resolved `did:key` signing key.
+///
+/// The signature covers `sha256(header_b64.payload_b64)` per the atproto
+/// inter-service-auth convention.
 pub fn verify_signature(decoded: &DecodedJwt, did_key: &str) -> Result<()> {
-    let ok = rsky_crypto::verify::verify_signature(
+    let digest = sha2::Sha256::digest(&decoded.signing_input);
+    let ok = rsky_crypto::verify::verify_signature_digest(
         &did_key.to_string(),
-        &decoded.signing_input,
+        &digest,
         &decoded.signature,
         None,
     )
@@ -221,8 +226,186 @@ mod tests {
     }
 
     #[test]
+    fn es256_delegation_token_roundtrip() {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+        let signing_key = SigningKey::from_slice(&[0x51u8; 32]).unwrap();
+        let did_key = rsky_crypto::did::format_did_key(
+            rsky_crypto::constants::P256_JWT_ALG.to_string(),
+            signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+
+        let header = JwtHeader {
+            typ: DELEGATION_TYP.to_string(),
+            alg: "ES256".to_string(),
+            kid: Some("#atproto".to_string()),
+        };
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let claims = SpaceClaims {
+            iss: "did:plc:user".to_string(),
+            sub: space.to_string(),
+            aud: Some("did:plc:authority#atproto_space_host".to_string()),
+            iat: 1000,
+            exp: 1060,
+            jti: "es256-nonce".to_string(),
+        };
+        let jwt = encode(&header, &claims, |input| {
+            let digest = sha2::Sha256::digest(input);
+            let sig: Signature = signing_key
+                .sign_prehash(&digest)
+                .map_err(|e| e.to_string())?;
+            let sig = sig.normalize_s().unwrap_or(sig);
+            Ok(sig.to_vec())
+        })
+        .unwrap();
+
+        let iss =
+            verify_delegation_token(&jwt, space, "did:plc:authority", &did_key, 1030).unwrap();
+        assert_eq!(iss, "did:plc:user");
+        // Tampered payload fails signature verification.
+        let decoded = decode(&jwt).unwrap();
+        let mut bad = decoded;
+        bad.signature[0] ^= 0xFF;
+        assert!(matches!(
+            verify_signature(&bad, &did_key),
+            Err(SpaceError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn secp256k1_credential_roundtrip() {
+        use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+        let secret = SecretKey::from_slice(&[0x52u8; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = PublicKey::from_secret_key(&secp, &secret);
+        let did_key = rsky_crypto::utils::encode_did_key(&pubkey);
+
+        let header = JwtHeader {
+            typ: CREDENTIAL_TYP.to_string(),
+            alg: "ES256K".to_string(),
+            kid: Some("#atproto_space".to_string()),
+        };
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let claims = SpaceClaims {
+            iss: "did:plc:authority".to_string(),
+            sub: space.to_string(),
+            aud: None,
+            iat: 1000,
+            exp: 1000 + CREDENTIAL_TTL_SECS,
+            jti: "k256-nonce".to_string(),
+        };
+        let jwt = encode(&header, &claims, |input| {
+            let digest = sha2::Sha256::digest(input);
+            let msg = Message::from_digest_slice(&digest).map_err(|e| e.to_string())?;
+            let mut sig = secret.sign_ecdsa(msg);
+            sig.normalize_s();
+            Ok(sig.serialize_compact().to_vec())
+        })
+        .unwrap();
+
+        verify_space_credential(&jwt, space, "did:plc:authority", &did_key, 1000)
+            .expect("secp256k1-signed credential must verify");
+    }
+
+    #[test]
     fn malformed_jwt_rejected() {
         assert!(matches!(decode("not.a"), Err(SpaceError::MalformedJwt(_))));
+    }
+
+    #[test]
+    fn credential_claim_checks() {
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let make = |typ: &str, iss: &str, sub: &str| {
+            let header = JwtHeader {
+                typ: typ.to_string(),
+                alg: "ES256K".to_string(),
+                kid: None,
+            };
+            let claims = SpaceClaims {
+                iss: iss.to_string(),
+                sub: sub.to_string(),
+                aud: None,
+                iat: 1000,
+                exp: 9000,
+                jti: "n".to_string(),
+            };
+            encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap()
+        };
+        // Wrong typ (a delegation token is not a credential).
+        assert!(matches!(
+            verify_space_credential(
+                &make(DELEGATION_TYP, "did:plc:authority", space),
+                space,
+                "did:plc:authority",
+                "did:key:x",
+                1000
+            ),
+            Err(SpaceError::InvalidClaim(_))
+        ));
+        // Wrong sub.
+        assert!(matches!(
+            verify_space_credential(
+                &make(CREDENTIAL_TYP, "did:plc:authority", "at://x/space/y/z"),
+                space,
+                "did:plc:authority",
+                "did:key:x",
+                1000
+            ),
+            Err(SpaceError::InvalidClaim(_))
+        ));
+        // Wrong issuer.
+        assert!(matches!(
+            verify_space_credential(
+                &make(CREDENTIAL_TYP, "did:plc:imposter", space),
+                space,
+                "did:plc:authority",
+                "did:key:x",
+                1000
+            ),
+            Err(SpaceError::InvalidClaim(_))
+        ));
+    }
+
+    #[test]
+    fn delegation_wrong_typ_and_aud_rejected() {
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let header = JwtHeader {
+            typ: CREDENTIAL_TYP.to_string(),
+            alg: "ES256K".to_string(),
+            kid: None,
+        };
+        let claims = SpaceClaims {
+            iss: "did:plc:user".to_string(),
+            sub: space.to_string(),
+            aud: Some("did:plc:authority#atproto_space_host".to_string()),
+            iat: 1000,
+            exp: 1060,
+            jti: "n".to_string(),
+        };
+        let wrong_typ = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
+        assert!(matches!(
+            verify_delegation_token(&wrong_typ, space, "did:plc:authority", "did:key:x", 1000),
+            Err(SpaceError::InvalidClaim(_))
+        ));
+
+        let header = JwtHeader {
+            typ: DELEGATION_TYP.to_string(),
+            ..header
+        };
+        let claims = SpaceClaims {
+            aud: None,
+            ..claims
+        };
+        let no_aud = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
+        assert!(matches!(
+            verify_delegation_token(&no_aud, space, "did:plc:authority", "did:key:x", 1000),
+            Err(SpaceError::InvalidClaim(_))
+        ));
     }
 
     #[test]

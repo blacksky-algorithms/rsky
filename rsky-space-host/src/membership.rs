@@ -44,3 +44,18 @@ impl MembershipStore for InMemoryMembership {
         Ok(self.members.read().unwrap().contains(did))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn add_remove_membership() {
+        let members = InMemoryMembership::default();
+        assert!(!members.is_member("did:plc:user").await.unwrap());
+        members.add("did:plc:user");
+        assert!(members.is_member("did:plc:user").await.unwrap());
+        members.remove("did:plc:user");
+        assert!(!members.is_member("did:plc:user").await.unwrap());
+    }
+}

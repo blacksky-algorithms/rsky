@@ -48,3 +48,17 @@ impl RepoHostClient for HttpRepoHost {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_client_is_deferred() {
+        let host = HttpRepoHost::new("credential".to_string());
+        assert!(matches!(
+            host.list_repo_ops("did:plc:author", None).await,
+            Err(DaemonError::NotImplemented(_))
+        ));
+    }
+}

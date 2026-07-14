@@ -59,3 +59,56 @@ pub struct RepoRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(cid: Option<&str>, prev: Option<&str>) -> RepoOp {
+        RepoOp {
+            rev: "3krev".to_string(),
+            collection: "c.o.l".to_string(),
+            rkey: "3ka".to_string(),
+            cid: cid.map(str::to_string),
+            prev: prev.map(str::to_string),
+            value: None,
+        }
+    }
+
+    #[test]
+    fn op_kind_predicates() {
+        assert!(op(None, Some("bafyOld")).is_delete());
+        assert!(op(Some("bafyNew"), None).is_create());
+        let update = op(Some("bafyNew"), Some("bafyOld"));
+        assert!(!update.is_delete());
+        assert!(!update.is_create());
+    }
+
+    #[test]
+    fn wire_types_serde_roundtrip() {
+        let commit = SignedCommit {
+            ver: 1,
+            hash: ByteBuf::from(vec![1u8; 32]),
+            ikm: ByteBuf::from(vec![2u8; 32]),
+            sig: ByteBuf::from(vec![3u8; 64]),
+            mac: ByteBuf::from(vec![4u8; 32]),
+            rev: "3krev".to_string(),
+        };
+        let json = serde_json::to_string(&commit).unwrap();
+        assert_eq!(serde_json::from_str::<SignedCommit>(&json).unwrap(), commit);
+
+        let repo = RepoRef {
+            did: "did:plc:writer".to_string(),
+            rev: "3krev".to_string(),
+            hash: None,
+        };
+        let json = serde_json::to_string(&repo).unwrap();
+        // Absent hash is omitted on the wire, not serialized as null.
+        assert!(!json.contains("hash"));
+        assert_eq!(serde_json::from_str::<RepoRef>(&json).unwrap(), repo);
+
+        let o = op(Some("bafy"), None);
+        let json = serde_json::to_string(&o).unwrap();
+        assert_eq!(serde_json::from_str::<RepoOp>(&json).unwrap(), o);
+    }
+}

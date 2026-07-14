@@ -162,6 +162,122 @@ mod tests {
         }
     }
 
+    struct FixedKey(String);
+    #[async_trait]
+    impl KeyResolver for FixedKey {
+        async fn signing_key(&self, _did: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A delegation token signed by a real user key for the authority's space.
+    fn user_delegation(auth: &Authority, user_did: &str, iat: u64) -> (String, String) {
+        use rsky_space::credential::{encode, JwtHeader, SpaceClaims, DELEGATION_TYP};
+        let user_signer =
+            Signer::from_secret(secp256k1::SecretKey::from_slice(&[0x77u8; 32]).unwrap());
+        let header = JwtHeader {
+            typ: DELEGATION_TYP.to_string(),
+            alg: rsky_crypto::constants::SECP256K1_JWT_ALG.to_string(),
+            kid: Some("#atproto".to_string()),
+        };
+        let claims = SpaceClaims {
+            iss: user_did.to_string(),
+            sub: auth.space_uri(),
+            aud: Some(format!("{}#atproto_space_host", auth.authority_did())),
+            iat,
+            exp: iat + 60,
+            jti: "delegation-jti".to_string(),
+        };
+        let jwt = encode(&header, &claims, |input| user_signer.sign(input)).unwrap();
+        (jwt, user_signer.did_key().to_string())
+    }
+
+    #[tokio::test]
+    async fn key_resolution_failure_propagates() {
+        let auth = authority();
+        let user = "did:plc:member";
+        let (jwt, _) = user_delegation(&auth, user, 1000);
+        let members = InMemoryMembership::new([user.to_string()]);
+        let res = auth
+            .get_space_credential(&jwt, None, &members, &DenyAllKeys, 1000, "jti".into())
+            .await;
+        assert!(matches!(res, Err(HostError::Membership(_))));
+    }
+
+    #[tokio::test]
+    async fn full_mint_flow_authorizes_member() {
+        let auth = authority();
+        let user = "did:plc:member";
+        let (jwt, user_key) = user_delegation(&auth, user, 1000);
+        let members = InMemoryMembership::new([user.to_string()]);
+
+        let credential = auth
+            .get_space_credential(
+                &jwt,
+                None,
+                &members,
+                &FixedKey(user_key),
+                1000,
+                "jti".into(),
+            )
+            .await
+            .expect("member with valid delegation gets a credential");
+        credential::verify_space_credential(
+            &credential,
+            &auth.space_uri(),
+            auth.authority_did(),
+            auth.signer.did_key(),
+            1000,
+        )
+        .expect("minted credential verifies against the space key");
+    }
+
+    #[tokio::test]
+    async fn non_member_is_denied() {
+        let auth = authority();
+        let (jwt, user_key) = user_delegation(&auth, "did:plc:stranger", 1000);
+        let members = InMemoryMembership::default();
+        let res = auth
+            .get_space_credential(
+                &jwt,
+                None,
+                &members,
+                &FixedKey(user_key),
+                1000,
+                "jti".into(),
+            )
+            .await;
+        assert!(matches!(res, Err(HostError::NotAuthorized)));
+    }
+
+    #[tokio::test]
+    async fn expired_delegation_is_denied() {
+        let auth = authority();
+        let user = "did:plc:member";
+        let (jwt, user_key) = user_delegation(&auth, user, 1000);
+        let members = InMemoryMembership::new([user.to_string()]);
+        let res = auth
+            .get_space_credential(
+                &jwt,
+                None,
+                &members,
+                &FixedKey(user_key),
+                5000,
+                "jti".into(),
+            )
+            .await;
+        assert!(matches!(res, Err(HostError::Delegation(_))));
+    }
+
+    #[test]
+    fn space_config_surfaces_policy() {
+        let auth = authority();
+        let cfg = auth.space_config("did:web:app.example#managing_app");
+        assert_eq!(cfg.policy, "managing-app");
+        assert_eq!(cfg.space, auth.space_uri());
+        assert!(!cfg.requires_attestation);
+    }
+
     #[tokio::test]
     async fn allowlist_rejects_unknown_client_before_network() {
         let space = SpaceId::new("did:plc:auth", "community.blacksky.feed", "main");
