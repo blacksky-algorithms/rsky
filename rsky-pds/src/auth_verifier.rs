@@ -987,11 +987,14 @@ pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Res
 }
 
 pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
-    if !token.starts_with(BASIC) {
+    let mut parts = token.split_whitespace();
+    if parts.next() != Some("Basic") {
         return None;
     }
-
-    let b64 = &token[BASIC.len()..];
+    let b64 = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let decoded: Vec<u8> = match base64pad.decode(b64) {
         Err(_) => return None,
         Ok(decoded) => decoded,
@@ -1000,13 +1003,59 @@ pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
         Err(_) => return None,
         Ok(res) => res,
     };
-    let parsed_parts = parsed_str.split(":").collect::<Vec<&str>>();
+    let (username, password) = parsed_str.split_once(':')?;
+    Some(BasicAuth {
+        username: username.to_string(),
+        password: password.to_string(),
+    })
+}
 
-    match (parsed_parts.first(), parsed_parts.get(1)) {
-        (Some(username), Some(password)) => Some(BasicAuth {
-            username: username.to_string(),
-            password: password.to_string(),
-        }),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // base64("admin:password")
+    const CREDS: &str = "YWRtaW46cGFzc3dvcmQ=";
+
+    fn assert_admin(parsed: Option<BasicAuth>) {
+        let parsed = parsed.expect("expected successful parse");
+        assert_eq!(parsed.username, "admin");
+        assert_eq!(parsed.password, "password");
+    }
+
+    #[test]
+    fn parses_normal_basic_auth() {
+        assert_admin(parse_basic_auth(&format!("Basic {CREDS}")));
+    }
+
+    #[test]
+    fn tolerates_extra_whitespace() {
+        assert_admin(parse_basic_auth(&format!("Basic  {CREDS}")));
+        assert_admin(parse_basic_auth(&format!("Basic \t {CREDS}")));
+    }
+
+    #[test]
+    fn tolerates_trailing_whitespace() {
+        assert_admin(parse_basic_auth(&format!("Basic {CREDS} ")));
+        assert_admin(parse_basic_auth(&format!("  Basic {CREDS}  ")));
+    }
+
+    #[test]
+    fn preserves_colons_in_password() {
+        // base64("admin:pass:word")
+        let parsed = parse_basic_auth("Basic YWRtaW46cGFzczp3b3Jk").expect("expected parse");
+        assert_eq!(parsed.username, "admin");
+        assert_eq!(parsed.password, "pass:word");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_basic_auth("").is_none());
+        assert!(parse_basic_auth("Basic").is_none());
+        assert!(parse_basic_auth("Basic not-base64!").is_none());
+        assert!(parse_basic_auth(&format!("Bearer {CREDS}")).is_none());
+        assert!(parse_basic_auth(&format!("Basic {CREDS} extra")).is_none());
+        // base64("no-colon")
+        assert!(parse_basic_auth("Basic bm8tY29sb24=").is_none());
     }
 }
