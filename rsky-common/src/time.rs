@@ -30,7 +30,7 @@ pub fn from_str_to_micros(str: &str) -> Result<i64> {
         .map_err(|e| anyhow!("failed to parse datetime {:?}: {}", str, e))
 }
 
-pub fn from_str_to_millis(str: &String) -> Result<i64> {
+pub fn from_str_to_millis(str: &str) -> Result<i64> {
     Ok(NaiveDateTime::parse_from_str(str, RFC3339_VARIANT)?
         .and_utc()
         .timestamp_millis())
@@ -58,7 +58,9 @@ pub fn from_micros_to_str(micros: i64) -> String {
     format!("{}", from_micros_to_utc(micros).format(RFC3339_VARIANT))
 }
 
+#[allow(deprecated)]
 pub fn from_millis_to_utc(millis: i64) -> DateTime<UtcOffset> {
+    // todo: use non-deprecated APIs
     DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_millis(millis).unwrap(), Utc)
 }
 

@@ -364,3 +364,309 @@ impl SubscribeReposEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_time() -> DateTime<Utc> {
+        // Deterministic timestamp with millisecond precision (matches AT spec).
+        DateTime::parse_from_rfc3339("2026-01-12T19:45:23.307Z").unwrap().with_timezone(&Utc)
+    }
+
+    fn empty_cid() -> Cid {
+        // Smallest valid CID: dag-cbor codec, sha256 of empty bytes.
+        Cid::try_from("bafyreigbtj4x7ip5legnfznufuopl4sg4knzc2cof6duas4b3q2fy6swua").unwrap()
+    }
+
+    fn tid() -> TID {
+        TID::new("3kqcb45gzpk2c".to_owned()).unwrap()
+    }
+
+    fn make_commit() -> SubscribeReposCommit {
+        SubscribeReposCommit {
+            seq: 0,
+            rebase: false,
+            too_big: false,
+            did: "did:plc:test".to_owned(),
+            commit: empty_cid(),
+            rev: tid(),
+            since: None,
+            blocks: vec![1, 2, 3, 4],
+            ops: vec![SubscribeReposCommitOperation::Create {
+                path: "app.bsky.feed.post/abc".to_owned(),
+                cid: empty_cid(),
+            }],
+            blobs: vec![],
+            prev_data: None,
+            time: fixed_time(),
+        }
+    }
+
+    fn make_sync() -> SubscribeReposSync {
+        SubscribeReposSync {
+            seq: 0,
+            did: "did:plc:test".to_owned(),
+            blocks: vec![9, 9, 9],
+            rev: tid(),
+            time: fixed_time(),
+        }
+    }
+
+    fn make_identity() -> SubscribeReposIdentity {
+        SubscribeReposIdentity {
+            seq: 0,
+            did: "did:plc:test".to_owned(),
+            time: fixed_time(),
+            handle: Some("alice.test".to_owned()),
+        }
+    }
+
+    fn make_account() -> SubscribeReposAccount {
+        SubscribeReposAccount {
+            seq: 0,
+            did: "did:plc:test".to_owned(),
+            time: fixed_time(),
+            active: false,
+            status: Some(AccountStatus::Deactivated),
+        }
+    }
+
+    fn make_label() -> SubscribeLabel {
+        // Labels in the wild always carry sig; the deserializer requires it (no #[serde(default)]).
+        SubscribeLabel {
+            ver: Some(1),
+            src: "did:plc:labeler".to_owned(),
+            uri: "at://did:plc:test/app.bsky.feed.post/abc".to_owned(),
+            cid: Some("bafyreigbtj4x7ip5legnfznufuopl4sg4knzc2cof6duas4b3q2fy6swua".to_owned()),
+            val: "spam".to_owned(),
+            neg: Some(false),
+            cts: "2026-01-12T19:45:23.307Z".to_owned(),
+            cts_dt: fixed_time(),
+            exp: Some("2027-01-01T00:00:00.000Z".to_owned()),
+            sig: Some(vec![0u8; 64]),
+        }
+    }
+
+    fn make_labels() -> SubscribeLabels {
+        SubscribeLabels { seq: 0, labels: Vec1::new(make_label()) }
+    }
+
+    #[test]
+    fn commit_round_trip() {
+        let event = SubscribeReposEvent::Commit(make_commit());
+        let bytes = event.serialize(64, Cursor::from(42)).unwrap();
+        let parsed = SubscribeReposEvent::parse(&bytes).unwrap().unwrap();
+        match parsed {
+            SubscribeReposEvent::Commit(c) => {
+                assert_eq!(c.seq, 42);
+                assert_eq!(c.did, "did:plc:test");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn sync_round_trip() {
+        let event = SubscribeReposEvent::Sync(make_sync());
+        let bytes = event.serialize(64, Cursor::from(7)).unwrap();
+        let parsed = SubscribeReposEvent::parse(&bytes).unwrap().unwrap();
+        assert!(matches!(parsed, SubscribeReposEvent::Sync(s) if s.seq == 7));
+    }
+
+    #[test]
+    fn identity_round_trip() {
+        let event = SubscribeReposEvent::Identity(make_identity());
+        let bytes = event.serialize(64, Cursor::from(8)).unwrap();
+        let parsed = SubscribeReposEvent::parse(&bytes).unwrap().unwrap();
+        assert!(matches!(parsed, SubscribeReposEvent::Identity(i) if i.seq == 8));
+    }
+
+    #[test]
+    fn account_round_trip() {
+        let event = SubscribeReposEvent::Account(make_account());
+        let bytes = event.serialize(64, Cursor::from(9)).unwrap();
+        let parsed = SubscribeReposEvent::parse(&bytes).unwrap().unwrap();
+        assert!(matches!(parsed, SubscribeReposEvent::Account(a)
+            if a.seq == 9 && a.status == Some(AccountStatus::Deactivated)));
+    }
+
+    #[test]
+    fn labels_round_trip_populates_cts_dt() {
+        let event = SubscribeReposEvent::Labels(make_labels());
+        let bytes = event.serialize(64, Cursor::from(10)).unwrap();
+        let parsed = SubscribeReposEvent::parse(&bytes).unwrap().unwrap();
+        match parsed {
+            SubscribeReposEvent::Labels(l) => {
+                assert_eq!(l.seq, 10);
+                assert_eq!(l.labels.last().val, "spam");
+                // parse() must populate cts_dt from cts string.
+                assert_eq!(l.labels.last().cts_dt, fixed_time());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_op_minus_one_returns_none() {
+        // Header { type: "", op: -1 } -> ciborium-encoded.
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&Header { type_: Cow::Borrowed(""), operation_: -1 }, &mut buf)
+            .unwrap();
+        assert!(SubscribeReposEvent::parse(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_info_returns_none() {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(
+            &Header { type_: Cow::Borrowed("#info"), operation_: 1 },
+            &mut buf,
+        )
+        .unwrap();
+        let info =
+            SubscribeReposInfo { name: "OutdatedCursor".to_owned(), message: "msg".to_owned() };
+        serde_ipld_dagcbor::to_writer(&mut buf, &info).unwrap();
+        assert!(SubscribeReposEvent::parse(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_unknown_type_errors() {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(
+            &Header { type_: Cow::Borrowed("#bogus"), operation_: 1 },
+            &mut buf,
+        )
+        .unwrap();
+        assert!(matches!(
+            SubscribeReposEvent::parse(&buf),
+            Err(ParseError::UnknownType(t)) if t == "#bogus"
+        ));
+    }
+
+    #[test]
+    fn parse_garbage_header_errors() {
+        // Truncated input -> ciborium header decode error.
+        assert!(matches!(SubscribeReposEvent::parse(&[]), Err(ParseError::Header(_))));
+    }
+
+    #[test]
+    fn parse_bad_body_errors() {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(
+            &Header { type_: Cow::Borrowed("#commit"), operation_: 1 },
+            &mut buf,
+        )
+        .unwrap();
+        // body intentionally missing -> dag-cbor decode error
+        assert!(matches!(SubscribeReposEvent::parse(&buf), Err(ParseError::Body(_))));
+    }
+
+    #[test]
+    fn type_str_is_correct_for_each_variant() {
+        assert_eq!(SubscribeReposEvent::Commit(make_commit()).type_(), "#commit");
+        assert_eq!(SubscribeReposEvent::Sync(make_sync()).type_(), "#sync");
+        assert_eq!(SubscribeReposEvent::Identity(make_identity()).type_(), "#identity");
+        assert_eq!(SubscribeReposEvent::Account(make_account()).type_(), "#account");
+        assert_eq!(SubscribeReposEvent::Labels(make_labels()).type_(), "#labels");
+    }
+
+    #[test]
+    fn seq_returns_per_variant_seq() {
+        let mut commit = make_commit();
+        commit.seq = 1;
+        assert_eq!(SubscribeReposEvent::Commit(commit).seq().get(), 1);
+        let mut sync = make_sync();
+        sync.seq = 2;
+        assert_eq!(SubscribeReposEvent::Sync(sync).seq().get(), 2);
+        let mut identity = make_identity();
+        identity.seq = 3;
+        assert_eq!(SubscribeReposEvent::Identity(identity).seq().get(), 3);
+        let mut account = make_account();
+        account.seq = 4;
+        assert_eq!(SubscribeReposEvent::Account(account).seq().get(), 4);
+        let mut labels = make_labels();
+        labels.seq = 5;
+        assert_eq!(SubscribeReposEvent::Labels(labels).seq().get(), 5);
+    }
+
+    #[test]
+    fn time_returns_per_variant_time() {
+        let t = fixed_time();
+        assert_eq!(SubscribeReposEvent::Commit(make_commit()).time(), t);
+        assert_eq!(SubscribeReposEvent::Sync(make_sync()).time(), t);
+        assert_eq!(SubscribeReposEvent::Identity(make_identity()).time(), t);
+        assert_eq!(SubscribeReposEvent::Account(make_account()).time(), t);
+        assert_eq!(SubscribeReposEvent::Labels(make_labels()).time(), t);
+    }
+
+    #[test]
+    fn did_returns_per_variant_subject() {
+        assert_eq!(SubscribeReposEvent::Commit(make_commit()).did(), "did:plc:test");
+        assert_eq!(SubscribeReposEvent::Sync(make_sync()).did(), "did:plc:test");
+        assert_eq!(SubscribeReposEvent::Identity(make_identity()).did(), "did:plc:test");
+        assert_eq!(SubscribeReposEvent::Account(make_account()).did(), "did:plc:test");
+        assert_eq!(SubscribeReposEvent::Labels(make_labels()).did(), "did:plc:labeler");
+    }
+
+    #[test]
+    fn account_status_display_matches_debug() {
+        assert_eq!(format!("{}", AccountStatus::Takendown), "Takendown");
+        assert_eq!(format!("{}", AccountStatus::Suspended), "Suspended");
+        assert_eq!(format!("{}", AccountStatus::Deleted), "Deleted");
+        assert_eq!(format!("{}", AccountStatus::Deactivated), "Deactivated");
+        assert_eq!(format!("{}", AccountStatus::Desynchronized), "Desynchronized");
+        assert_eq!(format!("{}", AccountStatus::Throttled), "Throttled");
+    }
+
+    #[test]
+    fn commit_op_path_and_eq() {
+        let a = SubscribeReposCommitOperation::Create { path: "p1".to_owned(), cid: empty_cid() };
+        let b = SubscribeReposCommitOperation::Update {
+            path: "p1".to_owned(),
+            cid: empty_cid(),
+            prev_data: None,
+        };
+        let c = SubscribeReposCommitOperation::Delete { path: "p2".to_owned(), prev_data: None };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a < c);
+        assert_eq!(a.partial_cmp(&c), Some(Ordering::Less));
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[test]
+    fn commit_op_is_valid() {
+        assert!(
+            SubscribeReposCommitOperation::Create { path: "p".to_owned(), cid: empty_cid() }
+                .is_valid()
+        );
+        assert!(
+            SubscribeReposCommitOperation::Update {
+                path: "p".to_owned(),
+                cid: empty_cid(),
+                prev_data: Some(empty_cid()),
+            }
+            .is_valid()
+        );
+        assert!(
+            !SubscribeReposCommitOperation::Update {
+                path: "p".to_owned(),
+                cid: empty_cid(),
+                prev_data: None,
+            }
+            .is_valid()
+        );
+        assert!(
+            SubscribeReposCommitOperation::Delete {
+                path: "p".to_owned(),
+                prev_data: Some(empty_cid()),
+            }
+            .is_valid()
+        );
+        assert!(
+            !SubscribeReposCommitOperation::Delete { path: "p".to_owned(), prev_data: None }
+                .is_valid()
+        );
+    }
+}

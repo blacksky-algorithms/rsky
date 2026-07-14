@@ -51,7 +51,7 @@ impl Sequencer {
         self.last_seen = Some(curr.unwrap_or(0));
         if self.waker.is_none() {
             loop {
-                while let Some(_) = self.next().await {}
+                while self.next().await.is_some() {}
             }
         }
         Ok(())
@@ -136,7 +136,7 @@ impl Sequencer {
         }
 
         let rows = seq_qb.get_results(conn)?;
-        if rows.len() < 1 {
+        if rows.is_empty() {
             return Ok(vec![]);
         }
 
@@ -147,12 +147,12 @@ impl Sequencer {
                 None => continue, // should never hit this because of WHERE clause
                 Some(seq) => match row.event_type.as_str() {
                     "append" | "rebase" => {
-                        seq_evts.push(SeqEvt::TypedCommitEvt(TypedCommitEvt {
+                        seq_evts.push(SeqEvt::TypedCommitEvt(Box::new(TypedCommitEvt {
                             r#type: "commit".to_string(),
                             seq,
                             time,
                             evt: cbor_to_struct(row.event)?,
-                        }));
+                        })));
                     }
                     "sync" => {
                         seq_evts.push(SeqEvt::TypedSyncEvt(TypedSyncEvt {
@@ -263,7 +263,7 @@ impl Stream for Sequencer {
             return Poll::Ready(None);
         }
         // if already polling, do not start another poll
-        return match futures::executor::block_on(self.request_seq_range(RequestSeqRangeOpts {
+        match futures::executor::block_on(self.request_seq_range(RequestSeqRangeOpts {
             earliest_seq: self.last_seen,
             latest_seq: None,
             earliest_time: None,
@@ -280,7 +280,7 @@ impl Stream for Sequencer {
                 Poll::Ready(Some(Err(err)))
             }
             Ok(evts) => {
-                if evts.len() > 0 {
+                if !evts.is_empty() {
                     self.tries_with_no_results = 0;
                     futures::executor::block_on(EVENT_EMITTER.write()).emit(
                         "events",
@@ -300,19 +300,19 @@ impl Stream for Sequencer {
                     Poll::Pending
                 }
             }
-        };
+        }
     }
 }
 
 pub async fn delete_all_for_user(did: &String, excluding_seqs: Option<Vec<i64>>) -> Result<()> {
     use crate::schema::pds::repo_seq::dsl as RepoSeqSchema;
     let conn = &mut establish_connection_for_sequencer()?;
-    let excluding_seqs = excluding_seqs.unwrap_or_else(|| vec![]);
+    let excluding_seqs = excluding_seqs.unwrap_or_default();
 
     let mut builder = delete(RepoSeqSchema::repo_seq)
         .filter(RepoSeqSchema::did.eq(did))
         .into_boxed();
-    if excluding_seqs.len() > 0 {
+    if !excluding_seqs.is_empty() {
         builder = builder.filter(RepoSeqSchema::seq.ne_all(excluding_seqs));
     }
     builder.execute(conn)?;

@@ -15,6 +15,7 @@ use rsky_lexicon::app::bsky::feed::{AuthorFeed, FeedViewPost, PostView};
 
 const METHOD_NSID: &str = "app.bsky.feed.getActorLikes";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn inner_get_actor_likes(
     _actor: String,
     _limit: Option<u8>,
@@ -50,6 +51,7 @@ pub async fn inner_get_actor_likes(
 }
 
 /// Get a list of posts liked by an actor. Does not require auth.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getActorLikes?<actor>&<limit>&<cursor>")]
 pub async fn get_actor_likes(

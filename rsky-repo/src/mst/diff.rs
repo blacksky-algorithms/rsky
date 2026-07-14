@@ -13,9 +13,10 @@ pub async fn null_diff(tree: MST) -> Result<DataDiff> {
     Ok(diff)
 }
 
+#[allow(clippy::comparison_chain)]
 pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff> {
     curr.get_pointer().await?;
-    return if let Some(prev) = prev {
+    if let Some(prev) = prev {
         prev.get_pointer().await?;
         let mut diff = DataDiff::new();
 
@@ -50,6 +51,7 @@ pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff
 
                     // if both pointers are leaves, record an update & advance both or record
                     // the lowest key and advance that pointer
+                    // todo: switch to match statement
                     if let (NodeEntry::Leaf(left_leaf), NodeEntry::Leaf(right_leaf)) =
                         (&left, &right)
                     {
@@ -75,6 +77,7 @@ pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff
                     // try to catch up with the lower
                     // if the higher walker is pointed at a leaf, then advance the lower walker
                     // to try to catch up the higher
+                    // todo: switch to match statement
                     if left_walker.layer()? > right_walker.layer()? {
                         if left.is_leaf() {
                             diff.node_add(right).await?;
@@ -101,6 +104,7 @@ pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff
                     if let (NodeEntry::MST(left_tree), NodeEntry::MST(right_tree)) =
                         (&mut left, &mut right)
                     {
+                        // todo: switch to match statement
                         if left_tree
                             .get_pointer()
                             .await?
@@ -136,5 +140,5 @@ pub async fn mst_diff(curr: &mut MST, prev: Option<&mut MST>) -> Result<DataDiff
         Ok(diff)
     } else {
         Ok(null_diff(curr.clone()).await?)
-    };
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rsky-wintermute"
-version = "0.1.0"
+version = "0.4.4"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Monolithic indexer combining ingester, backfiller, and indexer"
@@ -25,7 +25,16 @@ path = "src/bin/plc_import.rs"
 name = "label_sync"
 path = "src/bin/label_sync.rs"
 
+[[bin]]
+name = "car_loader"
+path = "src/bin/car_loader.rs"
+
+[[bin]]
+name = "cleanup_stale_deactivated"
+path = "src/bin/cleanup_stale_deactivated.rs"
+
 [dependencies]
+base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 ciborium = "0.2"
@@ -59,6 +68,9 @@ rand = "0.8"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+rusqlite = { workspace = true }
+num_cpus = "1"
 
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }

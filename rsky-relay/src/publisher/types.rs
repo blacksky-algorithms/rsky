@@ -121,4 +121,117 @@ mod maybe_tls_stream {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Cursor as IoCursor;
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Mutex;
+
+        // A test-only Read+Write+NoDelay backing store for exercising Plain methods.
+        #[derive(Debug, Default)]
+        struct Pipe {
+            buf: Vec<u8>,
+            nodelay: Mutex<Option<bool>>,
+        }
+        impl Read for Pipe {
+            fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+                let n = dst.len().min(self.buf.len());
+                dst[..n].copy_from_slice(&self.buf[..n]);
+                self.buf.drain(..n);
+                Ok(n)
+            }
+        }
+        impl Write for Pipe {
+            fn write(&mut self, src: &[u8]) -> io::Result<usize> {
+                self.buf.extend_from_slice(src);
+                Ok(src.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl NoDelay for Pipe {
+            fn set_nodelay(&mut self, v: bool) -> io::Result<()> {
+                *self.nodelay.lock().unwrap() = Some(v);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn plain_read_write_round_trips() {
+            let mut s = MaybeTlsStream::Plain(IoCursor::new(Vec::<u8>::new()));
+            assert_eq!(s.write(b"hello").unwrap(), 5);
+            s.flush().unwrap();
+            // Reset cursor pos for read.
+            if let MaybeTlsStream::Plain(c) = &mut s {
+                c.set_position(0);
+            }
+            let mut out = [0u8; 5];
+            assert_eq!(s.read(&mut out).unwrap(), 5);
+            assert_eq!(&out, b"hello");
+        }
+
+        #[test]
+        fn plain_set_nodelay_reaches_inner() {
+            let mut s = MaybeTlsStream::Plain(Pipe::default());
+            s.set_nodelay(true).unwrap();
+            if let MaybeTlsStream::Plain(p) = &s {
+                assert_eq!(*p.nodelay.lock().unwrap(), Some(true));
+            } else {
+                panic!("not Plain");
+            }
+        }
+
+        #[test]
+        fn debug_renders_plain_variant() {
+            let s: MaybeTlsStream<IoCursor<Vec<u8>>> =
+                MaybeTlsStream::Plain(IoCursor::new(vec![1u8]));
+            let dbg = format!("{s:?}");
+            assert!(dbg.starts_with("MaybeTlsStream::Plain"));
+        }
+
+        #[test]
+        fn plain_tcp_peek_returns_buffered_bytes() {
+            // Local TCP pair: write from server side, peek from client side.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_thread = std::thread::spawn(move || {
+                let (mut s, _) = listener.accept().unwrap();
+                s.write_all(b"abc").unwrap();
+                s.flush().unwrap();
+            });
+            let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // Wait until the bytes arrive (deterministic via small loop).
+            let mut s = MaybeTlsStream::Plain(client);
+            let mut buf = [0u8; 8];
+            let mut got = 0usize;
+            for _ in 0..50 {
+                if let Ok(n) = s.peek(&mut buf) {
+                    if n >= 3 {
+                        got = n;
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            server_thread.join().unwrap();
+            assert!(got >= 3, "peek did not yield bytes; got {got}");
+            assert_eq!(&buf[..3], b"abc");
+        }
+
+        #[test]
+        fn plain_tcp_shutdown_succeeds() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_thread = std::thread::spawn(move || {
+                drop(listener.accept());
+            });
+            let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut s = MaybeTlsStream::Plain(client);
+            s.shutdown().unwrap();
+            server_thread.join().unwrap();
+        }
+    }
 }

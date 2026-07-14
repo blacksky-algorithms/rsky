@@ -33,10 +33,7 @@ impl ReadableRepo {
                 .read_obj(
                     &commit_cid,
                     Box::new(|obj: CborValue| {
-                        match serde_cbor::value::from_value::<VersionedCommit>(obj.clone()) {
-                            Ok(_) => true,
-                            Err(_) => false,
-                        }
+                        serde_cbor::value::from_value::<VersionedCommit>(obj.clone()).is_ok()
                     }),
                 )
                 .await?

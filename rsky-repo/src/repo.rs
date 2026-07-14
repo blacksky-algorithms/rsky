@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// todo: determine which of these fields are necessary to keep around
+#[allow(dead_code)]
 pub struct CommitRecord {
     collection: String,
     rkey: String,
@@ -128,7 +130,7 @@ impl Repo {
             .collect::<Vec<Cid>>();
         let storage_guard = self.storage.read().await;
         let found = storage_guard.get_blocks(cids).await?;
-        if found.missing.len() > 0 {
+        if !found.missing.is_empty() {
             return Err(anyhow::Error::new(DataStoreError::MissingBlocks(
                 "getContents record".to_owned(),
                 found.missing,
@@ -137,7 +139,7 @@ impl Repo {
         let mut contents: RepoContents = BTreeMap::new();
         for entry in entries {
             let path = util::parse_data_key(&entry.key)?;
-            if contents.get(&path.collection).is_none() {
+            if !contents.contains_key(&path.collection) {
                 contents.insert(path.collection.clone(), CollectionContents::new());
             }
             let parsed = crate::parse::get_and_parse_record(&found.blocks, entry.value)?;
@@ -152,12 +154,12 @@ impl Repo {
     pub async fn format_init_commit(
         storage: Arc<RwLock<dyn RepoStorage>>,
         did: String,
-        keypair: Keypair,
+        keypair: &Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<CommitData> {
         let mut new_blocks = BlockMap::new();
         let mut data = MST::create(storage, None, None).await?;
-        for record in initial_writes.unwrap_or(Vec::new()) {
+        for record in initial_writes.unwrap_or_default() {
             let cid = new_blocks.add(record.record)?;
             let data_key = util::format_data_key(record.collection, record.rkey);
             data = data.add(&data_key, cid, None).await?;
@@ -204,7 +206,7 @@ impl Repo {
     pub async fn create(
         storage: Arc<RwLock<dyn RepoStorage>>,
         did: String,
-        keypair: Keypair,
+        keypair: &Keypair,
         initial_writes: Option<Vec<RecordCreateOrUpdateOp>>,
     ) -> Result<Self> {
         let commit =
@@ -215,7 +217,7 @@ impl Repo {
     pub async fn format_commit(
         &mut self,
         to_write: RecordWriteEnum,
-        keypair: Keypair,
+        keypair: &Keypair,
     ) -> Result<CommitData> {
         let writes = match to_write {
             RecordWriteEnum::List(to_write) => to_write,
@@ -259,7 +261,7 @@ impl Repo {
         }
 
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
-        if added_leaves.missing.len() > 0 {
+        if !added_leaves.missing.is_empty() {
             bail!("Missing leaf blocks: {:?}", added_leaves.missing);
         }
         new_blocks.add_map(added_leaves.blocks.clone())?;
@@ -298,7 +300,7 @@ impl Repo {
     }
 
     pub async fn apply_commit(&self, commit_data: CommitData) -> Result<Self> {
-        let commit_data_cid = commit_data.cid.clone();
+        let commit_data_cid = commit_data.cid;
         {
             let storage_guard = self.storage.read().await;
             storage_guard.apply_commit(commit_data, None).await?;
@@ -309,13 +311,13 @@ impl Repo {
     pub async fn apply_writes(
         &mut self,
         to_write: RecordWriteEnum,
-        keypair: Keypair,
+        keypair: &Keypair,
     ) -> Result<Self> {
         let commit = self.format_commit(to_write, keypair).await?;
         self.apply_commit(commit).await
     }
 
-    pub fn format_resign_commit(&self, rev: String, keypair: Keypair) -> Result<CommitData> {
+    pub fn format_resign_commit(&self, rev: String, keypair: &Keypair) -> Result<CommitData> {
         let commit = util::sign_commit(
             UnsignedCommit {
                 did: self.did(),
@@ -339,7 +341,7 @@ impl Repo {
         })
     }
 
-    pub async fn resign_commit(&mut self, rev: String, keypair: Keypair) -> Result<Self> {
+    pub async fn resign_commit(&mut self, rev: String, keypair: &Keypair) -> Result<Self> {
         let formatted = self.format_resign_commit(rev, keypair)?;
         self.apply_commit(formatted).await
     }
@@ -401,7 +403,7 @@ mod tests {
             repo_data.insert(coll_name.to_string(), coll_data);
         }
         let writes = RecordWriteEnum::List(writes);
-        let updated = repo.apply_writes(writes, keypair).await?;
+        let updated = repo.apply_writes(writes, &keypair).await?;
         Ok(FillRepoOutput {
             repo: updated,
             data: repo_data,
@@ -547,7 +549,7 @@ mod tests {
             repo_data.insert(coll_name.to_string(), coll_data);
         }
         let commit = repo
-            .format_commit(RecordWriteEnum::List(writes), keypair)
+            .format_commit(RecordWriteEnum::List(writes), &keypair)
             .await?;
         Ok(FormatEditOutput {
             commit,
@@ -561,7 +563,7 @@ mod tests {
         let secp = Secp256k1::new();
         let keypair = Keypair::new(&secp, &mut thread_rng());
         let did_key = encode_did_key(&keypair.public_key());
-        let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, keypair, None).await?;
+        let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, &keypair, None).await?;
         Ok(())
     }
 
@@ -574,7 +576,7 @@ mod tests {
         let repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -592,7 +594,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -606,7 +608,7 @@ mod tests {
                     rkey: rkey.clone(),
                     record: record.clone(),
                 })),
-                keypair,
+                &keypair,
             )
             .await?;
 
@@ -624,7 +626,7 @@ mod tests {
                     rkey: rkey.clone(),
                     record: updated_record.clone(),
                 })),
-                keypair,
+                &keypair,
             )
             .await?;
         let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
@@ -639,7 +641,7 @@ mod tests {
                     collection: COLL_NAME.to_string(),
                     rkey: rkey.clone(),
                 })),
-                keypair,
+                &keypair,
             )
             .await?;
         let got = repo.get_record(COLL_NAME.to_string(), rkey.clone()).await?;
@@ -656,7 +658,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -677,7 +679,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -711,7 +713,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -745,7 +747,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -779,7 +781,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             did_key.clone(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -822,7 +824,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(blockstore)),
             did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -839,7 +841,7 @@ mod tests {
                         rkey,
                         record: serde_json::from_value(record.clone())?,
                     })),
-                    keypair,
+                    &keypair,
                 )
                 .await?;
         }
@@ -855,7 +857,7 @@ mod tests {
                         collection: collection.to_string(),
                         rkey: keys[0].clone(),
                     })),
-                    keypair,
+                    &keypair,
                 )
                 .await?;
             let car = blocks_to_car_file(Some(&commit.cid), commit.new_blocks).await?;
@@ -888,7 +890,7 @@ mod tests {
                         collection: collection.to_string(),
                         rkey: rkey.clone(),
                     })),
-                    keypair,
+                    &keypair,
                 )
                 .await?;
             let car = blocks_to_car_file(Some(&commit.cid), commit.relevant_blocks.clone()).await?;
@@ -919,7 +921,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -954,7 +956,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -993,7 +995,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -1033,7 +1035,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -1074,7 +1076,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -1114,7 +1116,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -1170,7 +1172,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;
@@ -1211,7 +1213,7 @@ mod tests {
         let mut repo = Repo::create(
             Arc::new(RwLock::new(storage)),
             repo_did.to_string(),
-            keypair,
+            &keypair,
             None,
         )
         .await?;

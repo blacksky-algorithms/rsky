@@ -42,8 +42,7 @@ pub struct ReadAfterWriteNotFoundOutput {
     pub lag: Option<usize>,
 }
 
-#[allow(non_snake_case)]
-#[allow(unused_variables)]
+#[allow(unused_variables, non_snake_case, clippy::too_many_arguments)]
 pub async fn inner_get_post_thread(
     uri: String,
     depth: u16,
@@ -122,8 +121,7 @@ pub async fn inner_get_post_thread(
 
 /// Get posts in a thread. Does not require auth, but additional metadata and filtering
 /// will be applied for authed requests.
-#[allow(non_snake_case)]
-#[allow(unused_variables)]
+#[allow(unused_variables, non_snake_case, clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getPostThread?<uri>&<depth>&<parentHeight>")]
 pub async fn get_post_thread(
@@ -173,17 +171,11 @@ pub async fn get_post_thread(
                         } = xrpc
                         {
                             let xrpc_error = ErrorMessageResponse {
-                                code: match error {
-                                    None => None,
-                                    Some(error) => Some(
-                                        ErrorCode::from_str(error)
-                                            .unwrap_or(ErrorCode::InternalServerError),
-                                    ),
-                                },
-                                message: match message {
-                                    None => None,
-                                    Some(message) => Some(message.to_string()),
-                                },
+                                code: error.as_ref().map(|error| {
+                                    ErrorCode::from_str(error)
+                                        .unwrap_or(ErrorCode::InternalServerError)
+                                }),
+                                message: message.as_ref().map(|message| message.to_string()),
                             };
                             Err(ApiError::BadRequest(
                                 "XRPCError".to_string(),
@@ -228,7 +220,7 @@ pub async fn add_posts_to_thread(
     posts: Vec<RecordDescript<Post>>,
 ) -> Result<ThreadViewPost> {
     let in_thread = find_posts_in_thread(&original, posts);
-    if in_thread.len() == 0 {
+    if in_thread.is_empty() {
         return Ok(original);
     }
     let mut thread = original;

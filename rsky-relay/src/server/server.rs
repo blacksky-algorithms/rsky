@@ -13,6 +13,9 @@ use color_eyre::eyre::eyre;
 use httparse::{EMPTY_HEADER, Status};
 #[cfg(not(feature = "labeler"))]
 use rusqlite::named_params;
+#[cfg(feature = "labeler")]
+use rusqlite::{Connection, OpenFlags};
+#[cfg(not(feature = "labeler"))]
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use thiserror::Error;
@@ -21,12 +24,59 @@ use url::Url;
 use crate::SHUTDOWN;
 use crate::config::{ADMIN_PASSWORD, HOSTS_INTERVAL, PORT};
 #[cfg(not(feature = "labeler"))]
-use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAY};
+use crate::config::{HOSTS_MIN_ACCOUNTS, HOSTS_RELAYS};
 use crate::crawler::{RequestCrawl, RequestCrawlSender};
+#[cfg(not(feature = "labeler"))]
+use crate::metrics;
 use crate::publisher::{MaybeTlsStream, SubscribeRepos, SubscribeReposSender};
 use crate::server::types::{BannedHost, ListBans};
 #[cfg(not(feature = "labeler"))]
 use crate::server::types::{GetHostStatus, Host, HostStatus, ListHosts};
+
+#[cfg(not(feature = "labeler"))]
+pub trait HostListFetcher {
+    fn fetch_page(&self, cursor: Option<&str>) -> Result<ListHosts>;
+}
+
+#[cfg(not(feature = "labeler"))]
+struct ReqwestHostListFetcher {
+    client: reqwest::blocking::Client,
+    base_url: String,
+}
+
+#[cfg(not(feature = "labeler"))]
+impl HostListFetcher for ReqwestHostListFetcher {
+    fn fetch_page(&self, cursor: Option<&str>) -> Result<ListHosts> {
+        let mut params: Vec<(&str, &str)> = vec![("limit", "1000")];
+        if let Some(c) = cursor {
+            params.push(("cursor", c));
+        }
+        let url = Url::parse_with_params(&self.base_url, params)?;
+        Ok(self.client.get(url).send()?.json()?)
+    }
+}
+
+#[cfg(not(feature = "labeler"))]
+pub fn fetch_page_with_retry<F: HostListFetcher + ?Sized>(
+    fetcher: &F, cursor: Option<&str>, sleep: impl Fn(Duration),
+) -> Result<ListHosts> {
+    let mut delay = Duration::from_secs(1);
+    let mut last: Option<color_eyre::Report> = None;
+    for attempt in 0..3 {
+        match fetcher.fetch_page(cursor) {
+            Ok(page) => return Ok(page),
+            Err(err) => {
+                tracing::warn!(%err, attempt, "listHosts page fetch failed; retrying");
+                last = Some(err);
+                if attempt < 2 {
+                    sleep(delay);
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| eyre!("listHosts retries exhausted with no error")))
+}
 
 const SLEEP: Duration = Duration::from_millis(10);
 
@@ -321,8 +371,7 @@ impl Server {
                     "{\"error\":\"InvalidRequest\",\"message\":\"invalid or missing hostname\"}",
                 )
             }
-            ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN)
-            | ("GET", PATH_ADMIN_LIST_BANS) => {
+            ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN) | ("GET", PATH_ADMIN_LIST_BANS) => {
                 self.handle_admin(&mut stream, url.path(), &url, is_admin_authed)
             }
             _ => write_response(
@@ -489,30 +538,62 @@ impl Server {
             .user_agent("rsky-relay")
             .https_only(true)
             .build()?;
-        let mut cursor: Option<String> = None;
-        loop {
-            let mut params = vec![("limit", "1000")];
-            if let Some(cursor) = &cursor {
-                params.push(("cursor", cursor));
+        let mut seen: hashbrown::HashSet<String> = hashbrown::HashSet::new();
+        for upstream in HOSTS_RELAYS.iter() {
+            let fetcher = ReqwestHostListFetcher {
+                client: client.clone(),
+                base_url: format!("https://{upstream}{PATH_LIST_HOSTS}"),
+            };
+            if let Err(err) =
+                self.query_hosts_with_fetcher(&fetcher, thread::sleep, &mut seen, upstream)
+            {
+                tracing::warn!(%err, %upstream, "discovery upstream failed entirely");
             }
-            let url =
-                Url::parse_with_params(&format!("https://{HOSTS_RELAY}{PATH_LIST_HOSTS}"), params)?;
-            let mut hosts: ListHosts = client.get(url).send()?.json()?;
-            hosts.hosts.sort_unstable_by_key(|host| host.account_count);
-            for host in hosts.hosts.into_iter().rev() {
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    fn query_hosts_with_fetcher<F: HostListFetcher + ?Sized>(
+        &mut self, fetcher: &F, sleep: impl Fn(Duration) + Copy,
+        seen: &mut hashbrown::HashSet<String>, upstream: &str,
+    ) -> Result<()> {
+        let mut cursor: Option<String> = None;
+        let mut total_seen: usize = 0;
+        let mut total_added: usize = 0;
+        let mut had_failure = false;
+        loop {
+            let page = match fetch_page_with_retry(fetcher, cursor.as_deref(), sleep) {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::warn!(%err, %upstream, "listHosts page failed after retries");
+                    had_failure = true;
+                    break;
+                }
+            };
+            total_seen += page.hosts.len();
+            let mut sorted = page.hosts;
+            sorted.sort_unstable_by_key(|host| host.account_count);
+            for host in sorted.into_iter().rev() {
                 if host.account_count > HOSTS_MIN_ACCOUNTS
                     && matches!(host.status, HostStatus::Active | HostStatus::Idle)
                     && !self.is_host_banned(&host.hostname)
+                    && seen.insert(host.hostname.clone())
                 {
                     self.request_crawl_tx
                         .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
+                    total_added += 1;
                 }
             }
-            cursor = hosts.cursor;
+            cursor = page.cursor;
             if cursor.is_none() {
                 break;
             }
         }
+        let outcome =
+            if had_failure { if total_added > 0 { "partial" } else { "fail" } } else { "ok" };
+        metrics::record_discovery_round(outcome);
+        tracing::info!(total = %total_seen, added = %total_added, %outcome, %upstream, "host discovery refresh complete");
         Ok(())
     }
 
@@ -578,4 +659,108 @@ fn check_admin_auth(headers: &[httparse::Header<'_>]) -> bool {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .is_some_and(|token| token == password.as_str())
     })
+}
+
+#[cfg(all(test, not(feature = "labeler")))]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct ScriptedFetcher {
+        script: Vec<Result<ListHosts, &'static str>>,
+        idx: Cell<usize>,
+    }
+
+    impl ScriptedFetcher {
+        const fn new(script: Vec<Result<ListHosts, &'static str>>) -> Self {
+            Self { script, idx: Cell::new(0) }
+        }
+        fn calls(&self) -> usize {
+            self.idx.get()
+        }
+    }
+
+    impl HostListFetcher for ScriptedFetcher {
+        fn fetch_page(&self, _cursor: Option<&str>) -> Result<ListHosts> {
+            let i = self.idx.get();
+            self.idx.set(i + 1);
+            let entry = self.script.get(i).ok_or_else(|| eyre!("script exhausted"))?;
+            match entry {
+                Ok(page) => Ok(ListHosts {
+                    cursor: page.cursor.clone(),
+                    hosts: page
+                        .hosts
+                        .iter()
+                        .map(|h| Host {
+                            account_count: h.account_count,
+                            hostname: h.hostname.clone(),
+                            seq: h.seq,
+                            status: match h.status {
+                                HostStatus::Active => HostStatus::Active,
+                                HostStatus::Idle => HostStatus::Idle,
+                                HostStatus::Offline => HostStatus::Offline,
+                                HostStatus::Throttled => HostStatus::Throttled,
+                                HostStatus::Banned => HostStatus::Banned,
+                            },
+                        })
+                        .collect(),
+                }),
+                Err(msg) => Err(eyre!(*msg)),
+            }
+        }
+    }
+
+    fn page(cursor: Option<&str>, hosts: Vec<&str>) -> ListHosts {
+        ListHosts {
+            cursor: cursor.map(str::to_owned),
+            hosts: hosts
+                .into_iter()
+                .map(|h| Host {
+                    account_count: 1,
+                    hostname: h.to_owned(),
+                    seq: 0,
+                    status: HostStatus::Active,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn fetch_page_with_retry_succeeds_on_first_try() {
+        let fetcher = ScriptedFetcher::new(vec![Ok(page(None, vec!["a", "b"]))]);
+        let res = fetch_page_with_retry(&fetcher, None, |_| {});
+        assert!(res.is_ok());
+        assert_eq!(fetcher.calls(), 1);
+    }
+
+    #[test]
+    fn fetch_page_with_retry_succeeds_after_transient_failure() {
+        let fetcher = ScriptedFetcher::new(vec![Err("transient"), Ok(page(None, vec!["a"]))]);
+        let collector = std::cell::RefCell::new(Vec::<Duration>::new());
+        let sleep_fn = |d: Duration| collector.borrow_mut().push(d);
+        let res = fetch_page_with_retry(&fetcher, None, sleep_fn);
+        assert!(res.is_ok());
+        assert_eq!(fetcher.calls(), 2);
+        assert_eq!(collector.borrow().len(), 1);
+    }
+
+    #[test]
+    fn fetch_page_with_retry_returns_err_after_exhausting_attempts() {
+        let fetcher = ScriptedFetcher::new(vec![Err("e1"), Err("e2"), Err("e3")]);
+        let res = fetch_page_with_retry(&fetcher, None, |_| {});
+        assert!(res.is_err());
+        assert_eq!(fetcher.calls(), 3);
+    }
+
+    #[test]
+    fn fetch_page_with_retry_doubles_backoff_between_attempts() {
+        let fetcher = ScriptedFetcher::new(vec![Err("a"), Err("b"), Err("c")]);
+        let collector = std::cell::RefCell::new(Vec::<Duration>::new());
+        let sleep_fn = |d: Duration| collector.borrow_mut().push(d);
+        drop(fetch_page_with_retry(&fetcher, None, sleep_fn));
+        let sleeps = collector.borrow();
+        assert_eq!(sleeps.len(), 2, "sleep between attempts only");
+        assert_eq!(sleeps[0], Duration::from_secs(1));
+        assert_eq!(sleeps[1], Duration::from_secs(2));
+    }
 }

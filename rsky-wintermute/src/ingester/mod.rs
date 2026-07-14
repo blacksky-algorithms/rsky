@@ -6,11 +6,7 @@ mod tests;
 
 use crate::SHUTDOWN;
 use crate::backfiller::convert_record_to_ipld;
-use crate::config::{
-    CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, INLINE_CONCURRENCY,
-    WORKERS_INGESTER,
-};
-use crate::indexer::IndexerManager;
+use crate::config::{CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, WORKERS_INGESTER};
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -20,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
@@ -149,11 +144,6 @@ impl IngesterManager {
             }
         };
 
-        // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
-        let concurrency = *INLINE_CONCURRENCY;
-        tracing::info!("firehose inline concurrency: {concurrency}");
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s max
         let max_backoff_secs = 60u64;
         let mut backoff_secs = 1u64;
@@ -165,7 +155,7 @@ impl IngesterManager {
             }
 
             let connect_start = std::time::Instant::now();
-            match Self::connect_and_stream(&storage, &hostname, &pool, &semaphore).await {
+            match Self::connect_and_stream(&storage, &hostname, &pool).await {
                 ConnectionResult::Closed => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
@@ -215,10 +205,9 @@ impl IngesterManager {
     }
 
     async fn connect_and_stream(
-        _storage: &Storage,
+        storage: &Storage,
         hostname: &str,
         pool: &Arc<Pool>,
-        semaphore: &Arc<Semaphore>,
     ) -> ConnectionResult {
         use crate::metrics;
 
@@ -227,14 +216,16 @@ impl IngesterManager {
         // Use AtomicI64 for cheap, lock-free cursor updates (like indigo/tap's lastSeq)
         let last_seq = Arc::new(AtomicI64::new(0));
 
-        // Get cursor from postgres (survives Fjall corruption)
-        let cursor = match get_cursor_from_postgres(pool, &cursor_key).await {
+        // Get cursor from postgres (survives Fjall corruption). A saved cursor resumes;
+        // a fresh subscription falls back to FIREHOSE_INITIAL_CURSOR (None=live, Some(0)=oldest).
+        let saved = match get_cursor_from_postgres(pool, &cursor_key).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("failed to get cursor from postgres: {e}");
                 return ConnectionResult::Error(e);
             }
         };
+        let start_cursor = resolve_start_cursor(saved, *crate::config::FIREHOSE_INITIAL_CURSOR);
 
         let clean_hostname = hostname
             .trim_start_matches("https://")
@@ -245,13 +236,7 @@ impl IngesterManager {
             "wss://{clean_hostname}/xrpc/com.atproto.sync.subscribeRepos"
         )) {
             Ok(mut u) => {
-                // Only add cursor if we have a saved position
-                // No cursor = start from current stream position (live)
-                // cursor=N = resume from seq N (may be in rollback window)
-                if cursor > 0 {
-                    u.query_pairs_mut()
-                        .append_pair("cursor", &cursor.to_string());
-                }
+                append_cursor_param(&mut u, start_cursor);
                 u
             }
             Err(e) => {
@@ -261,8 +246,8 @@ impl IngesterManager {
             }
         };
 
-        if cursor > 0 {
-            tracing::info!("connecting to {url} resuming from cursor {cursor}");
+        if let Some(c) = start_cursor {
+            tracing::info!("connecting to {url} starting from cursor {c}");
         } else {
             tracing::info!("connecting to {url} starting from live stream");
         }
@@ -454,12 +439,26 @@ impl IngesterManager {
                     if let Some(ref account) = event.account {
                         let pool_clone = Arc::clone(pool);
                         let event_did = event.did.clone();
+                        let event_time = event.time.clone();
                         let active = account.active;
                         let status = account.status.clone();
                         tokio::spawn(async move {
+                            if !active && Self::pds_says_active(&event_did).await == Some(true) {
+                                tracing::info!(
+                                    "skipped account event for {} (active=false, status={:?}): \
+                                     authoritative PDS reports active=true",
+                                    event_did,
+                                    status.as_deref()
+                                );
+                                metrics::INGESTER_ERRORS_TOTAL
+                                    .with_label_values(&["account_skipped_stale_source"])
+                                    .inc();
+                                return;
+                            }
                             if let Err(e) = Self::process_account_event(
                                 &pool_clone,
                                 &event_did,
+                                &event_time,
                                 active,
                                 status.as_deref(),
                             )
@@ -499,24 +498,17 @@ impl IngesterManager {
                     continue;
                 }
 
-                // Process inline: parse event and spawn indexing tasks directly (skip Fjall queue)
+                // Queue to Fjall so live intake never blocks on indexing speed; the
+                // firehose_live processor loop consumes and indexes from the queue.
                 match Self::parse_event_to_jobs(&event).await {
                     Ok(jobs) => {
                         for job in jobs {
-                            // Acquire semaphore permit (like rsky-firehose)
-                            let Ok(permit) = semaphore.clone().acquire_owned().await else {
-                                tracing::error!("semaphore closed during firehose processing");
-                                break;
-                            };
-                            let pool_clone = Arc::clone(pool);
-                            tokio::spawn(async move {
-                                if let Err(e) = IndexerManager::process_job(&pool_clone, &job).await
-                                {
-                                    tracing::error!("inline indexing failed: {e}");
-                                    metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                                }
-                                drop(permit);
-                            });
+                            if let Err(e) = storage.enqueue_firehose_live(&job) {
+                                tracing::error!("failed to enqueue firehose_live job: {e}");
+                                metrics::INGESTER_ERRORS_TOTAL
+                                    .with_label_values(&["enqueue_failed"])
+                                    .inc();
+                            }
                         }
                     }
                     Err(e) => {
@@ -996,29 +988,34 @@ impl IngesterManager {
     async fn process_account_event(
         pool: &Pool,
         did: &str,
+        time: &str,
         active: bool,
         status: Option<&str>,
     ) -> Result<(), WintermuteError> {
         tracing::debug!(
-            "processing account event for {}: active={}, status={:?}",
+            "processing account event for {}: time={}, active={}, status={:?}",
             did,
+            time,
             active,
             status
         );
 
-        // Determine upstream_status based on active flag and status
+        let event_at = time.parse::<chrono::DateTime<chrono::Utc>>().map_err(|e| {
+            WintermuteError::Serialization(format!(
+                "invalid account event time '{time}' for {did}: {e}"
+            ))
+        })?;
+
         let upstream_status: Option<&str> = if active {
-            // Active accounts have no upstream status
             None
         } else {
-            // Inactive accounts: check for recognized statuses
             match status {
                 Some(s) if ["deactivated", "suspended", "takendown", "deleted"].contains(&s) => {
                     Some(s)
                 }
                 Some(s) => {
                     tracing::warn!("unrecognized account status '{}' for {}", s, did);
-                    Some(s) // Still store it, just log a warning
+                    Some(s)
                 }
                 None => {
                     tracing::warn!("inactive account {} has no status", did);
@@ -1027,30 +1024,90 @@ impl IngesterManager {
             }
         };
 
-        // Update actor table
         let client = pool.get().await?;
         let result = client
             .execute(
-                "UPDATE actor SET \"upstreamStatus\" = $1 WHERE did = $2",
-                &[&upstream_status, &did],
+                "UPDATE actor
+                    SET \"upstreamStatus\" = $1, \"accountEventAt\" = $2
+                  WHERE did = $3
+                    AND (\"accountEventAt\" IS NULL OR \"accountEventAt\" < $2)",
+                &[&upstream_status, &event_at, &did],
             )
             .await?;
 
         if result > 0 {
             tracing::info!(
-                "updated upstream_status for {} to {:?}",
+                "updated upstream_status for {} to {:?} at {}",
                 did,
-                upstream_status.unwrap_or("null")
+                upstream_status.unwrap_or("null"),
+                event_at
             );
         } else {
-            tracing::debug!("no actor found to update status for {}", did);
+            tracing::debug!(
+                "skipped account event for {} (stale or actor missing); time={}",
+                did,
+                event_at
+            );
         }
 
         Ok(())
     }
+
+    /// Resolves the actor's current PDS via PLC and queries its `getRepoStatus`.
+    /// Returns `Some(true)` if the PDS reports `active: true`, `Some(false)` if `active: false`,
+    /// `None` on any resolution or transport error.
+    ///
+    /// Used to filter out `#account active:false` events emitted by a PDS the actor has
+    /// already migrated away from. The relay forwards them unaware of the migration; the
+    /// PLC log is the authoritative answer.
+    async fn pds_says_active(did: &str) -> Option<bool> {
+        use rsky_identity::IdResolver;
+        use rsky_identity::types::IdentityResolverOpts;
+        let mut resolver = IdResolver::new(IdentityResolverOpts {
+            timeout: Some(std::time::Duration::from_secs(5)),
+            plc_url: None,
+            did_cache: None,
+            backup_nameservers: None,
+        });
+        let Ok(Some(doc)) = resolver.did.resolve(did.to_owned(), None).await else {
+            return None;
+        };
+        let pds_endpoint = doc.service.as_ref()?.iter().find_map(|s| {
+            if s.id == "#atproto_pds" {
+                Some(s.service_endpoint.clone())
+            } else {
+                None
+            }
+        })?;
+        let url = format!(
+            "{}/xrpc/com.atproto.sync.getRepoStatus?did={}",
+            pds_endpoint.trim_end_matches('/'),
+            did
+        );
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.text().await.ok()?;
+        parse_active_flag(&body)
+    }
 }
 
-async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, WintermuteError> {
+/// Parses the `active` boolean out of a `com.atproto.sync.getRepoStatus` JSON body.
+/// Returns `Some(true)`/`Some(false)` if present, `None` if missing or malformed.
+fn parse_active_flag(body: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("active").and_then(serde_json::Value::as_bool)
+}
+
+async fn get_cursor_from_postgres(
+    pool: &Pool,
+    service: &str,
+) -> Result<Option<i64>, WintermuteError> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
@@ -1059,7 +1116,20 @@ async fn get_cursor_from_postgres(pool: &Pool, service: &str) -> Result<i64, Win
         )
         .await?;
 
-    Ok(row.map_or(0, |r| r.get::<_, i64>("cursor")))
+    Ok(row.map(|r| r.get::<_, i64>("cursor")))
+}
+
+// Resolve the start cursor for a connection: a saved cursor wins; otherwise fall back to the
+// configured initial cursor (None = start live, Some(0) = oldest/full backfill window).
+fn resolve_start_cursor(saved: Option<i64>, initial: Option<i64>) -> Option<i64> {
+    saved.or(initial)
+}
+
+// Append the cursor query param when a start cursor is set, including cursor=0.
+fn append_cursor_param(url: &mut url::Url, start_cursor: Option<i64>) {
+    if let Some(c) = start_cursor {
+        url.query_pairs_mut().append_pair("cursor", &c.to_string());
+    }
 }
 
 async fn set_cursor_in_postgres(
@@ -1085,4 +1155,47 @@ async fn delete_cursor_from_postgres(pool: &Pool, service: &str) -> Result<(), W
         .execute("DELETE FROM sub_state WHERE service = $1", &[&service])
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::{append_cursor_param, resolve_start_cursor};
+
+    fn subscribe_url() -> url::Url {
+        url::Url::parse("wss://relay.example/xrpc/com.atproto.sync.subscribeRepos").unwrap()
+    }
+
+    #[test]
+    fn saved_cursor_takes_precedence_over_initial() {
+        assert_eq!(resolve_start_cursor(Some(100), Some(0)), Some(100));
+        assert_eq!(resolve_start_cursor(Some(5), None), Some(5));
+    }
+
+    #[test]
+    fn fresh_subscription_uses_initial_cursor() {
+        assert_eq!(resolve_start_cursor(None, Some(0)), Some(0));
+        assert_eq!(resolve_start_cursor(None, Some(42)), Some(42));
+        assert_eq!(resolve_start_cursor(None, None), None);
+    }
+
+    #[test]
+    fn append_cursor_param_emits_zero_explicitly() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, Some(0));
+        assert_eq!(u.query(), Some("cursor=0"));
+    }
+
+    #[test]
+    fn append_cursor_param_omits_when_none() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, None);
+        assert_eq!(u.query(), None);
+    }
+
+    #[test]
+    fn append_cursor_param_sets_positive_seq() {
+        let mut u = subscribe_url();
+        append_cursor_param(&mut u, Some(12345));
+        assert_eq!(u.query(), Some("cursor=12345"));
+    }
 }

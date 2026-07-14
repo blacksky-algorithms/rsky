@@ -21,6 +21,20 @@ use rsky_identity::types::DidDocument;
 use crate::config::{CAPACITY_CACHE, DO_PLC_EXPORT, PLC_EXPORT_INTERVAL};
 use crate::validator::event::{DidEndpoint, DidKey};
 
+/// Hot-path interface used by the validator. Returns owned values so the resolver isn't
+/// borrowed across the rest of the validation pipeline. Implemented by the production
+/// `Resolver` and by test fakes.
+pub trait IdentityResolver: Send {
+    fn expire(&mut self, did: &str, time: DateTime<Utc>);
+    fn resolve_owned(
+        &mut self, did: &str,
+    ) -> Result<Option<(Option<String>, DidKey)>, ResolverError>;
+    fn request_direct(&mut self, did: &str);
+    fn poll(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, ResolverError>> + Send;
+}
+
 const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
@@ -66,10 +80,10 @@ impl Resolver {
         } else {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         };
-        let conn = Connection::open_with_flags(
-            "plc_directory.db",
-            flag | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let conn =
+            Connection::open_with_flags("plc_directory.db", flag | OpenFlags::SQLITE_OPEN_CREATE)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;")?;
         if *DO_PLC_EXPORT {
             match conn.execute("PRAGMA secure_delete = OFF", []) {
                 Ok(_) | Err(rusqlite::Error::ExecuteReturnedResults) => {}
@@ -196,7 +210,7 @@ impl Resolver {
         }));
     }
 
-    pub async fn poll(&mut self) -> Result<Vec<String>, ResolverError> {
+    pub async fn poll_inner(&mut self) -> Result<Vec<String>, ResolverError> {
         if let Ok(Some((query, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await {
             match res {
                 Ok(bytes) => match query {
@@ -216,7 +230,7 @@ impl Resolver {
                         let mut dids = Vec::new();
                         let mut count = 0;
                         let tx = self.conn.transaction()?;
-                        let mut stmt = tx.prepare_cached("INSERT INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+                        let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
                         for line in bytes.reader().lines() {
                             count += 1;
                             if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
@@ -270,6 +284,35 @@ struct PlcDocument<'a> {
     cid: String,
     nullified: bool,
     created_at: String,
+}
+
+impl IdentityResolver for Resolver {
+    #[inline]
+    fn expire(&mut self, did: &str, time: DateTime<Utc>) {
+        Self::expire(self, did, time);
+    }
+
+    #[inline]
+    fn resolve_owned(
+        &mut self, did: &str,
+    ) -> Result<Option<(Option<String>, DidKey)>, ResolverError> {
+        match self.resolve(did)? {
+            Some((pds, key)) => Ok(Some((pds.map(str::to_owned), *key))),
+            None => Ok(None),
+        }
+    }
+
+    #[inline]
+    fn request_direct(&mut self, did: &str) {
+        Self::request_direct(self, did);
+    }
+
+    #[inline]
+    fn poll(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, ResolverError>> + Send {
+        self.poll_inner()
+    }
 }
 
 fn parse_plc_doc(input: &str) -> Option<PlcDocument<'_>> {
@@ -331,4 +374,106 @@ fn parse_key_endpoint(endpoint: Option<&str>, key: Option<&str>) -> Option<(DidE
         }
     }
     None
+}
+
+#[cfg(test)]
+pub(crate) type ResolveResult = Result<Option<(Option<String>, DidKey)>, ResolverError>;
+#[cfg(test)]
+pub(crate) type PollResult = Result<Vec<String>, ResolverError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// Minimal scriptable `IdentityResolver` fake for unit tests. The validator hot path
+    /// only exercises `resolve_owned` + `request_direct` + `expire` + `poll`.
+    pub struct FakeResolver {
+        pub script: VecDeque<ResolveResult>,
+        pub direct_requests: Vec<String>,
+        pub expirations: Vec<(String, DateTime<Utc>)>,
+        pub polls: VecDeque<PollResult>,
+    }
+
+    impl FakeResolver {
+        pub fn new() -> Self {
+            Self {
+                script: VecDeque::new(),
+                direct_requests: Vec::new(),
+                expirations: Vec::new(),
+                polls: VecDeque::new(),
+            }
+        }
+    }
+
+    impl IdentityResolver for FakeResolver {
+        fn expire(&mut self, did: &str, time: DateTime<Utc>) {
+            self.expirations.push((did.to_owned(), time));
+        }
+
+        fn resolve_owned(&mut self, _did: &str) -> ResolveResult {
+            self.script.pop_front().unwrap_or(Ok(None))
+        }
+
+        fn request_direct(&mut self, did: &str) {
+            self.direct_requests.push(did.to_owned());
+        }
+
+        fn poll(&mut self) -> impl std::future::Future<Output = PollResult> + Send {
+            let next = self.polls.pop_front().unwrap_or_else(|| Ok(Vec::new()));
+            std::future::ready(next)
+        }
+    }
+
+    #[test]
+    fn fake_resolver_resolve_owned_returns_scripted_value() {
+        let mut fake = FakeResolver::new();
+        fake.script.push_back(Ok(Some((Some("pds.example".to_owned()), [7u8; 35]))));
+        fake.script.push_back(Ok(None));
+        let r1 = fake.resolve_owned("did:plc:a").unwrap();
+        let r2 = fake.resolve_owned("did:plc:b").unwrap();
+        assert_eq!(r1, Some((Some("pds.example".to_owned()), [7u8; 35])));
+        assert_eq!(r2, None);
+    }
+
+    #[test]
+    fn fake_resolver_request_direct_records_did() {
+        let mut fake = FakeResolver::new();
+        fake.request_direct("did:plc:a");
+        fake.request_direct("did:plc:b");
+        assert_eq!(fake.direct_requests, vec!["did:plc:a".to_owned(), "did:plc:b".to_owned()]);
+    }
+
+    #[test]
+    fn fake_resolver_expire_records_did_and_time() {
+        let mut fake = FakeResolver::new();
+        let t = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        fake.expire("did:plc:a", t);
+        assert_eq!(fake.expirations, vec![("did:plc:a".to_owned(), t)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_resolver_poll_returns_scripted_value() {
+        let mut fake = FakeResolver::new();
+        fake.polls.push_back(Ok(vec!["did:plc:a".to_owned()]));
+        fake.polls.push_back(Ok(Vec::new()));
+        assert_eq!(fake.poll().await.unwrap(), vec!["did:plc:a".to_owned()]);
+        assert_eq!(fake.poll().await.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_key_endpoint_with_null_key_returns_none() {
+        assert!(parse_key_endpoint(None, None).is_none());
+        assert!(parse_key_endpoint(Some("https://pds.example"), None).is_none());
+    }
+
+    #[test]
+    fn parse_key_endpoint_strips_https_prefix_and_trailing_slash() {
+        let valid_key = "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme";
+        let pair = parse_key_endpoint(Some("https://pds.example.com/"), Some(valid_key));
+        match pair {
+            Some((Some(pds), _key)) => assert_eq!(pds.as_ref(), "pds.example.com"),
+            other => panic!("expected Some endpoint, got {other:?}"),
+        }
+    }
 }

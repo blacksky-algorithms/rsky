@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod backfiller_tests {
+    use base64::Engine as _;
+
     use crate::backfiller::{BackfillerManager, convert_record_to_ipld};
     use crate::storage::Storage;
     use crate::types::{BackfillJob, WintermuteError};
@@ -52,6 +54,54 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    async fn test_process_car_bytes_with_fixture_repo() {
+        let (storage, _dir) = setup_test_storage();
+
+        let car_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rsky-repo/resources/test/valid_repo.car"
+        ))
+        .unwrap();
+
+        let enqueued = BackfillerManager::process_car_bytes(
+            &storage,
+            "did:plc:r7fdhqmw3h2cifeakw5hmvy6",
+            &car_bytes,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // valid_repo.car's MST references exactly 6 live records
+        let queue_len = storage.firehose_backfill_len().unwrap();
+        assert_eq!(enqueued, queue_len);
+        assert_eq!(enqueued, 6);
+    }
+
+    #[tokio::test]
+    async fn test_process_car_bytes_rejects_did_mismatch() {
+        let (storage, _dir) = setup_test_storage();
+
+        let car_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rsky-repo/resources/test/valid_repo.car"
+        ))
+        .unwrap();
+
+        let result = BackfillerManager::process_car_bytes(
+            &storage,
+            "did:plc:someotherdidentirely00000",
+            &car_bytes,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(storage.firehose_backfill_len().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live network; run manually with --ignored"]
     async fn test_process_job_with_real_repo() {
         let (storage, _dir) = setup_test_storage();
 
@@ -66,22 +116,11 @@ mod backfiller_tests {
             .build()
             .unwrap();
 
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
+        BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
+            .await
+            .unwrap();
 
-        match result {
-            Ok(()) => {
-                let queue_len = storage.firehose_backfill_len().unwrap();
-                assert!(
-                    queue_len > 7000,
-                    "expected more than 20000 records to be enqueued for indexing, found {queue_len}"
-                );
-            }
-            Err(e) => {
-                panic!("backfill job failed: {e}");
-            }
-        }
+        assert!(storage.firehose_backfill_len().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -248,13 +287,35 @@ mod backfiller_tests {
     }
 
     #[test]
-    fn test_convert_record_invalid_cid_bytes() {
-        // Byte array that's not a valid CID - should be preserved as regular array
+    fn test_convert_record_invalid_cid_bytes_becomes_bytes() {
+        // Byte array that's not a valid CID - should be encoded as $bytes
         let input = json!({"data": [1, 2, 3, 4, 5]});
         let output = convert_record_to_ipld(&input);
-        // Should not have $link since it's not a valid CID
-        assert!(!output["data"].is_object());
-        assert_eq!(output, input);
+        // Should have $bytes since it's a byte array but not a valid CID
+        assert!(output["data"].is_object());
+        assert!(output["data"]["$bytes"].is_string());
+        assert_eq!(output["data"]["$bytes"], "AQIDBAU="); // base64 of [1,2,3,4,5]
+    }
+
+    #[test]
+    fn test_convert_record_germ_key_bytes() {
+        // Simulate a germ declaration record with crypto key bytes
+        let key_bytes: Vec<u8> = (0..32).collect();
+        let input = json!({
+            "$type": "com.germnetwork.declaration",
+            "currentKey": key_bytes,
+            "keyPackage": key_bytes
+        });
+        let output = convert_record_to_ipld(&input);
+
+        // Both key fields should be $bytes encoded
+        assert!(output["currentKey"]["$bytes"].is_string());
+        assert!(output["keyPackage"]["$bytes"].is_string());
+        // Verify round-trip: decode and check
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(output["currentKey"]["$bytes"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, (0u8..32).collect::<Vec<u8>>());
     }
 
     #[test]

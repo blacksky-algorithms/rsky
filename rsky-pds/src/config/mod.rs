@@ -82,12 +82,12 @@ pub fn env_to_cfg() -> ServerConfig {
         privacy_policy_url: env_str("PDS_PRIVACY_POLICY_URL"),
         terms_of_service_url: env_str("PDS_TERMS_OF_SERVICE_URL"),
         accepting_imports: env_bool("PDS_ACCEPTING_REPO_IMPORTS").unwrap_or(true),
-        blob_upload_limit: env_int("PDS_BLOB_UPLOAD_LIMIT").unwrap_or_else(|| 5 * 1024 * 1024), // 5mb
+        blob_upload_limit: env_int("PDS_BLOB_UPLOAD_LIMIT").unwrap_or(5 * 1024 * 1024), // 5mb
         contact_email_address: env_str("PDS_CONTACT_EMAIL_ADDRESS"),
         dev_mode: env_bool("PDS_DEV_MODE").unwrap_or(false),
     };
     let service_handle_domains: Vec<String>;
-    if env_list("PDS_SERVICE_HANDLE_DOMAINS").len() > 0 {
+    if !env_list("PDS_SERVICE_HANDLE_DOMAINS").is_empty() {
         service_handle_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
     } else if hostname == "localhost" {
         service_handle_domains = vec![".test".to_string()];
@@ -98,41 +98,35 @@ pub fn env_to_cfg() -> ServerConfig {
         plc_url: env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_string()),
         resolver_timeout: env_int("PDS_ID_RESOLVER_TIMEOUT").unwrap_or_else(|| 3 * SECOND as usize)
             as u64,
-        cache_state_ttl: env_int("PDS_DID_CACHE_STALE_TTL").unwrap_or_else(|| HOUR as usize) as u64,
-        cache_max_ttl: env_int("PDS_DID_CACHE_MAX_TTL").unwrap_or_else(|| DAY as usize) as u64,
+        cache_state_ttl: env_int("PDS_DID_CACHE_STALE_TTL").unwrap_or(HOUR as usize) as u64,
+        cache_max_ttl: env_int("PDS_DID_CACHE_MAX_TTL").unwrap_or(DAY as usize) as u64,
         recovery_did_key: env_str("PDS_RECOVERY_DID_KEY"),
         service_handle_domains,
         handle_backup_name_servers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
         enable_did_doc_with_session: env_bool("PDS_ENABLE_DID_DOC_WITH_SESSION").unwrap_or(false),
     };
-    let bsky_app_view_cfg: Option<ServiceConfig> = match env_str("PDS_BSKY_APP_VIEW_URL") {
-        None => None,
-        Some(mod_service_url) => Some(ServiceConfig {
+    let bsky_app_view_cfg: Option<ServiceConfig> =
+        env_str("PDS_BSKY_APP_VIEW_URL").map(|mod_service_url| ServiceConfig {
             url: mod_service_url,
             did: env_str("PDS_BSKY_APP_VIEW_DID").expect(
                 "if bsky appview service url is configured, must configure its did as well.",
             ),
             cdn_url_pattern: env_str("PDS_BSKY_APP_VIEW_CDN_URL_PATTERN"),
-        }),
-    };
-    let mod_service_cfg: Option<ServiceConfig> = match env_str("PDS_MOD_SERVICE_URL") {
-        None => None,
-        Some(mod_service_url) => Some(ServiceConfig {
+        });
+    let mod_service_cfg: Option<ServiceConfig> =
+        env_str("PDS_MOD_SERVICE_URL").map(|mod_service_url| ServiceConfig {
             url: mod_service_url,
             did: env_str("PDS_MOD_SERVICE_DID")
                 .expect("if mod service url is configured, must configure its did as well."),
             cdn_url_pattern: None,
-        }),
-    };
-    let mut report_service_cfg: Option<ServiceConfig> = match env_str("PDS_REPORT_SERVICE_URL") {
-        None => None,
-        Some(mod_service_url) => Some(ServiceConfig {
+        });
+    let mut report_service_cfg: Option<ServiceConfig> =
+        env_str("PDS_REPORT_SERVICE_URL").map(|mod_service_url| ServiceConfig {
             url: mod_service_url,
             did: env_str("PDS_REPORT_SERVICE_DID")
                 .expect("if mod service url is configured, must configure its did as well."),
             cdn_url_pattern: None,
-        }),
-    };
+        });
 
     // if there's a mod service, default report service into it
     if mod_service_cfg.is_some() && report_service_cfg.is_none() {
@@ -171,7 +165,7 @@ pub fn env_to_cfg() -> ServerConfig {
 }
 
 impl ServerConfig {
-    pub async fn appview_auth_headers(&self, did: &String, lxm: &String) -> Result<HeaderMap> {
+    pub async fn appview_auth_headers(&self, did: &str, lxm: &str) -> Result<HeaderMap> {
         match &self.bsky_app_view {
             None => bail!("No appview configured."),
             Some(bsky_app_view) => {

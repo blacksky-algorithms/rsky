@@ -16,6 +16,7 @@ use rsky_lexicon::app::bsky::feed::{AuthorFeed, FeedViewPost, PostView};
 
 const METHOD_NSID: &str = "app.bsky.feed.getAuthorFeed";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn inner_get_author_feed(
     _actor: String,
     _limit: Option<u8>,
@@ -52,6 +53,7 @@ pub async fn inner_get_author_feed(
 }
 
 /// Get a view of an actor's 'author feed' (post and reposts by the author). Does not require auth.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getAuthorFeed?<actor>&<limit>&<cursor>&<filter>")]
 pub async fn get_author_feed(
@@ -201,9 +203,6 @@ pub fn is_users_feed(feed: &AuthorFeed, requester: &String) -> bool {
     match first {
         None => false,
         Some(first) if first.reason.is_none() && &first.post.author.did == requester => true,
-        Some(first) => match first.reason {
-            Some(ref reason) if &reason.by.did == requester => true,
-            _ => false,
-        },
+        Some(first) => matches!(first.reason, Some(ref reason) if &reason.by.did == requester),
     }
 }

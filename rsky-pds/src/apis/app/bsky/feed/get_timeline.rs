@@ -15,6 +15,7 @@ use rsky_lexicon::app::bsky::feed::AuthorFeed;
 
 const METHOD_NSID: &str = "app.bsky.feed.getTimeline";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn inner_get_timeline(
     _algorithm: Option<String>,
     _limit: Option<u8>,
@@ -51,6 +52,7 @@ pub async fn inner_get_timeline(
 
 /// Get a view of the requesting account's home timeline.
 /// This is expected to be some form of reverse-chronological feed.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.feed.getTimeline?<algorithm>&<limit>&<cursor>")]
 pub async fn get_timeline(
@@ -66,7 +68,7 @@ pub async fn get_timeline(
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
     if let Some(limit) = limit {
-        if limit > 100 || limit < 1 {
+        if !(1..=100).contains(&limit) {
             return Err(ApiError::InvalidRequest("invalid limit".to_string()));
         }
     }

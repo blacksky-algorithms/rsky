@@ -271,6 +271,21 @@ impl BackfillerManager {
         }
 
         let car_bytes = response.bytes().await?;
+        Self::process_car_bytes(storage, did, &car_bytes, job.priority).await?;
+
+        metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
+
+        Ok(())
+    }
+
+    pub async fn process_car_bytes(
+        storage: &Storage,
+        did: &str,
+        car_bytes: &[u8],
+        priority: bool,
+    ) -> Result<usize, WintermuteError> {
+        use crate::metrics;
+
         let mut reader = match CarReader::new(Cursor::new(car_bytes.to_vec())).await {
             Ok(r) => r,
             Err(e) => {
@@ -340,7 +355,7 @@ impl BackfillerManager {
                 continue;
             };
 
-            if !collection.starts_with("app.bsky.") && !collection.starts_with("chat.bsky.") {
+            if !crate::config::ingest_collection_allowed(collection) {
                 metrics::BACKFILLER_RECORDS_FILTERED_TOTAL.inc();
                 continue;
             }
@@ -366,20 +381,20 @@ impl BackfillerManager {
         }
 
         if !batch_jobs.is_empty() {
-            if job.priority {
+            if priority {
                 storage.enqueue_firehose_backfill_priority_batch(&batch_jobs)?;
             } else {
                 storage.enqueue_firehose_backfill_batch(&batch_jobs)?;
             }
         }
 
-        metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
-
-        Ok(())
+        Ok(batch_jobs.len())
     }
 }
 
 pub fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Value {
+    use base64::Engine;
+
     match record_json {
         serde_json::Value::Object(map) => {
             let mut new_map = serde_json::Map::new();
@@ -402,6 +417,10 @@ pub fn convert_record_to_ipld(record_json: &serde_json::Value) -> serde_json::Va
                 if let Ok(cid) = lexicon_cid::Cid::try_from(&bytes[..]) {
                     return serde_json::json!({"$link": cid.to_string()});
                 }
+
+                // Non-CID byte array: encode as $bytes (AT Protocol IPLD format)
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                return serde_json::json!({"$bytes": encoded});
             }
 
             serde_json::Value::Array(arr.iter().map(convert_record_to_ipld).collect())

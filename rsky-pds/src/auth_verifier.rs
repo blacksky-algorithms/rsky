@@ -18,9 +18,18 @@ use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
 use std::str;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
+
+pub static PDS_JWT_KEYPAIR: LazyLock<ES256kKeyPair> = LazyLock::new(|| {
+    let secp = Secp256k1::new();
+    let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
+    let secret_key = SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
+    let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
+    ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice()).unwrap()
+});
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum AuthScope {
@@ -42,6 +51,7 @@ impl AuthScope {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(scope: &str) -> Result<Self> {
         match scope {
             "com.atproto.access" => Ok(AuthScope::Access),
@@ -153,17 +163,20 @@ impl<'r> FromRequest<'r> for Refresh {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let mut options = VerificationOptions::default();
-        options.allowed_audiences = Some(HashSet::from_strings(&[
-            env::var("PDS_SERVICE_DID").unwrap()
-        ]));
+        let options = VerificationOptions {
+            allowed_audiences: Some(HashSet::from_strings(&[
+                env::var("PDS_SERVICE_DID").unwrap()
+            ])),
+            ..Default::default()
+        };
+
         let ValidatedBearer {
             did,
             scope,
             token,
             payload,
             audience,
-        } = match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
+        } = match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)) {
             Ok(result) => {
                 let payload = result.payload.clone();
                 match payload.jti {
@@ -200,8 +213,8 @@ impl<'r> FromRequest<'r> for Refresh {
     }
 }
 
-pub async fn access_check<'r>(
-    req: &'r Request<'_>,
+pub async fn access_check(
+    req: &Request<'_>,
     scopes: Vec<AuthScope>,
     opts: Option<ValidateAccessTokenOpts>,
 ) -> Outcome<AccessOutput, AuthError> {
@@ -430,9 +443,12 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let mut options = VerificationOptions::default();
-        options.max_validity = Some(Duration::from_secs(INFINITY));
-        match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)).await {
+        let options = VerificationOptions {
+            max_validity: Some(Duration::from_secs(INFINITY)),
+            ..Default::default()
+        };
+
+        match validate_bearer_token(req, vec![AuthScope::Refresh], Some(options)) {
             Ok(result) => match result.payload.jti {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
                 None => {
@@ -703,22 +719,23 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
     }
 }
 
-pub async fn validate_bearer_access_token<'r>(
-    request: &'r Request<'_>,
+pub async fn validate_bearer_access_token(
+    request: &Request<'_>,
     scopes: Vec<AuthScope>,
 ) -> Result<AccessOutput> {
-    let mut options = VerificationOptions::default();
-    options.allowed_audiences = Some(HashSet::from_strings(&[
-        env::var("PDS_SERVICE_DID").unwrap()
-    ]));
+    let options = VerificationOptions {
+        allowed_audiences: Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID")?])),
+        ..Default::default()
+    };
+
     let ValidatedBearer {
         did,
         scope,
         token,
         audience,
         ..
-    } = validate_bearer_token(request, scopes, Some(options)).await?;
-    let is_privileged = vec![AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope);
+    } = validate_bearer_token(request, scopes, Some(options))?;
+    let is_privileged = [AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope);
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -734,19 +751,14 @@ pub async fn validate_bearer_access_token<'r>(
     })
 }
 
-pub async fn validate_bearer_token<'r>(
-    request: &'r Request<'_>,
+pub fn validate_bearer_token(
+    request: &Request,
     scopes: Vec<AuthScope>,
     verify_options: Option<VerificationOptions>,
 ) -> Result<ValidatedBearer> {
     let token = bearer_token_from_req(request)?;
     if let Some(token) = token {
-        let secp = Secp256k1::new();
-        let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
-        let secret_key =
-            SecretKey::from_slice(&hex::decode(private_key.as_bytes()).unwrap()).unwrap();
-        let jwt_key = Keypair::from_secret_key(&secp, &secret_key);
-        let payload = verify_jwt(token.clone(), jwt_key, verify_options).await?;
+        let payload = verify_jwt(&token, verify_options)?;
         let JwtPayload {
             sub, aud, scope, ..
         } = payload.clone();
@@ -759,7 +771,7 @@ pub async fn validate_bearer_token<'r>(
             if !aud.starts_with("did:") {
                 bail!("Malformed token")
             }
-            if scopes.len() > 0 && !scopes.contains(&scope) {
+            if !scopes.is_empty() && !scopes.contains(&scope) {
                 bail!("Bad token scope")
                 /*{
                     "error": "InvalidToken",
@@ -782,26 +794,27 @@ pub async fn validate_bearer_token<'r>(
 }
 
 // @TODO: Implement DPop/OAuth
-pub async fn validate_access_token<'r>(
-    request: &'r Request<'_>,
+pub async fn validate_access_token(
+    request: &Request<'_>,
     scopes: Vec<AuthScope>,
     opts: Option<ValidateAccessTokenOpts>,
 ) -> Result<AccessOutput> {
-    let mut options = VerificationOptions::default();
-    options.allowed_audiences = Some(HashSet::from_strings(&[
-        env::var("PDS_SERVICE_DID").unwrap()
-    ]));
+    let options = VerificationOptions {
+        allowed_audiences: Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID")?])),
+        ..Default::default()
+    };
+
     let ValidatedBearer {
         did,
         scope,
         token,
         audience,
         ..
-    } = validate_bearer_token(request, scopes, Some(options)).await?;
+    } = validate_bearer_token(request, scopes, Some(options))?;
     let ValidateAccessTokenOpts {
         check_takedown,
         check_deactivated,
-    } = opts.unwrap_or_else(|| ValidateAccessTokenOpts {
+    } = opts.unwrap_or(ValidateAccessTokenOpts {
         check_takedown: Some(false),
         check_deactivated: Some(false),
     });
@@ -869,8 +882,8 @@ pub async fn validate_access_token<'r>(
     })
 }
 
-pub async fn verify_service_jwt<'r>(
-    request: &'r Request<'_>,
+pub async fn verify_service_jwt(
+    request: &Request<'_>,
     id_resolver: &State<SharedIdResolver>,
     opts: ServiceJwtOpts,
 ) -> Result<VerifiedServiceJwt> {
@@ -880,7 +893,7 @@ pub async fn verify_service_jwt<'r>(
             _ => (),
         }
         let parts = iss.split("#").collect::<Vec<&str>>();
-        if let (Some(did), Some(service_id)) = (parts.get(0), parts.get(1)) {
+        if let (Some(did), Some(service_id)) = (parts.first(), parts.get(1)) {
             let (did, service_id) = (did.to_string(), *service_id);
             let key_id = if service_id == "atproto_labeler" {
                 "atproto_label"
@@ -894,7 +907,7 @@ pub async fn verify_service_jwt<'r>(
                 Err(err) => bail!("could not resolve iss did: `{err}`"),
                 Ok(res) => res,
             };
-            match get_verification_material(&did_doc, &key_id.to_string()) {
+            match get_verification_material(&did_doc, key_id) {
                 None => bail!("missing or bad key in did doc"),
                 Some(parsed_key) => match get_did_key_from_multibase(parsed_key)? {
                     None => bail!("missing or bad key in did doc"),
@@ -958,14 +971,10 @@ pub fn bearer_token_from_req(request: &Request) -> Result<Option<String>> {
     }
 }
 
-pub async fn verify_jwt(
-    jwt: String,
-    jwt_key: Keypair,
-    verify_options: Option<VerificationOptions>,
-) -> Result<JwtPayload> {
-    let key = ES256kKeyPair::from_bytes(jwt_key.secret_bytes().as_slice())?;
-    let public_key = key.public_key();
-    let claims = public_key.verify_token::<CustomClaimObj>(&jwt, verify_options)?;
+pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Result<JwtPayload> {
+    let claims = PDS_JWT_KEYPAIR
+        .public_key()
+        .verify_token::<CustomClaimObj>(jwt, verify_options)?;
 
     Ok(JwtPayload {
         scope: AuthScope::from_str(&claims.custom.scope)?,
@@ -993,7 +1002,7 @@ pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
     };
     let parsed_parts = parsed_str.split(":").collect::<Vec<&str>>();
 
-    match (parsed_parts.get(0), parsed_parts.get(1)) {
+    match (parsed_parts.first(), parsed_parts.get(1)) {
         (Some(username), Some(password)) => Some(BasicAuth {
             username: username.to_string(),
             password: password.to_string(),

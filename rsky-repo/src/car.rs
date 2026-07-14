@@ -34,7 +34,7 @@ where
     let (writer, mut reader) = tokio::io::duplex(8 * 1024); // 8KB buffer
 
     // Create CAR header with roots
-    let roots = root.map_or_else(Vec::new, |r| vec![r.clone()]);
+    let roots = root.map_or_else(Vec::new, |r| vec![*r]);
     let header = CarHeader::new_v1(roots);
     let car_writer = CarWriter::new(header, writer);
 

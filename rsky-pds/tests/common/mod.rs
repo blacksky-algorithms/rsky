@@ -62,7 +62,7 @@ pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
     let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
     Client::untracked(
         build_rocket(Some(RocketConfig {
-            db_url: String::from(connection_string),
+            db_url: connection_string,
         }))
         .await,
     )
