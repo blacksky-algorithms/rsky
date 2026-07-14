@@ -6,21 +6,40 @@
 //! Blacksky appview reads this index). It is a dedicated service — NOT the
 //! appview — because permissioned data is a parallel protocol.
 //!
-//! The [`engine`] holds the pure sync logic (apply an oplog → index, maintain
-//! the running [`rsky_space::LtHash`], authenticate against the signed commit,
-//! detect divergence), abstracted over a [`repohost::RepoHostClient`] and a
-//! [`index::SpaceIndex`]. It is fully tested against mocks now. The live
-//! `com.atproto.space.listRepoOps`/`getRepo` HTTP client and the writer-set /
-//! notification loop are gated on upstream (PR #5187); the daemon runs the
-//! moment members' PDSes expose those methods.
+//! - [`engine`] — pure incremental sync: apply an oplog to the index, maintain
+//!   the running [`rsky_space::LtHash`], authenticate against the signed
+//!   commit, detect divergence.
+//! - [`recovery`] — full-state recovery from a `getRepo` CAR when incremental
+//!   sync cannot proceed.
+//! - [`xrpc`] / [`repohost`] — HTTP clients for the space host and members'
+//!   repo hosts.
+//! - [`credentials`] — delegation-token → space-credential lifecycle.
+//! - [`notify`] — the inbound `notifyWrite` / `notifySpaceDeleted` listener.
+//! - [`runner`] — the loop composing all of the above.
+//! - [`index`] / [`sqlite_index`] — the synced record index.
 
 pub mod config;
+pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod index;
+pub mod notify;
+pub mod recovery;
 pub mod repohost;
+pub mod runner;
+pub mod sqlite_index;
+pub mod xrpc;
 
+pub use credentials::{
+    unix_now, CredentialProvider, CredentialSource, DelegationSource, PdsDelegationSource,
+    StaticCredential,
+};
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
 pub use index::{InMemoryIndex, SpaceIndex};
-pub use repohost::{OplogPage, RepoHostClient};
+pub use notify::{router as notify_router, NotifyState, WriteNotice};
+pub use recovery::recover_repo;
+pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
+pub use runner::{run, sync_repo_healing, sync_space_once, RunnerOptions, SweepReport};
+pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
+pub use xrpc::{HttpSpaceHost, SpaceHostClient};

@@ -40,6 +40,12 @@ pub trait SpaceIndex: Send + Sync {
     async fn delete(&self, did: &str, collection: &str, rkey: &str) -> Result<()>;
     /// Persist the author's new head (rev + accumulator) after a synced batch.
     async fn save_head(&self, did: &str, rev: &str, lthash: &LtHash) -> Result<()>;
+    /// Enumerate an author's indexed records as `(collection, rkey, cid)`,
+    /// used to diff against a recovered full-state CAR.
+    async fn list_paths(&self, did: &str) -> Result<Vec<(String, String, String)>>;
+    /// Drop every record and sync head this index holds. A syncer MUST delete
+    /// all data for a deleted space (proposal §Space deletion).
+    async fn purge_space(&self) -> Result<()>;
 }
 
 fn key(collection: &str, rkey: &str) -> String {
@@ -148,5 +154,55 @@ impl SpaceIndex for InMemoryIndex {
         a.rev = Some(rev.to_string());
         a.state_bytes = Some(lthash.state_bytes());
         Ok(())
+    }
+
+    async fn list_paths(&self, did: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self
+            .authors
+            .read()
+            .unwrap()
+            .get(did)
+            .map(|a| {
+                a.records
+                    .iter()
+                    .map(|(path, r)| {
+                        let (collection, rkey) = path.split_once('/').expect("keyed by path");
+                        (collection.to_string(), rkey.to_string(), r.cid.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn purge_space(&self) -> Result<()> {
+        self.authors.write().unwrap().clear();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_paths_and_purge_space() {
+        let index = InMemoryIndex::new();
+        assert!(index.list_paths("did:plc:a").await.unwrap().is_empty());
+        index
+            .upsert("did:plc:a", "c.o.l", "3ka", "bafyA", "3rev", None)
+            .await
+            .unwrap();
+        index
+            .save_head("did:plc:a", "3rev", &LtHash::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            index.list_paths("did:plc:a").await.unwrap(),
+            vec![("c.o.l".to_string(), "3ka".to_string(), "bafyA".to_string())]
+        );
+
+        index.purge_space().await.unwrap();
+        assert_eq!(index.record_count("did:plc:a"), 0);
+        assert_eq!(index.last_rev("did:plc:a").await.unwrap(), None);
     }
 }
