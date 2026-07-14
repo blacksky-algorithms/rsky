@@ -189,6 +189,8 @@ pub struct Root {
     pub app_bsky_embed_record: AppBskyEmbedRecord,
     #[serde(rename = "AppBskyEmbedRecordWithMedia")]
     pub app_bsky_embed_record_with_media: AppBskyEmbedRecordWithMedia,
+    #[serde(rename = "AppBskyEmbedVideo")]
+    pub app_bsky_embed_video: AppBskyEmbedVideo,
     #[serde(rename = "AppBskyFeedDefs")]
     pub app_bsky_feed_defs: AppBskyFeedDefs,
     #[serde(rename = "AppBskyFeedDescribeFeedGenerator")]
@@ -20807,4 +20809,63 @@ pub struct Items144 {
     pub type_field: String,
     #[serde(rename = "ref")]
     pub ref_field: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBskyEmbedVideo {
+    pub lexicon: i64,
+    pub id: String,
+    pub description: String,
+    pub defs: VideoDefs,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDefs {
+    pub main: VideoMain,
+    pub caption: VideoCaption,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoMain {
+    #[serde(rename = "type")]
+    pub type_field: String,
+    pub required: Vec<String>,
+    pub properties: VideoMainProperties,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoMainProperties {
+    pub video: Image2,
+    pub captions: VideoCaptions,
+    pub alt: Alt,
+    pub aspect_ratio: AspectRatio,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoCaptions {
+    #[serde(rename = "type")]
+    pub type_field: String,
+    pub items: Items2,
+    pub max_length: i64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoCaption {
+    #[serde(rename = "type")]
+    pub type_field: String,
+    pub required: Vec<String>,
+    pub properties: VideoCaptionProperties,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoCaptionProperties {
+    pub lang: Root2,
+    pub file: Image2,
 }

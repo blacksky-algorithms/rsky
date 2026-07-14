@@ -52,6 +52,28 @@ impl fmt::Display for FormatCommitError {
 
 impl std::error::Error for FormatCommitError {}
 
+fn check_record_swap(
+    action: &WriteOpAction,
+    current_record: &Option<Cid>,
+    swap_cid: &Option<Cid>,
+) -> Result<(), FormatCommitError> {
+    let Some(swap_cid) = swap_cid else {
+        return Ok(());
+    };
+    // There should be no current record for a create
+    if matches!(action, WriteOpAction::Create) {
+        return Err(FormatCommitError::BadRecordSwap(format!(
+            "{current_record:?}"
+        )));
+    }
+    match current_record {
+        Some(current_record) if current_record.eq(swap_cid) => Ok(()),
+        _ => Err(FormatCommitError::RecordSwapMismatch(format!(
+            "{current_record:?}"
+        ))),
+    }
+}
+
 pub struct ActorStore {
     pub did: String,
     pub storage: Arc<RwLock<SqlRepoReader>>, // get ipld blocks from db
@@ -272,10 +294,9 @@ impl ActorStore {
                         delete_and_update_uris.push(d_at_uri)
                     }
                 }
-                if write.swap_cid().is_none() {
-                    continue;
-                }
                 let write_at_uri: &AtUri = &write.uri().try_into()?;
+                // op.prev must be populated for every update/delete,
+                // not only swap-checked writes
                 let record = self
                     .record
                     .get_record(write_at_uri, None, Some(true))
@@ -288,49 +309,13 @@ impl ActorStore {
                     &PreparedWrite::Delete(_) => None,
                     &PreparedWrite::Create(w) | &PreparedWrite::Update(w) => Some(w.cid),
                 };
-                let mut op = CommitOp {
+                commit_ops.push(CommitOp {
                     action: commit_action,
                     path: format_data_key(write_at_uri.get_collection(), write_at_uri.get_rkey()),
                     cid,
-                    prev: None,
-                };
-                if current_record.is_some() {
-                    op.prev = current_record;
-                };
-                commit_ops.push(op);
-                match write {
-                    // There should be no current record for a create
-                    PreparedWrite::Create(_) if write.swap_cid().is_some() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    // There should be a current record for an update
-                    PreparedWrite::Update(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    // There should be a current record for a delete
-                    PreparedWrite::Delete(_) if write.swap_cid().is_none() => {
-                        Err::<(), anyhow::Error>(
-                            FormatCommitError::BadRecordSwap(format!("{:?}", current_record))
-                                .into(),
-                        )
-                    }
-                    _ => Ok::<(), anyhow::Error>(()),
-                }?;
-                match (current_record, write.swap_cid()) {
-                    (Some(current_record), Some(swap_cid)) if current_record.eq(swap_cid) => {
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    _ => Err::<(), anyhow::Error>(
-                        FormatCommitError::RecordSwapMismatch(format!("{:?}", current_record))
-                            .into(),
-                    ),
-                }?;
+                    prev: current_record,
+                });
+                check_record_swap(write.action(), &current_record, write.swap_cid())?;
             }
             let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;
             let previous_data = repo.commit.data;
@@ -481,3 +466,57 @@ pub mod blob;
 pub mod preference;
 pub mod record;
 pub mod repo;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cid(value: &str) -> Cid {
+        Cid::from_str(value).unwrap()
+    }
+
+    fn current() -> Cid {
+        cid("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+    }
+
+    fn other() -> Cid {
+        cid("bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t2v4")
+    }
+
+    #[test]
+    fn no_swap_cid_skips_checks() {
+        assert!(check_record_swap(&WriteOpAction::Update, &Some(current()), &None).is_ok());
+        assert!(check_record_swap(&WriteOpAction::Delete, &None, &None).is_ok());
+        assert!(check_record_swap(&WriteOpAction::Create, &None, &None).is_ok());
+    }
+
+    #[test]
+    fn create_with_swap_cid_is_rejected() {
+        assert!(matches!(
+            check_record_swap(&WriteOpAction::Create, &None, &Some(current())),
+            Err(FormatCommitError::BadRecordSwap(_))
+        ));
+    }
+
+    #[test]
+    fn matching_swap_cid_is_accepted() {
+        assert!(
+            check_record_swap(&WriteOpAction::Update, &Some(current()), &Some(current())).is_ok()
+        );
+        assert!(
+            check_record_swap(&WriteOpAction::Delete, &Some(current()), &Some(current())).is_ok()
+        );
+    }
+
+    #[test]
+    fn mismatched_or_missing_current_record_is_rejected() {
+        assert!(matches!(
+            check_record_swap(&WriteOpAction::Update, &Some(current()), &Some(other())),
+            Err(FormatCommitError::RecordSwapMismatch(_))
+        ));
+        assert!(matches!(
+            check_record_swap(&WriteOpAction::Delete, &None, &Some(current())),
+            Err(FormatCommitError::RecordSwapMismatch(_))
+        ));
+    }
+}
