@@ -21,6 +21,22 @@ pub enum SpaceError {
     Expired,
     #[error("not authorized for space")]
     NotAuthorized,
+    #[error("expected 2 car roots, got {0}")]
+    RootCountMismatch(usize),
+    #[error("index does not match trusted commit hash")]
+    IndexHashMismatch,
+    #[error("block bytes do not match cid: {0}")]
+    BlockCidMismatch(String),
+    #[error("block out of index order: {0}")]
+    BlockOrderViolation(String),
+    #[error("missing block: {0}")]
+    MissingBlock(String),
+    #[error("car error: {0}")]
+    Car(String),
+    #[error("decode error: {0}")]
+    Decode(String),
+    #[error("invalid jwk: {0}")]
+    InvalidJwk(String),
     #[error("crypto error: {0}")]
     Crypto(String),
     #[error(transparent)]

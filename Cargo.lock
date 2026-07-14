@@ -8113,12 +8113,13 @@ dependencies = [
 
 [[package]]
 name = "rsky-crypto"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "multibase",
  "p256 0.13.2",
  "secp256k1",
+ "sha2",
  "unsigned-varint 0.8.0",
 ]
 
@@ -8209,9 +8210,12 @@ name = "rsky-identity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "hickory-resolver 0.24.4",
+ "multibase",
  "reqwest 0.12.23",
  "rsky-crypto",
+ "secp256k1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -8472,22 +8476,28 @@ dependencies = [
 
 [[package]]
 name = "rsky-space"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "cid 0.11.1",
  "hex",
  "hkdf",
  "hmac",
+ "iroh-car",
+ "p256 0.13.2",
  "rsky-common",
  "rsky-crypto",
  "rsky-syntax",
+ "secp256k1",
  "serde",
  "serde_bytes",
+ "serde_ipld_dagcbor 0.6.3",
  "serde_json",
  "sha2",
  "subtle",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

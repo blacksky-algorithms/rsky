@@ -12,7 +12,7 @@ name = "rsky-daemon"
 path = "src/main.rs"
 
 [dependencies]
-rsky-space = { path = "../rsky-space", version = "0.1.0" }
+rsky-space = { path = "../rsky-space", version = "0.2.0" }
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }
 rsky-identity = { workspace = true }
