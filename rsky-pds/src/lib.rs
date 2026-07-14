@@ -85,7 +85,6 @@ use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
-use rsky_common::env::env_list;
 use rsky_identity::types::{DidCache, IdentityResolverOpts};
 use rsky_identity::IdResolver;
 use std::env;
@@ -230,12 +229,17 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
-            timeout: None,
-            plc_url: Some(
-                env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
-            ),
-            did_cache: Some(DidCache::new(None, None)),
-            backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
+            timeout: Some(std::time::Duration::from_millis(
+                cfg.identity.resolver_timeout,
+            )),
+            plc_url: Some(cfg.identity.plc_url.clone()),
+            did_cache: Some(DidCache::new(
+                Some(std::time::Duration::from_millis(
+                    cfg.identity.cache_state_ttl,
+                )),
+                Some(std::time::Duration::from_millis(cfg.identity.cache_max_ttl)),
+            )),
+            backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
         })),
     };
 

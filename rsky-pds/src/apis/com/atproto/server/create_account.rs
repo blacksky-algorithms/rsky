@@ -286,7 +286,7 @@ pub async fn validate_inputs_for_local_pds(
         id_resolver,
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
-    if !super::validate_handle(&handle) {
+    if !super::validate_handle(&handle, &cfg.identity.service_handle_domains) {
         return Err(ApiError::InvalidHandle);
     };
 

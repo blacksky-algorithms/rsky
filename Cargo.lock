@@ -7814,6 +7814,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.31",
+ "rustls-native-certs 0.8.1",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -8174,7 +8175,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-identity"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "hickory-resolver 0.24.4",

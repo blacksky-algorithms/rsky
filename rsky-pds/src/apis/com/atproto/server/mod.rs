@@ -76,11 +76,17 @@ pub fn gen_invite_codes(count: i32) -> Vec<String> {
     codes
 }
 
-pub fn validate_handle(handle: &str) -> bool {
-    let suffix: String = env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned());
-    let s_slice: &str = &suffix[..]; // take a full slice of the string
-    handle.ends_with(s_slice)
-    // Need to check suffix here and need to make sure handle doesn't include "." after trumming it
+pub fn validate_handle(handle: &str, service_handle_domains: &[String]) -> bool {
+    service_handle_domains.iter().any(|domain| {
+        let suffix = if domain.starts_with('.') {
+            domain.clone()
+        } else {
+            format!(".{domain}")
+        };
+        handle
+            .strip_suffix(suffix.as_str())
+            .is_some_and(|front| !front.is_empty() && !front.contains('.'))
+    })
 }
 
 pub async fn is_valid_did_doc_for_service(did: String) -> Result<bool> {
@@ -180,3 +186,42 @@ pub mod reserve_signing_key;
 pub mod reset_password;
 pub mod revoke_app_password;
 pub mod update_email;
+
+#[cfg(test)]
+mod tests {
+    use super::validate_handle;
+
+    fn domains() -> Vec<String> {
+        vec![
+            ".pds.example.com".to_string(),
+            "alt.example.net".to_string(),
+        ]
+    }
+
+    #[test]
+    fn accepts_direct_child_of_service_domain() {
+        assert!(validate_handle("alice.pds.example.com", &domains()));
+    }
+
+    #[test]
+    fn accepts_direct_child_of_secondary_domain() {
+        assert!(validate_handle("bob.alt.example.net", &domains()));
+    }
+
+    #[test]
+    fn rejects_evil_suffix_domain() {
+        assert!(!validate_handle("alice.evilpds.example.com", &domains()));
+        assert!(!validate_handle("evilpds.example.com", &domains()));
+    }
+
+    #[test]
+    fn rejects_multi_label_handles() {
+        assert!(!validate_handle("a.b.pds.example.com", &domains()));
+    }
+
+    #[test]
+    fn rejects_bare_service_domain() {
+        assert!(!validate_handle("pds.example.com", &domains()));
+        assert!(!validate_handle("alt.example.net", &domains()));
+    }
+}
