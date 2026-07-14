@@ -12,12 +12,18 @@
 //! reads the membership decision itself), and the per-app decision is
 //! [`appaccess::AppAccess`], enforced against a verified
 //! [client attestation](attestation).
+//!
+//! The XRPC surface ([`http`]) serves `getSpace`, `getSpaceCredential`,
+//! `listRepos`, `registerNotify`, and `notifyWrite` using the
+//! `com.atproto.space.*` DTOs from rsky-lexicon, backed by in-memory or SQLite
+//! [stores](store).
 
 pub mod appaccess;
 pub mod attestation;
 pub mod authority;
 pub mod config;
 pub mod error;
+pub mod http;
 pub mod keys;
 pub mod managing_app;
 pub mod membership;
