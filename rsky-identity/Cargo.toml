@@ -20,3 +20,8 @@ url = "2.5.0"
 serde = { version = "1.0.197", features = ["derive"] }
 rsky-crypto = { workspace = true }
 hickory-resolver = "0.24.1"
+
+[dev-dependencies]
+secp256k1 = { workspace = true }
+multibase = "0.9.1"
+hex = "0.4"

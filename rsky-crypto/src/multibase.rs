@@ -1,19 +1,37 @@
-use anyhow::{bail, Result};
-use multibase::{encode, Base};
+use anyhow::Result;
 
+/// Decode a multibase-prefixed string to its raw bytes.
 pub fn multibase_to_bytes(mb: String) -> Result<Vec<u8>> {
-    match mb.get(0..1) {
-        None => bail!("empty multibase string"),
-        Some(base) => match (base, mb.get(1..)) {
-            ("f", Some(key)) => Ok(encode(Base::Base16Lower, key).into_bytes()),
-            ("F", Some(key)) => Ok(encode(Base::Base16Upper, key).into_bytes()),
-            ("b", Some(key)) => Ok(encode(Base::Base32Lower, key).into_bytes()),
-            ("B", Some(key)) => Ok(encode(Base::Base32Upper, key).into_bytes()),
-            ("z", Some(key)) => Ok(encode(Base::Base58Btc, key).into_bytes()),
-            ("m", Some(key)) => Ok(encode(Base::Base64, key).into_bytes()),
-            ("u", Some(key)) => Ok(encode(Base::Base64Url, key).into_bytes()),
-            ("U", Some(key)) => Ok(encode(Base::Base64UrlPad, key).into_bytes()),
-            (&_, _) => bail!("Unsupported multibase: {mb}"),
-        },
+    let (_base, bytes) = multibase::decode(&mb)?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use multibase::Base;
+
+    #[test]
+    fn decodes_each_supported_base() {
+        let payload = b"\x04\x01\x02\x03\xff".to_vec();
+        for base in [
+            Base::Base16Lower,
+            Base::Base16Upper,
+            Base::Base32Lower,
+            Base::Base32Upper,
+            Base::Base58Btc,
+            Base::Base64,
+            Base::Base64Url,
+            Base::Base64UrlPad,
+        ] {
+            let encoded = multibase::encode(base, &payload);
+            assert_eq!(multibase_to_bytes(encoded).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_unknown_prefix() {
+        assert!(multibase_to_bytes(String::new()).is_err());
+        assert!(multibase_to_bytes("!notmultibase".to_string()).is_err());
     }
 }
