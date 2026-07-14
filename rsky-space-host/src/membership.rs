@@ -1,9 +1,8 @@
-//! The managing-app membership decision.
+//! The member list backing the `member-list` policy.
 //!
-//! Under the `managing-app` policy the authority decides per-user access at
-//! credential-mint time. For the Blacksky community that decision is "is this
-//! DID on the `blacksky-beta` list?" — read directly by the host, NOT routed
-//! through the appview (permissioned data is a parallel protocol).
+//! Only the `member-list` policy reads membership directly; under
+//! `managing-app` the decision is routed to the managing app
+//! (see [`crate::managing_app`]) and this store is not consulted.
 
 use async_trait::async_trait;
 use std::collections::HashSet;

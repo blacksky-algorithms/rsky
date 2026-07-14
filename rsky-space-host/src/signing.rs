@@ -39,7 +39,7 @@ impl Signer {
     /// Sign arbitrary bytes (used for the JWT signing input).
     pub fn sign(&self, input: &[u8]) -> Result<Vec<u8>, String> {
         let hash = Sha256::digest(input);
-        let msg = Message::from_digest_slice(hash.as_ref()).map_err(|e| e.to_string())?;
+        let msg = Message::from_digest_slice(hash.as_ref()).expect("sha256 digest is 32 bytes");
         let mut sig = self.secret.sign_ecdsa(msg);
         sig.normalize_s();
         Ok(sig.serialize_compact().to_vec())
