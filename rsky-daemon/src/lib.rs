@@ -11,8 +11,10 @@ pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod index;
+pub mod notify;
 pub mod recovery;
 pub mod repohost;
+pub mod sqlite_index;
 pub mod xrpc;
 
 pub use credentials::{
@@ -22,6 +24,8 @@ pub use credentials::{
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
 pub use index::{InMemoryIndex, SpaceIndex};
+pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
+pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};
