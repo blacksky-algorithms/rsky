@@ -153,6 +153,12 @@ async fn health(
     }
 }
 
+// Pure liveness probe: must never touch the database
+#[get("/xrpc/_health/live")]
+async fn health_live() -> &'static str {
+    "ok"
+}
+
 #[tracing::instrument(skip_all)]
 #[catch(default)]
 async fn default_catcher(_status: Status, request: &Request<'_>) -> ApiError {
@@ -293,6 +299,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 index,
                 robots,
                 health,
+                health_live,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
