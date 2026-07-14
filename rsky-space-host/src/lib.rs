@@ -21,9 +21,11 @@ pub mod error;
 pub mod keys;
 pub mod managing_app;
 pub mod membership;
+pub mod notify;
 pub mod policy;
 pub mod service_jwt;
 pub mod signing;
+pub mod store;
 
 pub use authority::{Authority, KeyResolver};
 pub use error::{HostError, Result};
