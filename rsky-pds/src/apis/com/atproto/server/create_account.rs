@@ -8,7 +8,6 @@ use crate::auth_verifier::UserDidAuthOptional;
 use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::config::ServerConfig;
 use crate::context::PDS_REPO_SIGNING_KEYPAIR;
-use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
@@ -23,6 +22,7 @@ use rsky_common::env::env_str;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
 use std::env;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TransformedCreateAccountInput {
@@ -51,7 +51,7 @@ pub async fn server_create_account(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -77,17 +77,27 @@ pub async fn server_create_account(
     .await?;
 
     // Create new actor repo TODO: Proper rollback
-    let mut actor_store =
-        ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store
-        .create_repo(&PDS_REPO_SIGNING_KEYPAIR, Vec::new())
-        .await
-    {
-        Ok(commit) => commit,
-        Err(error) => {
-            tracing::error!("Failed to create repo\n{:?}", error);
-            actor_store.destroy().await?;
-            return Err(ApiError::RuntimeError);
+    let blobstore = Arc::new(S3BlobStore::new(did.clone(), s3_config));
+    if let Err(error) = actor_store.create(&did, &PDS_REPO_SIGNING_KEYPAIR).await {
+        tracing::error!("Failed to create actor store\n{:?}", error);
+        return Err(ApiError::RuntimeError);
+    }
+    let commit = {
+        let actor_txn = match actor_store.transact(did.clone(), blobstore.clone()).await {
+            Ok(actor_txn) => actor_txn,
+            Err(error) => {
+                tracing::error!("Failed to open actor store\n{:?}", error);
+                actor_store.destroy(&did, blobstore.clone()).await?;
+                return Err(ApiError::RuntimeError);
+            }
+        };
+        match actor_txn.create_repo(Vec::new()).await {
+            Ok(commit) => commit,
+            Err(error) => {
+                tracing::error!("Failed to create repo\n{:?}", error);
+                actor_store.destroy(&did, blobstore.clone()).await?;
+                return Err(ApiError::RuntimeError);
+            }
         }
     };
 
@@ -106,7 +116,7 @@ pub async fn server_create_account(
                 }
                 Err(_) => {
                     tracing::error!("Failed to create did:plc");
-                    actor_store.destroy().await?;
+                    actor_store.destroy(&did, blobstore.clone()).await?;
                     return Err(ApiError::RuntimeError);
                 }
             }
@@ -117,7 +127,7 @@ pub async fn server_create_account(
         Ok(res) => res,
         Err(error) => {
             tracing::error!("Error resolving DID Doc\n{error}");
-            actor_store.destroy().await?;
+            actor_store.destroy(&did, blobstore.clone()).await?;
             return Err(ApiError::RuntimeError);
         }
     };
@@ -142,7 +152,7 @@ pub async fn server_create_account(
         }
         Err(error) => {
             tracing::error!("Error creating account\n{error}");
-            actor_store.destroy().await?;
+            actor_store.destroy(&did, blobstore.clone()).await?;
             return Err(ApiError::RuntimeError);
         }
     }

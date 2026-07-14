@@ -1,12 +1,5 @@
-use crate::db::DbConn;
-use crate::models;
-use crate::models::RepoBlock;
+use crate::actor_store::db::{ActorDb, RepoBlock};
 use anyhow::Result;
-use diesel::dsl::sql;
-use diesel::prelude::*;
-use diesel::sql_types::{Bool, Text};
-use diesel::*;
-use futures::{stream, StreamExt, TryStreamExt};
 use lexicon_cid::Cid;
 use rsky_common;
 use rsky_repo::block_map::{BlockMap, BlocksAndMissing};
@@ -17,18 +10,21 @@ use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::storage::CidAndRev;
 use rsky_repo::storage::RepoRootError::RepoRootNotFoundError;
 use rsky_repo::types::CommitData;
+use rusqlite::OptionalExtension;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub(crate) fn placeholders(len: usize) -> String {
+    vec!["?"; len].join(",")
+}
+
 #[derive(Clone, Debug)]
 pub struct SqlRepoReader {
     pub cache: Arc<RwLock<BlockMap>>,
-    pub db: Arc<DbConn>,
-    pub root: Option<Cid>,
-    pub rev: Option<String>,
+    pub db: ActorDb,
     pub now: String,
     pub did: String,
 }
@@ -38,28 +34,27 @@ impl ReadableBlockstore for SqlRepoReader {
         &'a self,
         cid: &'a Cid,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + Sync + 'a>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
+        let db = self.db.clone();
         let cid = *cid;
 
         Box::pin(async move {
-            use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
             let cached = {
                 let cache_guard = self.cache.read().await;
                 cache_guard.get(cid).cloned()
             };
             if let Some(cached_result) = cached {
-                return Ok(Some(cached_result.clone()));
+                return Ok(Some(cached_result));
             }
 
             let found: Option<Vec<u8>> = db
                 .run(move |conn| {
-                    RepoBlockSchema::repo_block
-                        .filter(RepoBlockSchema::cid.eq(cid.to_string()))
-                        .filter(RepoBlockSchema::did.eq(did))
-                        .select(RepoBlockSchema::content)
-                        .first(conn)
-                        .optional()
+                    Ok(conn
+                        .query_row(
+                            "SELECT content FROM repo_block WHERE cid = ?1",
+                            [cid.to_string()],
+                            |row| row.get(0),
+                        )
+                        .optional()?)
                 })
                 .await?;
             match found {
@@ -89,75 +84,51 @@ impl ReadableBlockstore for SqlRepoReader {
         &'a self,
         cids: Vec<Cid>,
     ) -> Pin<Box<dyn Future<Output = Result<BlocksAndMissing>> + Send + Sync + 'a>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
+        let db = self.db.clone();
 
         Box::pin(async move {
-            use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
             let cached = {
                 let mut cache_guard = self.cache.write().await;
                 cache_guard.get_many(cids)?
             };
-
             if cached.missing.is_empty() {
                 return Ok(cached);
             }
-            let missing = CidSet::new(Some(cached.missing.clone()));
             let missing_strings: Vec<String> =
-                cached.missing.into_iter().map(|c| c.to_string()).collect();
+                cached.missing.iter().map(|c| c.to_string()).collect();
+            let mut missing = CidSet::new(Some(cached.missing));
 
-            let blocks = Arc::new(tokio::sync::Mutex::new(BlockMap::new()));
-            let missing_set = Arc::new(tokio::sync::Mutex::new(missing));
-
-            let _: Vec<_> = stream::iter(missing_strings.chunks(500))
-                .then(|batch| {
-                    let this_db = db.clone();
-                    let this_did = did.clone();
-                    let blocks = Arc::clone(&blocks);
-                    let missing = Arc::clone(&missing_set);
-                    let batch = batch.to_vec(); // Convert to owned Vec
-
-                    async move {
-                        // Database query
-                        let rows: Vec<(String, Vec<u8>)> = this_db
-                            .run(move |conn| {
-                                RepoBlockSchema::repo_block
-                                    .filter(RepoBlockSchema::cid.eq_any(batch))
-                                    .filter(RepoBlockSchema::did.eq(this_did))
-                                    .select((RepoBlockSchema::cid, RepoBlockSchema::content))
-                                    .load(conn)
-                            })
-                            .await?;
-
-                        // Process rows with locked access
-                        let mut blocks = blocks.lock().await;
-                        let mut missing = missing.lock().await;
-
-                        for row in rows {
-                            let cid = Cid::from_str(&row.0)?; // Proper error handling
-                            blocks.set(cid, row.1);
-                            missing.delete(cid);
-                        }
-
-                        Ok::<(), anyhow::Error>(())
+            let rows: Vec<(String, Vec<u8>)> = db
+                .run(move |conn| {
+                    let mut rows = Vec::new();
+                    for batch in missing_strings.chunks(500) {
+                        let sql = format!(
+                            "SELECT cid, content FROM repo_block WHERE cid IN ({})",
+                            placeholders(batch.len())
+                        );
+                        let mut stmt = conn.prepare(&sql)?;
+                        let batch_rows = stmt
+                            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                            })?
+                            .collect::<Result<Vec<(String, Vec<u8>)>, rusqlite::Error>>()?;
+                        rows.extend(batch_rows);
                     }
+                    Ok(rows)
                 })
-                .try_collect()
                 .await?;
 
-            // Extract values from synchronization primitives
-            let mut blocks = Arc::try_unwrap(blocks)
-                .expect("Arc still has owners")
-                .into_inner();
-            let missing = Arc::try_unwrap(missing_set)
-                .expect("Arc still has owners")
-                .into_inner();
+            let mut blocks = BlockMap::new();
+            for (cid_str, content) in rows {
+                let cid = Cid::from_str(&cid_str)?;
+                blocks.set(cid, content);
+                missing.delete(cid);
+            }
 
             {
                 let mut cache_guard = self.cache.write().await;
                 cache_guard.add_map(blocks.clone())?;
             }
-
             blocks.add_map(cached.blocks)?;
 
             Ok(BlocksAndMissing {
@@ -184,22 +155,16 @@ impl RepoStorage for SqlRepoReader {
         bytes: Vec<u8>,
         rev: String,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
+        let db = self.db.clone();
         let bytes_cloned = bytes.clone();
         Box::pin(async move {
-            use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
             db.run(move |conn| {
-                insert_into(RepoBlockSchema::repo_block)
-                    .values((
-                        RepoBlockSchema::did.eq(did),
-                        RepoBlockSchema::cid.eq(cid.to_string()),
-                        RepoBlockSchema::repoRev.eq(rev),
-                        RepoBlockSchema::size.eq(bytes.len() as i32),
-                        RepoBlockSchema::content.eq(bytes),
-                    ))
-                    .execute(conn)
+                conn.execute(
+                    "INSERT INTO repo_block (cid, \"repoRev\", size, content) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                    rusqlite::params![cid.to_string(), rev, bytes.len() as i64, bytes],
+                )?;
+                Ok(())
             })
             .await?;
             {
@@ -215,90 +180,56 @@ impl RepoStorage for SqlRepoReader {
         to_put: BlockMap,
         rev: String,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
+        let db = self.db.clone();
 
         Box::pin(async move {
-            use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
-            let blocks: Vec<RepoBlock> = to_put
+            let blocks: Vec<(String, Vec<u8>)> = to_put
                 .map
                 .iter()
-                .map(|(cid, bytes)| RepoBlock {
-                    cid: cid.to_string(),
-                    did: did.clone(),
-                    repo_rev: rev.clone(),
-                    size: bytes.0.len() as i32,
-                    content: bytes.0.clone(),
-                })
+                .map(|(cid, bytes)| (cid.to_string(), bytes.0.clone()))
                 .collect();
-
-            let chunks: Vec<Vec<RepoBlock>> =
-                blocks.chunks(50).map(|chunk| chunk.to_vec()).collect();
-
-            let _: Vec<_> = stream::iter(chunks)
-                .then(|batch| {
-                    let db = db.clone();
-                    async move {
-                        db.run(move |conn| {
-                            insert_into(RepoBlockSchema::repo_block)
-                                .values(batch)
-                                .on_conflict_do_nothing()
-                                .execute(conn)
-                                .map(|_| ())
-                        })
-                        .await
-                        .map_err(anyhow::Error::from)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<()>>>()?;
-
-            Ok(())
+            db.run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "INSERT INTO repo_block (cid, \"repoRev\", size, content) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                )?;
+                for (cid, bytes) in &blocks {
+                    stmt.execute(rusqlite::params![cid, rev, bytes.len() as i64, bytes])?;
+                }
+                Ok(())
+            })
+            .await
         })
     }
+
     fn update_root<'a>(
         &'a self,
         cid: Cid,
         rev: String,
         is_create: Option<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
-        let now: String = self.now.clone();
+        let did = self.did.clone();
+        let db = self.db.clone();
+        let now = self.now.clone();
 
         Box::pin(async move {
-            use crate::schema::pds::repo_root::dsl as RepoRootSchema;
-
             let is_create = is_create.unwrap_or(false);
-            if is_create {
-                db.run(move |conn| {
-                    insert_into(RepoRootSchema::repo_root)
-                        .values((
-                            RepoRootSchema::did.eq(did),
-                            RepoRootSchema::cid.eq(cid.to_string()),
-                            RepoRootSchema::rev.eq(rev),
-                            RepoRootSchema::indexedAt.eq(now),
-                        ))
-                        .execute(conn)
-                })
-                .await?;
-            } else {
-                db.run(move |conn| {
-                    update(RepoRootSchema::repo_root)
-                        .filter(RepoRootSchema::did.eq(did))
-                        .set((
-                            RepoRootSchema::cid.eq(cid.to_string()),
-                            RepoRootSchema::rev.eq(rev),
-                            RepoRootSchema::indexedAt.eq(now),
-                        ))
-                        .execute(conn)
-                })
-                .await?;
-            }
-            Ok(())
+            db.run(move |conn| {
+                if is_create {
+                    conn.execute(
+                        "INSERT INTO repo_root (did, cid, rev, \"indexedAt\") \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![did, cid.to_string(), rev, now],
+                    )?;
+                } else {
+                    conn.execute(
+                        "UPDATE repo_root SET cid = ?1, rev = ?2, \"indexedAt\" = ?3",
+                        rusqlite::params![cid.to_string(), rev, now],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
         })
     }
 
@@ -317,14 +248,11 @@ impl RepoStorage for SqlRepoReader {
     }
 }
 
-// Basically handles getting ipld blocks from db
 impl SqlRepoReader {
-    pub fn new(did: String, now: Option<String>, db: Arc<DbConn>) -> Self {
+    pub fn new(did: String, now: Option<String>, db: ActorDb) -> Self {
         let now = now.unwrap_or_else(rsky_common::now);
         SqlRepoReader {
             cache: Arc::new(RwLock::new(BlockMap::new())),
-            root: None,
-            rev: None,
             db,
             now,
             did,
@@ -337,15 +265,11 @@ impl SqlRepoReader {
             Some(root) => {
                 let mut car = BlockMap::new();
                 let mut cursor: Option<CidAndRev> = None;
-                let mut write_rows = |rows: Vec<RepoBlock>| -> Result<()> {
-                    for row in rows {
-                        car.set(Cid::from_str(&row.cid)?, row.content);
-                    }
-                    Ok(())
-                };
                 loop {
                     let res = self.get_block_range(&since, &cursor).await?;
-                    write_rows(res.clone())?;
+                    for row in &res {
+                        car.set(Cid::from_str(&row.cid)?, row.content.clone());
+                    }
                     if let Some(last_row) = res.last() {
                         cursor = Some(CidAndRev {
                             cid: Cid::from_str(&last_row.cid)?,
@@ -365,57 +289,50 @@ impl SqlRepoReader {
         since: &Option<String>,
         cursor: &Option<CidAndRev>,
     ) -> Result<Vec<RepoBlock>> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
+        let db = self.db.clone();
         let since = since.clone();
         let cursor = cursor.clone();
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
 
-        Ok(db
-            .run(move |conn| {
-                let mut builder = RepoBlockSchema::repo_block
-                    .select(RepoBlock::as_select())
-                    .order((RepoBlockSchema::repoRev.desc(), RepoBlockSchema::cid.desc()))
-                    .filter(RepoBlockSchema::did.eq(did))
-                    .limit(500)
-                    .into_boxed();
-
-                if let Some(cursor) = cursor {
-                    // use this syntax to ensure we hit the index
-                    builder = builder.filter(
-                        sql::<Bool>("((")
-                            .bind(RepoBlockSchema::repoRev)
-                            .sql(", ")
-                            .bind(RepoBlockSchema::cid)
-                            .sql(") < (")
-                            .bind::<Text, _>(cursor.rev.clone())
-                            .sql(", ")
-                            .bind::<Text, _>(cursor.cid.to_string())
-                            .sql("))"),
-                    );
-                }
-                if let Some(since) = since {
-                    builder = builder.filter(RepoBlockSchema::repoRev.gt(since));
-                }
-                builder.load(conn)
-            })
-            .await?)
+        db.run(move |conn| {
+            let mut sql =
+                String::from("SELECT cid, \"repoRev\", size, content FROM repo_block WHERE 1 = 1");
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if let Some(cursor) = &cursor {
+                // use this syntax to ensure we hit the index
+                sql.push_str(" AND ((\"repoRev\", cid) < (?, ?))");
+                params.push(Box::new(cursor.rev.clone()));
+                params.push(Box::new(cursor.cid.to_string()));
+            }
+            if let Some(since) = &since {
+                sql.push_str(" AND \"repoRev\" > ?");
+                params.push(Box::new(since.clone()));
+            }
+            sql.push_str(" ORDER BY \"repoRev\" DESC, cid DESC LIMIT 500");
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |row| {
+                        Ok(RepoBlock {
+                            cid: row.get(0)?,
+                            repo_rev: row.get(1)?,
+                            size: row.get(2)?,
+                            content: row.get(3)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<RepoBlock>, rusqlite::Error>>()?;
+            Ok(rows)
+        })
+        .await
     }
 
     pub async fn count_blocks(&self) -> Result<i64> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
-        let res = db
-            .run(move |conn| {
-                RepoBlockSchema::repo_block
-                    .filter(RepoBlockSchema::did.eq(did))
-                    .count()
-                    .get_result(conn)
-            })
-            .await?;
-        Ok(res)
+        self.db
+            .run(
+                |conn| Ok(conn.query_row("SELECT count(*) FROM repo_block", [], |row| row.get(0))?),
+            )
+            .await
     }
 
     // Transactors
@@ -423,22 +340,20 @@ impl SqlRepoReader {
 
     /// Proactively cache all blocks from a particular commit (to prevent multiple roundtrips)
     pub async fn cache_rev(&mut self, rev: String) -> Result<()> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
+        let db = self.db.clone();
         let res: Vec<(String, Vec<u8>)> = db
             .run(move |conn| {
-                RepoBlockSchema::repo_block
-                    .filter(RepoBlockSchema::did.eq(did))
-                    .filter(RepoBlockSchema::repoRev.eq(rev))
-                    .select((RepoBlockSchema::cid, RepoBlockSchema::content))
-                    .limit(15)
-                    .get_results::<(String, Vec<u8>)>(conn)
+                let mut stmt = conn.prepare(
+                    "SELECT cid, content FROM repo_block WHERE \"repoRev\" = ?1 LIMIT 15",
+                )?;
+                let rows = stmt
+                    .query_map([rev.clone()], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<(String, Vec<u8>)>, rusqlite::Error>>()?;
+                Ok(rows)
             })
             .await?;
+        let mut cache_guard = self.cache.write().await;
         for row in res {
-            let mut cache_guard = self.cache.write().await;
             cache_guard.set(Cid::from_str(&row.0)?, row.1)
         }
         Ok(())
@@ -448,38 +363,219 @@ impl SqlRepoReader {
         if cids.is_empty() {
             return Ok(());
         }
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
         let cid_strings: Vec<String> = cids.into_iter().map(|c| c.to_string()).collect();
-        db.run(move |conn| {
-            delete(RepoBlockSchema::repo_block)
-                .filter(RepoBlockSchema::did.eq(did))
-                .filter(RepoBlockSchema::cid.eq_any(cid_strings))
-                .execute(conn)
-        })
-        .await?;
-        Ok(())
+        self.db
+            .run(move |conn| {
+                for batch in cid_strings.chunks(500) {
+                    let sql = format!(
+                        "DELETE FROM repo_block WHERE cid IN ({})",
+                        placeholders(batch.len())
+                    );
+                    conn.execute(&sql, rusqlite::params_from_iter(batch.iter()))?;
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub async fn get_root_detailed(&self) -> Result<CidAndRev> {
-        let did: String = self.did.clone();
-        let db: Arc<DbConn> = self.db.clone();
-        use crate::schema::pds::repo_root::dsl as RepoRootSchema;
-
-        let res = db
-            .run(move |conn| {
-                RepoRootSchema::repo_root
-                    .filter(RepoRootSchema::did.eq(did))
-                    .select(models::RepoRoot::as_select())
-                    .first(conn)
+        let res: (String, String) = self
+            .db
+            .run(|conn| {
+                Ok(
+                    conn.query_row("SELECT cid, rev FROM repo_root LIMIT 1", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?,
+                )
             })
             .await?;
-
         Ok(CidAndRev {
-            cid: Cid::from_str(&res.cid)?,
-            rev: res.rev,
+            cid: Cid::from_str(&res.0)?,
+            rev: res.1,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actor_store::db::get_migrated_db;
+
+    fn cid_for(value: &[u8]) -> Cid {
+        use sha2::{Digest, Sha256};
+        rsky_common::ipld::sha256_to_cid(Sha256::digest(value).to_vec())
+    }
+
+    async fn test_reader() -> (tempfile::TempDir, SqlRepoReader) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = get_migrated_db(dir.path().join("store.sqlite"))
+            .await
+            .unwrap();
+        let reader = SqlRepoReader::new("did:example:alice".to_owned(), None, db);
+        (dir, reader)
+    }
+
+    #[tokio::test]
+    async fn put_and_get_blocks_with_cache() {
+        let (_dir, reader) = test_reader().await;
+        let bytes = b"block-one".to_vec();
+        let cid = cid_for(&bytes);
+        reader
+            .put_block(cid, bytes.clone(), "rev-1".to_owned())
+            .await
+            .unwrap();
+        // put_block is idempotent
+        reader
+            .put_block(cid, bytes.clone(), "rev-1".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(reader.get_bytes(&cid).await.unwrap(), Some(bytes.clone()));
+        // cached path
+        assert_eq!(reader.get_bytes(&cid).await.unwrap(), Some(bytes.clone()));
+        assert!(reader.has(cid).await.unwrap());
+        let missing_cid = cid_for(b"missing");
+        assert!(!reader.has(missing_cid).await.unwrap());
+        assert_eq!(reader.count_blocks().await.unwrap(), 1);
+
+        let got = reader.get_blocks(vec![cid, missing_cid]).await.unwrap();
+        assert_eq!(got.blocks.get(cid), Some(&bytes));
+        assert_eq!(got.missing, vec![missing_cid]);
+    }
+
+    #[tokio::test]
+    async fn put_many_and_delete_many() {
+        let (_dir, reader) = test_reader().await;
+        let mut blocks = BlockMap::new();
+        let one = b"one".to_vec();
+        let two = b"two".to_vec();
+        let (cid_one, cid_two) = (cid_for(&one), cid_for(&two));
+        blocks.set(cid_one, one.clone());
+        blocks.set(cid_two, two.clone());
+        reader.put_many(blocks, "rev-1".to_owned()).await.unwrap();
+        assert_eq!(reader.count_blocks().await.unwrap(), 2);
+
+        let fetched = reader.get_blocks(vec![cid_one, cid_two]).await.unwrap();
+        assert!(fetched.missing.is_empty());
+        assert_eq!(fetched.blocks.get(cid_one), Some(&one));
+
+        reader.delete_many(vec![]).await.unwrap();
+        reader.delete_many(vec![cid_one]).await.unwrap();
+        assert_eq!(reader.count_blocks().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn root_lifecycle() {
+        let (_dir, reader) = test_reader().await;
+        assert!(reader.get_root().await.is_none());
+        assert!(reader.get_root_detailed().await.is_err());
+
+        let root_one = cid_for(b"root-one");
+        reader
+            .update_root(root_one, "rev-1".to_owned(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(reader.get_root().await, Some(root_one));
+
+        let root_two = cid_for(b"root-two");
+        reader
+            .update_root(root_two, "rev-2".to_owned(), None)
+            .await
+            .unwrap();
+        let detailed = reader.get_root_detailed().await.unwrap();
+        assert_eq!(detailed.cid, root_two);
+        assert_eq!(detailed.rev, "rev-2");
+    }
+
+    #[tokio::test]
+    async fn apply_commit_writes_and_removes() {
+        let (_dir, reader) = test_reader().await;
+        let removed = b"removed".to_vec();
+        let removed_cid = cid_for(&removed);
+        reader
+            .put_block(removed_cid, removed, "rev-1".to_owned())
+            .await
+            .unwrap();
+        reader
+            .update_root(removed_cid, "rev-1".to_owned(), Some(true))
+            .await
+            .unwrap();
+
+        let added = b"added".to_vec();
+        let added_cid = cid_for(&added);
+        let mut new_blocks = BlockMap::new();
+        new_blocks.set(added_cid, added.clone());
+        let commit = CommitData {
+            cid: added_cid,
+            rev: "rev-2".to_owned(),
+            since: Some("rev-1".to_owned()),
+            prev: Some(removed_cid),
+            new_blocks,
+            relevant_blocks: BlockMap::new(),
+            removed_cids: CidSet::new(Some(vec![removed_cid])),
+        };
+        reader.apply_commit(commit, None).await.unwrap();
+
+        let detailed = reader.get_root_detailed().await.unwrap();
+        assert_eq!(detailed.rev, "rev-2");
+        assert_eq!(reader.count_blocks().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_rev_populates_cache() {
+        let (_dir, mut reader) = test_reader().await;
+        let bytes = b"cache-me".to_vec();
+        let cid = cid_for(&bytes);
+        reader
+            .put_block(cid, bytes.clone(), "rev-9".to_owned())
+            .await
+            .unwrap();
+        reader.cache_rev("rev-9".to_owned()).await.unwrap();
+        let cache_guard = reader.cache.read().await;
+        assert_eq!(cache_guard.get(cid), Some(&bytes));
+    }
+
+    #[tokio::test]
+    async fn car_stream_and_block_range() {
+        let (_dir, reader) = test_reader().await;
+        assert!(reader.get_car_stream(None).await.is_err());
+
+        let root_bytes = b"the-root".to_vec();
+        let root_cid = cid_for(&root_bytes);
+        reader
+            .put_block(root_cid, root_bytes, "rev-1".to_owned())
+            .await
+            .unwrap();
+        let second = b"second".to_vec();
+        let second_cid = cid_for(&second);
+        reader
+            .put_block(second_cid, second, "rev-2".to_owned())
+            .await
+            .unwrap();
+        reader
+            .update_root(root_cid, "rev-2".to_owned(), Some(true))
+            .await
+            .unwrap();
+
+        let car = reader.get_car_stream(None).await.unwrap();
+        assert!(!car.is_empty());
+        let car_since = reader.get_car_stream(Some("rev-1".to_owned())).await;
+        assert!(car_since.is_ok());
+
+        let range = reader.get_block_range(&None, &None).await.unwrap();
+        assert_eq!(range.len(), 2);
+        assert_eq!(range[0].repo_rev, "rev-2");
+        let cursor = Some(CidAndRev {
+            cid: Cid::from_str(&range[0].cid).unwrap(),
+            rev: range[0].repo_rev.clone(),
+        });
+        let rest = reader.get_block_range(&None, &cursor).await.unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].repo_rev, "rev-1");
+        let since = reader
+            .get_block_range(&Some("rev-1".to_owned()), &None)
+            .await
+            .unwrap();
+        assert_eq!(since.len(), 1);
+        assert_eq!(since[0].repo_rev, "rev-2");
     }
 }

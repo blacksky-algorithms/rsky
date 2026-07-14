@@ -3,12 +3,12 @@ use crate::actor_store::blob::ListMissingBlobsOpts;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
-use crate::db::DbConn;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::ListMissingBlobsOutput;
+use std::sync::Arc;
 
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.repo.listMissingBlobs?<limit>&<cursor>")]
@@ -16,13 +16,18 @@ pub async fn list_missing_blobs(
     limit: Option<u16>,
     cursor: Option<String>,
     auth: AccessFull,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     s3_config: &State<SdkConfig>,
 ) -> Result<Json<ListMissingBlobsOutput>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let limit: u16 = limit.unwrap_or(500);
 
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    let actor_store = actor_store
+        .read(
+            did.clone(),
+            Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+        )
+        .await?;
 
     match actor_store
         .blob

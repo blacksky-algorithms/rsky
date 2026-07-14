@@ -4,7 +4,6 @@ use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::db::DbConn;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
@@ -19,13 +18,14 @@ use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ApplyWritesInput, ApplyWritesInputRefWrite};
 use rsky_repo::types::PreparedWrite;
 use std::str::FromStr;
+use std::sync::Arc;
 
 async fn inner_apply_writes(
     body: Json<ApplyWritesInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<()> {
     let tx: ApplyWritesInput = body.into_inner();
@@ -103,8 +103,12 @@ async fn inner_apply_writes(
             None => None,
         };
 
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+        let mut actor_store = actor_store
+            .transact(
+                did.clone(),
+                Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+            )
+            .await?;
 
         let commit = actor_store
             .process_writes(writes.clone(), swap_commit_cid)
@@ -132,11 +136,20 @@ pub async fn apply_writes(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
-    match inner_apply_writes(body, auth, sequencer, s3_config, db, account_manager).await {
+    match inner_apply_writes(
+        body,
+        auth,
+        sequencer,
+        s3_config,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -3,7 +3,6 @@ use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
-use crate::db::DbConn;
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use futures::try_join;
@@ -13,13 +12,14 @@ use rocket::State;
 use rsky_lexicon::com::atproto::admin::{RepoBlobRef, RepoRef, Subject, SubjectStatus};
 use rsky_lexicon::com::atproto::repo::StrongRef;
 use std::str::FromStr;
+use std::sync::Arc;
 
 async fn inner_get_subject_status(
     did: Option<String>,
     uri: Option<String>,
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<SubjectStatus> {
     let mut body: Option<SubjectStatus> = None;
@@ -27,8 +27,12 @@ async fn inner_get_subject_status(
         match did {
             None => bail!("Must provide a did to request blob state"),
             Some(did) => {
-                let actor_store =
-                    ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+                let actor_store = actor_store
+                    .read(
+                        did.clone(),
+                        Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+                    )
+                    .await?;
 
                 let takedown = actor_store
                     .blob
@@ -52,11 +56,12 @@ async fn inner_get_subject_status(
         let parts = uri_without_prefix.split("/").collect::<Vec<&str>>();
         if let (Some(uri_hostname), Some(_), Some(_)) = (parts.first(), parts.get(1), parts.get(2))
         {
-            let actor_store = ActorStore::new(
-                uri_hostname.to_string(),
-                S3BlobStore::new(uri_hostname.to_string(), s3_config),
-                db,
-            );
+            let actor_store = actor_store
+                .read(
+                    uri_hostname.to_string(),
+                    Arc::new(S3BlobStore::new(uri_hostname.to_string(), s3_config)),
+                )
+                .await?;
             let (takedown, cid) = try_join!(
                 actor_store.record.get_record_takedown_status(uri.clone()),
                 actor_store.record.get_current_record_cid(uri.clone()),
@@ -97,11 +102,11 @@ pub async fn get_subject_status(
     uri: Option<String>,
     blob: Option<String>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     _auth: Moderator,
     account_manager: AccountManager,
 ) -> Result<Json<SubjectStatus>, ApiError> {
-    match inner_get_subject_status(did, uri, blob, s3_config, db, account_manager).await {
+    match inner_get_subject_status(did, uri, blob, s3_config, actor_store, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -4,7 +4,6 @@ use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::db::DbConn;
 use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -16,13 +15,14 @@ use rsky_lexicon::com::atproto::repo::{CreateRecordInput, CreateRecordOutput};
 use rsky_repo::types::{PreparedDelete, PreparedWrite};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
+use std::sync::Arc;
 
 async fn inner_create_record(
     body: Json<CreateRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<CreateRecordOutput> {
     let CreateRecordInput {
@@ -64,8 +64,12 @@ async fn inner_create_record(
         })
         .await?;
 
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+        let mut actor_store = actor_store
+            .transact(
+                did.clone(),
+                Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+            )
+            .await?;
         let backlink_conflicts: Vec<AtUri> = match validate {
             Some(true) => {
                 let write_at_uri: AtUri = write.uri.clone().try_into()?;
@@ -122,11 +126,20 @@ pub async fn create_record(
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug create_record {body:#?}");
-    match inner_create_record(body, auth, sequencer, s3_config, db, account_manager).await {
+    match inner_create_record(
+        body,
+        auth,
+        sequencer,
+        s3_config,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

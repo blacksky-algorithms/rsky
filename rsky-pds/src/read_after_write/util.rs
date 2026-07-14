@@ -1,7 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
-use crate::db::DbConn;
 use crate::pipethrough::parse_res;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::viewer::{get_records_since_rev, LocalViewer};
@@ -20,6 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const REPO_REV_HEADER: &str = "atproto-repo-rev";
@@ -114,7 +114,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     munge: MungeFn<T>,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
     match read_after_write_internal(
@@ -124,7 +124,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
         munge,
         s3_config,
         state_local_viewer,
-        db,
+        actor_store,
         account_manager,
     )
     .await
@@ -149,7 +149,7 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     munge: MungeFn<T>,
     s3_config: &State<SdkConfig>,
     state_local_viewer: &State<SharedLocalViewer>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
     let headers = &res.headers.clone().unwrap_or_default();
@@ -157,11 +157,12 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(rev) => {
-            let actor_store = ActorStore::new(
-                requester.clone(),
-                S3BlobStore::new(requester.clone(), s3_config),
-                db,
-            );
+            let actor_store = actor_store
+                .read(
+                    requester.clone(),
+                    Arc::new(S3BlobStore::new(requester.clone(), s3_config)),
+                )
+                .await?;
             let local = get_records_since_rev(&actor_store, rev).await?;
             if local.count <= 0 {
                 return Ok(ReadAfterWriteResponse::HandlerPipeThrough(res));

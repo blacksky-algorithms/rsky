@@ -2,7 +2,6 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::db::DbConn;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
@@ -10,6 +9,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::GetRecordOutput;
 use rsky_syntax::aturi::AtUri;
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
@@ -19,7 +19,7 @@ async fn inner_get_record(
     rkey: String,
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     req: ProxyRequest<'_>,
     account_manager: AccountManager,
 ) -> Result<GetRecordOutput> {
@@ -29,8 +29,12 @@ async fn inner_get_record(
     if let Some(did) = did {
         let uri = AtUri::make(did.clone(), Some(collection), Some(rkey))?;
 
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+        let mut actor_store = actor_store
+            .read(
+                did.clone(),
+                Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+            )
+            .await?;
 
         match actor_store.record.get_record(&uri, cid, None).await {
             Ok(Some(record)) if record.takedown_ref.is_none() => Ok(GetRecordOutput {
@@ -75,7 +79,7 @@ pub async fn get_record(
     rkey: String,
     cid: Option<String>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     req: ProxyRequest<'_>,
     account_manager: AccountManager,
 ) -> Result<Json<GetRecordOutput>, ApiError> {
@@ -85,7 +89,7 @@ pub async fn get_record(
         rkey,
         cid,
         s3_config,
-        db,
+        actor_store,
         req,
         account_manager,
     )

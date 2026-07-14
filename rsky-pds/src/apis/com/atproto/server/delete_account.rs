@@ -4,7 +4,6 @@ use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
-use crate::db::DbConn;
 use crate::models::models::EmailTokenPurpose;
 use crate::sequencer;
 use crate::SharedSequencer;
@@ -12,13 +11,14 @@ use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::DeleteAccountInput;
+use std::sync::Arc;
 
 #[tracing::instrument(skip_all)]
 async fn inner_delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let DeleteAccountInput {
@@ -46,9 +46,9 @@ async fn inner_delete_account(
             .assert_valid_email_token(&did, EmailTokenPurpose::from_str("delete_account")?, &token)
             .await?;
 
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-        actor_store.destroy().await?;
+        actor_store
+            .destroy(&did, Arc::new(S3BlobStore::new(did.clone(), s3_config)))
+            .await?;
         account_manager.delete_account(&did).await?;
         let mut lock = sequencer.sequencer.write().await;
         let account_seq = lock
@@ -72,11 +72,11 @@ pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     _auth: AdminToken,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_account(body, sequencer, s3_config, db, account_manager).await {
+    match inner_delete_account(body, sequencer, s3_config, actor_store, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

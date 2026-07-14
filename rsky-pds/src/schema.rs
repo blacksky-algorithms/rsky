@@ -14,15 +14,6 @@ pub mod pds {
     }
 
     diesel::table! {
-        pds.account_pref (id) {
-            id -> Int4,
-            did -> Varchar,
-            name -> Varchar,
-            valueJson -> Nullable<Text>,
-        }
-    }
-
-    diesel::table! {
         pds.actor (did) {
             did -> Varchar,
             handle -> Nullable<Varchar>,
@@ -39,28 +30,6 @@ pub mod pds {
             name -> Varchar,
             password -> Varchar,
             createdAt -> Varchar,
-        }
-    }
-
-    diesel::table! {
-        pds.backlink (uri, path) {
-            uri -> Varchar,
-            path -> Varchar,
-            linkTo -> Varchar,
-        }
-    }
-
-    diesel::table! {
-        pds.blob (cid, did) {
-            cid -> Varchar,
-            did -> Varchar,
-            mimeType -> Varchar,
-            size -> Int4,
-            tempKey -> Nullable<Varchar>,
-            width -> Nullable<Int4>,
-            height -> Nullable<Int4>,
-            createdAt -> Varchar,
-            takedownRef -> Nullable<Varchar>,
         }
     }
 
@@ -101,43 +70,12 @@ pub mod pds {
     }
 
     diesel::table! {
-        pds.record (uri) {
-            uri -> Varchar,
-            cid -> Varchar,
-            did -> Varchar,
-            collection -> Varchar,
-            rkey -> Varchar,
-            repoRev -> Nullable<Varchar>,
-            indexedAt -> Varchar,
-            takedownRef -> Nullable<Varchar>,
-        }
-    }
-
-    diesel::table! {
-        pds.record_blob (blobCid, recordUri) {
-            blobCid -> Varchar,
-            recordUri -> Varchar,
-            did -> Varchar,
-        }
-    }
-
-    diesel::table! {
         pds.refresh_token (id) {
             id -> Varchar,
             did -> Varchar,
             expiresAt -> Varchar,
             nextId -> Nullable<Varchar>,
             appPasswordName -> Nullable<Varchar>,
-        }
-    }
-
-    diesel::table! {
-        pds.repo_block (cid, did) {
-            cid -> Varchar,
-            did -> Varchar,
-            repoRev -> Varchar,
-            size -> Int4,
-            content -> Bytea,
         }
     }
 
@@ -163,19 +101,13 @@ pub mod pds {
 
     diesel::allow_tables_to_appear_in_same_query!(
         account,
-        account_pref,
         actor,
         app_password,
-        backlink,
-        blob,
         did_doc,
         email_token,
         invite_code,
         invite_code_use,
-        record,
-        record_blob,
         refresh_token,
-        repo_block,
         repo_root,
         repo_seq,
     );

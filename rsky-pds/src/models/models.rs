@@ -38,28 +38,6 @@ pub struct Account {
 }
 
 #[derive(
-    Queryable,
-    Identifiable,
-    Insertable,
-    Selectable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-)]
-#[diesel(table_name = crate::schema::pds::account_pref)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct AccountPref {
-    pub id: i32,
-    pub name: String,
-    #[diesel(column_name = valueJson)]
-    #[serde(rename = "valueJson")]
-    pub value_json: Option<String>,
-}
-
-#[derive(
     Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
 )]
 #[diesel(primary_key(did))]
@@ -95,56 +73,6 @@ pub struct AppPassword {
     #[diesel(column_name = createdAt)]
     #[serde(rename = "createdAt")]
     pub created_at: String,
-}
-
-#[derive(
-    Queryable,
-    Identifiable,
-    Insertable,
-    Selectable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-)]
-#[diesel(primary_key(uri, path))]
-#[diesel(table_name = crate::schema::pds::backlink)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Backlink {
-    pub uri: String,
-    pub path: String,
-    #[diesel(column_name = linkTo)]
-    #[serde(rename = "linkTo")]
-    pub link_to: String,
-}
-
-#[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
-)]
-#[diesel(treat_none_as_null = true)]
-#[diesel(primary_key(cid))]
-#[diesel(table_name = crate::schema::pds::blob)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Blob {
-    pub cid: String,
-    pub did: String,
-    #[diesel(column_name = mimeType)]
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-    pub size: i32,
-    #[diesel(column_name = tempKey)]
-    #[serde(rename = "tempKey")]
-    pub temp_key: Option<String>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-    #[diesel(column_name = createdAt)]
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[diesel(column_name = takedownRef)]
-    #[serde(rename = "takedownRef")]
-    pub takedown_ref: Option<String>,
 }
 
 #[derive(
@@ -283,64 +211,6 @@ pub struct InviteCodeUse {
 }
 
 #[derive(
-    Queryable,
-    Identifiable,
-    Insertable,
-    Selectable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-)]
-#[diesel(primary_key(uri))]
-#[diesel(table_name = crate::schema::pds::record)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Record {
-    pub uri: String,
-    pub cid: String,
-    pub did: String,
-    pub collection: String,
-    pub rkey: String,
-    #[diesel(column_name = repoRev)]
-    #[serde(rename = "repoRev")]
-    pub repo_rev: Option<String>,
-    #[diesel(column_name = indexedAt)]
-    #[serde(rename = "indexedAt")]
-    pub indexed_at: String,
-    #[diesel(column_name = takedownRef)]
-    #[serde(rename = "takedownRef")]
-    pub takedown_ref: Option<String>,
-}
-
-#[derive(
-    QueryableByName,
-    Queryable,
-    Identifiable,
-    Selectable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-)]
-#[diesel(primary_key(blobCid, recordUri))]
-#[diesel(table_name = crate::schema::pds::record_blob)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct RecordBlob {
-    #[diesel(column_name = blobCid, sql_type = Text)]
-    #[serde(rename = "blobCid")]
-    pub blob_cid: String,
-    #[diesel(column_name = recordUri, sql_type = Text)]
-    #[serde(rename = "recordUri")]
-    pub record_uri: String,
-    #[diesel(sql_type = Text)]
-    pub did: String,
-}
-
-#[derive(
     Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
 )]
 #[diesel(table_name = crate::schema::pds::refresh_token)]
@@ -357,48 +227,6 @@ pub struct RefreshToken {
     #[diesel(column_name = appPasswordName)]
     #[serde(rename = "appPasswordName")]
     pub app_password_name: Option<String>,
-}
-
-#[derive(
-    Queryable,
-    Identifiable,
-    Selectable,
-    Insertable,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-)]
-#[diesel(primary_key(cid))]
-#[diesel(table_name = crate::schema::pds::repo_block)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct RepoBlock {
-    #[diesel(sql_type = Text)]
-    pub cid: String,
-    pub did: String,
-    #[diesel(column_name = repoRev)]
-    #[serde(rename = "repoRev")]
-    pub repo_rev: String,
-    pub size: i32,
-    #[diesel(sql_type = Bytea)]
-    pub content: Vec<u8>,
-}
-
-#[derive(
-    Queryable, Identifiable, Selectable, Clone, Debug, PartialEq, Default, Serialize, Deserialize,
-)]
-#[diesel(primary_key(did))]
-#[diesel(table_name = crate::schema::pds::repo_root)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct RepoRoot {
-    pub did: String,
-    pub cid: String,
-    pub rev: String,
-    #[diesel(column_name = indexedAt)]
-    #[serde(rename = "indexedAt")]
-    pub indexed_at: String,
 }
 
 #[derive(

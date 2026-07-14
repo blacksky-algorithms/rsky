@@ -5,7 +5,6 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::db::DbConn;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -14,6 +13,7 @@ use lexicon_cid::Cid;
 use rocket::http::Header;
 use rocket::{Responder, State};
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Responder)]
 #[response(status = 200)]
@@ -24,7 +24,7 @@ async fn inner_get_blob(
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(Vec<u8>, Option<String>)> {
     let is_user_or_admin = if let Some(access) = auth.access {
@@ -35,7 +35,12 @@ async fn inner_get_blob(
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
 
     let cid = Cid::from_str(&cid)?;
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    let actor_store = actor_store
+        .read(
+            did.clone(),
+            Arc::new(S3BlobStore::new(did.clone(), s3_config)),
+        )
+        .await?;
 
     let found = actor_store.blob.get_blob(cid).await?;
     let buf: AggregatedBytes = found.stream.collect().await?;
@@ -51,10 +56,10 @@ pub async fn get_blob(
     cid: String,
     s3_config: &State<SdkConfig>,
     auth: OptionalAccessOrAdminToken,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<BlobResponder, ApiError> {
-    match inner_get_blob(did, cid, s3_config, auth, db, account_manager).await {
+    match inner_get_blob(did, cid, s3_config, auth, actor_store, account_manager).await {
         Ok(res) => {
             let (bytes, mime_type) = res;
             Ok(BlobResponder(

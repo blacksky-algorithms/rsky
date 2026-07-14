@@ -5,18 +5,18 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
-use crate::db::DbConn;
 use crate::SharedSequencer;
 use aws_config::SdkConfig;
 use rocket::State;
 use rsky_syntax::handle::INVALID_HANDLE;
+use std::sync::Arc;
 
 #[tracing::instrument(skip_all)]
 async fn inner_activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
@@ -35,11 +35,12 @@ async fn inner_activate_account(
     if let Some(account) = account {
         account_manager.activate_account(&requester).await?;
 
-        let mut actor_store = ActorStore::new(
-            requester.clone(),
-            S3BlobStore::new(requester.clone(), s3_config),
-            db,
-        );
+        let actor_store = actor_store
+            .read(
+                requester.clone(),
+                Arc::new(S3BlobStore::new(requester.clone(), s3_config)),
+            )
+            .await?;
         let sync_data = actor_store.get_sync_event_data().await?;
 
         // @NOTE: we're over-emitting for now for backwards compatibility, can reduce this in the future
@@ -64,10 +65,10 @@ pub async fn activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
     s3_config: &State<SdkConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_activate_account(auth, sequencer, s3_config, db, account_manager).await {
+    match inner_activate_account(auth, sequencer, s3_config, actor_store, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

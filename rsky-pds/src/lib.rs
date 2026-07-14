@@ -31,6 +31,8 @@ pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::{AccountManager, SharedAccountManager};
+use crate::actor_store::ActorStore;
+use crate::background::BackgroundQueue;
 use crate::config::env_to_cfg;
 use crate::crawlers::Crawlers;
 use crate::db::DbConn;
@@ -290,6 +292,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
     let account_manager = SharedAccountManager {
         account_manager: RwLock::new(AccountManager::creator()),
     };
+    let actor_store = ActorStore::new(&cfg.actor_store, BackgroundQueue::default());
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -390,4 +393,5 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(local_viewer)
         .manage(app_view_agent)
         .manage(account_manager)
+        .manage(actor_store)
 }

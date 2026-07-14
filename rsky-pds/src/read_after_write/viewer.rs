@@ -1,7 +1,6 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
 use crate::account_manager::AccountManager;
-use crate::actor_store::ActorStore;
-use crate::models::models;
+use crate::actor_store::ActorStoreReader;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util;
 use crate::xrpc_server::auth::create_service_auth_headers;
@@ -21,7 +20,6 @@ use atrium_api::app::bsky::graph::get_list::{
 };
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
-use diesel::*;
 use futures::stream::{self, StreamExt};
 use ipld_core::ipld::Ipld as AtriumIpld;
 use lexicon_cid::Cid;
@@ -48,7 +46,8 @@ use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
-pub type LocalViewerCreator = Box<dyn Fn(ActorStore, AccountManager) -> LocalViewer + Send + Sync>;
+pub type LocalViewerCreator =
+    Box<dyn Fn(ActorStoreReader, AccountManager) -> LocalViewer + Send + Sync>;
 
 pub struct LocalViewerCreatorParams {
     pub pds_hostname: String,
@@ -60,7 +59,7 @@ pub struct LocalViewerCreatorParams {
 pub struct LocalViewer {
     pub account_manager: AccountManager,
     pub did: String,
-    pub actor_store: ActorStore,
+    pub actor_store: ActorStoreReader,
     pub pds_hostname: String,
     pub appview_agent: Option<Agent>,
     appview_agent_str: Option<String>,
@@ -70,7 +69,7 @@ pub struct LocalViewer {
 
 impl LocalViewer {
     pub fn new(
-        actor_store: ActorStore,
+        actor_store: ActorStoreReader,
         account_manager: AccountManager,
         pds_hostname: String,
         appview_agent: Option<Agent>,
@@ -92,7 +91,7 @@ impl LocalViewer {
 
     pub fn creator(params: LocalViewerCreatorParams) -> LocalViewerCreator {
         Box::new(
-            move |actor_store: ActorStore, account_manager: AccountManager| -> LocalViewer {
+            move |actor_store: ActorStoreReader, account_manager: AccountManager| -> LocalViewer {
                 LocalViewer::new(
                     actor_store,
                     account_manager,
@@ -156,39 +155,13 @@ impl LocalViewer {
     }
 
     pub async fn get_profile_basic(&self) -> Result<Option<ProfileViewBasic>> {
-        use crate::schema::pds::record::dsl as RecordSchema;
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
-        let db = self.actor_store.record.db.clone();
-        let did = self.actor_store.did.clone();
-        let profile_res: Option<(models::Record, Option<models::RepoBlock>)> = db
-            .run(move |conn| {
-                RecordSchema::record
-                    .left_join(
-                        RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
-                    )
-                    .select((
-                        models::Record::as_select(),
-                        Option::<models::RepoBlock>::as_select(),
-                    ))
-                    .filter(RecordSchema::did.eq(&did))
-                    .filter(RecordSchema::collection.eq(Ids::AppBskyActorProfile.as_str()))
-                    .filter(RecordSchema::rkey.eq("self"))
-                    .first(conn)
-                    .optional()
-            })
-            .await?;
+        let profile_res = self.actor_store.record.get_profile_record().await?;
         let account_res = self.account_manager.get_account(&self.did, None).await?;
         match account_res {
             None => Ok(None),
             Some(account_res) => {
                 let record: Option<Profile> = match profile_res {
-                    Some(profile_res) => match profile_res.1 {
-                        Some(profile_res) => {
-                            serde_ipld_dagcbor::from_slice(profile_res.content.as_slice())?
-                        }
-                        None => None,
-                    },
+                    Some(content) => serde_ipld_dagcbor::from_slice(content.as_slice())?,
                     None => None,
                 };
                 Ok(Some(ProfileViewBasic {
@@ -631,54 +604,11 @@ impl LocalViewer {
     }
 }
 
-pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Result<LocalRecords> {
-    use crate::schema::pds::record::dsl as RecordSchema;
-    use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
-    let did = actor_store.did.clone();
-    let did_1 = did.clone();
-    let rev_1 = rev.clone();
-    let res: Vec<(models::Record, models::RepoBlock)> = actor_store
-        .record
-        .db
-        .run(move |conn| {
-            RecordSchema::record
-                .inner_join(
-                    RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
-                )
-                .select((models::Record::as_select(), models::RepoBlock::as_select()))
-                .filter(RecordSchema::did.eq(did_1))
-                .filter(RecordSchema::repoRev.gt(rev_1))
-                .limit(10)
-                .order_by(RecordSchema::repoRev.asc())
-                .get_results(conn)
-        })
-        .await?;
-
-    // sanity check to ensure that the clock received is not before _all_ local records
-    // (for instance in case of account migration)
-    if !res.is_empty() {
-        let sanity_checks = actor_store
-            .record
-            .db
-            .run(move |conn| {
-                RecordSchema::record
-                    .select(models::Record::as_select())
-                    .filter(RecordSchema::did.eq(&did))
-                    .filter(RecordSchema::repoRev.le(&rev))
-                    .limit(1)
-                    .first(conn)
-                    .optional()
-            })
-            .await?;
-        if sanity_checks.is_none() {
-            return Ok(LocalRecords {
-                count: 0,
-                profile: None,
-                posts: vec![],
-            });
-        }
-    }
+pub async fn get_records_since_rev(
+    actor_store: &ActorStoreReader,
+    rev: String,
+) -> Result<LocalRecords> {
+    let res = actor_store.record.get_records_since_rev(rev).await?;
 
     // res.reduce() in javascript
     res.into_iter().try_fold(
@@ -688,24 +618,24 @@ pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Res
             posts: vec![],
         },
         |mut acc: LocalRecords, cur| {
-            let uri: AtUri = AtUri::new(cur.0.uri, None)?;
+            let uri: AtUri = AtUri::new(cur.uri, None)?;
             if uri.get_collection() == Ids::AppBskyActorProfile.as_str()
                 && uri.get_rkey() == *"self"
             {
-                let profile: Profile = serde_ipld_dagcbor::from_slice(cur.1.content.as_slice())?;
+                let profile: Profile = serde_ipld_dagcbor::from_slice(cur.content.as_slice())?;
                 let descript = RecordDescript {
                     uri,
-                    cid: Cid::from_str(&cur.1.cid)?,
-                    indexed_at: cur.0.indexed_at,
+                    cid: Cid::from_str(&cur.cid)?,
+                    indexed_at: cur.indexed_at,
                     record: profile,
                 };
                 acc.profile = Some(descript);
             } else if uri.get_collection() == Ids::AppBskyFeedPost.as_str() {
-                let post: Post = serde_ipld_dagcbor::from_slice(cur.1.content.as_slice())?;
+                let post: Post = serde_ipld_dagcbor::from_slice(cur.content.as_slice())?;
                 let descript = RecordDescript {
                     uri,
-                    cid: Cid::from_str(&cur.1.cid)?,
-                    indexed_at: cur.0.indexed_at,
+                    cid: Cid::from_str(&cur.cid)?,
+                    indexed_at: cur.indexed_at,
                     record: post,
                 };
                 acc.posts.push(descript);
