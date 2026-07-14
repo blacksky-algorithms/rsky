@@ -7,14 +7,21 @@
 //! appview — because permissioned data is a parallel protocol.
 
 pub mod config;
+pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod index;
+pub mod recovery;
 pub mod repohost;
 pub mod xrpc;
 
+pub use credentials::{
+    unix_now, CredentialProvider, CredentialSource, DelegationSource, PdsDelegationSource,
+    StaticCredential,
+};
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
 pub use index::{InMemoryIndex, SpaceIndex};
+pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};
