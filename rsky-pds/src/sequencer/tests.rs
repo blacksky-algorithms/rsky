@@ -309,6 +309,7 @@ async fn start_surfaces_startup_db_errors() {
 
 #[tokio::test]
 async fn start_logs_poll_errors_and_keeps_running() {
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::FmtSubscriber::new());
     let (_dir, mut sequencer) = test_sequencer().await;
     let mut background = sequencer.clone();
     let handle = tokio::spawn(async move { background.start().await });

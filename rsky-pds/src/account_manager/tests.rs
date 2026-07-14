@@ -870,6 +870,46 @@ async fn manages_email_tokens() {
 }
 
 #[tokio::test]
+async fn register_account_rejects_duplicate_did() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:dup", "dup.test").await;
+    let err = account::register_account(
+        "did:plc:dup".to_owned(),
+        "dup2@example.com".to_owned(),
+        "hash".to_owned(),
+        &am.db,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.to_string(), "UserAlreadyExistsError");
+}
+
+#[tokio::test]
+async fn rotates_app_password_refresh_tokens() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:apppw", "apppw.test").await;
+    am.create_app_password("did:plc:apppw".to_owned(), "rotator".to_owned())
+        .await
+        .unwrap();
+    let (_, refresh_jwt) = am
+        .create_session("did:plc:apppw".to_owned(), Some("rotator".to_owned()))
+        .await
+        .unwrap();
+    let payload = auth::decode_refresh_token(refresh_jwt).unwrap();
+    let rotated = am
+        .rotate_refresh_token(&payload.jti)
+        .await
+        .unwrap()
+        .unwrap();
+    let rotated_payload = auth::decode_refresh_token(rotated.1).unwrap();
+    let stored = auth::get_refresh_token(&rotated_payload.jti, &am.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.app_password_name, Some("rotator".to_owned()));
+}
+
+#[tokio::test]
 async fn account_helper_edge_cases() {
     let (_dir, am) = test_manager().await;
     // unique violation detection

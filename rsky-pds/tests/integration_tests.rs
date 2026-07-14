@@ -174,3 +174,26 @@ async fn test_get_invite_codes() {
         assert_eq!(body["codes"].as_array().unwrap().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn test_liveness_options_and_catcher() {
+    let (_dir, client) = common::get_client().await;
+
+    let response = client.get("/xrpc/_health/live").dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(response.into_string().await.unwrap(), "ok");
+
+    // CORS headers are attached to preflight responses by the fairing
+    let response = client
+        .options("/xrpc/com.atproto.server.createSession")
+        .dispatch()
+        .await;
+    assert_eq!(
+        response.headers().get_one("Access-Control-Allow-Origin"),
+        Some("*")
+    );
+
+    // unhandled paths fall through to the default catcher
+    let response = client.get("/does-not-exist").dispatch().await;
+    assert_eq!(response.status(), Status::InternalServerError);
+}
