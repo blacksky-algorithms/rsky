@@ -1,10 +1,19 @@
+use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::disk_blobstore::DiskBlobStore;
+use crate::config::BlobstoreConfig;
 use anyhow::{bail, Result};
+use aws_config::SdkConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use futures::future::BoxFuture;
 use lexicon_cid::Cid;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, thiserror::Error)]
+#[error("Blob not found")]
+pub struct BlobNotFoundError;
 
 /// Object storage for blob bytes, keyed by actor.
 /// Mirrors the BlobStore interface from the reference implementation.
@@ -16,9 +25,44 @@ pub trait BlobStore: Send + Sync {
     fn unquarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>>;
     fn get_bytes(&self, cid: Cid) -> BoxFuture<'_, Result<Vec<u8>>>;
     fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>>;
+    fn has_temp(&self, key: String) -> BoxFuture<'_, Result<bool>>;
     fn has_stored(&self, cid: Cid) -> BoxFuture<'_, Result<bool>>;
-    fn delete(&self, cid: String) -> BoxFuture<'_, Result<()>>;
+    fn delete(&self, cid: Cid) -> BoxFuture<'_, Result<()>>;
     fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>>;
+    /// Stores that can wipe an actor's blobs wholesale return a future;
+    /// others return None and callers fall back to per-cid deletion.
+    fn delete_all(&self) -> Option<BoxFuture<'_, Result<()>>> {
+        None
+    }
+}
+
+/// Builds the configured blobstore implementation for a given actor.
+pub struct BlobstoreFactory {
+    cfg: BlobstoreConfig,
+    aws_cfg: SdkConfig,
+}
+
+impl BlobstoreFactory {
+    pub fn new(cfg: BlobstoreConfig, aws_cfg: SdkConfig) -> Self {
+        BlobstoreFactory { cfg, aws_cfg }
+    }
+
+    pub fn blobstore(&self, did: String) -> Arc<dyn BlobStore> {
+        match &self.cfg {
+            BlobstoreConfig::Disk {
+                location,
+                tmp_location,
+            } => Arc::new(DiskBlobStore::new(
+                did,
+                Path::new(location),
+                tmp_location.as_deref().map(Path::new),
+                None,
+            )),
+            BlobstoreConfig::S3 { bucket } => {
+                Arc::new(S3BlobStore::new(did, &self.aws_cfg, bucket.clone()))
+            }
+        }
+    }
 }
 
 /// In-memory blobstore used by deterministic tests.
@@ -120,13 +164,17 @@ impl BlobStore for MemoryBlobStore {
         })
     }
 
+    fn has_temp(&self, key: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.lock().temp.contains_key(&key)) })
+    }
+
     fn has_stored(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
         Box::pin(async move { Ok(self.lock().stored.contains_key(&cid.to_string())) })
     }
 
-    fn delete(&self, cid: String) -> BoxFuture<'_, Result<()>> {
+    fn delete(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.lock().stored.remove(&cid);
+            self.lock().stored.remove(&cid.to_string());
             Ok(())
         })
     }
@@ -159,7 +207,9 @@ mod tests {
         let cid = cid_for(&bytes);
         let key = store.put_temp(bytes.clone()).await.unwrap();
         assert!(store.has_temp(&key));
+        assert!(BlobStore::has_temp(&store, key.clone()).await.unwrap());
         assert!(!store.has_stored(cid).await.unwrap());
+        assert!(store.delete_all().is_none());
 
         store.make_permanent(key.clone(), cid).await.unwrap();
         assert!(!store.has_temp(&key));
@@ -202,9 +252,67 @@ mod tests {
         store.put_permanent(cid_one, one).await.unwrap();
         store.put_permanent(cid_two, two).await.unwrap();
         assert_eq!(store.stored_cids().len(), 2);
-        store.delete(cid_one.to_string()).await.unwrap();
+        store.delete(cid_one).await.unwrap();
         assert_eq!(store.stored_cids(), [cid_two.to_string()]);
         store.delete_many(vec![cid_one, cid_two]).await.unwrap();
         assert!(store.stored_cids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn factory_builds_disk_store_from_disk_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join("blobs");
+        let factory = BlobstoreFactory::new(
+            BlobstoreConfig::Disk {
+                location: location.to_string_lossy().to_string(),
+                tmp_location: None,
+            },
+            SdkConfig::builder().build(),
+        );
+        let store = factory.blobstore("did:example:alice".to_owned());
+        let bytes = b"factory blob".to_vec();
+        let cid = cid_for(&bytes);
+        store.put_permanent(cid, bytes.clone()).await.unwrap();
+        // bytes landed on disk under {location}/{did}/{cid}
+        let stored_path = location.join("did:example:alice").join(cid.to_string());
+        assert_eq!(std::fs::read(stored_path).unwrap(), bytes);
+        assert!(store.delete_all().is_some());
+    }
+
+    #[tokio::test]
+    async fn factory_builds_disk_store_with_custom_tmp_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join("blobs");
+        let tmp_location = dir.path().join("tmp");
+        let factory = BlobstoreFactory::new(
+            BlobstoreConfig::Disk {
+                location: location.to_string_lossy().to_string(),
+                tmp_location: Some(tmp_location.to_string_lossy().to_string()),
+            },
+            SdkConfig::builder().build(),
+        );
+        let store = factory.blobstore("did:example:alice".to_owned());
+        let key = store.put_temp(b"temp blob".to_vec()).await.unwrap();
+        assert!(tmp_location.join("did:example:alice").join(&key).is_file());
+    }
+
+    #[tokio::test]
+    async fn factory_builds_s3_store_from_s3_config() {
+        let aws_cfg = SdkConfig::builder()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .build();
+        let factory = BlobstoreFactory::new(
+            BlobstoreConfig::S3 {
+                bucket: Some("my-bucket".to_owned()),
+            },
+            aws_cfg.clone(),
+        );
+        // constructs without touching the network; s3 stores cannot delete_all
+        let store = factory.blobstore("did:example:alice".to_owned());
+        assert!(store.delete_all().is_none());
+
+        let legacy = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg);
+        let store = legacy.blobstore("did:example:alice".to_owned());
+        assert!(store.delete_all().is_none());
     }
 }

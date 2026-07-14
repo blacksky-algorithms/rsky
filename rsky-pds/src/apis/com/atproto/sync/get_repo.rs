@@ -1,30 +1,25 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use rocket::{Responder, State};
-use std::sync::Arc;
 
 #[derive(Responder)]
 #[response(status = 200, content_type = "application/vnd.ipld.car")]
 pub struct BlockResponder(Vec<u8>);
 
 async fn get_car_stream(
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     did: String,
     since: Option<String>,
     actor_store: &State<ActorStore>,
 ) -> Result<Vec<u8>> {
     let actor_store = actor_store
-        .read(
-            did.clone(),
-            Arc::new(S3BlobStore::new(did.clone(), s3_config)),
-        )
+        .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
     let storage_guard = actor_store.storage.read().await;
     match storage_guard.get_car_stream(since).await {
@@ -36,7 +31,7 @@ async fn get_car_stream(
 async fn inner_get_repo(
     did: String,
     since: Option<String>, // The revision ('rev') of the repo to create a diff from.
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
@@ -47,7 +42,7 @@ async fn inner_get_repo(
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
-    get_car_stream(s3_config, did, since, actor_store).await
+    get_car_stream(blobstore_factory, did, since, actor_store).await
 }
 
 /// Download a repository export as CAR file. Optionally only a 'diff' since a previous revision.
@@ -57,12 +52,21 @@ async fn inner_get_repo(
 pub async fn get_repo(
     did: String,
     since: Option<String>, // The revision ('rev') of the repo to create a diff from.
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<BlockResponder, ApiError> {
-    match inner_get_repo(did, since, s3_config, auth, actor_store, account_manager).await {
+    match inner_get_repo(
+        did,
+        since,
+        blobstore_factory,
+        auth,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

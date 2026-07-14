@@ -1,10 +1,9 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use futures::try_join;
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
@@ -12,13 +11,12 @@ use rocket::State;
 use rsky_lexicon::com::atproto::admin::{RepoBlobRef, RepoRef, Subject, SubjectStatus};
 use rsky_lexicon::com::atproto::repo::StrongRef;
 use std::str::FromStr;
-use std::sync::Arc;
 
 async fn inner_get_subject_status(
     did: Option<String>,
     uri: Option<String>,
     blob: Option<String>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<SubjectStatus> {
@@ -28,10 +26,7 @@ async fn inner_get_subject_status(
             None => bail!("Must provide a did to request blob state"),
             Some(did) => {
                 let actor_store = actor_store
-                    .read(
-                        did.clone(),
-                        Arc::new(S3BlobStore::new(did.clone(), s3_config)),
-                    )
+                    .read(did.clone(), blobstore_factory.blobstore(did.clone()))
                     .await?;
 
                 let takedown = actor_store
@@ -59,7 +54,7 @@ async fn inner_get_subject_status(
             let actor_store = actor_store
                 .read(
                     uri_hostname.to_string(),
-                    Arc::new(S3BlobStore::new(uri_hostname.to_string(), s3_config)),
+                    blobstore_factory.blobstore(uri_hostname.to_string()),
                 )
                 .await?;
             let (takedown, cid) = try_join!(
@@ -101,12 +96,21 @@ pub async fn get_subject_status(
     did: Option<String>,
     uri: Option<String>,
     blob: Option<String>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     _auth: Moderator,
     account_manager: AccountManager,
 ) -> Result<Json<SubjectStatus>, ApiError> {
-    match inner_get_subject_status(did, uri, blob, s3_config, actor_store, account_manager).await {
+    match inner_get_subject_status(
+        did,
+        uri,
+        blob,
+        blobstore_factory,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

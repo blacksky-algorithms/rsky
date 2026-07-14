@@ -1,21 +1,19 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::SharedSequencer;
-use aws_config::SdkConfig;
 use rocket::State;
 use rsky_syntax::handle::INVALID_HANDLE;
-use std::sync::Arc;
 
 #[tracing::instrument(skip_all)]
 async fn inner_activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
@@ -38,7 +36,7 @@ async fn inner_activate_account(
         let actor_store = actor_store
             .read(
                 requester.clone(),
-                Arc::new(S3BlobStore::new(requester.clone(), s3_config)),
+                blobstore_factory.blobstore(requester.clone()),
             )
             .await?;
         let sync_data = actor_store.get_sync_event_data().await?;
@@ -64,11 +62,19 @@ async fn inner_activate_account(
 pub async fn activate_account(
     auth: AccessFull,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_activate_account(auth, sequencer, s3_config, actor_store, account_manager).await {
+    match inner_activate_account(
+        auth,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(_) => Ok(()),
         Err(error) => Err(error),
     }

@@ -450,7 +450,7 @@ async fn duplicate_record_cids_are_detected() {
 #[tokio::test]
 async fn failing_blobstore_fails_every_operation() {
     use crate::actor_store::blobstore::BlobStore;
-    let store = FailingBlobStore;
+    let store = FailingBlobStore::default();
     let cid = current();
     assert!(store.put_temp(vec![]).await.is_err());
     assert!(store.make_permanent("key".to_owned(), cid).await.is_err());
@@ -459,9 +459,15 @@ async fn failing_blobstore_fails_every_operation() {
     assert!(store.unquarantine(cid).await.is_err());
     assert!(store.get_bytes(cid).await.is_err());
     assert!(store.get_stream(cid).await.is_err());
+    assert!(store.has_temp("key".to_owned()).await.is_err());
     assert!(store.has_stored(cid).await.is_err());
-    assert!(store.delete(cid.to_string()).await.is_err());
+    assert!(store.delete(cid).await.is_err());
     assert!(store.delete_many(vec![cid]).await.is_err());
+    assert!(store.delete_all().is_none());
+    let failing_delete_all = FailingBlobStore {
+        fail_delete_all: true,
+    };
+    assert!(failing_delete_all.delete_all().unwrap().await.is_err());
 }
 
 #[tokio::test]
@@ -492,7 +498,10 @@ async fn destroy_deletes_blobs_from_blobstore() {
     assert!(blobs.stored_cids().is_empty());
 }
 
-struct FailingBlobStore;
+#[derive(Default)]
+struct FailingBlobStore {
+    fail_delete_all: bool,
+}
 
 impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
     fn put_temp(&self, _bytes: Vec<u8>) -> futures::future::BoxFuture<'_, Result<String>> {
@@ -527,14 +536,24 @@ impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
     ) -> futures::future::BoxFuture<'_, Result<aws_sdk_s3::primitives::ByteStream>> {
         Box::pin(async { bail!("blobstore unavailable") })
     }
+    fn has_temp(&self, _key: String) -> futures::future::BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
     fn has_stored(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<bool>> {
         Box::pin(async { bail!("blobstore unavailable") })
     }
-    fn delete(&self, _cid: String) -> futures::future::BoxFuture<'_, Result<()>> {
+    fn delete(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<()>> {
         Box::pin(async { bail!("blobstore unavailable") })
     }
     fn delete_many(&self, _cids: Vec<Cid>) -> futures::future::BoxFuture<'_, Result<()>> {
         Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn delete_all(&self) -> Option<futures::future::BoxFuture<'_, Result<()>>> {
+        if self.fail_delete_all {
+            Some(Box::pin(async { bail!("blobstore unavailable") }))
+        } else {
+            None
+        }
     }
 }
 
@@ -567,7 +586,44 @@ async fn destroy_logs_blobstore_failures_and_still_removes_dir() {
     drop(txn);
 
     store
-        .destroy(TEST_DID, Arc::new(FailingBlobStore))
+        .destroy(TEST_DID, Arc::new(FailingBlobStore::default()))
+        .await
+        .unwrap();
+    assert!(!store.exists(TEST_DID).await.unwrap());
+}
+
+#[tokio::test]
+async fn destroy_uses_disk_delete_all_when_available() {
+    use crate::actor_store::disk_blobstore::DiskBlobStore;
+    let (dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let disk_store = Arc::new(DiskBlobStore::new(
+        TEST_DID.to_owned(),
+        &dir.path().join("blobs"),
+        None,
+        None,
+    ));
+    let bytes = b"disk destroy".to_vec();
+    let cid = rsky_common::ipld::sha256_to_cid(Sha256::digest(&bytes).to_vec());
+    disk_store.put_permanent(cid, bytes).await.unwrap();
+    assert!(disk_store.has_stored(cid).await.unwrap());
+
+    store.destroy(TEST_DID, disk_store.clone()).await.unwrap();
+    assert!(!store.exists(TEST_DID).await.unwrap());
+    assert!(!disk_store.has_stored(cid).await.unwrap());
+}
+
+#[tokio::test]
+async fn destroy_logs_delete_all_failures_and_still_removes_dir() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    store
+        .destroy(
+            TEST_DID,
+            Arc::new(FailingBlobStore {
+                fail_delete_all: true,
+            }),
+        )
         .await
         .unwrap();
     assert!(!store.exists(TEST_DID).await.unwrap());

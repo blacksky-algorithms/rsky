@@ -1,4 +1,5 @@
 use crate::account_manager::AccountManager;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
@@ -9,7 +10,6 @@ use crate::read_after_write::viewer::LocalViewer;
 use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use rocket::State;
 use rsky_lexicon::app::bsky::actor::{GetProfilesOutput, ProfileViewDetailed};
 
@@ -19,7 +19,7 @@ pub async fn inner_get_profiles(
     _actors: Vec<String>,
     auth: AccessStandard,
     res: HandlerPipeThrough,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
@@ -33,7 +33,7 @@ pub async fn inner_get_profiles(
         requester,
         res,
         get_profiles_munge,
-        s3_config,
+        blobstore_factory,
         state_local_viewer,
         actor_store,
         account_manager,
@@ -50,7 +50,7 @@ pub async fn get_profiles(
     actors: Vec<String>,
     auth: AccessStandard,
     res: HandlerPipeThrough,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
@@ -63,7 +63,7 @@ pub async fn get_profiles(
                 actors,
                 auth,
                 res,
-                s3_config,
+                blobstore_factory,
                 state_local_viewer,
                 actor_store,
                 account_manager,
