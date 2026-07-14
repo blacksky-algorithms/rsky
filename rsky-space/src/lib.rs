@@ -13,6 +13,8 @@
 //!   signature/MAC verification.
 //! - [`credential`] — delegation tokens, space credentials, and client
 //!   attestations (the JWT envelope + verification).
+//! - [`jwk`] — minimal EC JWK (P-256) verification for ES256 client
+//!   attestations.
 //! - [`space_id`] — space and permissioned-record `at://.../space/...`
 //!   addressing.
 //! - [`types`] — signed commits, repo ops, and writer-set references.
@@ -25,12 +27,14 @@ pub mod car;
 pub mod commit;
 pub mod credential;
 pub mod error;
+pub mod jwk;
 pub mod lthash;
 pub mod space_id;
 pub mod types;
 
 pub use car::{repo_car_bytes, write_repo_car, RepoCarValidator};
 pub use error::{Result, SpaceError};
+pub use jwk::{verify_es256, EcJwk, JwkSet};
 pub use lthash::LtHash;
 pub use space_id::{is_space_uri, RecordId, SpaceId};
 pub use types::{RepoOp, RepoRef, SignedCommit};
