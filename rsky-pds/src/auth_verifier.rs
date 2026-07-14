@@ -655,7 +655,13 @@ impl<'r> FromRequest<'r> for AdminToken {
             Some(parsed) => {
                 let BasicAuth { username, password } = parsed;
 
-                if username != "admin" || password != env::var("PDS_ADMIN_PASS").unwrap() {
+                let Some(admin_password) = admin_password_from_env() else {
+                    tracing::error!("admin password is not configured");
+                    let error = AuthError::AuthRequired("BadAuth".to_string());
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    return Outcome::Error((Status::InternalServerError, error));
+                };
+                if username != "admin" || password != admin_password {
                     let error = AuthError::AuthRequired("BadAuth".to_string());
                     req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                     Outcome::Error((Status::BadRequest, error))
@@ -986,6 +992,12 @@ pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Res
     })
 }
 
+pub fn admin_password_from_env() -> Option<String> {
+    env::var("PDS_ADMIN_PASSWORD")
+        .or_else(|_| env::var("PDS_ADMIN_PASS"))
+        .ok()
+}
+
 pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
     let mut parts = token.split_whitespace();
     if parts.next() != Some("Basic") {
@@ -1046,6 +1058,23 @@ mod tests {
         let parsed = parse_basic_auth("Basic YWRtaW46cGFzczp3b3Jk").expect("expected parse");
         assert_eq!(parsed.username, "admin");
         assert_eq!(parsed.password, "pass:word");
+    }
+
+    // Single test: sequential env mutation stays deterministic across threads
+    #[test]
+    fn admin_password_prefers_upstream_env_name() {
+        env::remove_var("PDS_ADMIN_PASSWORD");
+        env::remove_var("PDS_ADMIN_PASS");
+        assert_eq!(admin_password_from_env(), None);
+
+        env::set_var("PDS_ADMIN_PASS", "legacy");
+        assert_eq!(admin_password_from_env(), Some("legacy".to_string()));
+
+        env::set_var("PDS_ADMIN_PASSWORD", "standard");
+        assert_eq!(admin_password_from_env(), Some("standard".to_string()));
+
+        env::remove_var("PDS_ADMIN_PASSWORD");
+        env::remove_var("PDS_ADMIN_PASS");
     }
 
     #[test]
