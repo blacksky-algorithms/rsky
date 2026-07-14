@@ -255,6 +255,62 @@ mod tests {
             .is_empty());
     }
 
+    #[tokio::test]
+    async fn empty_put_clears_namespace() {
+        let (_dir, reader) = test_reader().await;
+        reader
+            .put_preferences(
+                vec![adult_content_pref(true)],
+                "app.bsky".to_owned(),
+                AuthScope::Access,
+            )
+            .await
+            .unwrap();
+        // None namespace returns everything
+        assert_eq!(
+            reader
+                .get_preferences(None, AuthScope::Access)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        reader
+            .put_preferences(vec![], "app.bsky".to_owned(), AuthScope::Access)
+            .await
+            .unwrap();
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .unwrap()
+            .is_empty());
+        // clearing an already-empty namespace is a no-op
+        reader
+            .put_preferences(vec![], "app.bsky".to_owned(), AuthScope::Access)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_json_is_an_error() {
+        let (_dir, reader) = test_reader().await;
+        reader
+            .db
+            .run(|conn| {
+                conn.execute(
+                    "INSERT INTO account_pref (name, \"valueJson\") VALUES ('app.bsky.actor.defs#adultContentPref', 'not json')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .is_err());
+    }
+
     #[test]
     fn unknown_pref_type_in_namespace_is_accepted() {
         let pref: RefPreferences = serde_json::from_value(serde_json::json!({

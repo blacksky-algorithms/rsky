@@ -156,6 +156,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warns_when_wal_unavailable() {
+        // in-memory databases cannot use WAL; open still succeeds
+        let db = Db::open(":memory:").unwrap();
+        let journal_mode: String = db
+            .run(|conn| Ok(conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "memory");
+    }
+
+    #[tokio::test]
     async fn run_round_trips_data() {
         let (_dir, db) = temp_db();
         db.run(|conn| {

@@ -443,6 +443,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_reader_fetches_from_db_and_caches() {
+        let (_dir, reader) = test_reader().await;
+        let bytes = b"persisted".to_vec();
+        let cid = cid_for(&bytes);
+        reader
+            .put_block(cid, bytes.clone(), "rev-1".to_owned())
+            .await
+            .unwrap();
+
+        // a second reader over the same db starts with a cold cache
+        let fresh = SqlRepoReader::new(reader.did.clone(), None, reader.db.clone());
+        assert_eq!(fresh.get_bytes(&cid).await.unwrap(), Some(bytes.clone()));
+
+        // a third reader exercises the multi-block db path, then the all-cached path
+        let fresh_two = SqlRepoReader::new(reader.did.clone(), None, reader.db.clone());
+        let first = fresh_two.get_blocks(vec![cid]).await.unwrap();
+        assert!(first.missing.is_empty());
+        let second = fresh_two.get_blocks(vec![cid]).await.unwrap();
+        assert!(second.missing.is_empty());
+        assert_eq!(second.blocks.get(cid), Some(&bytes));
+    }
+
+    #[tokio::test]
     async fn put_many_and_delete_many() {
         let (_dir, reader) = test_reader().await;
         let mut blocks = BlockMap::new();

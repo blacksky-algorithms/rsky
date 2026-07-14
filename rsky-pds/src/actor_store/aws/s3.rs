@@ -1,11 +1,13 @@
 use std::str::FromStr;
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
+use crate::actor_store::blobstore::BlobStore;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use aws_sdk_s3 as s3;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectCannedAcl, ObjectIdentifier};
+use futures::future::BoxFuture;
 use lexicon_cid::Cid;
 use rsky_common::env::env_str;
 use rsky_common::get_random_str;
@@ -213,5 +215,47 @@ impl S3BlobStore {
             .send()
             .await?;
         Ok(())
+    }
+}
+
+impl BlobStore for S3BlobStore {
+    fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
+        Box::pin(S3BlobStore::put_temp(self, bytes))
+    }
+
+    fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::make_permanent(self, key, cid))
+    }
+
+    fn put_permanent(&self, cid: Cid, bytes: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::put_permanent(self, cid, bytes))
+    }
+
+    fn quarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::quarantine(self, cid))
+    }
+
+    fn unquarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::unquarantine(self, cid))
+    }
+
+    fn get_bytes(&self, cid: Cid) -> BoxFuture<'_, Result<Vec<u8>>> {
+        Box::pin(S3BlobStore::get_bytes(self, cid))
+    }
+
+    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
+        Box::pin(S3BlobStore::get_stream(self, cid))
+    }
+
+    fn has_stored(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(S3BlobStore::has_stored(self, cid))
+    }
+
+    fn delete(&self, cid: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::delete(self, cid))
+    }
+
+    fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::delete_many(self, cids))
     }
 }

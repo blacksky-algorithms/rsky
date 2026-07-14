@@ -1065,6 +1065,100 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn extracts_backlinks_from_json_lex_values() {
+        use std::collections::BTreeMap;
+        // records decoded from JSON-wrapped Lex values rather than plain strings
+        let mut follow: RepoRecord = BTreeMap::new();
+        follow.insert(
+            "$type".to_owned(),
+            Lex::Ipld(Ipld::Json(JsonValue::String(
+                "app.bsky.graph.follow".to_owned(),
+            ))),
+        );
+        follow.insert(
+            "subject".to_owned(),
+            Lex::Ipld(Ipld::Json(JsonValue::String("did:example:bob".to_owned()))),
+        );
+        let uri = at_uri("at://did:example:alice/app.bsky.graph.follow/3jt5vlkoraa2a");
+        let links = get_backlinks(&uri, &follow).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_to, "did:example:bob");
+
+        let mut like: RepoRecord = BTreeMap::new();
+        like.insert(
+            "$type".to_owned(),
+            Lex::Ipld(Ipld::String("app.bsky.feed.like".to_owned())),
+        );
+        let mut subject_lex: BTreeMap<String, Lex> = BTreeMap::new();
+        subject_lex.insert(
+            "uri".to_owned(),
+            Lex::Ipld(Ipld::String(
+                "at://did:example:carol/app.bsky.feed.post/3jt5vlkorcc2c".to_owned(),
+            )),
+        );
+        like.insert("subject".to_owned(), Lex::Map(subject_lex));
+        let like_uri = at_uri("at://did:example:alice/app.bsky.feed.like/3jt5vlkorbb2b");
+        let links = get_backlinks(&like_uri, &like).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].path, "subject.uri");
+
+        // ipld map subject with json string uri
+        let mut like_json: RepoRecord = BTreeMap::new();
+        like_json.insert(
+            "$type".to_owned(),
+            Lex::Ipld(Ipld::String("app.bsky.feed.repost".to_owned())),
+        );
+        let mut subject_ipld: BTreeMap<String, Ipld> = BTreeMap::new();
+        subject_ipld.insert(
+            "uri".to_owned(),
+            Ipld::Json(JsonValue::String(
+                "at://did:example:carol/app.bsky.feed.post/3jt5vlkorcc2c".to_owned(),
+            )),
+        );
+        like_json.insert("subject".to_owned(), Lex::Ipld(Ipld::Map(subject_ipld)));
+        let links = get_backlinks(&like_uri, &like_json).unwrap();
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn ignores_records_with_missing_or_malformed_subjects() {
+        let follow_no_subject = record_from_json(serde_json::json!({
+            "$type": "app.bsky.graph.follow",
+            "createdAt": "2023-01-01T00:00:00.000Z",
+        }));
+        let uri = at_uri("at://did:example:alice/app.bsky.graph.follow/3jt5vlkoraa2a");
+        assert!(get_backlinks(&uri, &follow_no_subject).unwrap().is_empty());
+
+        let like_bad_subject = record_from_json(serde_json::json!({
+            "$type": "app.bsky.feed.like",
+            "subject": "not-a-map",
+            "createdAt": "2023-01-01T00:00:00.000Z",
+        }));
+        let like_uri = at_uri("at://did:example:alice/app.bsky.feed.like/3jt5vlkorbb2b");
+        assert!(get_backlinks(&like_uri, &like_bad_subject)
+            .unwrap()
+            .is_empty());
+
+        let like_no_uri = record_from_json(serde_json::json!({
+            "$type": "app.bsky.feed.like",
+            "subject": { "cid": "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t2v4" },
+            "createdAt": "2023-01-01T00:00:00.000Z",
+        }));
+        assert!(get_backlinks(&like_uri, &like_no_uri).unwrap().is_empty());
+
+        let mut like_lex_map: RepoRecord = std::collections::BTreeMap::new();
+        like_lex_map.insert(
+            "$type".to_owned(),
+            Lex::Ipld(Ipld::String("app.bsky.feed.like".to_owned())),
+        );
+        like_lex_map.insert(
+            "subject".to_owned(),
+            Lex::Map(std::collections::BTreeMap::new()),
+        );
+        assert!(get_backlinks(&like_uri, &like_lex_map).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn rejects_backlinks_with_invalid_subjects() {
         let follow = follow_record("not-a-did");

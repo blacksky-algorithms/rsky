@@ -229,6 +229,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn env_to_cfg_builds_default_and_configured_config() {
+        let cfg = env_to_cfg();
+        assert!(cfg.service.port > 0);
+        assert!(!cfg.actor_store.directory.is_empty());
+        assert!(cfg
+            .service_db
+            .account_db_location
+            .ends_with("account.sqlite"));
+        assert!(cfg.invites.required);
+
+        // configured variant: exercises hostname/appview/mod-service/invite branches
+        let vars = [
+            ("PDS_HOSTNAME", "pds.example.com"),
+            ("PDS_SERVICE_HANDLE_DOMAINS", ".pds.example.com"),
+            ("PDS_BSKY_APP_VIEW_URL", "https://appview.example.com"),
+            ("PDS_BSKY_APP_VIEW_DID", "did:web:appview.example.com"),
+            ("PDS_MOD_SERVICE_URL", "https://mod.example.com"),
+            ("PDS_MOD_SERVICE_DID", "did:web:mod.example.com"),
+            ("PDS_REPORT_SERVICE_URL", "https://report.example.com"),
+            ("PDS_REPORT_SERVICE_DID", "did:web:report.example.com"),
+            ("PDS_INVITE_REQUIRED", "false"),
+        ];
+        for (key, value) in vars {
+            std::env::set_var(key, value);
+        }
+        let cfg = env_to_cfg();
+        for (key, _) in vars {
+            std::env::remove_var(key);
+        }
+        assert_eq!(cfg.service.public_url, "https://pds.example.com");
+        assert_eq!(
+            cfg.identity.service_handle_domains,
+            vec![".pds.example.com".to_string()]
+        );
+        assert_eq!(
+            cfg.bsky_app_view.unwrap().did,
+            "did:web:appview.example.com"
+        );
+        assert_eq!(cfg.mod_service.unwrap().did, "did:web:mod.example.com");
+        assert_eq!(
+            cfg.report_service.unwrap().did,
+            "did:web:report.example.com"
+        );
+        assert!(!cfg.invites.required);
+
+        // a mod service without an explicit report service is used for reports,
+        // and a non-localhost hostname derives its own handle domain
+        std::env::set_var("PDS_HOSTNAME", "pds2.example.com");
+        std::env::set_var("PDS_MOD_SERVICE_URL", "https://mod.example.com");
+        std::env::set_var("PDS_MOD_SERVICE_DID", "did:web:mod.example.com");
+        let cfg = env_to_cfg();
+        std::env::remove_var("PDS_HOSTNAME");
+        std::env::remove_var("PDS_MOD_SERVICE_URL");
+        std::env::remove_var("PDS_MOD_SERVICE_DID");
+        assert_eq!(cfg.report_service.unwrap().did, "did:web:mod.example.com");
+        assert_eq!(
+            cfg.identity.service_handle_domains,
+            vec![".pds2.example.com".to_string()]
+        );
+
+        let cfg = env_to_cfg();
+        assert_eq!(
+            cfg.service.public_url,
+            format!("http://localhost:{}", cfg.service.port)
+        );
+
+        // no appview configured means no auth headers
+        let mut no_appview = cfg;
+        no_appview.bsky_app_view = None;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(
+                no_appview.appview_auth_headers("did:example:alice", "app.bsky.feed.getTimeline")
+            )
+            .is_err());
+    }
+
+    #[test]
     fn storage_cfg_defaults_without_data_directory() {
         let (actor_store, service_db) = storage_cfg_from(None, None, None, None, None, None);
         assert_eq!(actor_store.directory, "actors");

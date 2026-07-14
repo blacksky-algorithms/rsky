@@ -1,4 +1,3 @@
-use crate::actor_store::aws::s3::S3BlobStore;
 use anyhow::{bail, Result};
 use aws_sdk_s3::primitives::ByteStream;
 use futures::future::BoxFuture;
@@ -20,48 +19,6 @@ pub trait BlobStore: Send + Sync {
     fn has_stored(&self, cid: Cid) -> BoxFuture<'_, Result<bool>>;
     fn delete(&self, cid: String) -> BoxFuture<'_, Result<()>>;
     fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>>;
-}
-
-impl BlobStore for S3BlobStore {
-    fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
-        Box::pin(S3BlobStore::put_temp(self, bytes))
-    }
-
-    fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::make_permanent(self, key, cid))
-    }
-
-    fn put_permanent(&self, cid: Cid, bytes: Vec<u8>) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::put_permanent(self, cid, bytes))
-    }
-
-    fn quarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::quarantine(self, cid))
-    }
-
-    fn unquarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::unquarantine(self, cid))
-    }
-
-    fn get_bytes(&self, cid: Cid) -> BoxFuture<'_, Result<Vec<u8>>> {
-        Box::pin(S3BlobStore::get_bytes(self, cid))
-    }
-
-    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
-        Box::pin(S3BlobStore::get_stream(self, cid))
-    }
-
-    fn has_stored(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(S3BlobStore::has_stored(self, cid))
-    }
-
-    fn delete(&self, cid: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::delete(self, cid))
-    }
-
-    fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
-        Box::pin(S3BlobStore::delete_many(self, cids))
-    }
 }
 
 /// In-memory blobstore used by deterministic tests.

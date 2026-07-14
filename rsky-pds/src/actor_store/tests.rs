@@ -240,8 +240,13 @@ async fn reserved_keypair_lifecycle() {
         .unwrap()
         .is_some());
 
+    // clearing with a did that has no reserved file is a no-op for that file
     store
-        .clear_reserved_keypair(&key_did, Some(TEST_DID))
+        .clear_reserved_keypair(&key_did, Some("did:example:nobody"))
+        .await
+        .unwrap();
+    store
+        .clear_reserved_keypair(&for_did, Some(TEST_DID))
         .await
         .unwrap();
     assert!(store
@@ -424,6 +429,39 @@ async fn duplicate_record_cids_are_detected() {
         .await
         .unwrap();
     assert_eq!(dupes, vec![write_two.cid]);
+
+    // deleting only one of the two keeps the shared block for the other
+    let delete = PreparedWrite::Delete(PreparedDelete {
+        action: WriteOpAction::Delete,
+        uri: write_one.uri.clone(),
+        swap_cid: None,
+    });
+    txn.process_writes(vec![delete], None).await.unwrap();
+    let write_two_uri: AtUri = write_two.uri.clone().try_into().unwrap();
+    let got = txn
+        .record
+        .get_record(&write_two_uri, None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.value, write_two.record);
+}
+
+#[tokio::test]
+async fn failing_blobstore_fails_every_operation() {
+    use crate::actor_store::blobstore::BlobStore;
+    let store = FailingBlobStore;
+    let cid = current();
+    assert!(store.put_temp(vec![]).await.is_err());
+    assert!(store.make_permanent("key".to_owned(), cid).await.is_err());
+    assert!(store.put_permanent(cid, vec![]).await.is_err());
+    assert!(store.quarantine(cid).await.is_err());
+    assert!(store.unquarantine(cid).await.is_err());
+    assert!(store.get_bytes(cid).await.is_err());
+    assert!(store.get_stream(cid).await.is_err());
+    assert!(store.has_stored(cid).await.is_err());
+    assert!(store.delete(cid.to_string()).await.is_err());
+    assert!(store.delete_many(vec![cid]).await.is_err());
 }
 
 #[tokio::test]
@@ -452,4 +490,220 @@ async fn destroy_deletes_blobs_from_blobstore() {
     assert!(!blobs.stored_cids().is_empty());
     store.destroy(TEST_DID, blobs.clone()).await.unwrap();
     assert!(blobs.stored_cids().is_empty());
+}
+
+struct FailingBlobStore;
+
+impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
+    fn put_temp(&self, _bytes: Vec<u8>) -> futures::future::BoxFuture<'_, Result<String>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn make_permanent(
+        &self,
+        _key: String,
+        _cid: Cid,
+    ) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn put_permanent(
+        &self,
+        _cid: Cid,
+        _bytes: Vec<u8>,
+    ) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn quarantine(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn unquarantine(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn get_bytes(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<Vec<u8>>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn get_stream(
+        &self,
+        _cid: Cid,
+    ) -> futures::future::BoxFuture<'_, Result<aws_sdk_s3::primitives::ByteStream>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn has_stored(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn delete(&self, _cid: String) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn delete_many(&self, _cids: Vec<Cid>) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+}
+
+#[tokio::test]
+async fn reopens_evicted_db_from_disk() {
+    let (_dir, store) = test_store(1);
+    let keypair = test_keypair();
+    store.create(TEST_DID, &keypair).await.unwrap();
+    // bob evicts alice from the single-entry cache
+    store.create("did:example:bob", &keypair).await.unwrap();
+    // alice re-opens from disk
+    let reader = store.read(TEST_DID.to_owned(), blobstore()).await.unwrap();
+    assert!(reader.get_repo_root().await.is_none());
+}
+
+#[tokio::test]
+async fn destroy_logs_blobstore_failures_and_still_removes_dir() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    let metadata = txn
+        .blob
+        .upload_blob_and_get_metadata("text/plain".to_owned(), b"orphan".to_vec())
+        .await
+        .unwrap();
+    txn.blob.track_untethered_blob(metadata).await.unwrap();
+    drop(txn);
+
+    store
+        .destroy(TEST_DID, Arc::new(FailingBlobStore))
+        .await
+        .unwrap();
+    assert!(!store.exists(TEST_DID).await.unwrap());
+}
+
+#[tokio::test]
+async fn reader_keypair_errors_when_key_missing() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let location = store.get_location(TEST_DID).unwrap();
+    tokio::fs::remove_file(&location.key_location)
+        .await
+        .unwrap();
+    let reader = store.read(TEST_DID.to_owned(), blobstore()).await.unwrap();
+    assert!(reader.keypair().await.is_err());
+    assert!(store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn reserved_key_load_errors_on_unreadable_file() {
+    let (_dir, store) = test_store(10);
+    tokio::fs::create_dir_all(store.reserved_key_dir.join("not-a-file"))
+        .await
+        .unwrap();
+    assert!(store.get_reserved_keypair("not-a-file").await.is_err());
+    assert!(store.get_reserved_keypair("bad/path").await.is_err());
+}
+
+#[tokio::test]
+async fn create_repo_with_initial_writes() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    let write = post_write("3jt5vlkoraa2a", "first post");
+    let commit = txn.create_repo(vec![write.clone()]).await.unwrap();
+    assert_eq!(commit.ops.len(), 1);
+    assert_eq!(commit.ops[0].cid, Some(write.cid));
+    let write_uri: AtUri = write.uri.clone().try_into().unwrap();
+    let got = txn
+        .record
+        .get_record(&write_uri, None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.cid, write.cid.to_string());
+
+    // matching swap-commit is accepted
+    let root = txn.get_repo_root().await.unwrap();
+    let next = post_write("3jt5vlkorbb2b", "second post");
+    txn.process_writes(vec![PreparedWrite::Create(next)], Some(root))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn process_import_repo_applies_commit_and_writes() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    let init = txn.create_repo(vec![]).await.unwrap();
+
+    let write = post_write("3jt5vlkoraa2a", "imported");
+    let commit = CommitData {
+        cid: init.commit_data.cid,
+        rev: "3jt5vlkorxx2x".to_owned(),
+        since: None,
+        prev: None,
+        new_blocks: rsky_repo::block_map::BlockMap::new(),
+        relevant_blocks: rsky_repo::block_map::BlockMap::new(),
+        removed_cids: rsky_repo::cid_set::CidSet::new(None),
+    };
+    txn.process_import_repo(commit, vec![PreparedWrite::Create(write.clone())])
+        .await
+        .unwrap();
+    let write_uri: AtUri = write.uri.try_into().unwrap();
+    assert!(txn
+        .record
+        .get_record(&write_uri, None, None)
+        .await
+        .unwrap()
+        .is_none());
+    // record row indexed but block content lives outside repo_block in this synthetic import
+    assert!(txn
+        .record
+        .has_record(write_uri.to_string(), None, None)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn moved_record_keeps_shared_blocks() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    txn.create_repo(vec![]).await.unwrap();
+
+    let original = post_write("3jt5vlkoraa2a", "same content");
+    txn.process_writes(vec![PreparedWrite::Create(original.clone())], None)
+        .await
+        .unwrap();
+
+    // move the record: delete the old rkey and re-create the same content
+    // under a new rkey in a single commit (cid stays the same)
+    let moved = PreparedCreateOrUpdate {
+        uri: format!("at://{TEST_DID}/app.bsky.feed.post/3jt5vlkorbb2b"),
+        ..original.clone()
+    };
+    let delete = PreparedWrite::Delete(PreparedDelete {
+        action: WriteOpAction::Delete,
+        uri: original.uri.clone(),
+        swap_cid: None,
+    });
+    let commit = txn
+        .process_writes(vec![delete, PreparedWrite::Create(moved.clone())], None)
+        .await
+        .unwrap();
+    assert_eq!(commit.ops.len(), 2);
+
+    let moved_uri: AtUri = moved.uri.clone().try_into().unwrap();
+    let got = txn
+        .record
+        .get_record(&moved_uri, None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.cid, original.cid.to_string());
 }

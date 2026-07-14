@@ -536,17 +536,10 @@ pub async fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
     if accepted.contains(&"*/*".to_owned()) {
         return true;
     }
-    let globs: Vec<String> = accepted
-        .clone()
-        .into_iter()
-        .filter(|a| a.ends_with("/*"))
-        .collect::<Vec<String>>();
+    let globs = accepted.iter().filter_map(|a| a.strip_suffix("/*"));
     for glob in globs {
-        let start = glob.split("/").collect::<Vec<&str>>().first().copied();
-        if let Some(start) = start {
-            if mime.starts_with(&format!("{start}/")) {
-                return true;
-            }
+        if mime.starts_with(&format!("{glob}/")) {
+            return true;
         }
     }
     accepted.contains(&mime)
@@ -993,6 +986,133 @@ mod tests {
             .process_write_blobs(vec![delete_again])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_write_blobs_handles_updates() {
+        let t = test_reader().await;
+        let old_blob = upload(&t, b"old media").await;
+        let old_cid = old_blob.get_cid().unwrap();
+        let record_uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a".to_owned();
+        t.reader
+            .verify_blob_and_make_permanent(prepared_ref(&old_blob))
+            .await
+            .unwrap();
+        t.reader
+            .associate_blob(prepared_ref(&old_blob), record_uri.clone())
+            .await
+            .unwrap();
+
+        let new_blob = upload(&t, b"new media").await;
+        let new_cid = new_blob.get_cid().unwrap();
+        let update = PreparedWrite::Update(PreparedCreateOrUpdate {
+            action: WriteOpAction::Update,
+            uri: record_uri.clone(),
+            cid: new_cid,
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "updated",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![prepared_ref(&new_blob)],
+        });
+        t.reader.process_write_blobs(vec![update]).await.unwrap();
+        t.reader.background_queue.process_all().await;
+
+        // old blob dereferenced and deleted, new blob permanent and associated
+        assert!(!t.store.has_stored(old_cid).await.unwrap());
+        assert!(t.store.has_stored(new_cid).await.unwrap());
+        assert_eq!(
+            t.reader.get_records_for_blob(new_cid).await.unwrap(),
+            [record_uri]
+        );
+        assert_eq!(t.reader.blob_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn takedown_logs_missing_blobstore_entry() {
+        let t = test_reader().await;
+        // row exists but blob bytes were never promoted to storage
+        let blob = upload(&t, b"row only").await;
+        let cid = blob.get_cid().unwrap();
+        t.reader
+            .update_blob_takedown_status(
+                cid,
+                StatusAttr {
+                    applied: true,
+                    r#ref: Some("ref-x".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        let status = t
+            .reader
+            .get_blob_takedown_status(cid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.applied);
+    }
+
+    #[tokio::test]
+    async fn verify_blob_accepts_within_max_size() {
+        let t = test_reader().await;
+        let blob = upload(&t, b"small").await;
+        let mut sized = prepared_ref(&blob);
+        sized.constraints.max_size = Some(1024);
+        t.reader
+            .verify_blob_and_make_permanent(sized)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_delete_and_create_keeps_new_blobs() {
+        let t = test_reader().await;
+        let old_blob = upload(&t, b"replaced media").await;
+        let old_uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a".to_owned();
+        t.reader
+            .verify_blob_and_make_permanent(prepared_ref(&old_blob))
+            .await
+            .unwrap();
+        t.reader
+            .associate_blob(prepared_ref(&old_blob), old_uri.clone())
+            .await
+            .unwrap();
+
+        // re-upload the same bytes for a new record while deleting the old one
+        let new_blob = upload(&t, b"replaced media").await;
+        let new_uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkorbb2b".to_owned();
+        let delete = PreparedWrite::Delete(PreparedDelete {
+            action: WriteOpAction::Delete,
+            uri: old_uri,
+            swap_cid: None,
+        });
+        let create = PreparedWrite::Create(PreparedCreateOrUpdate {
+            action: WriteOpAction::Create,
+            uri: new_uri.clone(),
+            cid: new_blob.get_cid().unwrap(),
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "recreated",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![prepared_ref(&new_blob)],
+        });
+        t.reader
+            .process_write_blobs(vec![delete, create])
+            .await
+            .unwrap();
+        t.reader.background_queue.process_all().await;
+        // blob is kept because the create in the same commit references it
+        let cid = new_blob.get_cid().unwrap();
+        assert_eq!(t.reader.blob_count().await.unwrap(), 1);
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert_eq!(t.reader.get_records_for_blob(cid).await.unwrap(), [new_uri]);
     }
 
     #[tokio::test]

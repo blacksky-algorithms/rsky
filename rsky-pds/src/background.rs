@@ -55,14 +55,15 @@ impl BackgroundQueue {
         let state = self.state.clone();
         state.pending.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            match state.semaphore.acquire().await {
-                Ok(_permit) => {
-                    if let Err(err) = task.await {
-                        tracing::error!(?err, "background queue task failed");
-                    }
-                }
-                Err(err) => tracing::error!(?err, "background queue semaphore closed"),
+            let _permit = state
+                .semaphore
+                .acquire()
+                .await
+                .expect("background queue semaphore never closed");
+            if let Err(err) = task.await {
+                tracing::error!(?err, "background queue task failed");
             }
+            drop(_permit);
             state.pending.fetch_sub(1, Ordering::SeqCst);
             state.notify.notify_waiters();
         });
