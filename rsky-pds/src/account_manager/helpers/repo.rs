@@ -1,32 +1,21 @@
-use crate::db::DbConn;
+use crate::db::sqlite::Db;
 use anyhow::Result;
-use diesel::*;
 use lexicon_cid::Cid;
-use rsky_common;
+use rusqlite::params;
 
-pub async fn update_root(did: String, cid: Cid, rev: String, db: &DbConn) -> Result<()> {
+pub async fn update_root(did: String, cid: Cid, rev: String, db: &Db) -> Result<()> {
     // @TODO balance risk of a race in the case of a long retry
-    use crate::schema::pds::repo_root::dsl as RepoRootSchema;
-
     let now = rsky_common::now();
+    let cid = cid.to_string();
 
     db.run(move |conn| {
-        insert_into(RepoRootSchema::repo_root)
-            .values((
-                RepoRootSchema::did.eq(did),
-                RepoRootSchema::cid.eq(cid.to_string()),
-                RepoRootSchema::rev.eq(rev.clone()),
-                RepoRootSchema::indexedAt.eq(now),
-            ))
-            .on_conflict(RepoRootSchema::did)
-            .do_update()
-            .set((
-                RepoRootSchema::cid.eq(cid.to_string()),
-                RepoRootSchema::rev.eq(rev),
-            ))
-            .execute(conn)
+        conn.execute(
+            "INSERT INTO repo_root (did, cid, rev, \"indexedAt\") \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (did) DO UPDATE SET cid = excluded.cid, rev = excluded.rev",
+            params![did, cid, rev, now],
+        )?;
+        Ok(())
     })
-    .await?;
-
-    Ok(())
+    .await
 }

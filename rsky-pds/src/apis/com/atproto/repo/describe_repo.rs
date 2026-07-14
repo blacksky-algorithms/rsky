@@ -23,7 +23,7 @@ async fn inner_describe_repo(
     match account {
         None => bail!("Cound not find user: `{repo}`"),
         Some(account) => {
-            let mut lock = id_resolver.id_resolver.write().await;
+            let lock = id_resolver.id_resolver.write().await;
             let did_doc: DidDocument = match lock.did.ensure_resolve(&account.did, None).await {
                 Err(err) => bail!("Could not resolve DID: `{err}`"),
                 Ok(res) => res,

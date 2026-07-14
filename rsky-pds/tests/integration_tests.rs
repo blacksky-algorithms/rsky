@@ -8,16 +8,21 @@ mod common;
 
 #[tokio::test]
 async fn test_index() {
-    let postgres = common::get_postgres().await;
-    let client = common::get_client(&postgres).await;
+    let (_dir, client) = common::get_client().await;
     let response = client.get("/").dispatch().await;
     assert_eq!(response.status(), Status::Ok);
 }
 
 #[tokio::test]
+async fn test_health() {
+    let (_dir, client) = common::get_client().await;
+    let response = client.get("/xrpc/_health").dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+}
+
+#[tokio::test]
 async fn test_robots_txt() {
-    let postgres = common::get_postgres().await;
-    let client = common::get_client(&postgres).await;
+    let (_dir, client) = common::get_client().await;
     let response = client.get("/robots.txt").dispatch().await;
     let response_status = response.status();
     let response_body = response.into_string().await.unwrap();
@@ -30,8 +35,7 @@ async fn test_robots_txt() {
 
 #[tokio::test]
 async fn test_create_invite_code() {
-    let postgres = common::get_postgres().await;
-    let client = common::get_client(&postgres).await;
+    let (_dir, client) = common::get_client().await;
     let input = json!({
         "useCount": 1
     });
@@ -54,8 +58,7 @@ async fn test_create_invite_code() {
 
 #[tokio::test]
 async fn test_create_invite_code_and_account() {
-    let postgres = common::get_postgres().await;
-    let client = common::get_client(&postgres).await;
+    let (_dir, client) = common::get_client().await;
     let domain = client
         .rocket()
         .state::<ServerConfig>()
@@ -103,8 +106,7 @@ async fn test_create_invite_code_and_account() {
 
 #[tokio::test]
 async fn test_create_session() {
-    let postgres = common::get_postgres().await;
-    let client = common::get_client(&postgres).await;
+    let (_dir, client) = common::get_client().await;
 
     let (username, password) = create_account(&client).await;
 
@@ -137,4 +139,38 @@ async fn test_create_session() {
         .await;
     let response_status = response.status();
     assert_eq!(response_status, Status::BadRequest);
+}
+
+#[tokio::test]
+async fn test_list_repos() {
+    let (_dir, client) = common::get_client().await;
+    create_account(&client).await;
+
+    let response = client
+        .get("/xrpc/com.atproto.sync.listRepos?limit=10")
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["repos"].as_array().unwrap().len(), 1);
+    assert_eq!(body["repos"][0]["did"], "did:plc:khvyd3oiw46vif5gm7hijslk");
+}
+
+#[tokio::test]
+async fn test_get_invite_codes() {
+    let (_dir, client) = common::get_client().await;
+    create_account(&client).await;
+
+    for sort in ["recent", "usage"] {
+        let response = client
+            .get(format!(
+                "/xrpc/com.atproto.admin.getInviteCodes?sort={sort}&limit=10"
+            ))
+            .header(Header::new("Authorization", get_admin_token()))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+        let body: serde_json::Value = response.into_json().await.unwrap();
+        assert_eq!(body["codes"].as_array().unwrap().len(), 1);
+    }
 }

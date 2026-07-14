@@ -17,6 +17,7 @@ pub mod config;
 pub mod context;
 pub mod crawlers;
 pub mod db;
+pub mod did_cache;
 pub mod handle;
 pub mod image;
 pub mod lexicon;
@@ -26,19 +27,18 @@ pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
 pub mod repo;
-pub mod schema;
 pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
-use crate::account_manager::{AccountManager, SharedAccountManager};
+use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::background::BackgroundQueue;
-use crate::config::env_to_cfg;
+use crate::config::{env_to_cfg, ServiceDbConfig};
 use crate::crawlers::Crawlers;
-use crate::db::DbConn;
+use crate::did_cache::DidSqliteCache;
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
-use diesel::prelude::*;
 use rocket::{catch, catchers, get, options, routes, Build, Rocket};
+use std::sync::Arc;
 
 pub static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_HOMEPAGE"),
@@ -74,21 +74,16 @@ extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use diesel::sql_types::Int4;
 use dotenvy::dotenv;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::fairing::{Fairing, Info, Kind};
-use rocket::figment::{
-    util::map,
-    value::{Map, Value},
-};
 use rocket::http::Header;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
-use rsky_identity::types::{DidCache, IdentityResolverOpts};
+use rsky_identity::types::IdentityResolverOpts;
 use rsky_identity::IdResolver;
 use std::env;
 use tokio::sync::RwLock;
@@ -125,14 +120,11 @@ async fn robots() -> &'static str {
 #[tracing::instrument(skip_all)]
 #[get("/xrpc/_health")]
 async fn health(
-    connection: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<ServerVersion>, status::Custom<Json<ErrorMessageResponse>>> {
-    let result = connection
-        .run(move |conn| {
-            diesel::select(diesel::dsl::sql::<Int4>("1")) // SELECT 1;
-                .load::<i32>(conn)
-                .map(|v| v.into_iter().next().expect("no results"))
-        })
+    let result = account_manager
+        .db
+        .run(|conn| Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?))
         .await;
     match result {
         Ok(_) => {
@@ -198,32 +190,45 @@ impl Fairing for CORS {
     }
 }
 
+/// Optional overrides for the on-disk service databases, used by tests
+/// to point a rocket instance at temporary sqlite files.
+#[derive(Debug, Clone, Default)]
 pub struct RocketConfig {
-    pub db_url: String,
+    pub service_db: Option<ServiceDbConfig>,
+    pub actor_store_directory: Option<String>,
 }
 
-pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
+pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
-    let db_url = if let Some(cfg) = cfg {
-        cfg.db_url
-    } else {
-        env::var("DATABASE_URL").unwrap_or("".into())
-    };
-
-    let db: Map<_, Value> = map! {
-        "url" => db_url.into(),
-        "pool_size" => 20.into(),
-        "timeout" => 30.into(),
-    };
-
     let figment = rocket::Config::figment()
-        .merge(("databases", map!["pg_db" => db]))
         .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
-    let cfg = env_to_cfg();
+    let mut cfg = env_to_cfg();
+    if let Some(rocket_cfg) = rocket_cfg {
+        if let Some(service_db) = rocket_cfg.service_db {
+            cfg.service_db = service_db;
+        }
+        if let Some(actor_store_directory) = rocket_cfg.actor_store_directory {
+            cfg.actor_store.directory = actor_store_directory;
+        }
+    }
+
+    let account_db = account_manager::db::get_migrated_db(&cfg.service_db.account_db_location)
+        .await
+        .expect("Failed to open account database");
+    let sequencer_db = sequencer::db::get_migrated_db(&cfg.service_db.sequencer_db_location)
+        .await
+        .expect("Failed to open sequencer database");
+    let did_cache_db = did_cache::get_migrated_db(&cfg.service_db.did_cache_db_location)
+        .await
+        .expect("Failed to open did cache database");
+
+    let background_queue = BackgroundQueue::default();
+    let account_manager = AccountManager::new(account_db);
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::new(
+            sequencer_db,
             Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
             None,
         )),
@@ -242,12 +247,12 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 cfg.identity.resolver_timeout,
             )),
             plc_url: Some(cfg.identity.plc_url.clone()),
-            did_cache: Some(DidCache::new(
-                Some(std::time::Duration::from_millis(
-                    cfg.identity.cache_state_ttl,
-                )),
-                Some(std::time::Duration::from_millis(cfg.identity.cache_max_ttl)),
-            )),
+            did_cache: Some(Arc::new(DidSqliteCache::new(
+                did_cache_db,
+                background_queue.clone(),
+                std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
+                std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
+            ))),
             backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
         })),
     };
@@ -289,10 +294,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    let account_manager = SharedAccountManager {
-        account_manager: RwLock::new(AccountManager::creator()),
-    };
-    let actor_store = ActorStore::new(&cfg.actor_store, BackgroundQueue::default());
+    let actor_store = ActorStore::new(&cfg.actor_store, background_queue);
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -384,7 +386,6 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         )
         .register("/", catchers![default_catcher])
         .attach(CORS)
-        .attach(DbConn::fairing())
         .attach(shield)
         .manage(sequencer)
         .manage(aws_sdk_config)

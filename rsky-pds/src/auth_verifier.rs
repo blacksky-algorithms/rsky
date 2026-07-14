@@ -906,7 +906,7 @@ pub async fn verify_service_jwt(
             } else {
                 "atproto"
             };
-            let mut lock = futures::executor::block_on(id_resolver.id_resolver.write());
+            let lock = futures::executor::block_on(id_resolver.id_resolver.write());
             let did_doc: Result<DidDocument> =
                 futures::executor::block_on(lock.did.ensure_resolve(&did, Some(force_refresh)));
             let did_doc: DidDocument = match did_doc {

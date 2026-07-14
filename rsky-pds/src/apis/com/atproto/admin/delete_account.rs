@@ -4,7 +4,7 @@ use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
-use crate::{sequencer, SharedSequencer};
+use crate::SharedSequencer;
 use anyhow::Result;
 use aws_config::SdkConfig;
 use rocket::serde::json::Json;
@@ -30,7 +30,8 @@ async fn inner_delete_account(
         .sequence_account_evt(did.clone(), AccountStatus::Deleted)
         .await?;
 
-    sequencer::delete_all_for_user(&did, Some(vec![account_seq])).await?;
+    lock.delete_all_for_user(&did, Some(vec![account_seq]))
+        .await?;
     Ok(())
 }
 

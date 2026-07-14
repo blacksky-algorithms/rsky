@@ -186,7 +186,7 @@ pub async fn submit_plc_operation(
     seq_lock.sequence_identity_evt(did.clone(), None).await?;
 
     //Refresh DID after PLC update
-    let mut id_lock = id_resolver.id_resolver.write().await;
+    let id_lock = id_resolver.id_resolver.write().await;
     if let Err(error) = id_lock.did.ensure_resolve(&did, None).await {
         tracing::error!("Failed to fresh did after plc update\n{error}")
     };

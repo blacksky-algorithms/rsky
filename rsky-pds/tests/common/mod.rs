@@ -1,33 +1,44 @@
-use anyhow::Result;
-use diesel::{Connection, PgConnection};
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use http_auth_basic::Credentials;
 use rocket::http::{ContentType, Header};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
-use rsky_pds::config::ServerConfig;
+use rsky_pds::config::{ServerConfig, ServiceDbConfig};
 use rsky_pds::{build_rocket, RocketConfig};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::ContainerAsync;
-use testcontainers_modules::postgres;
-use testcontainers_modules::postgres::Postgres;
+use std::sync::Once;
+use tempfile::TempDir;
 
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+static INIT_ENV: Once = Once::new();
 
-/**
-    Establish connection to the testcontainer postgres
-*/
-#[tracing::instrument(skip_all)]
-pub fn establish_connection(database_url: &str) -> Result<PgConnection> {
-    tracing::debug!("Establishing database connection");
-    let result = PgConnection::establish(database_url).map_err(|error| {
-        let context = format!("Error connecting to {database_url:?}");
-        anyhow::Error::new(error).context(context)
-    })?;
-
-    Ok(result)
+/// Provides the environment the server expects when the caller (e.g. a
+/// local `cargo test` run) hasn't configured it. CI sets its own values.
+fn init_env() {
+    INIT_ENV.call_once(|| {
+        let defaults = [
+            ("PDS_HOSTNAME", "rsky.com"),
+            ("PDS_SERVICE_DID", "did:web:localho.st"),
+            ("PDS_SERVICE_HANDLE_DOMAINS", ".rsky.com"),
+            ("PDS_ADMIN_PASS", "3ed1c7b568d3328c44430add531a099f"),
+            (
+                "PDS_JWT_KEY_K256_PRIVATE_KEY_HEX",
+                "9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd",
+            ),
+            (
+                "PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX",
+                "fb478b39dd2ddf84bef135dd60f90381903eefadbb9df4b18a2b9b174ae72582",
+            ),
+            (
+                "PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX",
+                "71cfcf4882a6cff494c3d0affadd3858eb3a5838e7b5e15170e696a590a4fa01",
+            ),
+        ];
+        for (key, value) in defaults {
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, value);
+            }
+        }
+    });
 }
 
 /**
@@ -39,35 +50,25 @@ pub fn get_admin_token() -> String {
 }
 
 /**
-    Starts a testcontainer for a postgres instance, and runs migrations from rsky-pds
+    Start a client for the rsky-pds rocket instance backed by sqlite
+    databases under a fresh temporary directory
 */
-pub async fn get_postgres() -> ContainerAsync<Postgres> {
-    let postgres = postgres::Postgres::default()
-        .start()
+pub async fn get_client() -> (TempDir, Client) {
+    init_env();
+    let dir = tempfile::tempdir().expect("Valid temporary directory");
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let rocket_cfg = RocketConfig {
+        service_db: Some(ServiceDbConfig {
+            account_db_location: path("account.sqlite"),
+            sequencer_db_location: path("sequencer.sqlite"),
+            did_cache_db_location: path("did_cache.sqlite"),
+        }),
+        actor_store_directory: Some(path("actors")),
+    };
+    let client = Client::untracked(build_rocket(Some(rocket_cfg)).await)
         .await
-        .expect("Valid postgres instance");
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
-    let mut conn =
-        establish_connection(connection_string.as_str()).expect("Connection  Established");
-    conn.run_pending_migrations(MIGRATIONS).unwrap();
-    postgres
-}
-
-/**
-    Start Client for the RSky-PDS and have it use the provided postgres container
-*/
-pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
-    Client::untracked(
-        build_rocket(Some(RocketConfig {
-            db_url: connection_string,
-        }))
-        .await,
-    )
-    .await
-    .expect("Valid Rocket instance")
+        .expect("Valid Rocket instance");
+    (dir, client)
 }
 
 /**

@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 pub mod models;
 pub use self::models::Account;
 pub use self::models::Actor;

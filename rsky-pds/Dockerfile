@@ -49,8 +49,6 @@ RUN cargo build --release --package rsky-pds
 
 # Now copy the real source code and build the final binary
 COPY rsky-pds/src rsky-pds/src
-COPY rsky-pds/migrations rsky-pds/migrations
-COPY rsky-pds/diesel.toml rsky-pds/diesel.toml
 
 RUN cargo build --release --package rsky-pds
 

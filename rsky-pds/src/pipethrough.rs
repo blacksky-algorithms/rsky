@@ -385,7 +385,7 @@ pub async fn parse_proxy_header(req: &ProxyRequest<'_>) -> Result<Option<ProxyHe
                 (Some(did), Some(service_id), None) => {
                     let did = did.to_string();
                     let id_resolver = req.id_resolver;
-                    let mut lock = id_resolver.id_resolver.write().await;
+                    let lock = id_resolver.id_resolver.write().await;
                     match lock.did.resolve(did.clone(), None).await? {
                         None => bail!(InvalidRequestError::CannotResolveProxyDid),
                         Some(did_doc) => {

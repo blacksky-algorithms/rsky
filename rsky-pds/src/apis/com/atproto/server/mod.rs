@@ -43,7 +43,7 @@ pub async fn safe_resolve_did_doc(
     did: &String,
     force_refresh: Option<bool>,
 ) -> Result<Option<DidDocument>> {
-    let mut lock = id_resolver.id_resolver.write().await;
+    let lock = id_resolver.id_resolver.write().await;
     match lock.did.resolve(did.clone(), force_refresh).await {
         Ok(did_doc) => Ok(did_doc),
         Err(err) => {

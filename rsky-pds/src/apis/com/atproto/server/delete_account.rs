@@ -5,7 +5,6 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
 use crate::models::models::EmailTokenPurpose;
-use crate::sequencer;
 use crate::SharedSequencer;
 use aws_config::SdkConfig;
 use rocket::serde::json::Json;
@@ -54,7 +53,8 @@ async fn inner_delete_account(
         let account_seq = lock
             .sequence_account_evt(did.clone(), AccountStatus::Deleted)
             .await?;
-        sequencer::delete_all_for_user(&did, Some(vec![account_seq])).await?;
+        lock.delete_all_for_user(&did, Some(vec![account_seq]))
+            .await?;
         Ok(())
     } else {
         tracing::error!("account not found");
