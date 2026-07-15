@@ -1,6 +1,6 @@
 [package]
 name = "rsky-oauth"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "OAuth provider core (JOSE, JWK, DPoP) for AT Protocol services"
 license = "Apache-2.0"
@@ -10,7 +10,9 @@ homepage = "https://blackskyweb.xyz"
 repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-oauth"
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
+hex = "0.4.3"
 hmac = "0.12"
 p256 = { version = "0.13.2", features = ["ecdsa"] }
 rsky-crypto = { workspace = true }
@@ -20,3 +22,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = "2.0.11"
 url = "2.5.4"
+
+[dev-dependencies]
+tokio = { workspace = true }

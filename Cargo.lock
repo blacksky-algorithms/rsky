@@ -8080,17 +8080,20 @@ dependencies = [
 
 [[package]]
 name = "rsky-oauth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "hex",
  "hmac",
  "p256 0.13.2",
  "rsky-crypto",
  "secp256k1",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "thiserror 2.0.16",
+ "tokio",
  "url",
 ]
 
