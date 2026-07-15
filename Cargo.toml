@@ -40,7 +40,7 @@ rsky-identity = {path = "rsky-identity", version = "0.2.0"}
 rsky-crypto = {path = "rsky-crypto", version = "0.2.0"}
 rsky-syntax = {path = "rsky-syntax", version = "0.1.0"}
 rsky-common = {path = "rsky-common", version = "0.1.3"}
-rsky-repo = {path = "rsky-repo", version = "0.0.2"}
+rsky-repo = {path = "rsky-repo", version = "0.0.3"}
 rsky-firehose = {path = "rsky-firehose", version = "0.2.1"}
 
 [profile.release]

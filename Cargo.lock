@@ -8061,12 +8061,13 @@ dependencies = [
 
 [[package]]
 name = "rsky-lexicon"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
  "cid",
  "derive_builder 0.12.0",
+ "ipld-core",
  "miette 5.10.0",
  "parking_lot",
  "secp256k1",
@@ -8074,6 +8075,7 @@ dependencies = [
  "serde_bytes",
  "serde_cbor",
  "serde_derive",
+ "serde_ipld_dagcbor",
  "serde_json",
  "thiserror 1.0.69",
 ]
@@ -8203,7 +8205,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-repo"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -8315,7 +8317,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "base64 0.22.1",
  "bytes",
