@@ -201,11 +201,18 @@ pub enum RefPreferences {
     BskyAppStatePref(BskyAppStatePref),
     #[serde(rename = "app.bsky.actor.defs#labelersPref")]
     LabelersPref(LabelersPref),
+    // Lexicon unions are open: unrecognized $types must roundtrip untouched
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 impl RefPreferences {
     pub fn get_type(&self) -> String {
         let r#type = match self {
+            RefPreferences::Unknown(value) => value
+                .get("$type")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default(),
             RefPreferences::AdultContentPref(_) => "app.bsky.actor.defs#adultContentPref",
             RefPreferences::ContentLabelPref(_) => "app.bsky.actor.defs#contentLabelPref",
             RefPreferences::SavedFeedsPref(_) => "app.bsky.actor.defs#savedFeedsPref",
@@ -394,6 +401,40 @@ pub struct LabelersPrefItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_preference_type_roundtrips() {
+        let json = serde_json::json!({
+            "$type": "app.bsky.actor.defs#skyfeedBuilderFeedsPref",
+            "feeds": ["at://did:plc:abc/app.bsky.feed.generator/aaaa"],
+        });
+        let pref: RefPreferences = serde_json::from_value(json.clone()).unwrap();
+        match &pref {
+            RefPreferences::Unknown(value) => assert_eq!(value, &json),
+            other => panic!("expected Unknown variant, got {other:?}"),
+        }
+        assert_eq!(
+            pref.get_type(),
+            "app.bsky.actor.defs#skyfeedBuilderFeedsPref"
+        );
+        assert_eq!(serde_json::to_value(&pref).unwrap(), json);
+    }
+
+    #[test]
+    fn known_preference_type_still_parses_tagged() {
+        let json = serde_json::json!({
+            "$type": "app.bsky.actor.defs#adultContentPref",
+            "enabled": true,
+        });
+        let pref: RefPreferences = serde_json::from_value(json).unwrap();
+        assert!(matches!(pref, RefPreferences::AdultContentPref(_)));
+    }
+
+    #[test]
+    fn preference_without_type_has_empty_type() {
+        let pref: RefPreferences = serde_json::from_value(serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(pref.get_type(), "");
+    }
 
     #[test]
     fn profile_view_basic_omits_none_fields() {

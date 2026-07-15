@@ -1,14 +1,12 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::blob::ListBlobsOpts;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
-use crate::db::DbConn;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::sync::ListBlobsOutput;
@@ -19,9 +17,9 @@ async fn inner_list_blobs(
     since: Option<String>, // Optional revision of the repo to list blobs since.
     limit: Option<u16>,
     cursor: Option<String>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ListBlobsOutput> {
     let is_user_or_admin = if let Some(access) = auth.access {
@@ -31,7 +29,9 @@ async fn inner_list_blobs(
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
 
-    let actor_store = ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+    let actor_store = actor_store
+        .read(did.clone(), blobstore_factory.blobstore(did.clone()))
+        .await?;
     let blob_cids = actor_store
         .blob
         .list_blobs(ListBlobsOpts {
@@ -58,9 +58,9 @@ pub async fn list_blobs(
     since: Option<String>, // Optional revision of the repo to list blobs since.
     limit: Option<u16>,
     cursor: Option<String>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<ListBlobsOutput>, ApiError> {
     match inner_list_blobs(
@@ -68,9 +68,9 @@ pub async fn list_blobs(
         since,
         limit,
         cursor,
-        s3_config,
+        blobstore_factory,
         auth,
-        db,
+        actor_store,
         account_manager,
     )
     .await

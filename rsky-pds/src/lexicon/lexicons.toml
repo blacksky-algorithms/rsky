@@ -3802,6 +3802,49 @@ description = "Alt text description of the image, for accessibility."
 type = "ref"
 ref = "lex:app.bsky.embed.images#aspectRatio"
 
+[AppBskyEmbedVideo]
+lexicon = 1
+id = "app.bsky.embed.video"
+description = "A video embedded in a Bluesky record (eg, a post)."
+
+[AppBskyEmbedVideo.defs.main]
+type = "object"
+required = [ "video" ]
+
+[AppBskyEmbedVideo.defs.main.properties.video]
+type = "blob"
+accept = [ "video/mp4" ]
+maxSize = 100_000_000
+
+[AppBskyEmbedVideo.defs.main.properties.captions]
+type = "array"
+maxLength = 20
+
+[AppBskyEmbedVideo.defs.main.properties.captions.items]
+type = "ref"
+ref = "lex:app.bsky.embed.video#caption"
+
+[AppBskyEmbedVideo.defs.main.properties.alt]
+type = "string"
+description = "Alt text description of the video, for accessibility."
+
+[AppBskyEmbedVideo.defs.main.properties.aspectRatio]
+type = "ref"
+ref = "lex:app.bsky.embed.defs#aspectRatio"
+
+[AppBskyEmbedVideo.defs.caption]
+type = "object"
+required = [ "lang", "file" ]
+
+[AppBskyEmbedVideo.defs.caption.properties.lang]
+type = "string"
+format = "language"
+
+[AppBskyEmbedVideo.defs.caption.properties.file]
+type = "blob"
+accept = [ "text/vtt" ]
+maxSize = 20_000
+
 [AppBskyEmbedRecord]
 lexicon = 1
 id = "app.bsky.embed.record"

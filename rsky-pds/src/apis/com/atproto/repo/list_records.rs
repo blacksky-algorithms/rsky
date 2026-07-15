@@ -1,10 +1,8 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::db::DbConn;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ListRecordsOutput, Record};
@@ -25,8 +23,8 @@ async fn inner_list_records(
     rkeyEnd: Option<String>,
     // Flag to reverse the order of the returned records.
     reverse: bool,
-    s3_config: &State<SdkConfig>,
-    db: DbConn,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ListRecordsOutput> {
     if limit > 100 {
@@ -34,8 +32,9 @@ async fn inner_list_records(
     }
     let did = account_manager.get_did_for_actor(&repo, None).await?;
     if let Some(did) = did {
-        let mut actor_store =
-            ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+        let mut actor_store = actor_store
+            .read(did.clone(), blobstore_factory.blobstore(did.clone()))
+            .await?;
 
         let records: Vec<Record> = actor_store
             .record
@@ -90,8 +89,8 @@ pub async fn list_records(
     rkeyEnd: Option<String>,
     // Flag to reverse the order of the returned records.
     reverse: Option<bool>,
-    s3_config: &State<SdkConfig>,
-    db: DbConn,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<ListRecordsOutput>, ApiError> {
     let limit = limit.unwrap_or(50);
@@ -105,8 +104,8 @@ pub async fn list_records(
         rkeyStart,
         rkeyEnd,
         reverse,
-        s3_config,
-        db,
+        blobstore_factory,
+        actor_store,
         account_manager,
     )
     .await

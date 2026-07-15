@@ -1,10 +1,9 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
-use crate::db::DbConn;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util::{
@@ -21,7 +20,6 @@ use atrium_api::app::bsky::feed::get_post_thread::{
 use atrium_api::client::AtpServiceClient;
 use atrium_api::types::LimitedU16;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use aws_config::SdkConfig;
 use futures::stream::{self, StreamExt};
 use ipld_core::ipld::Ipld as AtriumIpld;
 use reqwest::header::HeaderMap;
@@ -49,10 +47,10 @@ pub async fn inner_get_post_thread(
     parentHeight: u16,
     auth: AccessStandard,
     res: Result<HandlerPipeThrough>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
     let requester: String = match auth.access.credentials {
@@ -66,9 +64,9 @@ pub async fn inner_get_post_thread(
                 requester,
                 res,
                 get_post_thread_munge,
-                s3_config,
+                blobstore_factory,
                 state_local_viewer,
-                db,
+                actor_store,
                 account_manager,
             )
             .await?;
@@ -85,11 +83,12 @@ pub async fn inner_get_post_thread(
                 {
                     match error {
                         Some(error) if error == "NotFound" => {
-                            let actor_store = ActorStore::new(
-                                requester.clone(),
-                                S3BlobStore::new(requester.clone(), s3_config),
-                                db,
-                            );
+                            let actor_store = actor_store
+                                .read(
+                                    requester.clone(),
+                                    blobstore_factory.blobstore(requester.clone()),
+                                )
+                                .await?;
                             let local_viewer_lock = state_local_viewer.local_viewer.read().await;
                             let local_viewer = local_viewer_lock(actor_store, account_manager);
                             let local = read_after_write_not_found(
@@ -130,10 +129,10 @@ pub async fn get_post_thread(
     parentHeight: Option<u16>, // How many levels of parent (and grandparent, etc.) post to include.
     auth: AccessStandard,
     res: Result<HandlerPipeThrough>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, ApiError> {
     let depth = depth.unwrap_or(6);
@@ -151,10 +150,10 @@ pub async fn get_post_thread(
             parentHeight,
             auth,
             res,
-            s3_config,
+            blobstore_factory,
             state_local_viewer,
             cfg,
-            db,
+            actor_store,
             account_manager,
         )
         .await

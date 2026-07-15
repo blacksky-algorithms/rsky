@@ -1,26 +1,25 @@
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
-use crate::db::DbConn;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::actor::{GetPreferencesOutput, RefPreferences};
 
 async fn inner_get_preferences(
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: AccessStandard,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
 ) -> Result<GetPreferencesOutput> {
     let auth = auth.access.credentials.unwrap();
     let requester = auth.did.unwrap().clone();
-    let actor_store = ActorStore::new(
-        requester.clone(),
-        S3BlobStore::new(requester.clone(), s3_config),
-        db,
-    );
+    let actor_store = actor_store
+        .read(
+            requester.clone(),
+            blobstore_factory.blobstore(requester.clone()),
+        )
+        .await?;
     let preferences: Vec<RefPreferences> = actor_store
         .pref
         .get_preferences(Some("app.bsky".to_string()), auth.scope.unwrap())
@@ -34,11 +33,11 @@ async fn inner_get_preferences(
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/app.bsky.actor.getPreferences")]
 pub async fn get_preferences(
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: AccessStandard,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
 ) -> Result<Json<GetPreferencesOutput>, ApiError> {
-    match inner_get_preferences(s3_config, auth, db).await {
+    match inner_get_preferences(blobstore_factory, auth, actor_store).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

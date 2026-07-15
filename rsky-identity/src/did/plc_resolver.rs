@@ -2,17 +2,18 @@ use crate::common::encode_uri_component;
 use crate::types::DidCache;
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct DidPlcResolver {
     pub plc_url: String,
     pub timeout: Duration,
-    pub cache: Option<DidCache>,
+    pub cache: Option<Arc<dyn DidCache>>,
 }
 
 impl DidPlcResolver {
-    pub fn new(plc_url: String, timeout: Duration, cache: Option<DidCache>) -> Self {
+    pub fn new(plc_url: String, timeout: Duration, cache: Option<Arc<dyn DidCache>>) -> Self {
         Self {
             plc_url,
             timeout,

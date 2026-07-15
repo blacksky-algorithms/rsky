@@ -1,6 +1,6 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::{AccountManager, CreateAccountOpts};
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::safe_resolve_did_doc;
 use crate::apis::ApiError;
@@ -8,14 +8,12 @@ use crate::auth_verifier::UserDidAuthOptional;
 use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::config::ServerConfig;
 use crate::context::PDS_REPO_SIGNING_KEYPAIR;
-use crate::db::DbConn;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::sequencer::events::sync_evt_data_from_commit;
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
-use aws_config::SdkConfig;
 use email_address::*;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -47,11 +45,11 @@ pub async fn server_create_account(
     body: Json<CreateAccountInput>,
     auth: UserDidAuthOptional,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -77,17 +75,27 @@ pub async fn server_create_account(
     .await?;
 
     // Create new actor repo TODO: Proper rollback
-    let mut actor_store =
-        ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
-    let commit = match actor_store
-        .create_repo(&PDS_REPO_SIGNING_KEYPAIR, Vec::new())
-        .await
-    {
-        Ok(commit) => commit,
-        Err(error) => {
-            tracing::error!("Failed to create repo\n{:?}", error);
-            actor_store.destroy().await?;
-            return Err(ApiError::RuntimeError);
+    let blobstore = blobstore_factory.blobstore(did.clone());
+    if let Err(error) = actor_store.create(&did, &PDS_REPO_SIGNING_KEYPAIR).await {
+        tracing::error!("Failed to create actor store\n{:?}", error);
+        return Err(ApiError::RuntimeError);
+    }
+    let commit = {
+        let actor_txn = match actor_store.transact(did.clone(), blobstore.clone()).await {
+            Ok(actor_txn) => actor_txn,
+            Err(error) => {
+                tracing::error!("Failed to open actor store\n{:?}", error);
+                actor_store.destroy(&did, blobstore.clone()).await?;
+                return Err(ApiError::RuntimeError);
+            }
+        };
+        match actor_txn.create_repo(Vec::new()).await {
+            Ok(commit) => commit,
+            Err(error) => {
+                tracing::error!("Failed to create repo\n{:?}", error);
+                actor_store.destroy(&did, blobstore.clone()).await?;
+                return Err(ApiError::RuntimeError);
+            }
         }
     };
 
@@ -106,7 +114,7 @@ pub async fn server_create_account(
                 }
                 Err(_) => {
                     tracing::error!("Failed to create did:plc");
-                    actor_store.destroy().await?;
+                    actor_store.destroy(&did, blobstore.clone()).await?;
                     return Err(ApiError::RuntimeError);
                 }
             }
@@ -117,7 +125,7 @@ pub async fn server_create_account(
         Ok(res) => res,
         Err(error) => {
             tracing::error!("Error resolving DID Doc\n{error}");
-            actor_store.destroy().await?;
+            actor_store.destroy(&did, blobstore.clone()).await?;
             return Err(ApiError::RuntimeError);
         }
     };
@@ -142,7 +150,7 @@ pub async fn server_create_account(
         }
         Err(error) => {
             tracing::error!("Error creating account\n{error}");
-            actor_store.destroy().await?;
+            actor_store.destroy(&did, blobstore.clone()).await?;
             return Err(ApiError::RuntimeError);
         }
     }
@@ -286,7 +294,7 @@ pub async fn validate_inputs_for_local_pds(
         id_resolver,
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
-    if !super::validate_handle(&handle) {
+    if !super::validate_handle(&handle, &cfg.identity.service_handle_domains) {
         return Err(ApiError::InvalidHandle);
     };
 

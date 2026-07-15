@@ -34,7 +34,7 @@ pub async fn inner_register_push(
         None => "".to_string(),
         Some(credentials) => credentials.did.unwrap_or("".to_string()),
     };
-    let nsid = Ids::AppBskyFeedGetFeedGenerator.as_str().to_string();
+    let nsid = Ids::AppBskyNotificationRegisterPush.as_str().to_string();
     let auth_headers = context::service_auth_headers(&did, &service_did, &nsid).await?;
 
     let client = ReqwestClientBuilder::new(app_view_url)

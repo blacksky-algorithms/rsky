@@ -223,7 +223,7 @@ impl BackfillerManager {
                 did_cache: None,
                 backup_nameservers: None,
             };
-            let mut resolver = IdResolver::new(resolver_opts);
+            let resolver = IdResolver::new(resolver_opts);
             let Ok(Some(doc)) = resolver.did.resolve(did.to_string(), None).await else {
                 metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
                 return Err(WintermuteError::Other(format!(

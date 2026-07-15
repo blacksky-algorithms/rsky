@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.removeMember",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Remove a member (by DID) from a simplespace-managed space. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "did"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID of the member to remove."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }, { "name": "MemberNotFound" }]
+    }
+  }
+}

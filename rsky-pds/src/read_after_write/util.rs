@@ -1,14 +1,12 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
-use crate::db::DbConn;
 use crate::pipethrough::parse_res;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::viewer::{get_records_since_rev, LocalViewer};
 use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use rocket::http::Status;
@@ -112,9 +110,9 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     requester: String,
     res: HandlerPipeThrough,
     munge: MungeFn<T>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
     match read_after_write_internal(
@@ -122,16 +120,16 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
         requester.clone(),
         res.clone(),
         munge,
-        s3_config,
+        blobstore_factory,
         state_local_viewer,
-        db,
+        actor_store,
         account_manager,
     )
     .await
     {
         Ok(read_after_write_result) => Ok(read_after_write_result),
         Err(err) => {
-            tracing::error!(
+            tracing::warn!(
                 "Error in read after write munge {} {}",
                 err.to_string(),
                 requester
@@ -147,9 +145,9 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     requester: String,
     res: HandlerPipeThrough,
     munge: MungeFn<T>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
-    db: DbConn,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<T>> {
     let headers = &res.headers.clone().unwrap_or_default();
@@ -157,11 +155,12 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
     match rev {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(rev) => {
-            let actor_store = ActorStore::new(
-                requester.clone(),
-                S3BlobStore::new(requester.clone(), s3_config),
-                db,
-            );
+            let actor_store = actor_store
+                .read(
+                    requester.clone(),
+                    blobstore_factory.blobstore(requester.clone()),
+                )
+                .await?;
             let local = get_records_since_rev(&actor_store, rev).await?;
             if local.count <= 0 {
                 return Ok(ReadAfterWriteResponse::HandlerPipeThrough(res));

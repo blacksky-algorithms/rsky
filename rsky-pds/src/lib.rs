@@ -12,30 +12,37 @@ pub mod account_manager;
 pub mod actor_store;
 pub mod apis;
 pub mod auth_verifier;
+pub mod background;
 pub mod config;
 pub mod context;
 pub mod crawlers;
 pub mod db;
+pub mod did_cache;
 pub mod handle;
 pub mod image;
 pub mod lexicon;
 pub mod mailer;
 pub mod models;
+pub mod oauth;
 pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
 pub mod repo;
-pub mod schema;
 pub mod sequencer;
+pub mod space_auth;
+pub mod space_scope;
 pub mod well_known;
 pub mod xrpc_server;
-use crate::account_manager::{AccountManager, SharedAccountManager};
-use crate::config::env_to_cfg;
+use crate::account_manager::AccountManager;
+use crate::actor_store::blobstore::BlobstoreFactory;
+use crate::actor_store::ActorStore;
+use crate::background::BackgroundQueue;
+use crate::config::{env_to_cfg, ServiceDbConfig};
 use crate::crawlers::Crawlers;
-use crate::db::DbConn;
+use crate::did_cache::DidSqliteCache;
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
-use diesel::prelude::*;
 use rocket::{catch, catchers, get, options, routes, Build, Rocket};
+use std::sync::Arc;
 
 pub static APP_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_HOMEPAGE"),
@@ -71,22 +78,16 @@ extern crate rocket;
 use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use diesel::sql_types::Int4;
 use dotenvy::dotenv;
 use rocket::data::{Limits, ToByteUnit};
 use rocket::fairing::{Fairing, Info, Kind};
-use rocket::figment::{
-    util::map,
-    value::{Map, Value},
-};
 use rocket::http::Header;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
 use rocket::{Request, Response};
-use rsky_common::env::env_list;
-use rsky_identity::types::{DidCache, IdentityResolverOpts};
+use rsky_identity::types::IdentityResolverOpts;
 use rsky_identity::IdResolver;
 use std::env;
 use tokio::sync::RwLock;
@@ -123,14 +124,11 @@ async fn robots() -> &'static str {
 #[tracing::instrument(skip_all)]
 #[get("/xrpc/_health")]
 async fn health(
-    connection: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<ServerVersion>, status::Custom<Json<ErrorMessageResponse>>> {
-    let result = connection
-        .run(move |conn| {
-            diesel::select(diesel::dsl::sql::<Int4>("1")) // SELECT 1;
-                .load::<i32>(conn)
-                .map(|v| v.into_iter().next().expect("no results"))
-        })
+    let result = account_manager
+        .db
+        .run(|conn| Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?))
         .await;
     match result {
         Ok(_) => {
@@ -152,6 +150,12 @@ async fn health(
             ))
         }
     }
+}
+
+// Pure liveness probe: must never touch the database
+#[get("/xrpc/_health/live")]
+async fn health_live() -> &'static str {
+    "ok"
 }
 
 #[tracing::instrument(skip_all)]
@@ -190,32 +194,50 @@ impl Fairing for CORS {
     }
 }
 
+/// Optional overrides for the on-disk service databases, used by tests
+/// to point a rocket instance at temporary sqlite files.
+#[derive(Debug, Clone, Default)]
 pub struct RocketConfig {
-    pub db_url: String,
+    pub service_db: Option<ServiceDbConfig>,
+    pub actor_store_directory: Option<String>,
 }
 
-pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
+pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
-    let db_url = if let Some(cfg) = cfg {
-        cfg.db_url
-    } else {
-        env::var("DATABASE_URL").unwrap_or("".into())
-    };
-
-    let db: Map<_, Value> = map! {
-        "url" => db_url.into(),
-        "pool_size" => 20.into(),
-        "timeout" => 30.into(),
-    };
-
     let figment = rocket::Config::figment()
-        .merge(("databases", map!["pg_db" => db]))
         .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
-    let cfg = env_to_cfg();
+    let mut cfg = env_to_cfg();
+    if let Some(rocket_cfg) = rocket_cfg {
+        if let Some(service_db) = rocket_cfg.service_db {
+            cfg.service_db = service_db;
+        }
+        if let Some(actor_store_directory) = rocket_cfg.actor_store_directory {
+            cfg.actor_store.directory = actor_store_directory;
+        }
+    }
+
+    let account_db = account_manager::db::get_migrated_db(&cfg.service_db.account_db_location)
+        .await
+        .expect("Failed to open account database");
+    let sequencer_db = sequencer::db::get_migrated_db(&cfg.service_db.sequencer_db_location)
+        .await
+        .expect("Failed to open sequencer database");
+    let did_cache_db = did_cache::get_migrated_db(&cfg.service_db.did_cache_db_location)
+        .await
+        .expect("Failed to open did cache database");
+
+    let background_queue = BackgroundQueue::default();
+    let shared_oauth_provider = oauth::SharedOAuthProvider::new(
+        account_db.clone(),
+        cfg.service.public_url.clone(),
+        cfg.service.did.clone(),
+    );
+    let account_manager = AccountManager::new(account_db);
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::new(
+            sequencer_db,
             Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
             None,
         )),
@@ -227,15 +249,21 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
+    let blobstore_factory = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config);
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
-            timeout: None,
-            plc_url: Some(
-                env::var("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned()),
-            ),
-            did_cache: Some(DidCache::new(None, None)),
-            backup_nameservers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
+            timeout: Some(std::time::Duration::from_millis(
+                cfg.identity.resolver_timeout,
+            )),
+            plc_url: Some(cfg.identity.plc_url.clone()),
+            did_cache: Some(Arc::new(DidSqliteCache::new(
+                did_cache_db,
+                background_queue.clone(),
+                std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
+                std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
+            ))),
+            backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
         })),
     };
 
@@ -276,9 +304,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    let account_manager = SharedAccountManager {
-        account_manager: RwLock::new(AccountManager::creator()),
-    };
+    let actor_store = ActorStore::new(&cfg.actor_store, background_queue);
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -289,11 +315,13 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 index,
                 robots,
                 health,
+                health_live,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
                 com::atproto::admin::enable_account_invites::enable_account_invites,
                 com::atproto::admin::get_account_info::get_account_info,
+                com::atproto::admin::get_account_infos::get_account_infos,
                 com::atproto::admin::get_invite_codes::get_invite_codes,
                 com::atproto::admin::get_subject_status::get_subject_status,
                 com::atproto::admin::send_email::send_email,
@@ -301,8 +329,12 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::admin::update_account_email::update_account_email,
                 com::atproto::admin::update_account_handle::update_account_handle,
                 com::atproto::admin::update_subject_status::update_subject_status,
+                com::atproto::identity::refresh_identity::refresh_identity,
+                com::atproto::identity::resolve_did::resolve_did,
                 com::atproto::identity::resolve_handle::resolve_handle,
+                com::atproto::identity::resolve_identity::resolve_identity,
                 com::atproto::identity::update_handle::update_handle,
+                com::atproto::moderation::create_report::create_report,
                 com::atproto::identity::sign_plc_operation::sign_plc_operation,
                 com::atproto::identity::get_recommended_did_credentials::get_recommended_did_credentials,
                 com::atproto::identity::request_plc_operation_signature::request_plc_operation_signature,
@@ -342,8 +374,34 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::server::revoke_app_password::revoke_app_password,
                 com::atproto::server::update_email::update_email,
                 com::atproto::server::reserve_signing_key::reserve_signing_key,
+                com::atproto::simplespace::add_member::simplespace_add_member,
+                com::atproto::simplespace::create_space::simplespace_create_space,
+                com::atproto::simplespace::delete_space::simplespace_delete_space,
+                com::atproto::simplespace::list_members::simplespace_list_members,
+                com::atproto::simplespace::remove_member::simplespace_remove_member,
+                com::atproto::simplespace::update_space::simplespace_update_space,
+                com::atproto::space::apply_writes::space_apply_writes,
+                com::atproto::space::create_record::space_create_record,
+                com::atproto::space::delete_record::space_delete_record,
+                com::atproto::space::get_blob::space_get_blob,
+                com::atproto::space::get_delegation_token::space_get_delegation_token,
+                com::atproto::space::get_latest_commit::space_get_latest_commit,
+                com::atproto::space::get_record::space_get_record,
+                com::atproto::space::get_repo::space_get_repo,
+                com::atproto::space::get_space::space_get_space,
+                com::atproto::space::get_space_credential::space_get_space_credential,
+                com::atproto::space::list_records::space_list_records,
+                com::atproto::space::list_repo_ops::space_list_repo_ops,
+                com::atproto::space::list_repos::space_list_repos,
+                com::atproto::space::list_spaces::space_list_spaces,
+                com::atproto::space::notify_space_deleted::space_notify_space_deleted,
+                com::atproto::space::notify_write::space_notify_write,
+                com::atproto::space::put_record::space_put_record,
+                com::atproto::space::register_notify::space_register_notify,
                 com::atproto::sync::get_blob::get_blob,
                 com::atproto::sync::get_blocks::get_blocks,
+                com::atproto::sync::get_checkout::get_checkout,
+                com::atproto::sync::get_head::get_head,
                 com::atproto::sync::get_latest_commit::get_latest_commit,
                 com::atproto::sync::get_record::get_record,
                 com::atproto::sync::get_repo::get_repo,
@@ -351,6 +409,7 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::sync::list_blobs::list_blobs,
                 com::atproto::sync::list_repos::list_repos,
                 com::atproto::sync::subscribe_repos::subscribe_repos,
+                com::atproto::temp::check_signup_queue::check_signup_queue,
                 app::bsky::actor::get_preferences::get_preferences,
                 app::bsky::actor::get_profile::get_profile,
                 app::bsky::actor::get_profiles::get_profiles,
@@ -361,21 +420,35 @@ pub async fn build_rocket(cfg: Option<RocketConfig>) -> Rocket<Build> {
                 app::bsky::feed::get_post_thread::get_post_thread,
                 app::bsky::feed::get_timeline::get_timeline,
                 app::bsky::notification::register_push::register_push,
+                app::bsky::notification::unregister_push::unregister_push,
                 bsky_api_get_forwarder,
                 bsky_api_post_forwarder,
                 well_known::well_known,
+                oauth::routes::oauth_par,
+                oauth::routes::oauth_token,
+                oauth::routes::oauth_revoke,
+                oauth::routes::oauth_jwks,
+                oauth::routes::oauth_authorization_server_metadata,
+                oauth::routes::oauth_protected_resource_metadata,
+                oauth::routes::oauth_authorize,
+                oauth::routes::oauth_authorize_sign_in,
+                oauth::routes::oauth_authorize_select,
+                oauth::routes::oauth_authorize_accept,
+                oauth::routes::oauth_authorize_reject,
                 all_options
             ],
         )
         .register("/", catchers![default_catcher])
         .attach(CORS)
-        .attach(DbConn::fairing())
+        .attach(oauth::OAuthHeaders)
         .attach(shield)
         .manage(sequencer)
-        .manage(aws_sdk_config)
+        .manage(blobstore_factory)
         .manage(id_resolver)
         .manage(cfg)
         .manage(local_viewer)
         .manage(app_view_agent)
         .manage(account_manager)
+        .manage(shared_oauth_provider)
+        .manage(actor_store)
 }

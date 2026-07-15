@@ -1,0 +1,34 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.getBlob",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a blob referenced by a record in a permissioned repo. Returns the full blob as originally uploaded. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "did", "cid"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the account that authored the blob's referencing record."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "The CID of the blob to fetch."
+          }
+        }
+      },
+      "output": {
+        "encoding": "*/*"
+      },
+      "errors": [{ "name": "BlobNotFound" }, { "name": "RepoNotFound" }]
+    }
+  }
+}

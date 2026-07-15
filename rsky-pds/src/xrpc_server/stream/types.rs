@@ -25,6 +25,14 @@ pub struct ErrorFrameBody {
     pub message: Option<String>, // Error message
 }
 
+/// Body of a `#info` message frame on a subscription stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoFrameBody {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FrameHeader {
     MessageFrameHeader(MessageFrameHeader),

@@ -1,7 +1,10 @@
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::{AccessStandard, AuthScope, Credentials};
 use crate::handle;
 use crate::handle::errors::ErrorKind;
-use crate::pipethrough::{pipethrough_procedure, pipethrough_procedure_post, ProxyRequest};
+use crate::pipethrough::{
+    pipethrough_error, pipethrough_procedure, pipethrough_procedure_post, ProxyRequest,
+    PRIVILEGED_METHODS,
+};
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::FromParam;
@@ -28,6 +31,27 @@ impl<'a> FromParam<'a> for Nsid {
     }
 }
 
+/// Privileged methods (e.g. chat.bsky.*) must not be reachable with
+/// unprivileged app-password credentials.
+pub fn assert_valid_token_method(
+    nsid: &str,
+    credentials: &Option<Credentials>,
+) -> Result<(), ApiError> {
+    if PRIVILEGED_METHODS.contains(nsid) {
+        let privileged = matches!(
+            credentials.as_ref().and_then(|c| c.scope.as_ref()),
+            Some(AuthScope::Access) | Some(AuthScope::AppPassPrivileged)
+        );
+        if !privileged {
+            return Err(ApiError::BadRequest(
+                "InvalidToken".to_string(),
+                "Bad token method".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Lower ranks have higher presidence
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
@@ -38,6 +62,7 @@ pub async fn bsky_api_get_forwarder(
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
+    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
     let requester: Option<String> = match auth.access.credentials {
         None => None,
         Some(credentials) => credentials.did,
@@ -57,18 +82,19 @@ pub async fn bsky_api_get_forwarder(
         }
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(pipethrough_error(&error))
         }
     }
 }
 
-#[rocket::post("/xrpc/<_nsid>", data = "<body>", rank = 2)]
+#[rocket::post("/xrpc/<nsid>", data = "<body>", rank = 2)]
 pub async fn bsky_api_post_forwarder(
     body: Data<'_>,
-    _nsid: Nsid,
+    nsid: Nsid,
     auth: AccessStandard,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
+    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
     let requester: Option<String> = match auth.access.credentials {
         None => None,
         Some(credentials) => credentials.did,
@@ -110,6 +136,8 @@ pub enum ApiError {
     BlobNotFound,
     BadRequest(String, String),
     AuthRequiredError(String),
+    /// Error passed through from an upstream service: status code, error, message
+    UpstreamResponse(u16, String, String),
 }
 
 #[derive(Serialize)]
@@ -416,6 +444,18 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                     &[],
                 )));
                 res.set_status(Status { code: 401u16 });
+                Ok(res)
+            }
+            ApiError::UpstreamResponse(status, error, message) => {
+                let body = Json(ErrorBody { error, message });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: status });
                 Ok(res)
             }
             ApiError::RecordNotFound => {

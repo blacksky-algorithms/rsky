@@ -1,33 +1,110 @@
-use anyhow::Result;
-use diesel::{Connection, PgConnection};
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use http_auth_basic::Credentials;
 use rocket::http::{ContentType, Header};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::server::CreateInviteCodeOutput;
-use rsky_pds::config::ServerConfig;
+use rsky_pds::config::{ServerConfig, ServiceDbConfig};
 use rsky_pds::{build_rocket, RocketConfig};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::ContainerAsync;
-use testcontainers_modules::postgres;
-use testcontainers_modules::postgres::Postgres;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::Once;
+use tempfile::TempDir;
 
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+static INIT_ENV: Once = Once::new();
 
-/**
-    Establish connection to the testcontainer postgres
-*/
-#[tracing::instrument(skip_all)]
-pub fn establish_connection(database_url: &str) -> Result<PgConnection> {
-    tracing::debug!("Establishing database connection");
-    let result = PgConnection::establish(database_url).map_err(|error| {
-        let context = format!("Error connecting to {database_url:?}");
-        anyhow::Error::new(error).context(context)
-    })?;
+/// Serves DID documents for any did requested, claiming the handle of the
+/// account created by `create_account`. Keeps DID resolution hermetic.
+fn start_mock_plc_directory() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock plc directory");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let did = path
+                .trim_start_matches('/')
+                .replace("%3A", ":")
+                .replace("%3a", ":");
+            let domain = std::env::var("PDS_SERVICE_HANDLE_DOMAINS")
+                .unwrap_or(".rsky.com".to_string())
+                .split(',')
+                .next()
+                .unwrap()
+                .to_string();
+            // Every doc claims a PDS service endpoint pointing back at this
+            // mock, which answers 200 to any request. This lets best-effort
+            // notification fan-out resolve and deliver hermetically.
+            let body = format!(
+                "{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"],\
+                 \"service\":[{{\"id\":\"#atproto_pds\",\"type\":\"AtprotoPersonalDataServer\",\
+                 \"serviceEndpoint\":\"http://127.0.0.1:{port}\"}}]}}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
 
-    Ok(result)
+/// Provides the environment the server expects when the caller (e.g. a
+/// local `cargo test` run) hasn't configured it. CI sets its own values.
+fn init_env() {
+    INIT_ENV.call_once(|| {
+        let defaults = [
+            ("PDS_HOSTNAME", "rsky.com"),
+            ("PDS_SERVICE_DID", "did:web:localho.st"),
+            ("PDS_SERVICE_HANDLE_DOMAINS", ".rsky.com"),
+            ("PDS_ADMIN_PASS", "3ed1c7b568d3328c44430add531a099f"),
+            // pin the proxy targets so a developer's .env cannot leak real
+            // services into the tests; localhost is rejected by is_safe_url
+            ("PDS_MOD_SERVICE_URL", "http://localhost:1"),
+            ("PDS_MOD_SERVICE_DID", "did:web:mod.invalid"),
+            ("PDS_REPORT_SERVICE_URL", "http://localhost:1"),
+            ("PDS_REPORT_SERVICE_DID", "did:web:report.invalid"),
+            (
+                "PDS_JWT_KEY_K256_PRIVATE_KEY_HEX",
+                "9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd",
+            ),
+            (
+                "PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX",
+                "fb478b39dd2ddf84bef135dd60f90381903eefadbb9df4b18a2b9b174ae72582",
+            ),
+            (
+                "PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX",
+                "71cfcf4882a6cff494c3d0affadd3858eb3a5838e7b5e15170e696a590a4fa01",
+            ),
+        ];
+        for (key, value) in defaults {
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, value);
+            }
+        }
+        if std::env::var("PDS_BLOBSTORE_DISK_LOCATION").is_err()
+            && std::env::var("PDS_BLOBSTORE_S3_BUCKET").is_err()
+        {
+            let blob_dir =
+                std::env::temp_dir().join(format!("rsky-pds-test-blobs-{}", std::process::id()));
+            std::fs::create_dir_all(&blob_dir).expect("create test blobstore dir");
+            std::env::set_var("PDS_BLOBSTORE_DISK_LOCATION", &blob_dir);
+        }
+        if std::env::var("PDS_DID_PLC_URL").is_err() {
+            let port = start_mock_plc_directory();
+            std::env::set_var("PDS_DID_PLC_URL", format!("http://127.0.0.1:{port}"));
+        }
+        if std::env::var("PDS_BSKY_APP_VIEW_URL").is_err() {
+            let port = start_mock_plc_directory();
+            std::env::set_var("PDS_BSKY_APP_VIEW_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PDS_BSKY_APP_VIEW_DID", "did:web:appview.invalid");
+        }
+    });
 }
 
 /**
@@ -39,40 +116,31 @@ pub fn get_admin_token() -> String {
 }
 
 /**
-    Starts a testcontainer for a postgres instance, and runs migrations from rsky-pds
+    Start a client for the rsky-pds rocket instance backed by sqlite
+    databases under a fresh temporary directory
 */
-pub async fn get_postgres() -> ContainerAsync<Postgres> {
-    let postgres = postgres::Postgres::default()
-        .start()
+pub async fn get_client() -> (TempDir, Client) {
+    init_env();
+    let dir = tempfile::tempdir().expect("Valid temporary directory");
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let rocket_cfg = RocketConfig {
+        service_db: Some(ServiceDbConfig {
+            account_db_location: path("account.sqlite"),
+            sequencer_db_location: path("sequencer.sqlite"),
+            did_cache_db_location: path("did_cache.sqlite"),
+        }),
+        actor_store_directory: Some(path("actors")),
+    };
+    let client = Client::untracked(build_rocket(Some(rocket_cfg)).await)
         .await
-        .expect("Valid postgres instance");
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
-    let mut conn =
-        establish_connection(connection_string.as_str()).expect("Connection  Established");
-    conn.run_pending_migrations(MIGRATIONS).unwrap();
-    postgres
-}
-
-/**
-    Start Client for the RSky-PDS and have it use the provided postgres container
-*/
-pub async fn get_client(postgres: &ContainerAsync<Postgres>) -> Client {
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let connection_string = format!("postgres://postgres:postgres@localhost:{port}/postgres",);
-    Client::untracked(
-        build_rocket(Some(RocketConfig {
-            db_url: connection_string,
-        }))
-        .await,
-    )
-    .await
-    .expect("Valid Rocket instance")
+        .expect("Valid Rocket instance");
+    (dir, client)
 }
 
 /**
     Creates a mock account for testing purposes
 */
+#[allow(dead_code)] // not every test binary drives the account flow
 pub async fn create_account(client: &Client) -> (String, String) {
     let domain = client
         .rocket()
