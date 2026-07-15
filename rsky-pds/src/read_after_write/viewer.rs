@@ -245,10 +245,7 @@ impl LocalViewer {
         match author {
             None => Ok(None),
             Some(author) => {
-                let embed = match record.embed {
-                    None => None,
-                    Some(_) => self.format_post_embed(record.clone()).await?,
-                };
+                let embed = self.format_post_embed(record.clone()).await?;
                 Ok(Some(PostView {
                     uri: uri.to_string(),
                     cid: cid.to_string(),
@@ -271,24 +268,25 @@ impl LocalViewer {
         match embed {
             None => Ok(None),
             Some(embed) => match embed {
-                Embeds::Images(embed) => Ok(Some(
-                    self.format_simple_embed(MediaUnion::Images(embed)).await,
-                )),
-                Embeds::External(embed) => Ok(Some(
-                    self.format_simple_embed(MediaUnion::External(embed)).await,
-                )),
+                Embeds::Images(embed) => {
+                    Ok(self.format_simple_embed(MediaUnion::Images(embed)).await)
+                }
+                Embeds::External(embed) => {
+                    Ok(self.format_simple_embed(MediaUnion::External(embed)).await)
+                }
                 Embeds::Record(embed) => Ok(Some(EmbedViews::RecordView(
                     self.format_record_embed(embed).await?,
                 ))),
-                Embeds::RecordWithMedia(embed) => Ok(Some(EmbedViews::RecordWithMediaView(
-                    self.format_record_with_media_embed(embed).await?,
-                ))),
-                _ => Ok(None), // @TODO: Handle video
+                Embeds::RecordWithMedia(embed) => Ok(self
+                    .format_record_with_media_embed(embed)
+                    .await?
+                    .map(EmbedViews::RecordWithMediaView)),
+                Embeds::Video(_) => Ok(None),
             },
         }
     }
 
-    pub async fn format_simple_embed(&self, embed: MediaUnion) -> EmbedViews {
+    pub async fn format_simple_embed(&self, embed: MediaUnion) -> Option<EmbedViews> {
         match embed {
             MediaUnion::Images(embed) => {
                 let images = embed
@@ -307,7 +305,7 @@ impl LocalViewer {
                         aspect_ratio: img.aspect_ratio,
                     })
                     .collect::<Vec<ViewImage>>();
-                EmbedViews::ImagesView(ImagesView { images })
+                Some(EmbedViews::ImagesView(ImagesView { images }))
             }
             MediaUnion::External(embed) => {
                 let ExternalObject {
@@ -316,7 +314,7 @@ impl LocalViewer {
                     description,
                     thumb,
                 } = embed.external;
-                EmbedViews::ExternalView(ExternalView {
+                Some(EmbedViews::ExternalView(ExternalView {
                     external: ViewExternal {
                         uri,
                         title,
@@ -329,9 +327,9 @@ impl LocalViewer {
                             )),
                         },
                     },
-                })
+                }))
             }
-            _ => panic!("Can't handle video"), // @TODO: Handle video
+            MediaUnion::Video(_) => None,
         }
     }
 
@@ -435,14 +433,14 @@ impl LocalViewer {
     pub async fn format_record_with_media_embed(
         &self,
         embed: RecordWithMedia,
-    ) -> Result<RecordWithMediaView> {
+    ) -> Result<Option<RecordWithMediaView>> {
         let media = match self.format_simple_embed(embed.media).await {
-            EmbedViews::ImagesView(media) => MediaViewUnion::ImagesView(media),
-            EmbedViews::ExternalView(media) => MediaViewUnion::ExternalView(media),
-            _ => bail!("Unexpected enum for media."),
+            Some(EmbedViews::ImagesView(media)) => MediaViewUnion::ImagesView(media),
+            Some(EmbedViews::ExternalView(media)) => MediaViewUnion::ExternalView(media),
+            _ => return Ok(None),
         };
         let record = self.format_record_embed(embed.record).await?;
-        Ok(RecordWithMediaView { record, media })
+        Ok(Some(RecordWithMediaView { record, media }))
     }
 
     pub fn update_profile_view_basic(
@@ -481,11 +479,12 @@ impl LocalViewer {
             did,
             handle,
             display_name,
-            description,
             avatar,
             labels,
             indexed_at,
+            ..
         } = view;
+        let description = record.description.clone();
         let ProfileViewBasic {
             did,
             handle,
@@ -500,7 +499,7 @@ impl LocalViewer {
                 avatar,
                 associated: None,
                 viewer: None,
-                labels: Some(labels),
+                labels: Some(labels.clone()),
                 created_at: None,
             },
             record,
@@ -511,7 +510,7 @@ impl LocalViewer {
             display_name,
             description,
             avatar,
-            labels: vec![],
+            labels,
             indexed_at,
         }
     }
@@ -520,6 +519,7 @@ impl LocalViewer {
         &self,
         view: ProfileViewDetailed,
         record: Profile,
+        local_posts_count: usize,
     ) -> ProfileViewDetailed {
         let ProfileViewDetailed {
             did,
@@ -572,7 +572,7 @@ impl LocalViewer {
             },
             followers_count,
             follows_count,
-            posts_count,
+            posts_count: apply_local_posts_count(posts_count, local_posts_count),
             associated,
             joined_via_starter_pack,
             viewer,
@@ -602,6 +602,12 @@ impl LocalViewer {
             .build();
         Ok(AtpServiceClient::new(client))
     }
+}
+
+/// Adds locally written posts to an upstream posts_count.
+/// Returns None if the upstream count is unknown.
+pub fn apply_local_posts_count(upstream: Option<usize>, local_posts: usize) -> Option<usize> {
+    upstream.map(|count| count + local_posts)
 }
 
 pub async fn get_records_since_rev(

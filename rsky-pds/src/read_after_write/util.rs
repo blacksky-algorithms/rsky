@@ -129,7 +129,7 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
     {
         Ok(read_after_write_result) => Ok(read_after_write_result),
         Err(err) => {
-            tracing::error!(
+            tracing::warn!(
                 "Error in read after write munge {} {}",
                 err.to_string(),
                 requester
