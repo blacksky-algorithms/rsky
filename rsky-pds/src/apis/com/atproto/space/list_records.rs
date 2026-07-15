@@ -2,7 +2,9 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::decode_record;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::{open_local_repo, parse_space_uri, space_error};
+use crate::apis::com::atproto::space::{
+    internal_error, open_local_repo, parse_space_uri, space_error,
+};
 use crate::apis::ApiError;
 use crate::space_auth::{authorize_space_read, SpaceReadAuth};
 use crate::space_scope::SpaceRequest;
@@ -68,10 +70,10 @@ pub async fn space_list_records(
             let value = if exclude_values {
                 None
             } else {
-                Some(decode_record(&row.value).map_err(|error| {
-                    tracing::error!("stored record failed to decode: {error}");
-                    ApiError::RuntimeError
-                })?)
+                Some(
+                    decode_record(&row.value)
+                        .map_err(internal_error("stored record failed to decode"))?,
+                )
             };
             Ok(Record {
                 uri: space_id.record_uri(&did, &row.collection, &row.rkey),

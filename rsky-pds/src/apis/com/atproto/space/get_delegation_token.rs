@@ -1,5 +1,5 @@
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::parse_space_uri;
+use crate::apis::com::atproto::space::{internal_error, parse_space_uri};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::space_auth::{mint_delegation_token, session_permits};
@@ -25,13 +25,11 @@ pub async fn space_get_delegation_token(
             "session does not cover this space".to_string(),
         ));
     }
-    let keypair = actor_store.keypair(&did).await.map_err(|error| {
-        tracing::error!("missing actor keypair: {error}");
-        ApiError::RuntimeError
-    })?;
-    let token = mint_delegation_token(&keypair, &did, &space_id).map_err(|error| {
-        tracing::error!("delegation token mint failed: {error}");
-        ApiError::RuntimeError
-    })?;
+    let keypair = actor_store
+        .keypair(&did)
+        .await
+        .map_err(internal_error("missing actor keypair"))?;
+    let token = mint_delegation_token(&keypair, &did, &space_id)
+        .map_err(internal_error("delegation token mint failed"))?;
     Ok(Json(GetDelegationTokenOutput { token }))
 }

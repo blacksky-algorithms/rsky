@@ -3,7 +3,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::{
     def_app_access, def_policy, local_space_def, ActorJtiStore, FixedKeyResolver,
 };
-use crate::apis::com::atproto::space::parse_space_uri;
+use crate::apis::com::atproto::space::{internal_error, parse_space_uri};
 use crate::apis::ApiError;
 use crate::config::ServerConfig;
 use crate::space_auth::{now_secs, resolve_signing_did_key, ATPROTO_KEY_IDS};
@@ -54,10 +54,7 @@ pub async fn space_get_space_credential(
             now_secs() as i64,
         )
         .await
-        .map_err(|error| {
-            tracing::error!("jti store failure: {error}");
-            ApiError::RuntimeError
-        })?;
+        .map_err(internal_error("jti store failure"))?;
     if !fresh {
         return Err(ApiError::InvalidRequest(
             "delegation token replayed".to_string(),

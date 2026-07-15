@@ -2,7 +2,9 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::commit::sign_commit;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::{open_local_repo, parse_space_uri, space_error};
+use crate::apis::com::atproto::space::{
+    internal_error, open_local_repo, parse_space_uri, space_error,
+};
 use crate::apis::ApiError;
 use crate::space_auth::{authorize_space_read, SpaceReadAuth};
 use crate::space_scope::SpaceRequest;
@@ -57,29 +59,19 @@ pub async fn space_get_repo(
     let mut entries: BTreeMap<String, Cid> = BTreeMap::new();
     let mut blocks: HashMap<Cid, Vec<u8>> = HashMap::new();
     for row in rows {
-        let cid = Cid::from_str(&row.cid).map_err(|error| {
-            tracing::error!("stored cid failed to parse: {error}");
-            ApiError::RuntimeError
-        })?;
+        let cid = Cid::from_str(&row.cid).map_err(internal_error("stored cid failed to parse"))?;
         entries.insert(format!("{}/{}", row.collection, row.rkey), cid);
         blocks.insert(cid, row.value);
     }
-    let keypair = reader.keypair().await.map_err(|error| {
-        tracing::error!("missing actor keypair: {error}");
-        ApiError::RuntimeError
-    })?;
-    let commit = sign_commit(&keypair, &space_id.uri(), &did, &state.rev, &state.hash()).map_err(
-        |error| {
-            tracing::error!("commit signing failed: {error}");
-            ApiError::RuntimeError
-        },
-    )?;
+    let keypair = reader
+        .keypair()
+        .await
+        .map_err(internal_error("missing actor keypair"))?;
+    let commit = sign_commit(&keypair, &space_id.uri(), &did, &state.rev, &state.hash())
+        .map_err(internal_error("commit signing failed"))?;
     let car = repo_car_bytes(&commit, &entries, move |cid| blocks.get(cid).cloned())
         .await
-        .map_err(|error| {
-            tracing::error!("car serialization failed: {error}");
-            ApiError::RuntimeError
-        })?;
+        .map_err(internal_error("car serialization failed"))?;
     Ok(CarResponder(
         car,
         Header::new("content-type", "application/vnd.ipld.car"),

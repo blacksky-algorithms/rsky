@@ -49,6 +49,15 @@ pub fn format_expiry(expiry: &chrono::DateTime<chrono::Utc>) -> String {
     expiry.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
+/// Log-and-500 for local failures (missing key material, storage faults)
+/// that a healthy instance never produces.
+pub fn internal_error<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> ApiError {
+    move |error| {
+        tracing::error!("{context}: {error}");
+        ApiError::RuntimeError
+    }
+}
+
 pub fn parse_space_uri(space: &str) -> Result<SpaceId, ApiError> {
     SpaceId::parse(space)
         .map_err(|_| ApiError::InvalidRequest(format!("invalid space uri: {space}")))
@@ -109,16 +118,12 @@ pub async fn serve_commit(
         .live_repo_state(space_uri)
         .await
         .map_err(space_error)?;
-    let keypair = reader.keypair().await.map_err(|error| {
-        tracing::error!("missing actor keypair: {error}");
-        ApiError::RuntimeError
-    })?;
-    let commit = sign_commit(&keypair, space_uri, &reader.did, &state.rev, &state.hash()).map_err(
-        |error| {
-            tracing::error!("commit signing failed: {error}");
-            ApiError::RuntimeError
-        },
-    )?;
+    let keypair = reader
+        .keypair()
+        .await
+        .map_err(internal_error("missing actor keypair"))?;
+    let commit = sign_commit(&keypair, space_uri, &reader.did, &state.rev, &state.hash())
+        .map_err(internal_error("commit signing failed"))?;
     Ok(to_lexicon(&commit))
 }
 

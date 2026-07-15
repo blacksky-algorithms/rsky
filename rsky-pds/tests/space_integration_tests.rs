@@ -1729,3 +1729,59 @@ async fn read_guard_scope_boundaries() {
         .process_all()
         .await;
 }
+
+#[tokio::test]
+async fn missing_key_material_is_an_internal_error() {
+    let s = setup().await;
+    create_post(&s, "3ka", "one").await;
+    // mint a delegation token while the key still exists
+    let (_, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    let delegation = body["token"].as_str().unwrap().to_string();
+
+    // simulate lost key material for the author
+    let key_location = s
+        .client
+        .rocket()
+        .state::<ActorStore>()
+        .unwrap()
+        .get_location(AUTHOR_DID)
+        .unwrap()
+        .key_location;
+    std::fs::remove_file(key_location).unwrap();
+
+    // serve-time signing paths surface a 500, never a bogus commit
+    for path in [
+        format!(
+            "/xrpc/com.atproto.space.getLatestCommit?space={}&did={AUTHOR_DID}",
+            s.space
+        ),
+        format!(
+            "/xrpc/com.atproto.space.getRepo?space={}&did={AUTHOR_DID}",
+            s.space
+        ),
+        format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+    ] {
+        let (status, _) = get_json(&s.client, &path, &s.author_token).await;
+        assert_eq!(status, Status::InternalServerError, "{path}");
+    }
+    // the host role cannot answer without its keypair either
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        &s.member_token,
+        json!({"space": s.space, "delegationToken": delegation}),
+    )
+    .await;
+    assert_eq!(status, Status::InternalServerError);
+}

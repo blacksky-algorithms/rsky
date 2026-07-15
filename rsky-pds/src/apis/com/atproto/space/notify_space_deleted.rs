@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::notify_write::BearerToken;
-use crate::apis::com::atproto::space::parse_space_uri;
+use crate::apis::com::atproto::space::{internal_error, parse_space_uri};
 use crate::apis::ApiError;
 use crate::space_auth::{verify_space_service_token, NOTIFY_SPACE_DELETED_LXM};
 use crate::SharedIdResolver;
@@ -51,10 +51,7 @@ pub async fn space_notify_space_deleted(
             Ok(rows)
         })
         .await
-        .map_err(|error| {
-            tracing::error!("account listing failed: {error}");
-            ApiError::RuntimeError
-        })?;
+        .map_err(internal_error("account listing failed"))?;
     for did in dids {
         let Ok(reader) = actor_store
             .read(did.clone(), blobstore_factory.blobstore(did.clone()))

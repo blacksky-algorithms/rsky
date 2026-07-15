@@ -1,7 +1,9 @@
 use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::{BlobNotFoundError, BlobstoreFactory};
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::{open_local_repo, parse_space_uri, space_error};
+use crate::apis::com::atproto::space::{
+    internal_error, open_local_repo, parse_space_uri, space_error,
+};
 use crate::apis::ApiError;
 use crate::space_auth::{authorize_space_read, SpaceReadAuth};
 use crate::space_scope::SpaceRequest;
@@ -60,10 +62,11 @@ pub async fn space_get_blob(
         Cid::from_str(&cid).map_err(|_| ApiError::InvalidRequest(format!("invalid cid: {cid}")))?;
     match reader.blob.get_blob(parsed_cid).await {
         Ok(found) => {
-            let bytes: AggregatedBytes = found.stream.collect().await.map_err(|error| {
-                tracing::error!("blob read failed: {error}");
-                ApiError::RuntimeError
-            })?;
+            let bytes: AggregatedBytes = found
+                .stream
+                .collect()
+                .await
+                .map_err(internal_error("blob read failed"))?;
             let bytes = bytes.to_vec();
             Ok(SpaceBlobResponder(
                 bytes.clone(),

@@ -58,10 +58,10 @@ pub async fn local_space_def(
         .live_space_def(&space.uri())
         .await
         .map_err(super::space_error)?;
-    let keypair = reader.keypair().await.map_err(|error| {
-        tracing::error!("missing authority keypair: {error}");
-        ApiError::RuntimeError
-    })?;
+    let keypair = reader
+        .keypair()
+        .await
+        .map_err(super::internal_error("missing authority keypair"))?;
     Ok((def, reader.space.clone(), keypair))
 }
 

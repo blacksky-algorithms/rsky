@@ -101,8 +101,10 @@ pub async fn actor_keypair(
     actor_store: &ActorStore,
     did: &str,
 ) -> Result<secp256k1::Keypair, ApiError> {
-    actor_store.keypair(did).await.map_err(|error| {
-        tracing::error!("missing actor keypair: {error}");
-        ApiError::RuntimeError
-    })
+    actor_store
+        .keypair(did)
+        .await
+        .map_err(crate::apis::com::atproto::space::internal_error(
+            "missing actor keypair",
+        ))
 }
