@@ -125,6 +125,7 @@ pub async fn get_client() -> (TempDir, Client) {
 /**
     Creates a mock account for testing purposes
 */
+#[allow(dead_code)] // not every test binary drives the account flow
 pub async fn create_account(client: &Client) -> (String, String) {
     let domain = client
         .rocket()
