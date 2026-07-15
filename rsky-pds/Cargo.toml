@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"
@@ -51,6 +51,8 @@ rsky-crypto = { workspace = true }
 rsky-identity = { workspace = true }
 rsky-lexicon = { workspace = true }
 rsky-repo = { workspace = true }
+rsky-space = { path = "../rsky-space", version = "0.2.0" }
+rsky-space-host = { path = "../rsky-space-host", version = "0.2.0" }
 rsky-syntax = { workspace = true }
 secp256k1 = { workspace = true }
 serde = { workspace = true }

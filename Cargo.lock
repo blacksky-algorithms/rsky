@@ -8128,7 +8128,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8170,6 +8170,8 @@ dependencies = [
  "rsky-identity",
  "rsky-lexicon",
  "rsky-repo",
+ "rsky-space",
+ "rsky-space-host",
  "rsky-syntax",
  "rusqlite",
  "secp256k1",
