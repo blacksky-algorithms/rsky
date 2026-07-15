@@ -480,6 +480,7 @@ impl AccountManager {
 
 pub mod db;
 pub mod helpers;
+pub mod oauth_store;
 #[cfg(test)]
 pub(crate) mod tests;
 
