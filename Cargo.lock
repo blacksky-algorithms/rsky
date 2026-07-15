@@ -2206,6 +2206,18 @@ dependencies = [
 
 [[package]]
 name = "deadpool"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb84100978c1c7b37f09ed3ce3e5f843af02c2a2c431bae5b19230dad2c1b490"
+dependencies = [
+ "async-trait",
+ "deadpool-runtime",
+ "num_cpus",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
@@ -2222,7 +2234,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19be9da496d60d03ec3ab45d960d80a3afb285b787394b83614a79942f467e7f"
 dependencies = [
- "deadpool",
+ "deadpool 0.12.3",
  "getrandom 0.2.16",
  "tokio",
  "tokio-postgres",
@@ -7930,6 +7942,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-daemon"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "cid",
+ "clap",
+ "hex",
+ "reqwest 0.12.23",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-identity",
+ "rsky-lexicon",
+ "rsky-space",
+ "rsky-syntax",
+ "rusqlite",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "rsky-feedgen"
 version = "1.1.5"
 dependencies = [
@@ -8064,6 +8109,7 @@ name = "rsky-lexicon"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "cid",
  "derive_builder 0.12.0",
@@ -8257,6 +8303,66 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rsky-space"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "cid",
+ "hex",
+ "hkdf",
+ "hmac",
+ "iroh-car",
+ "p256 0.13.2",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-syntax",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "rsky-space-host"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "hex",
+ "http-body-util",
+ "p256 0.13.2",
+ "rand 0.8.5",
+ "reqwest 0.12.23",
+ "rsky-common",
+ "rsky-crypto",
+ "rsky-identity",
+ "rsky-lexicon",
+ "rsky-space",
+ "rsky-syntax",
+ "rusqlite",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -11403,6 +11509,30 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "wiremock"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "101681b74cd87b5899e87bcf5a64e83334dd313fcd3053ea72e6dba18928e301"
+dependencies = [
+ "assert-json-diff",
+ "async-trait",
+ "base64 0.22.1",
+ "deadpool 0.10.0",
+ "futures",
+ "http 1.3.1",
+ "http-body-util",
+ "hyper 1.7.0",
+ "hyper-util",
+ "log",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
