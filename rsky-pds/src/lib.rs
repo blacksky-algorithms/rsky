@@ -23,6 +23,7 @@ pub mod image;
 pub mod lexicon;
 pub mod mailer;
 pub mod models;
+pub mod oauth;
 pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
@@ -225,6 +226,11 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .expect("Failed to open did cache database");
 
     let background_queue = BackgroundQueue::default();
+    let shared_oauth_provider = oauth::SharedOAuthProvider::new(
+        account_db.clone(),
+        cfg.service.public_url.clone(),
+        cfg.service.did.clone(),
+    );
     let account_manager = AccountManager::new(account_db);
 
     let sequencer = SharedSequencer {
@@ -392,11 +398,23 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 bsky_api_get_forwarder,
                 bsky_api_post_forwarder,
                 well_known::well_known,
+                oauth::routes::oauth_par,
+                oauth::routes::oauth_token,
+                oauth::routes::oauth_revoke,
+                oauth::routes::oauth_jwks,
+                oauth::routes::oauth_authorization_server_metadata,
+                oauth::routes::oauth_protected_resource_metadata,
+                oauth::routes::oauth_authorize,
+                oauth::routes::oauth_authorize_sign_in,
+                oauth::routes::oauth_authorize_select,
+                oauth::routes::oauth_authorize_accept,
+                oauth::routes::oauth_authorize_reject,
                 all_options
             ],
         )
         .register("/", catchers![default_catcher])
         .attach(CORS)
+        .attach(oauth::OAuthHeaders)
         .attach(shield)
         .manage(sequencer)
         .manage(blobstore_factory)
@@ -405,5 +423,6 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(local_viewer)
         .manage(app_view_agent)
         .manage(account_manager)
+        .manage(shared_oauth_provider)
         .manage(actor_store)
 }

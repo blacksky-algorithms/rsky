@@ -12,6 +12,7 @@ documentation = "https://docs.rs/rsky-pds"
 
 [dependencies]
 anyhow = "1.0.79"
+askama = "0.12.1"
 async-trait = "0.1"
 argon2 = "0.5.3"
 async-event-emitter = "0.1.3"
@@ -41,6 +42,7 @@ lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
 rand = { workspace = true }
+rsky-oauth = { path = "../rsky-oauth", version = "0.2.0" }
 rand_core = { workspace = true }
 regex = "1.10.3"
 reqwest = { version = "0.12.3", features = ["json", "blocking"] }

@@ -799,12 +799,183 @@ pub fn validate_bearer_token(
     }
 }
 
-// @TODO: Implement DPop/OAuth
+/// Maps the granted OAuth scopes onto the closest legacy [`AuthScope`],
+/// mirroring the upstream transition-scope semantics: `transition:generic`
+/// is app-password-equivalent access and `transition:chat.bsky` raises it
+/// to privileged app-password access.
+pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
+    let has = |scope: &str| scopes.iter().any(|granted| granted == scope);
+    if !has("atproto") {
+        bail!("Bad token scope")
+    }
+    if has("transition:chat.bsky") {
+        Ok(AuthScope::AppPassPrivileged)
+    } else if has("transition:generic") {
+        Ok(AuthScope::AppPass)
+    } else {
+        bail!("Bad token scope")
+    }
+}
+
+pub fn dpop_token_from_req(request: &Request) -> Option<String> {
+    match request.headers().get_one("authorization") {
+        Some(header)
+            if header.len() > DPOP.len() && header[..DPOP.len()].eq_ignore_ascii_case(DPOP) =>
+        {
+            Some(header[DPOP.len()..].to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Validates a DPoP-bound OAuth access token against the provider,
+/// mapping the granted scopes onto the legacy [`AuthScope`] model.
+async fn validate_dpop_access_token(
+    request: &Request<'_>,
+    token: String,
+    scopes: Vec<AuthScope>,
+    opts: Option<ValidateAccessTokenOpts>,
+) -> Result<AccessOutput> {
+    let Some(shared) = request
+        .rocket()
+        .state::<crate::oauth::SharedOAuthProvider>()
+    else {
+        bail!("OAuth provider is not configured")
+    };
+    let Some(cfg) = request.rocket().state::<crate::config::ServerConfig>() else {
+        bail!("Server config is not available")
+    };
+    let provider = &shared.provider;
+    let now = crate::oauth::now_secs();
+    let uri = format!("{}{}", cfg.service.public_url, request.uri());
+    let dpop_headers: Vec<String> = request.headers().get("dpop").map(String::from).collect();
+    let dpop_refs: Vec<&str> = dpop_headers.iter().map(String::as_str).collect();
+    let verified = provider
+        .verify_access_token(
+            &token,
+            &rsky_oauth::DpopRequest {
+                method: request.method().as_str(),
+                uri: &uri,
+                dpop_headers: &dpop_refs,
+                access_token: Some(&token),
+            },
+            now,
+        )
+        .await;
+    let verified = match verified {
+        Ok(verified) => {
+            crate::oauth::stage_oauth_headers(
+                request,
+                crate::oauth::OAuthResponseHeaders {
+                    dpop_nonce: provider.next_dpop_nonce(now),
+                    www_authenticate: None,
+                },
+            );
+            verified
+        }
+        Err(error) => {
+            crate::oauth::stage_oauth_headers(
+                request,
+                crate::oauth::OAuthResponseHeaders {
+                    dpop_nonce: provider.next_dpop_nonce(now),
+                    www_authenticate: Some(format!(
+                        "DPoP error=\"{}\", error_description=\"{}\"",
+                        error.error_code(),
+                        error.error_description()
+                    )),
+                },
+            );
+            bail!("{}", error.error_description())
+        }
+    };
+    let scope = oauth_scopes_to_auth_scope(&verified.scopes)?;
+    if !scopes.is_empty() && !scopes.contains(&scope) {
+        bail!("Bad token scope")
+    }
+    let ValidateAccessTokenOpts {
+        check_takedown,
+        check_deactivated,
+    } = opts.unwrap_or(ValidateAccessTokenOpts {
+        check_takedown: Some(false),
+        check_deactivated: Some(false),
+    });
+    check_account_status(
+        request,
+        &verified.did,
+        check_takedown.unwrap_or(false),
+        check_deactivated.unwrap_or(false),
+    )
+    .await?;
+    Ok(AccessOutput {
+        credentials: Some(Credentials {
+            r#type: "oauth".to_string(),
+            did: Some(verified.did),
+            scope: Some(scope),
+            audience: Some(env::var("PDS_SERVICE_DID")?),
+            token_id: Some(verified.token_id),
+            aud: None,
+            iss: None,
+            is_privileged: None,
+        }),
+        artifacts: Some(token),
+    })
+}
+
+async fn check_account_status(
+    request: &Request<'_>,
+    did: &str,
+    check_takedown: bool,
+    check_deactivated: bool,
+) -> Result<()> {
+    if !check_takedown && !check_deactivated {
+        return Ok(());
+    }
+    let account_manager = match request.guard::<AccountManager>().await {
+        Outcome::Success(account_manager) => account_manager,
+        _ => {
+            return Err(anyhow::Error::new(AuthError::InternalServerError(
+                "Unexpected Error Occurred".to_string(),
+            )))
+        }
+    };
+    let found: ActorAccount = match account_manager
+        .get_account(
+            did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await
+    {
+        Ok(Some(found)) => found,
+        _ => {
+            return Err(anyhow::Error::new(AuthError::AccountNotFound(
+                "Account not found".to_string(),
+            )))
+        }
+    };
+    if check_takedown && found.takedown_ref.is_some() {
+        return Err(anyhow::Error::new(AuthError::AccountTakedown(
+            "Account has been taken down".to_string(),
+        )));
+    }
+    if check_deactivated && found.deactivated_at.is_some() {
+        return Err(anyhow::Error::new(AuthError::AccountDeactivated(
+            "Account is deactivated".to_string(),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn validate_access_token(
     request: &Request<'_>,
     scopes: Vec<AuthScope>,
     opts: Option<ValidateAccessTokenOpts>,
 ) -> Result<AccessOutput> {
+    if let Some(token) = dpop_token_from_req(request) {
+        return validate_dpop_access_token(request, token, scopes, opts).await;
+    }
     let options = VerificationOptions {
         allowed_audiences: Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID")?])),
         ..Default::default()
@@ -824,55 +995,13 @@ pub async fn validate_access_token(
         check_takedown: Some(false),
         check_deactivated: Some(false),
     });
-    let check_takedown = check_takedown.unwrap_or(false);
-    let check_deactivated = check_deactivated.unwrap_or(false);
-
-    let account_manager = match request
-        .guard::<AccountManager>()
-        .await
-        .map(|account_manager| account_manager)
-    {
-        Outcome::Success(account_manager) => account_manager,
-        Outcome::Error(_) => {
-            return Err(anyhow::Error::new(AuthError::InternalServerError(
-                "Unexpected Error Occurred".to_string(),
-            )))
-        }
-        Outcome::Forward(_) => {
-            return Err(anyhow::Error::new(AuthError::InternalServerError(
-                "Unexpected Error Occurred".to_string(),
-            )))
-        }
-    };
-    if check_takedown || check_deactivated {
-        let found: ActorAccount = match account_manager
-            .get_account(
-                &did,
-                Some(AvailabilityFlags {
-                    include_deactivated: Some(true),
-                    include_taken_down: Some(true),
-                }),
-            )
-            .await
-        {
-            Ok(Some(found)) => found,
-            _ => {
-                return Err(anyhow::Error::new(AuthError::AccountNotFound(
-                    "Account not found".to_string(),
-                )))
-            }
-        };
-        if check_takedown && found.takedown_ref.is_some() {
-            return Err(anyhow::Error::new(AuthError::AccountTakedown(
-                "Account has been taken down".to_string(),
-            )));
-        }
-        if check_deactivated && found.deactivated_at.is_some() {
-            return Err(anyhow::Error::new(AuthError::AccountDeactivated(
-                "Account is deactivated".to_string(),
-            )));
-        }
-    }
+    check_account_status(
+        request,
+        &did,
+        check_takedown.unwrap_or(false),
+        check_deactivated.unwrap_or(false),
+    )
+    .await?;
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -951,6 +1080,7 @@ pub fn is_user_or_admin(auth: AccessOutput, did: &String) -> bool {
 
 const BEARER: &str = "Bearer ";
 const BASIC: &str = "Basic ";
+const DPOP: &str = "DPoP ";
 
 pub fn is_bearer_token(request: &Request) -> bool {
     match request.headers().get_one("Authorization") {
@@ -1028,6 +1158,34 @@ mod tests {
 
     // base64("admin:password")
     const CREDS: &str = "YWRtaW46cGFzc3dvcmQ=";
+
+    #[test]
+    fn oauth_scope_mapping_follows_transition_semantics() {
+        let scopes = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:generic"])).unwrap(),
+            AuthScope::AppPass
+        );
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "transition:generic",
+                "transition:chat.bsky"
+            ]))
+            .unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // chat access alone still maps to privileged app-password access
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:chat.bsky"])).unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // atproto alone grants no legacy access level
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto"])).is_err());
+        // missing the mandatory atproto scope is rejected outright
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["transition:generic"])).is_err());
+        assert!(oauth_scopes_to_auth_scope(&[]).is_err());
+    }
 
     fn assert_admin(parsed: Option<BasicAuth>) {
         let parsed = parsed.expect("expected successful parse");
