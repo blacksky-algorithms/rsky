@@ -388,6 +388,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 app::bsky::feed::get_post_thread::get_post_thread,
                 app::bsky::feed::get_timeline::get_timeline,
                 app::bsky::notification::register_push::register_push,
+                app::bsky::notification::unregister_push::unregister_push,
                 bsky_api_get_forwarder,
                 bsky_api_post_forwarder,
                 well_known::well_known,
