@@ -368,6 +368,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::server::reserve_signing_key::reserve_signing_key,
                 com::atproto::sync::get_blob::get_blob,
                 com::atproto::sync::get_blocks::get_blocks,
+                com::atproto::sync::get_checkout::get_checkout,
+                com::atproto::sync::get_head::get_head,
                 com::atproto::sync::get_latest_commit::get_latest_commit,
                 com::atproto::sync::get_record::get_record,
                 com::atproto::sync::get_repo::get_repo,
