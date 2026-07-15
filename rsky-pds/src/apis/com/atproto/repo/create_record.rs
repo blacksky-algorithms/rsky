@@ -1,13 +1,12 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -15,13 +14,12 @@ use rsky_lexicon::com::atproto::repo::{CreateRecordInput, CreateRecordOutput};
 use rsky_repo::types::{PreparedDelete, PreparedWrite};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
-use std::sync::Arc;
 
 async fn inner_create_record(
     body: Json<CreateRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<CreateRecordOutput> {
@@ -65,10 +63,7 @@ async fn inner_create_record(
         .await?;
 
         let mut actor_store = actor_store
-            .transact(
-                did.clone(),
-                Arc::new(S3BlobStore::new(did.clone(), s3_config)),
-            )
+            .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
         let backlink_conflicts: Vec<AtUri> = match validate {
             Some(true) => {
@@ -125,7 +120,7 @@ pub async fn create_record(
     body: Json<CreateRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
@@ -134,7 +129,7 @@ pub async fn create_record(
         body,
         auth,
         sequencer,
-        s3_config,
+        blobstore_factory,
         actor_store,
         account_manager,
     )

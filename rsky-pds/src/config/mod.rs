@@ -16,6 +16,37 @@ pub struct ServerConfig {
     pub crawlers: Vec<String>,
     pub actor_store: ActorStoreConfig,
     pub service_db: ServiceDbConfig,
+    pub blobstore: BlobstoreConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlobstoreConfig {
+    Disk {
+        location: String,
+        tmp_location: Option<String>,
+    },
+    S3 {
+        bucket: Option<String>,
+    },
+}
+
+pub fn blobstore_cfg_from(
+    disk_location: Option<String>,
+    disk_tmp_location: Option<String>,
+    s3_bucket: Option<String>,
+) -> Result<BlobstoreConfig> {
+    match (disk_location, s3_bucket) {
+        (Some(_), Some(_)) => bail!("Cannot set both S3 and disk blobstore env vars"),
+        (Some(location), None) => Ok(BlobstoreConfig::Disk {
+            location,
+            tmp_location: disk_tmp_location,
+        }),
+        (None, Some(bucket)) => Ok(BlobstoreConfig::S3 {
+            bucket: Some(bucket),
+        }),
+        // legacy deployments derive a per-actor bucket from the DID
+        (None, None) => Ok(BlobstoreConfig::S3 { bucket: None }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +229,12 @@ pub fn env_to_cfg() -> ServerConfig {
         env_str("PDS_SEQUENCER_DB_LOCATION"),
         env_str("PDS_DID_CACHE_DB_LOCATION"),
     );
+    let blobstore_cfg = blobstore_cfg_from(
+        env_str("PDS_BLOBSTORE_DISK_LOCATION"),
+        env_str("PDS_BLOBSTORE_DISK_TMP_LOCATION"),
+        env_str("PDS_BLOBSTORE_S3_BUCKET"),
+    )
+    .expect("invalid blobstore configuration");
 
     ServerConfig {
         service: service_cfg,
@@ -210,6 +247,7 @@ pub fn env_to_cfg() -> ServerConfig {
         identity: identity_cfg,
         actor_store: actor_store_cfg,
         service_db: service_db_cfg,
+        blobstore: blobstore_cfg,
     }
 }
 
@@ -306,6 +344,59 @@ mod tests {
                 no_appview.appview_auth_headers("did:example:alice", "app.bsky.feed.getTimeline")
             )
             .is_err());
+    }
+
+    #[test]
+    fn blobstore_cfg_prefers_disk_when_disk_location_set() {
+        let cfg = blobstore_cfg_from(Some("/data/blobs".to_owned()), None, None).unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: None,
+            }
+        );
+
+        let cfg = blobstore_cfg_from(
+            Some("/data/blobs".to_owned()),
+            Some("/data/tmp".to_owned()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: Some("/data/tmp".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn blobstore_cfg_uses_s3_bucket_when_set() {
+        let cfg = blobstore_cfg_from(None, None, Some("my-bucket".to_owned())).unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::S3 {
+                bucket: Some("my-bucket".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn blobstore_cfg_falls_back_to_legacy_s3() {
+        let cfg = blobstore_cfg_from(None, None, None).unwrap();
+        assert_eq!(cfg, BlobstoreConfig::S3 { bucket: None });
+    }
+
+    #[test]
+    fn blobstore_cfg_rejects_both_disk_and_s3() {
+        assert!(blobstore_cfg_from(
+            Some("/data/blobs".to_owned()),
+            None,
+            Some("my-bucket".to_owned()),
+        )
+        .is_err());
     }
 
     #[test]

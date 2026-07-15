@@ -1,19 +1,17 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::{BlobNotFoundError, BlobstoreFactory};
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::AggregatedBytes;
 use lexicon_cid::Cid;
 use rocket::http::Header;
 use rocket::{Responder, State};
 use std::str::FromStr;
-use std::sync::Arc;
 
 #[derive(Responder)]
 #[response(status = 200)]
@@ -22,7 +20,7 @@ pub struct BlobResponder(Vec<u8>, Header<'static>, Header<'static>, Header<'stat
 async fn inner_get_blob(
     did: String,
     cid: String,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
@@ -36,10 +34,7 @@ async fn inner_get_blob(
 
     let cid = Cid::from_str(&cid)?;
     let actor_store = actor_store
-        .read(
-            did.clone(),
-            Arc::new(S3BlobStore::new(did.clone(), s3_config)),
-        )
+        .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
 
     let found = actor_store.blob.get_blob(cid).await?;
@@ -54,12 +49,21 @@ async fn inner_get_blob(
 pub async fn get_blob(
     did: String,
     cid: String,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<BlobResponder, ApiError> {
-    match inner_get_blob(did, cid, s3_config, auth, actor_store, account_manager).await {
+    match inner_get_blob(
+        did,
+        cid,
+        blobstore_factory,
+        auth,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(res) => {
             let (bytes, mime_type) = res;
             Ok(BlobResponder(
@@ -73,15 +77,13 @@ pub async fn get_blob(
             ))
         }
         Err(error) => {
-            match error.downcast_ref() {
-                Some(GetObjectError::NoSuchKey(_)) => {
-                    tracing::error!("Error: {}", error);
-                    Err(ApiError::BlobNotFound)
-                }
-                _ => {
-                    tracing::error!("Error: {}", error);
-                    Err(ApiError::RuntimeError)
-                }
+            tracing::error!("Error: {}", error);
+            if error.downcast_ref::<BlobNotFoundError>().is_some()
+                || matches!(error.downcast_ref(), Some(GetObjectError::NoSuchKey(_)))
+            {
+                Err(ApiError::BlobNotFound)
+            } else {
+                Err(ApiError::RuntimeError)
             }
             // @TODO: Need to update error handling to return 404 if we have it but it's in tmp
         }

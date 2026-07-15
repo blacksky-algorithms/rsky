@@ -40,6 +40,7 @@ pub mod aws;
 pub mod blob;
 pub mod blobstore;
 pub mod db;
+pub mod disk_blobstore;
 pub mod preference;
 pub mod record;
 pub mod repo;
@@ -257,7 +258,11 @@ impl ActorStore {
     }
 
     pub async fn destroy(&self, did: &str, blobstore: Arc<dyn BlobStore>) -> Result<()> {
-        if self.exists(did).await? {
+        if let Some(delete_all) = blobstore.delete_all() {
+            if let Err(err) = delete_all.await {
+                tracing::error!(?err, did, "failed to delete blobs from blobstore");
+            }
+        } else if self.exists(did).await? {
             let reader = self.read(did.to_string(), blobstore.clone()).await?;
             let blob_cids = reader.blob.get_blob_cids().await?;
             for chunk in blob_cids.chunks(500) {

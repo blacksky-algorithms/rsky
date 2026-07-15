@@ -1,23 +1,21 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
 use crate::SharedSequencer;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::{Subject, SubjectStatus, UpdateSubjectStatusOutput};
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
-use std::sync::Arc;
 
 async fn inner_update_subject_status(
     body: Json<SubjectStatus>,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<UpdateSubjectStatusOutput> {
@@ -38,7 +36,7 @@ async fn inner_update_subject_status(
                 let subject_at_uri: AtUri = subject.uri.clone().try_into()?;
                 let did = subject_at_uri.get_hostname().to_string();
                 let actor_store = actor_store
-                    .transact(did.clone(), Arc::new(S3BlobStore::new(did, s3_config)))
+                    .transact(did.clone(), blobstore_factory.blobstore(did))
                     .await?;
                 actor_store
                     .record
@@ -49,7 +47,7 @@ async fn inner_update_subject_status(
                 let actor_store = actor_store
                     .transact(
                         subject.did.clone(),
-                        Arc::new(S3BlobStore::new(subject.did.clone(), s3_config)),
+                        blobstore_factory.blobstore(subject.did.clone()),
                     )
                     .await?;
                 actor_store
@@ -91,13 +89,19 @@ async fn inner_update_subject_status(
 pub async fn update_subject_status(
     body: Json<SubjectStatus>,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     _auth: Moderator,
     account_manager: AccountManager,
 ) -> Result<Json<UpdateSubjectStatusOutput>, ApiError> {
-    match inner_update_subject_status(body, sequencer, s3_config, actor_store, account_manager)
-        .await
+    match inner_update_subject_status(
+        body,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        account_manager,
+    )
+    .await
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

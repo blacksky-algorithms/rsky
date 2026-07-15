@@ -1,5 +1,5 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
@@ -20,7 +20,6 @@ use atrium_api::app::bsky::feed::get_post_thread::{
 use atrium_api::client::AtpServiceClient;
 use atrium_api::types::LimitedU16;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use aws_config::SdkConfig;
 use futures::stream::{self, StreamExt};
 use ipld_core::ipld::Ipld as AtriumIpld;
 use reqwest::header::HeaderMap;
@@ -33,7 +32,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::Arc;
 
 const METHOD_NSID: &str = "app.bsky.feed.getPostThread";
 
@@ -49,7 +47,7 @@ pub async fn inner_get_post_thread(
     parentHeight: u16,
     auth: AccessStandard,
     res: Result<HandlerPipeThrough>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
@@ -66,7 +64,7 @@ pub async fn inner_get_post_thread(
                 requester,
                 res,
                 get_post_thread_munge,
-                s3_config,
+                blobstore_factory,
                 state_local_viewer,
                 actor_store,
                 account_manager,
@@ -88,7 +86,7 @@ pub async fn inner_get_post_thread(
                             let actor_store = actor_store
                                 .read(
                                     requester.clone(),
-                                    Arc::new(S3BlobStore::new(requester.clone(), s3_config)),
+                                    blobstore_factory.blobstore(requester.clone()),
                                 )
                                 .await?;
                             let local_viewer_lock = state_local_viewer.local_viewer.read().await;
@@ -131,7 +129,7 @@ pub async fn get_post_thread(
     parentHeight: Option<u16>, // How many levels of parent (and grandparent, etc.) post to include.
     auth: AccessStandard,
     res: Result<HandlerPipeThrough>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
@@ -152,7 +150,7 @@ pub async fn get_post_thread(
             parentHeight,
             auth,
             res,
-            s3_config,
+            blobstore_factory,
             state_local_viewer,
             cfg,
             actor_store,

@@ -1,28 +1,26 @@
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
 use crate::SharedSequencer;
 use anyhow::Result;
-use aws_config::SdkConfig;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::admin::DeleteAccountInput;
-use std::sync::Arc;
 
 async fn inner_delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<()> {
     let DeleteAccountInput { did } = body.into_inner();
 
     actor_store
-        .destroy(&did, Arc::new(S3BlobStore::new(did.clone(), s3_config)))
+        .destroy(&did, blobstore_factory.blobstore(did.clone()))
         .await?;
     account_manager.delete_account(&did).await?;
     let mut lock = sequencer.sequencer.write().await;
@@ -44,12 +42,20 @@ async fn inner_delete_account(
 pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     _auth: AdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_account(body, sequencer, s3_config, actor_store, account_manager).await {
+    match inner_delete_account(
+        body,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

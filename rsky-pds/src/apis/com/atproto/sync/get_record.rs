@@ -1,18 +1,16 @@
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use lexicon_cid::Cid;
 use rocket::{Responder, State};
 use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::types::RecordPath;
 use std::str::FromStr;
-use std::sync::Arc;
 
 #[derive(Responder)]
 #[response(status = 200, content_type = "application/vnd.ipld.car")]
@@ -24,7 +22,7 @@ async fn inner_get_record(
     collection: String,
     rkey: String,
     commit: Option<String>,
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
@@ -36,10 +34,7 @@ async fn inner_get_record(
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
     let actor_store = actor_store
-        .read(
-            did.clone(),
-            Arc::new(S3BlobStore::new(did.clone(), s3_config)),
-        )
+        .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
     let storage_guard = actor_store.storage.read().await;
     let commit: Option<Cid> = match commit {
@@ -70,7 +65,7 @@ pub async fn get_record(
     collection: String,
     rkey: String,
     commit: Option<String>, // DEPRECATED: referenced a repo commit by CID, and retrieved record as of that commit
-    s3_config: &State<SdkConfig>,
+    blobstore_factory: &State<BlobstoreFactory>,
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
@@ -80,7 +75,7 @@ pub async fn get_record(
         collection,
         rkey,
         commit,
-        s3_config,
+        blobstore_factory,
         auth,
         actor_store,
         account_manager,

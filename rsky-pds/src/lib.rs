@@ -31,6 +31,7 @@ pub mod sequencer;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::background::BackgroundQueue;
 use crate::config::{env_to_cfg, ServiceDbConfig};
@@ -240,6 +241,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
+    let blobstore_factory = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config);
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
@@ -388,7 +390,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .attach(CORS)
         .attach(shield)
         .manage(sequencer)
-        .manage(aws_sdk_config)
+        .manage(blobstore_factory)
         .manage(id_resolver)
         .manage(cfg)
         .manage(local_viewer)
