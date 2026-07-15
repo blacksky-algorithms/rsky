@@ -509,6 +509,28 @@ mod tests {
                 .is_err()
         );
 
+        // expired
+        let expired_claims = SpaceServiceClaims {
+            iss: "did:plc:writer".to_string(),
+            aud: "did:plc:auth".to_string(),
+            exp: 1000,
+            lxm: NOTIFY_WRITE_LXM.to_string(),
+            jti: "expired".to_string(),
+        };
+        let header = serde_json::json!({"typ": "JWT", "alg": "ES256K"});
+        let signing_input = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap()),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expired_claims).unwrap())
+        );
+        let sig = sign_with_keypair(&keypair, signing_input.as_bytes()).unwrap();
+        let expired = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig));
+        let err =
+            verify_space_service_token(&actor_store, &id_resolver, &expired, NOTIFY_WRITE_LXM)
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+
         // tampered signature
         let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
         let mut sig = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();

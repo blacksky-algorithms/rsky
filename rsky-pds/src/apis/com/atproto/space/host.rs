@@ -277,6 +277,21 @@ mod tests {
             .await
             .unwrap());
 
+        // an empty member list denies everyone
+        let policy = def_policy(
+            &def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        assert!(!policy
+            .authorizes(SPACE_URI, "did:plc:anyone", None)
+            .await
+            .unwrap());
+
         // member-list paginates through the full member set
         for i in 0..5 {
             store

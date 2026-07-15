@@ -609,6 +609,17 @@ mod tests {
     }
 
     #[test]
+    fn write_actions_reject_read_verbs_and_read_self_denial() {
+        let s = scope("space:com.atmoboards.forum?authority=*&action=create");
+        // a write-only grant does not satisfy read_self
+        assert!(!s.permits_read_self(Some(THREAD)));
+        assert!(!s.permits_read_self(None));
+        // read verbs are never record writes
+        assert!(!s.permits_record_write(SpaceAction::Read, THREAD));
+        assert!(!s.permits_record_write(SpaceAction::ReadSelf, THREAD));
+    }
+
+    #[test]
     fn parse_error_displays() {
         let err = SpaceScope::parse("nope").unwrap_err();
         assert!(err.to_string().contains("invalid space scope"));

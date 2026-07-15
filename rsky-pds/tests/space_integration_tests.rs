@@ -1643,3 +1643,89 @@ async fn delete_space_notifies_remote_writers() {
     // mock PLC (which advertises a PDS endpoint) and delivers best-effort
     actor_store.background_queue.process_all().await;
 }
+
+#[tokio::test]
+async fn read_guard_scope_boundaries() {
+    let s = setup().await;
+    let credential = mint_credential(&s).await;
+    create_post(&s, "3ka", "one").await;
+    create_post(&s, "3kb", "two").await;
+
+    // a credential for one space does not read a repo in another space
+    let other_space = format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/other");
+    let (status, _) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getRecord?space={other_space}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3ka"
+        ),
+        &credential,
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // a delegation token is not accepted where a credential is required
+    let (_, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    let delegation = body["token"].as_str().unwrap().to_string();
+    let (status, _) = get_json(
+        &s.client,
+        &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
+        &delegation,
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // listRecords paginates with a cursor
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}&limit=1",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(body["records"].as_array().unwrap().len(), 1);
+    let cursor = body["cursor"].as_str().unwrap().to_string();
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}&limit=1&cursor={cursor}",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert!(body["records"][0]["uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/3kb"));
+
+    // a write after notify registrations fans out deliveries (one endpoint
+    // resolvable through the mock, one unresolvable)
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({"space": s.space, "endpoint": "https://sync.example.invalid", "repo": AUTHOR_DID}),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    create_post(&s, "3kc", "three").await;
+    s.client
+        .rocket()
+        .state::<ActorStore>()
+        .unwrap()
+        .background_queue
+        .process_all()
+        .await;
+}
