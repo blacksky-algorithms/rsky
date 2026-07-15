@@ -10,7 +10,7 @@ use rsky_daemon::{
     SpaceIndex, SqliteIndex, StaticCredential,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
-use rsky_identity::types::{DidCache, IdentityResolverOpts};
+use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
 use rsky_identity::IdResolver;
 use rsky_space::space_id::SpaceId;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ impl DidKeyResolver {
             resolver: tokio::sync::Mutex::new(IdResolver::new(IdentityResolverOpts {
                 timeout: None,
                 plc_url: None,
-                did_cache: Some(DidCache::new(None, None)),
+                did_cache: Some(std::sync::Arc::new(MemoryCache::new(None, None))),
                 backup_nameservers: None,
             })),
         }

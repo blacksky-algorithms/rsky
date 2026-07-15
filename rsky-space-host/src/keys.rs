@@ -220,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolver_doc_source_fetches_via_did_web() {
-        use rsky_identity::types::{DidCache, DidResolverOpts};
+        use rsky_identity::types::{DidResolverOpts, MemoryCache};
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -247,7 +247,7 @@ mod tests {
         let source = ResolverDocSource::new(DidResolver::new(DidResolverOpts {
             timeout: None,
             plc_url: None,
-            did_cache: DidCache::new(None, None),
+            did_cache: Arc::new(MemoryCache::new(None, None)),
         }));
         let got = source.did_document(&did).await.unwrap();
         assert_eq!(signing_did_key_from_doc(&got).unwrap(), key);

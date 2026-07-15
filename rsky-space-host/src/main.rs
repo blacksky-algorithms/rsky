@@ -3,7 +3,7 @@
 
 use clap::Parser;
 use rsky_identity::did::did_resolver::DidResolver;
-use rsky_identity::types::{DidCache, DidResolverOpts};
+use rsky_identity::types::{DidResolverOpts, MemoryCache};
 use rsky_space::space_id::SpaceId;
 use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::HttpMetadataFetcher;
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let docs = Arc::new(ResolverDocSource::new(DidResolver::new(DidResolverOpts {
         timeout: None,
         plc_url: Some(cfg.plc_url.clone()),
-        did_cache: DidCache::new(None, None),
+        did_cache: std::sync::Arc::new(MemoryCache::new(None, None)),
     })));
     let policy = match cfg.policy {
         PolicyMode::Public => Policy::Public,
