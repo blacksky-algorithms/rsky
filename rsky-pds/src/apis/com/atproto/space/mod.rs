@@ -5,7 +5,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::commit::{sign_commit, to_lexicon};
 use crate::actor_store::space::{
-    oplog_window, SpaceCommitResult, SpaceStore, SpaceStoreError, SpaceWrite,
+    blob_refs_in_record, oplog_window, SpaceCommitResult, SpaceStore, SpaceStoreError, SpaceWrite,
 };
 use crate::actor_store::{ActorStore, ActorStoreReader};
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -146,11 +146,39 @@ pub async fn apply_space_writes(
         )
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
+    let blob_refs: Vec<(String, String)> = writes
+        .iter()
+        .flat_map(|write| match write {
+            SpaceWrite::Create { value, .. } | SpaceWrite::Update { value, .. } => {
+                blob_refs_in_record(value)
+            }
+            SpaceWrite::Delete { .. } => Vec::new(),
+        })
+        .collect();
     let commit = transactor
         .space
         .apply_writes(space, writes, oplog_window())
         .await
         .map_err(space_error)?;
+    // Promote referenced blobs out of temp storage, like the public write
+    // path. Unparseable refs are skipped: they can never be fetched.
+    for (blob_cid, mime_type) in blob_refs {
+        let Ok(cid) = <lexicon_cid::Cid as std::str::FromStr>::from_str(&blob_cid) else {
+            continue;
+        };
+        transactor
+            .blob
+            .verify_blob_and_make_permanent(rsky_repo::types::PreparedBlobRef {
+                cid,
+                mime_type,
+                constraints: rsky_repo::types::BlobConstraint {
+                    max_size: None,
+                    accept: None,
+                },
+            })
+            .await
+            .map_err(|error| ApiError::BadRequest("BlobNotFound".to_string(), error.to_string()))?;
+    }
     notify_after_write(
         actor_store,
         blobstore_factory,

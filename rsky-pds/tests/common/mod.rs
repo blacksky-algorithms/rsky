@@ -35,7 +35,14 @@ fn start_mock_plc_directory() -> u16 {
                 .next()
                 .unwrap()
                 .to_string();
-            let body = format!("{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"]}}");
+            // Every doc claims a PDS service endpoint pointing back at this
+            // mock, which answers 200 to any request. This lets best-effort
+            // notification fan-out resolve and deliver hermetically.
+            let body = format!(
+                "{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"],\
+                 \"service\":[{{\"id\":\"#atproto_pds\",\"type\":\"AtprotoPersonalDataServer\",\
+                 \"serviceEndpoint\":\"http://127.0.0.1:{port}\"}}]}}"
+            );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -79,6 +86,14 @@ fn init_env() {
             if std::env::var(key).is_err() {
                 std::env::set_var(key, value);
             }
+        }
+        if std::env::var("PDS_BLOBSTORE_DISK_LOCATION").is_err()
+            && std::env::var("PDS_BLOBSTORE_S3_BUCKET").is_err()
+        {
+            let blob_dir =
+                std::env::temp_dir().join(format!("rsky-pds-test-blobs-{}", std::process::id()));
+            std::fs::create_dir_all(&blob_dir).expect("create test blobstore dir");
+            std::env::set_var("PDS_BLOBSTORE_DISK_LOCATION", &blob_dir);
         }
         if std::env::var("PDS_DID_PLC_URL").is_err() {
             let port = start_mock_plc_directory();

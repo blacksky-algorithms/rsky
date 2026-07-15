@@ -1204,3 +1204,442 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
         .await;
     assert_ne!(response.status(), Status::Ok);
 }
+
+#[tokio::test]
+async fn blob_upload_and_space_get_blob() {
+    let s = setup().await;
+    let credential = mint_credential(&s).await;
+
+    // upload a blob as the author, then reference it from a space record
+    let response = s
+        .client
+        .post("/xrpc/com.atproto.repo.uploadBlob")
+        .header(ContentType::PNG)
+        .header(bearer(&s.author_token))
+        .body(vec![0x89u8, 0x50, 0x4E, 0x47, 1, 2, 3, 4])
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: Value = response.into_json().await.unwrap();
+    let blob = body["blob"].clone();
+    let blob_cid = blob["ref"]["$link"].as_str().unwrap().to_string();
+
+    // a record referencing a blob that was never uploaded is rejected
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.createRecord",
+        &s.author_token,
+        json!({
+            "space": s.space,
+            "collection": COLLECTION,
+            "rkey": "3kmissingblob",
+            "record": {
+                "text": "bad blob",
+                "embed": {"$type": "blob",
+                          "ref": {"$link": "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"},
+                          "mimeType": "image/png", "size": 8}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest, "{body}");
+
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.createRecord",
+        &s.author_token,
+        json!({
+            "space": s.space,
+            "collection": COLLECTION,
+            "rkey": "3kwithblob",
+            "record": {
+                "text": "with blob",
+                "embed": blob,
+                "legacy": {"cid": "not-a-cid", "mimeType": "image/png"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+
+    // the member fetches the blob through the space credential
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid={blob_cid}",
+            s.space
+        ))
+        .header(bearer(&credential))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        response.into_bytes().await.unwrap(),
+        vec![0x89u8, 0x50, 0x4E, 0x47, 1, 2, 3, 4]
+    );
+
+    // an unreferenced blob is not served through the space
+    let (status, _) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid=bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+    // a referenced-but-unparseable cid is a bad request
+    let (status, _) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid=not-a-cid",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+}
+
+fn craft_credential_jwt(iss: &str, sub: &str, keypair: Option<&secp256k1::Keypair>) -> String {
+    use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
+    let header = JwtHeader {
+        typ: CREDENTIAL_TYP.to_string(),
+        alg: "ES256K".to_string(),
+        kid: Some("#atproto_space".to_string()),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = SpaceClaims {
+        iss: iss.to_string(),
+        sub: sub.to_string(),
+        aud: None,
+        iat: now,
+        exp: now + 3600,
+        jti: "crafted".to_string(),
+    };
+    encode(&header, &claims, |input| match keypair {
+        Some(keypair) => rsky_pds::space_auth::sign_with_keypair(keypair, input),
+        None => Ok(vec![0u8; 64]),
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn crafted_credentials_are_rejected() {
+    let s = setup().await;
+    // a key that belongs to no account on this host
+    let secp = secp256k1::Secp256k1::new();
+    let foreign_keypair = secp256k1::Keypair::from_secret_key(
+        &secp,
+        &secp256k1::SecretKey::from_slice(&[0x42u8; 32]).unwrap(),
+    );
+
+    // sub is not a space uri
+    let bad_sub = craft_credential_jwt(AUTHOR_DID, "at://not-a-space", None);
+    // issuer is not the space authority
+    let wrong_iss = craft_credential_jwt(MEMBER_DID, &s.space, Some(&foreign_keypair));
+    // right claims, wrong signing key
+    let wrong_key = craft_credential_jwt(AUTHOR_DID, &s.space, Some(&foreign_keypair));
+    for token in [bad_sub, wrong_iss, wrong_key] {
+        let (status, _) = get_json(
+            &s.client,
+            &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
+            &token,
+        )
+        .await;
+        assert_ne!(status, Status::Ok);
+        // the read guard rejects them identically
+        let (status, _) = get_json(
+            &s.client,
+            &format!(
+                "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}",
+                s.space
+            ),
+            &token,
+        )
+        .await;
+        assert_ne!(status, Status::Ok);
+    }
+}
+
+#[tokio::test]
+async fn credential_edge_cases() {
+    let s = setup().await;
+
+    // duplicate space.createRecord rkey surfaces RecordExists
+    create_post(&s, "3kdup", "one").await;
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.createRecord",
+        &s.author_token,
+        json!({"space": s.space, "collection": COLLECTION, "rkey": "3kdup", "record": {"text": "two"}}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+    assert_eq!(body["error"], "RecordExists");
+
+    // getSpaceCredential for a nonexistent space under a local authority
+    let (_, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    let delegation = body["token"].as_str().unwrap().to_string();
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        &s.member_token,
+        json!({
+            "space": format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/nonexistent"),
+            "delegationToken": delegation
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+    assert_eq!(body["error"], "SpaceNotFound");
+
+    // a tampered delegation signature is refused
+    let (_, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    let delegation = body["token"].as_str().unwrap().to_string();
+    let mut parts: Vec<String> = delegation.split('.').map(str::to_string).collect();
+    {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let mut sig = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
+        sig[0] ^= 0xFF;
+        parts[2] = URL_SAFE_NO_PAD.encode(sig);
+    }
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        &s.member_token,
+        json!({"space": s.space, "delegationToken": parts.join(".")}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // a delegation whose issuer's key cannot be resolved is refused (the mock
+    // PLC serves DID documents without verification methods)
+    let member_keypair = actor_keypair(&s.client, MEMBER_DID).await;
+    let foreign = {
+        use rsky_space::credential::{encode, JwtHeader, SpaceClaims, DELEGATION_TYP};
+        let header = JwtHeader {
+            typ: DELEGATION_TYP.to_string(),
+            alg: "ES256K".to_string(),
+            kid: Some("#atproto".to_string()),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = SpaceClaims {
+            iss: "did:plc:notonthishost".to_string(),
+            sub: s.space.clone(),
+            aud: Some(format!("{AUTHOR_DID}#atproto_space_host")),
+            iat: now,
+            exp: now + 60,
+            jti: "foreign".to_string(),
+        };
+        encode(&header, &claims, |input| {
+            rsky_pds::space_auth::sign_with_keypair(&member_keypair, input)
+        })
+        .unwrap()
+    };
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        &s.member_token,
+        json!({"space": s.space, "delegationToken": foreign}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // managing-app policy: the app's service endpoint is unresolvable here
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.simplespace.updateSpace",
+        &s.author_token,
+        json!({
+            "space": s.space,
+            "config": {"policy": "managing-app", "managingApp": "did:plc:someapp#managing_app"}
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    // an invalid managingApp identifier is rejected
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.simplespace.updateSpace",
+        &s.author_token,
+        json!({"space": s.space, "config": {"managingApp": "not-a-service-id"}}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+    let (_, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    let delegation = body["token"].as_str().unwrap().to_string();
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        &s.member_token,
+        json!({"space": s.space, "delegationToken": delegation}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+}
+
+#[tokio::test]
+async fn notify_edges_and_allowlist_view() {
+    let s = setup().await;
+    let credential = mint_credential(&s).await;
+    create_post(&s, "3kfirst", "hello").await;
+
+    // registerNotify for a repo this host does not have
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({"space": s.space, "endpoint": "https://sync.example.invalid", "repo": "did:plc:nothosted"}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // notifyWrite with a garbage bearer token
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.notifyWrite",
+        "garbage",
+        json!({"space": s.space, "did": MEMBER_DID, "rev": "3k"}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+    // notifySpaceDeleted signed by a key the resolver cannot vouch for
+    // (unknown issuer resolves to a doc without verification methods)
+    let member_keypair = actor_keypair(&s.client, MEMBER_DID).await;
+    let unknown_iss = mint_space_service_token(
+        &member_keypair,
+        "did:plc:unknownissuer",
+        AUTHOR_DID,
+        NOTIFY_SPACE_DELETED_LXM,
+    )
+    .unwrap();
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.notifySpaceDeleted",
+        &unknown_iss,
+        json!({"space": s.space}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+
+    // an allow-list config is surfaced through getSpace
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.simplespace.updateSpace",
+        &s.author_token,
+        json!({
+            "space": s.space,
+            "config": {
+                "appAccess": {
+                    "$type": "com.atproto.simplespace.defs#appAccessAllowList",
+                    "allowed": ["https://app.example.com/client-metadata.json"]
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let (status, body) = get_json(
+        &s.client,
+        &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        body["config"]["appAccess"]["$type"],
+        "com.atproto.simplespace.defs#appAccessAllowList"
+    );
+    // and switching back to open clears the list
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.simplespace.updateSpace",
+        &s.author_token,
+        json!({
+            "space": s.space,
+            "config": {"appAccess": {"$type": "com.atproto.simplespace.defs#appAccessOpen"}}
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let (_, body) = get_json(
+        &s.client,
+        &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
+        &credential,
+    )
+    .await;
+    assert_eq!(
+        body["config"]["appAccess"]["$type"],
+        "com.atproto.simplespace.defs#appAccessOpen"
+    );
+}
+
+#[tokio::test]
+async fn delete_space_notifies_remote_writers() {
+    let s = setup().await;
+    create_post(&s, "3kfirst", "hello").await;
+
+    // a remote writer is known to the authority (e.g. via inbound notifyWrite)
+    let actor_store = s.client.rocket().state::<ActorStore>().unwrap();
+    let reader = actor_store
+        .read(
+            AUTHOR_DID.to_string(),
+            s.client
+                .rocket()
+                .state::<rsky_pds::actor_store::blobstore::BlobstoreFactory>()
+                .unwrap()
+                .blobstore(AUTHOR_DID.to_string()),
+        )
+        .await
+        .unwrap();
+    reader
+        .space
+        .upsert_writer(&s.space, "did:plc:remotewriterxyz", "3krev", None)
+        .await
+        .unwrap();
+
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.simplespace.deleteSpace",
+        &s.author_token,
+        json!({"space": s.space}),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    // the background fan-out resolves the remote writer's host through the
+    // mock PLC (which advertises a PDS endpoint) and delivers best-effort
+    actor_store.background_queue.process_all().await;
+}

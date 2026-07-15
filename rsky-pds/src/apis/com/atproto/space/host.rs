@@ -137,13 +137,13 @@ pub async fn def_policy(
             let mut cursor: Option<String> = None;
             loop {
                 let page = space_store
-                    .list_members(&def.space_uri, 1000, cursor.clone())
+                    .list_members(&def.space_uri, MEMBER_PAGE_SIZE, cursor.clone())
                     .await
                     .map_err(super::space_error)?;
                 let Some(last) = page.last().cloned() else {
                     break;
                 };
-                let full_page = page.len() == 1000;
+                let full_page = page.len() == MEMBER_PAGE_SIZE;
                 members.extend(page);
                 if !full_page {
                     break;
@@ -156,6 +156,11 @@ pub async fn def_policy(
         }
     }
 }
+
+#[cfg(not(test))]
+const MEMBER_PAGE_SIZE: usize = 1000;
+#[cfg(test)]
+const MEMBER_PAGE_SIZE: usize = 2;
 
 /// Single-use nonce store over the authority's `space_used_jti` table.
 pub struct ActorJtiStore(pub SpaceStore);
@@ -177,5 +182,180 @@ pub struct FixedKeyResolver(pub String);
 impl KeyResolver for FixedKeyResolver {
     async fn signing_key(&self, _did: &str) -> rsky_space_host::Result<String> {
         Ok(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actor_store::db::get_migrated_db;
+
+    const SPACE_URI: &str = "at://did:plc:auth/space/com.example.forum/main";
+
+    fn def(policy: &str, app_access: &str) -> SpaceDefRow {
+        SpaceDefRow {
+            space_uri: SPACE_URI.to_string(),
+            space_type: "com.example.forum".to_string(),
+            skey: "main".to_string(),
+            policy: policy.to_string(),
+            app_access: app_access.to_string(),
+            allowed_clients: None,
+            managing_app: None,
+            deleted: false,
+        }
+    }
+
+    async fn store() -> (tempfile::TempDir, SpaceStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = get_migrated_db(dir.path().join("store.sqlite"))
+            .await
+            .unwrap();
+        (dir, SpaceStore::new("did:plc:auth".to_string(), db))
+    }
+
+    fn signer() -> Signer {
+        Signer::from_secret(secp256k1::SecretKey::from_slice(&[0x66u8; 32]).unwrap())
+    }
+
+    #[test]
+    fn def_to_config_covers_every_variant() {
+        use rsky_lexicon::com::atproto::simplespace::Policy as LexPolicy;
+        let cfg = def_to_config(&def(POLICY_PUBLIC, APP_ACCESS_OPEN));
+        assert_eq!(cfg.policy, Some(LexPolicy::Public));
+        assert!(matches!(cfg.app_access, Some(LexAppAccess::Open(_))));
+
+        let mut allow = def(POLICY_MANAGING_APP, APP_ACCESS_ALLOW_LIST);
+        allow.allowed_clients = Some(vec!["https://app.example/client".to_string()]);
+        allow.managing_app = Some("did:web:app.example#managing_app".to_string());
+        let cfg = def_to_config(&allow);
+        assert_eq!(cfg.policy, Some(LexPolicy::ManagingApp));
+        assert!(
+            matches!(cfg.app_access, Some(LexAppAccess::AllowList(list)) if list.allowed.len() == 1)
+        );
+        assert_eq!(
+            cfg.managing_app.as_deref(),
+            Some("did:web:app.example#managing_app")
+        );
+
+        let cfg = def_to_config(&def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN));
+        assert_eq!(cfg.policy, Some(LexPolicy::MemberList));
+    }
+
+    #[test]
+    fn def_app_access_maps_both_variants() {
+        assert!(matches!(
+            def_app_access(&def(POLICY_PUBLIC, APP_ACCESS_OPEN)),
+            AppAccess::Open
+        ));
+        let mut allow = def(POLICY_PUBLIC, APP_ACCESS_ALLOW_LIST);
+        allow.allowed_clients = Some(vec!["https://a".to_string()]);
+        assert!(matches!(
+            def_app_access(&allow),
+            AppAccess::AllowList(list) if list == vec!["https://a".to_string()]
+        ));
+        // allow-list with no clients defaults to an empty (deny-all) list
+        assert!(matches!(
+            def_app_access(&def(POLICY_PUBLIC, APP_ACCESS_ALLOW_LIST)),
+            AppAccess::AllowList(list) if list.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn def_policy_public_and_member_list() {
+        let (_dir, store) = store().await;
+        let policy = def_policy(
+            &def(POLICY_PUBLIC, APP_ACCESS_OPEN),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        assert!(policy
+            .authorizes(SPACE_URI, "did:plc:anyone", None)
+            .await
+            .unwrap());
+
+        // member-list paginates through the full member set
+        for i in 0..5 {
+            store
+                .add_member(SPACE_URI, &format!("did:plc:m{i}"))
+                .await
+                .unwrap();
+        }
+        let policy = def_policy(
+            &def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        for i in 0..5 {
+            assert!(policy
+                .authorizes(SPACE_URI, &format!("did:plc:m{i}"), None)
+                .await
+                .unwrap());
+        }
+        assert!(!policy
+            .authorizes(SPACE_URI, "did:plc:stranger", None)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn def_policy_managing_app() {
+        let (_dir, store) = store().await;
+        // Missing managingApp is a config error.
+        let result = def_policy(
+            &def(POLICY_MANAGING_APP, APP_ACCESS_OPEN),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("managing-app without a managingApp must be a config error");
+        };
+        assert!(matches!(err, ApiError::BadRequest(name, _) if name == "InvalidSpaceConfig"));
+
+        let mut with_app = def(POLICY_MANAGING_APP, APP_ACCESS_OPEN);
+        with_app.managing_app = Some("did:web:app.example#managing_app".to_string());
+        let policy = def_policy(
+            &with_app,
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            policy.managing_app(),
+            Some("did:web:app.example#managing_app")
+        );
+        // The app is unreachable in tests: the decision errors rather than allows.
+        assert!(policy
+            .authorizes(SPACE_URI, "did:plc:member", None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn jti_store_and_key_resolver_adapters() {
+        let (_dir, store) = store().await;
+        let jti_store = ActorJtiStore(store);
+        let exp = crate::space_auth::now_secs() + 60;
+        assert!(jti_store.consume("nonce-1", exp).await.unwrap());
+        assert!(!jti_store.consume("nonce-1", exp).await.unwrap());
+
+        let resolver = FixedKeyResolver("did:key:zExample".to_string());
+        assert_eq!(
+            resolver.signing_key("did:plc:whoever").await.unwrap(),
+            "did:key:zExample"
+        );
     }
 }

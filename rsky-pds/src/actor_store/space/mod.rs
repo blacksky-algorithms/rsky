@@ -167,27 +167,31 @@ pub fn decode_record(bytes: &[u8]) -> Result<JsonValue> {
     Ok(serde_ipld_dagcbor::from_slice(bytes)?)
 }
 
-/// Collect the blob CIDs referenced by a record value: typed refs
-/// (`{"$type":"blob","ref":{"$link":cid}}`) and legacy untyped refs
-/// (`{"cid":...,"mimeType":...}`).
-pub fn blob_cids_in_record(value: &JsonValue) -> Vec<String> {
-    fn walk(value: &JsonValue, out: &mut Vec<String>) {
+/// Collect the blob references in a record value as `(cid, mimeType)` pairs:
+/// typed refs (`{"$type":"blob","ref":{"$link":cid}}`) and legacy untyped
+/// refs (`{"cid":...,"mimeType":...}`).
+pub fn blob_refs_in_record(value: &JsonValue) -> Vec<(String, String)> {
+    fn walk(value: &JsonValue, out: &mut Vec<(String, String)>) {
         match value {
             JsonValue::Object(map) => {
                 let typed = map.get("$type").and_then(JsonValue::as_str) == Some("blob");
+                let mime = map
+                    .get("mimeType")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("application/octet-stream");
                 if typed {
                     if let Some(link) = map
                         .get("ref")
                         .and_then(|r| r.get("$link"))
                         .and_then(JsonValue::as_str)
                     {
-                        out.push(link.to_string());
+                        out.push((link.to_string(), mime.to_string()));
                     }
-                } else if let (Some(cid), Some(_)) = (
+                } else if let (Some(cid), Some(mime)) = (
                     map.get("cid").and_then(JsonValue::as_str),
                     map.get("mimeType").and_then(JsonValue::as_str),
                 ) {
-                    out.push(cid.to_string());
+                    out.push((cid.to_string(), mime.to_string()));
                 }
                 for child in map.values() {
                     walk(child, out);
@@ -206,6 +210,14 @@ pub fn blob_cids_in_record(value: &JsonValue) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The blob CIDs referenced by a record value.
+pub fn blob_cids_in_record(value: &JsonValue) -> Vec<String> {
+    blob_refs_in_record(value)
+        .into_iter()
+        .map(|(cid, _)| cid)
+        .collect()
 }
 
 /// Reader/writer for one actor's permissioned repos and (when the actor is a
