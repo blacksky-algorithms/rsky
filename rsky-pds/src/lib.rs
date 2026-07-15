@@ -371,6 +371,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::sync::list_blobs::list_blobs,
                 com::atproto::sync::list_repos::list_repos,
                 com::atproto::sync::subscribe_repos::subscribe_repos,
+                com::atproto::temp::check_signup_queue::check_signup_queue,
                 app::bsky::actor::get_preferences::get_preferences,
                 app::bsky::actor::get_profile::get_profile,
                 app::bsky::actor::get_profiles::get_profiles,
