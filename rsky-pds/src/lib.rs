@@ -322,6 +322,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::admin::update_subject_status::update_subject_status,
                 com::atproto::identity::resolve_handle::resolve_handle,
                 com::atproto::identity::update_handle::update_handle,
+                com::atproto::moderation::create_report::create_report,
                 com::atproto::identity::sign_plc_operation::sign_plc_operation,
                 com::atproto::identity::get_recommended_did_credentials::get_recommended_did_credentials,
                 com::atproto::identity::request_plc_operation_signature::request_plc_operation_signature,
