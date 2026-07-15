@@ -1,0 +1,39 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.getLatestCommit",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get the current signed commit for a permissioned repo. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "did"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the repo's author."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["commit"],
+          "properties": {
+            "commit": {
+              "type": "ref",
+              "ref": "com.atproto.space.defs#signedCommit"
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "RepoNotFound" }]
+    }
+  }
+}

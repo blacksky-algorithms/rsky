@@ -1,0 +1,44 @@
+[package]
+name = "rsky-daemon"
+version = "0.2.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "atproto permissioned-data syncer daemon: pulls, verifies, and indexes permissioned repos from members' PDSes"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "rsky-daemon"
+path = "src/main.rs"
+
+[dependencies]
+rsky-space = { path = "../rsky-space", version = "0.2.0" }
+rsky-lexicon = { workspace = true }
+rsky-common = { workspace = true }
+rsky-crypto = { workspace = true }
+rsky-identity = { workspace = true }
+rsky-syntax = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = "1.0"
+async-trait = "0.1"
+hex = "0.4"
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+chrono = { version = "0.4", features = ["serde"] }
+axum = "0.7"
+base64 = "0.22"
+sha2 = { workspace = true }
+
+[dev-dependencies]
+secp256k1 = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+lexicon_cid = { workspace = true }
+wiremock = "=0.6.3"
+tower = { version = "0.4", features = ["util"] }
+tempfile = "3"

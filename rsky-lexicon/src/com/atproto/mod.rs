@@ -4,5 +4,7 @@ pub mod label;
 pub mod moderation;
 pub mod repo;
 pub mod server;
+pub mod simplespace;
+pub mod space;
 pub mod sync;
 pub mod temp;
