@@ -117,6 +117,12 @@ pub struct AccountView {
     pub invite_note: Option<String>,
 }
 
+/// Get details about some accounts.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GetAccountInfosOutput {
+    pub infos: Vec<AccountView>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StatusAttr {
     pub applied: bool,

@@ -57,9 +57,11 @@ mod ingester_tests {
                     action: action.to_owned(),
                     path: path.to_owned(),
                     cid: cid.and_then(|c| Cid::try_from(c).ok()),
+                    prev: None,
                 })
                 .collect(),
             blobs: vec![],
+            prev_data: None,
         };
 
         let mut result = Vec::new();
