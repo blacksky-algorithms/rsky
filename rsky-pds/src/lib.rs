@@ -313,6 +313,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
                 com::atproto::admin::enable_account_invites::enable_account_invites,
                 com::atproto::admin::get_account_info::get_account_info,
+                com::atproto::admin::get_account_infos::get_account_infos,
                 com::atproto::admin::get_invite_codes::get_invite_codes,
                 com::atproto::admin::get_subject_status::get_subject_status,
                 com::atproto::admin::send_email::send_email,
