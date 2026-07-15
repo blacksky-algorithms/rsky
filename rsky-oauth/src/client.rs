@@ -287,9 +287,10 @@ impl ClientManager {
         let metadata = if client_id.starts_with(LOOPBACK_CLIENT_ID_ORIGIN) {
             loopback_client_metadata(client_id)?
         } else {
-            let metadata = self.fetcher.fetch_client_metadata(client_id).await?;
+            // validate before fetching so the fetcher never sees an
+            // unvetted URL
             validate_discoverable_client_id(client_id)?;
-            metadata
+            self.fetcher.fetch_client_metadata(client_id).await?
         };
         validate_client_metadata(client_id, &metadata)?;
         let jwks = match &metadata.jwks_uri {
