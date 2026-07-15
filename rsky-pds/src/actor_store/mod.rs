@@ -8,6 +8,7 @@ use crate::actor_store::preference::PreferenceReader;
 use crate::actor_store::record::RecordReader;
 use crate::actor_store::repo::sql_repo::SqlRepoReader;
 use crate::actor_store::repo::types::SyncEvtData;
+use crate::actor_store::space::SpaceStore;
 use crate::background::BackgroundQueue;
 use crate::config::ActorStoreConfig;
 use anyhow::{bail, Result};
@@ -44,6 +45,7 @@ pub mod disk_blobstore;
 pub mod preference;
 pub mod record;
 pub mod repo;
+pub mod space;
 
 #[derive(Debug)]
 enum FormatCommitError {
@@ -334,6 +336,7 @@ pub struct ActorStoreReader {
     pub record: RecordReader,                // get lexicon records from db
     pub blob: BlobReader,                    // get blobs
     pub pref: PreferenceReader,              // get preferences
+    pub space: SpaceStore,                   // permissioned repos + space definitions
     key_location: PathBuf,
 }
 
@@ -353,6 +356,7 @@ impl ActorStoreReader {
             ))),
             record: RecordReader::new(did.clone(), db.clone()),
             pref: PreferenceReader::new(did.clone(), db.clone()),
+            space: SpaceStore::new(did.clone(), db.clone()),
             blob: BlobReader::new(blobstore, db, background_queue),
             did,
             key_location,

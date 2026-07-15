@@ -29,6 +29,8 @@ pub mod plc;
 pub mod read_after_write;
 pub mod repo;
 pub mod sequencer;
+pub mod space_auth;
+pub mod space_scope;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -372,6 +374,30 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::server::revoke_app_password::revoke_app_password,
                 com::atproto::server::update_email::update_email,
                 com::atproto::server::reserve_signing_key::reserve_signing_key,
+                com::atproto::simplespace::add_member::simplespace_add_member,
+                com::atproto::simplespace::create_space::simplespace_create_space,
+                com::atproto::simplespace::delete_space::simplespace_delete_space,
+                com::atproto::simplespace::list_members::simplespace_list_members,
+                com::atproto::simplespace::remove_member::simplespace_remove_member,
+                com::atproto::simplespace::update_space::simplespace_update_space,
+                com::atproto::space::apply_writes::space_apply_writes,
+                com::atproto::space::create_record::space_create_record,
+                com::atproto::space::delete_record::space_delete_record,
+                com::atproto::space::get_blob::space_get_blob,
+                com::atproto::space::get_delegation_token::space_get_delegation_token,
+                com::atproto::space::get_latest_commit::space_get_latest_commit,
+                com::atproto::space::get_record::space_get_record,
+                com::atproto::space::get_repo::space_get_repo,
+                com::atproto::space::get_space::space_get_space,
+                com::atproto::space::get_space_credential::space_get_space_credential,
+                com::atproto::space::list_records::space_list_records,
+                com::atproto::space::list_repo_ops::space_list_repo_ops,
+                com::atproto::space::list_repos::space_list_repos,
+                com::atproto::space::list_spaces::space_list_spaces,
+                com::atproto::space::notify_space_deleted::space_notify_space_deleted,
+                com::atproto::space::notify_write::space_notify_write,
+                com::atproto::space::put_record::space_put_record,
+                com::atproto::space::register_notify::space_register_notify,
                 com::atproto::sync::get_blob::get_blob,
                 com::atproto::sync::get_blocks::get_blocks,
                 com::atproto::sync::get_checkout::get_checkout,

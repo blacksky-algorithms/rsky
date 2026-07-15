@@ -7,9 +7,10 @@ use std::path::Path;
 
 pub type ActorDb = Db;
 
-pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[Migration {
-    name: "001",
-    sql: "\
+pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "001",
+        sql: "\
     CREATE TABLE repo_root (\
         did TEXT PRIMARY KEY, \
         cid TEXT NOT NULL, \
@@ -63,7 +64,88 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[Migration {
         name TEXT NOT NULL, \
         \"valueJson\" TEXT NOT NULL\
     );",
-}];
+    },
+    Migration {
+        name: "002",
+        sql: "\
+    CREATE TABLE space_repo (\
+        space_uri TEXT PRIMARY KEY, \
+        authority TEXT NOT NULL, \
+        space_type TEXT NOT NULL, \
+        skey TEXT NOT NULL, \
+        rev TEXT NOT NULL, \
+        lthash_state BLOB NOT NULL, \
+        oplog_floor_rev TEXT, \
+        deleted INTEGER NOT NULL DEFAULT 0, \
+        created_at TEXT NOT NULL\
+    );\
+    CREATE TABLE space_record (\
+        space_uri TEXT NOT NULL, \
+        collection TEXT NOT NULL, \
+        rkey TEXT NOT NULL, \
+        cid TEXT NOT NULL, \
+        rev TEXT NOT NULL, \
+        value BLOB NOT NULL, \
+        PRIMARY KEY (space_uri, collection, rkey)\
+    );\
+    CREATE TABLE space_oplog (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        space_uri TEXT NOT NULL, \
+        rev TEXT NOT NULL, \
+        collection TEXT NOT NULL, \
+        rkey TEXT NOT NULL, \
+        cid TEXT, \
+        prev TEXT\
+    );\
+    CREATE INDEX space_oplog_space_idx ON space_oplog (space_uri, id);\
+    CREATE TABLE space_blob_ref (\
+        space_uri TEXT NOT NULL, \
+        blob_cid TEXT NOT NULL, \
+        collection TEXT NOT NULL, \
+        rkey TEXT NOT NULL, \
+        PRIMARY KEY (space_uri, blob_cid, collection, rkey)\
+    );\
+    CREATE TABLE space_repo_notify (\
+        space_uri TEXT NOT NULL, \
+        endpoint TEXT NOT NULL, \
+        expires_at TEXT NOT NULL, \
+        PRIMARY KEY (space_uri, endpoint)\
+    );\
+    CREATE TABLE space_def (\
+        space_uri TEXT PRIMARY KEY, \
+        space_type TEXT NOT NULL, \
+        skey TEXT NOT NULL, \
+        policy TEXT NOT NULL DEFAULT 'member-list', \
+        app_access TEXT NOT NULL DEFAULT 'open', \
+        allowed_clients TEXT, \
+        managing_app TEXT, \
+        deleted INTEGER NOT NULL DEFAULT 0, \
+        created_at TEXT NOT NULL\
+    );\
+    CREATE TABLE space_member (\
+        space_uri TEXT NOT NULL, \
+        did TEXT NOT NULL, \
+        PRIMARY KEY (space_uri, did)\
+    );\
+    CREATE TABLE space_writer (\
+        space_uri TEXT NOT NULL, \
+        did TEXT NOT NULL, \
+        rev TEXT NOT NULL, \
+        hash TEXT, \
+        PRIMARY KEY (space_uri, did)\
+    );\
+    CREATE TABLE space_host_reg (\
+        space_uri TEXT NOT NULL, \
+        endpoint TEXT NOT NULL, \
+        expires_at TEXT NOT NULL, \
+        PRIMARY KEY (space_uri, endpoint)\
+    );\
+    CREATE TABLE space_used_jti (\
+        jti TEXT PRIMARY KEY, \
+        exp INTEGER NOT NULL\
+    );",
+    },
+];
 
 pub fn get_db(location: impl AsRef<Path>) -> Result<ActorDb> {
     Db::open(location)
@@ -169,7 +251,17 @@ mod tests {
                 "record",
                 "record_blob",
                 "repo_block",
-                "repo_root"
+                "repo_root",
+                "space_blob_ref",
+                "space_def",
+                "space_host_reg",
+                "space_member",
+                "space_oplog",
+                "space_record",
+                "space_repo",
+                "space_repo_notify",
+                "space_used_jti",
+                "space_writer"
             ]
         );
     }
