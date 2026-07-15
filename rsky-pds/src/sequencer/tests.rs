@@ -2,6 +2,8 @@ use super::db::get_migrated_db;
 use super::*;
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::actor_store::repo::types::SyncEvtData;
+use crate::sequencer::events::sync_evt_data_from_commit;
+use ipld_core::ipld::Ipld;
 use lexicon_cid::Cid;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::cid_set::CidSet;
@@ -333,4 +335,155 @@ async fn start_logs_poll_errors_and_keeps_running() {
         .expect("sequencer poll loop did not stop after destroy")
         .unwrap();
     assert!(res.is_ok());
+}
+
+fn as_map(ipld: Ipld) -> std::collections::BTreeMap<String, Ipld> {
+    match ipld {
+        Ipld::Map(map) => map,
+        other => panic!("expected cbor map, got {other:?}"),
+    }
+}
+
+fn sorted_keys(map: &std::collections::BTreeMap<String, Ipld>) -> Vec<&str> {
+    map.keys().map(|key| key.as_str()).collect()
+}
+
+#[tokio::test]
+async fn commit_event_matches_reference_shape() {
+    let cid = Cid::from_str(TEST_CID).unwrap();
+    let evt = format_seq_commit("did:plc:golden".to_owned(), commit_data(cid))
+        .await
+        .unwrap();
+    assert_eq!(evt.event_type, "append");
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    // deprecated `prev` is omitted; `prevData` only appears when present
+    assert_eq!(
+        sorted_keys(&map),
+        vec!["blobs", "blocks", "commit", "ops", "rebase", "repo", "rev", "since", "tooBig"]
+    );
+    assert!(matches!(map.get("blocks"), Some(Ipld::Bytes(_))));
+    assert_eq!(map.get("rebase"), Some(&Ipld::Bool(false)));
+    assert_eq!(map.get("tooBig"), Some(&Ipld::Bool(false)));
+    assert_eq!(map.get("since"), Some(&Ipld::Null));
+    let Some(Ipld::List(ops)) = map.get("ops") else {
+        panic!("expected ops list");
+    };
+    let Ipld::Map(op) = &ops[0] else {
+        panic!("expected op map");
+    };
+    // creates have no `prev`, and `cid` is always present
+    assert_eq!(
+        op.keys().map(|key| key.as_str()).collect::<Vec<&str>>(),
+        vec!["action", "cid", "path"]
+    );
+    assert_eq!(op.get("action"), Some(&Ipld::String("create".to_owned())));
+}
+
+#[tokio::test]
+async fn commit_event_includes_prev_data_and_op_prev() {
+    let cid = Cid::from_str(TEST_CID).unwrap();
+    let mut data = commit_data(cid);
+    data.prev_data = Some(cid);
+    data.ops = vec![CommitOp {
+        action: CommitAction::Delete,
+        path: "app.bsky.feed.post/3jzfcijpj2z2a".to_owned(),
+        cid: None,
+        prev: Some(cid),
+    }];
+    let evt = format_seq_commit("did:plc:golden".to_owned(), data)
+        .await
+        .unwrap();
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    assert_eq!(map.get("prevData"), Some(&Ipld::Link(cid)));
+    let Some(Ipld::List(ops)) = map.get("ops") else {
+        panic!("expected ops list");
+    };
+    let Ipld::Map(op) = &ops[0] else {
+        panic!("expected op map");
+    };
+    // deletes carry a null `cid` and the previous record cid in `prev`
+    assert_eq!(op.get("cid"), Some(&Ipld::Null));
+    assert_eq!(op.get("prev"), Some(&Ipld::Link(cid)));
+}
+
+#[tokio::test]
+async fn sync_event_matches_reference_shape() {
+    let cid = Cid::from_str(TEST_CID).unwrap();
+    let mut blocks = BlockMap::new();
+    blocks.set(cid, vec![1, 2, 3]);
+    let evt = format_seq_sync_evt(
+        "did:plc:golden".to_owned(),
+        SyncEvtData {
+            cid,
+            rev: "3jzfcijpj2z2a".to_owned(),
+            blocks,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(evt.event_type, "sync");
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    assert_eq!(sorted_keys(&map), vec!["blocks", "did", "rev"]);
+    // the CAR slice is a CBOR byte string, not an integer array
+    assert!(matches!(map.get("blocks"), Some(Ipld::Bytes(_))));
+}
+
+#[tokio::test]
+async fn identity_event_omits_absent_handle() {
+    let evt = format_seq_identity_evt("did:plc:golden".to_owned(), None)
+        .await
+        .unwrap();
+    assert_eq!(evt.event_type, "identity");
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    assert_eq!(sorted_keys(&map), vec!["did"]);
+
+    let evt = format_seq_identity_evt("did:plc:golden".to_owned(), Some("alice.test".to_owned()))
+        .await
+        .unwrap();
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    assert_eq!(sorted_keys(&map), vec!["did", "handle"]);
+    assert_eq!(
+        map.get("handle"),
+        Some(&Ipld::String("alice.test".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn account_event_matches_reference_shape() {
+    let evt = format_seq_account_evt("did:plc:golden".to_owned(), AccountStatus::Active)
+        .await
+        .unwrap();
+    assert_eq!(evt.event_type, "account");
+    let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+    assert_eq!(sorted_keys(&map), vec!["active", "did"]);
+    assert_eq!(map.get("active"), Some(&Ipld::Bool(true)));
+
+    for (status, expected) in [
+        (AccountStatus::Takendown, "takendown"),
+        (AccountStatus::Suspended, "suspended"),
+        (AccountStatus::Deleted, "deleted"),
+        (AccountStatus::Deactivated, "deactivated"),
+    ] {
+        let evt = format_seq_account_evt("did:plc:golden".to_owned(), status)
+            .await
+            .unwrap();
+        let map = as_map(serde_ipld_dagcbor::from_slice(&evt.event).unwrap());
+        assert_eq!(sorted_keys(&map), vec!["active", "did", "status"]);
+        assert_eq!(map.get("active"), Some(&Ipld::Bool(false)));
+        assert_eq!(map.get("status"), Some(&Ipld::String(expected.to_owned())));
+    }
+}
+
+#[tokio::test]
+async fn sync_evt_data_from_commit_requires_commit_block() {
+    let cid = Cid::from_str(TEST_CID).unwrap();
+    let data = commit_data(cid);
+    let sync_data = sync_evt_data_from_commit(data).await.unwrap();
+    assert_eq!(sync_data.cid, cid);
+    assert_eq!(sync_data.rev, "3jzfcijpj2z2a");
+
+    let mut missing = commit_data(cid);
+    missing.commit_data.relevant_blocks = BlockMap::new();
+    let err = sync_evt_data_from_commit(missing).await.unwrap_err();
+    assert!(err.to_string().contains("commit block was not found"));
 }
