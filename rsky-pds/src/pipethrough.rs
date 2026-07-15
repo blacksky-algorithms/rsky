@@ -84,25 +84,20 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                 .await
                 {
                     Ok(res) => Outcome::Success(res),
-                    Err(error) => match error.downcast_ref() {
-                        Some(InvalidRequestError::XRPCError(xrpc)) => {
-                            if let XRPCError::FailedResponse {
-                                status,
-                                error,
-                                message,
-                                headers,
-                            } = xrpc
-                            {
-                                tracing::error!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
-                            }
-                            req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
-                            Outcome::Error((Status::BadRequest, error))
+                    Err(error) => {
+                        if let Some(InvalidRequestError::XRPCError(XRPCError::FailedResponse {
+                            status,
+                            error,
+                            message,
+                            headers,
+                        })) = error.downcast_ref()
+                        {
+                            tracing::error!("@LOG: XRPC ERROR Status:{status}; Message: {message:?}; Error: {error:?}; Headers: {headers:?}");
                         }
-                        _ => {
-                            req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
-                            Outcome::Error((Status::BadRequest, error))
-                        }
-                    },
+                        let api_error = pipethrough_error(&error);
+                        req.local_cache(|| Some(api_error));
+                        Outcome::Error((Status::BadRequest, error))
+                    }
                 }
             }
             Outcome::Error(err) => {
@@ -187,8 +182,12 @@ pub async fn pipethrough_procedure_post(
         url,
         aud,
         lxm: nsid,
-    } = format_url_and_aud(req, None).await?;
-    let headers = format_headers(req, aud, nsid, requester).await?;
+    } = format_url_and_aud(req, None)
+        .await
+        .map_err(|error| pipethrough_error(&error))?;
+    let headers = format_headers(req, aud, nsid, requester)
+        .await
+        .map_err(|error| pipethrough_error(&error))?;
     let encoded_body: Option<JsonValue>;
     match body {
         None => encoded_body = None,
@@ -215,7 +214,9 @@ pub async fn pipethrough_procedure_post(
         }
     };
     let req_init = format_req_init_with_value(req, url, headers, encoded_body)?;
-    let res = make_request(req_init).await?;
+    let res = make_request(req_init)
+        .await
+        .map_err(|error| pipethrough_error(&error))?;
     Ok(parse_proxy_res(res).await?)
 }
 
@@ -453,12 +454,48 @@ pub async fn make_request(req_init: RequestBuilder) -> Result<Response> {
 // Response parsing/forwarding
 // -------------------
 
-const RES_HEADERS_TO_FORWARD: [&str; 4] = [
+const RES_HEADERS_TO_FORWARD: [&str; 5] = [
     "content-type",
     "content-language",
     "atproto-repo-rev",
     "atproto-content-labelers",
+    "retry-after",
 ];
+
+/// Maps a pipethrough failure to an ApiError, preserving the upstream status
+/// code and error shape when the upstream responded with an XRPC error.
+pub fn pipethrough_error(error: &anyhow::Error) -> ApiError {
+    match error.downcast_ref::<InvalidRequestError>() {
+        Some(InvalidRequestError::XRPCError(XRPCError::FailedResponse {
+            status,
+            error,
+            message,
+            ..
+        })) => {
+            let code = status
+                .split_whitespace()
+                .next()
+                .and_then(|code| code.parse::<u16>().ok())
+                .unwrap_or(502);
+            ApiError::UpstreamResponse(
+                code,
+                error
+                    .clone()
+                    .unwrap_or_else(|| "UpstreamFailure".to_string()),
+                message.clone().unwrap_or_default(),
+            )
+        }
+        Some(InvalidRequestError::XRPCError(XRPCError::UpstreamFailure)) => {
+            ApiError::UpstreamResponse(
+                502,
+                "UpstreamFailure".to_string(),
+                "Upstream service unreachable".to_string(),
+            )
+        }
+        Some(err) => ApiError::InvalidRequest(err.to_string()),
+        None => ApiError::InvalidRequest(error.to_string()),
+    }
+}
 
 pub async fn parse_proxy_res(res: Response) -> Result<HandlerPipeThrough> {
     let encoding = match res.headers().get(CONTENT_TYPE) {
