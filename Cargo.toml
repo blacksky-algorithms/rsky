@@ -9,6 +9,7 @@ members = [
   "rsky-jetstream-subscriber",
   "rsky-labeler",
   "rsky-lexicon",
+  "rsky-oauth",
   "rsky-pds",
   "rsky-relay",
   "rsky-repo",
