@@ -1,4 +1,4 @@
-use crate::auth_verifier::{AccessStandard, AuthScope, Credentials};
+use crate::auth_verifier::{AccessStandard, AuthError, AuthScope, Credentials};
 use crate::handle;
 use crate::handle::errors::ErrorKind;
 use crate::pipethrough::{
@@ -480,6 +480,22 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
 impl From<Error> for ApiError {
     fn from(_value: Error) -> Self {
         ApiError::RuntimeError
+    }
+}
+
+/// Renders an [`AuthError`] as its wire-facing [`ApiError`].
+///
+/// This is the single place auth guards translate a verification failure into
+/// the rendered error body. Previously every guard hardcoded `InvalidRequest`,
+/// which made an expired token indistinguishable from a malformed one; routing
+/// through here surfaces `ExpiredToken` so clients know to refresh, while every
+/// other case keeps its historical `InvalidRequest` rendering unchanged.
+impl From<&AuthError> for ApiError {
+    fn from(error: &AuthError) -> Self {
+        match error {
+            AuthError::ExpiredToken => ApiError::ExpiredToken,
+            other => ApiError::InvalidRequest(other.to_string()),
+        }
     }
 }
 
