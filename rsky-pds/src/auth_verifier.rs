@@ -23,6 +23,23 @@ use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
 
+/// True when `err` is jwt-simple's expiry error (`JWTError::TokenHasExpired`),
+/// as opposed to a signature, format, or other verification failure.
+///
+/// jwt-simple raises the error via `ensure!(..., JWTError::TokenHasExpired)`,
+/// so the concrete cause is wrapped in the `anyhow::Error` that propagates out
+/// of [`verify_jwt`]; `downcast_ref` recovers it. This lets an expired token
+/// surface as `ExpiredToken` instead of being collapsed into a generic
+/// `BadJwt`. jwt-simple verifies the signature *before* validating claims, so a
+/// token signed by a different key fails at signature (never at expiry) and is
+/// unaffected.
+pub(crate) fn is_expired_jwt(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<jwt_simple::JWTError>(),
+        Some(jwt_simple::JWTError::TokenHasExpired)
+    )
+}
+
 pub static PDS_JWT_KEYPAIR: LazyLock<ES256kKeyPair> = LazyLock::new(|| {
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
@@ -134,6 +151,8 @@ pub struct JwtPayload {
 
 #[derive(Error, Debug)]
 pub enum AuthError {
+    #[error("ExpiredToken: `Token is expired`")]
+    ExpiredToken,
     #[error("BadJwt: `{0}`")]
     BadJwt(String),
     #[error("BadJwtAudience: `{0}`")]
@@ -184,14 +203,21 @@ impl<'r> FromRequest<'r> for Refresh {
                     None => {
                         let error =
                             AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
-                        req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                        req.local_cache(|| Some(ApiError::from(&error)));
                         return Outcome::Error((Status::BadRequest, error));
                     }
                 }
             }
             Err(error) => {
-                let error = AuthError::BadJwt(error.to_string());
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                // The refresh guard bypasses `access_check`, so map expiry here
+                // too: an expired REFRESH token on refreshSession must surface as
+                // ExpiredToken so clients know the session is unrecoverable.
+                let error = if is_expired_jwt(&error) {
+                    AuthError::ExpiredToken
+                } else {
+                    AuthError::BadJwt(error.to_string())
+                };
+                req.local_cache(|| Some(ApiError::from(&error)));
                 return Outcome::Error((Status::BadRequest, error));
             }
         };
@@ -233,6 +259,9 @@ pub async fn access_check(
                 Status::BadRequest,
                 AuthError::AccountTakedown(error.to_string()),
             )),
+            _ if is_expired_jwt(&error) => {
+                Outcome::Error((Status::BadRequest, AuthError::ExpiredToken))
+            }
             _ => Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string()))),
         },
     }
@@ -271,7 +300,7 @@ impl<'r> FromRequest<'r> for AccessFull {
         match access_check(req, vec![AuthScope::Access], None).await {
             Outcome::Success(access) => Outcome::Success(AccessFull { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -297,7 +326,7 @@ impl<'r> FromRequest<'r> for AccessPrivileged {
         {
             Outcome::Success(access) => Outcome::Success(Self { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -327,7 +356,7 @@ impl<'r> FromRequest<'r> for AccessStandard {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandard { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -361,7 +390,7 @@ impl<'r> FromRequest<'r> for AccessStandardIncludeChecks {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardIncludeChecks { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -395,7 +424,7 @@ impl<'r> FromRequest<'r> for AccessStandardCheckTakedown {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardCheckTakedown { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -426,7 +455,7 @@ impl<'r> FromRequest<'r> for AccessStandardSignupQueued {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardSignupQueued { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -453,13 +482,20 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
                 None => {
                     let error = AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
-                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&error)));
                     Outcome::Error((Status::BadRequest, error))
                 }
             },
             Err(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                // RevokeRefreshToken also bypasses `access_check`; surface expiry
+                // rather than collapsing it into BadJwt.
+                let error = if is_expired_jwt(&error) {
+                    AuthError::ExpiredToken
+                } else {
+                    AuthError::BadJwt(error.to_string())
+                };
+                req.local_cache(|| Some(ApiError::from(&error)));
+                Outcome::Error((Status::BadRequest, error))
             }
         }
     }
@@ -527,7 +563,7 @@ impl<'r> FromRequest<'r> for UserDidAuthOptional {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during UserDidAuthOptional"),
@@ -617,7 +653,7 @@ impl<'r> FromRequest<'r> for Moderator {
                     access: output.access,
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during Moderator"),
@@ -628,7 +664,7 @@ impl<'r> FromRequest<'r> for Moderator {
                     access: output.access,
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during Moderator"),
@@ -703,7 +739,7 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
@@ -714,7 +750,7 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
