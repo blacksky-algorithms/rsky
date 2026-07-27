@@ -193,8 +193,14 @@ pub async fn upload_video(
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
 
-    // Bunny cannot transcode GIF input, so convert GIFs to MP4 up front; the
-    // PDS blob and Bunny then both receive real video/mp4 bytes.
+    // Normalize the container to MP4 before either upload below.
+    //
+    // Bunny cannot transcode GIF input at all, and the PDS tags blobs by
+    // sniffing their bytes rather than the content-type we send -- so a
+    // QuickTime `.mov` (every iPhone capture) would come back as
+    // `video/quicktime` and be rejected by app.bsky.embed.video, which accepts
+    // only `video/mp4`. Converting here means the PDS blob and Bunny both
+    // receive real MP4 bytes.
     let body = if crate::transcode::is_gif(&body) {
         match crate::transcode::gif_to_mp4(&body).await {
             Ok(mp4) => Bytes::from(mp4),
@@ -206,6 +212,15 @@ pub async fn upload_video(
                     &format!("GIF transcode failed: {}", e),
                 )
                 .await?;
+                return Err(e);
+            }
+        }
+    } else if crate::transcode::is_quicktime_container(&body) {
+        match crate::transcode::mov_to_mp4(&body).await {
+            Ok(mp4) => Bytes::from(mp4),
+            Err(e) => {
+                error!("MOV remux failed: {}", e);
+                db::fail_job(&state.db_pool, job_id, &format!("MOV remux failed: {}", e)).await?;
                 return Err(e);
             }
         }
