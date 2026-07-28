@@ -197,10 +197,14 @@ pub async fn upload_video(
     //
     // Bunny cannot transcode GIF input at all, and the PDS tags blobs by
     // sniffing their bytes rather than the content-type we send -- so a
-    // QuickTime `.mov` (every iPhone capture) would come back as
-    // `video/quicktime` and be rejected by app.bsky.embed.video, which accepts
-    // only `video/mp4`. Converting here means the PDS blob and Bunny both
-    // receive real MP4 bytes.
+    // QuickTime `.mov` (every iPhone capture), an `M4V ` export or a `3g*`
+    // capture would come back tagged something other than `video/mp4` and be
+    // rejected by app.bsky.embed.video, which accepts only `video/mp4`.
+    // Converting here means the PDS blob and Bunny both receive real MP4 bytes.
+    //
+    // Containers this cannot rescue with a stream copy (`.webm`, `.mkv`,
+    // `.avi`) still fail, but they fail loudly at the mimeType check in
+    // upload_blob_with_token rather than silently in the client's applyWrites.
     let body = if crate::transcode::is_gif(&body) {
         match crate::transcode::gif_to_mp4(&body).await {
             Ok(mp4) => Bytes::from(mp4),
@@ -215,12 +219,17 @@ pub async fn upload_video(
                 return Err(e);
             }
         }
-    } else if crate::transcode::is_quicktime_container(&body) {
+    } else if crate::transcode::needs_mp4_remux(&body) {
         match crate::transcode::mov_to_mp4(&body).await {
             Ok(mp4) => Bytes::from(mp4),
             Err(e) => {
-                error!("MOV remux failed: {}", e);
-                db::fail_job(&state.db_pool, job_id, &format!("MOV remux failed: {}", e)).await?;
+                error!("Container remux failed: {}", e);
+                db::fail_job(
+                    &state.db_pool,
+                    job_id,
+                    &format!("Container remux failed: {}", e),
+                )
+                .await?;
                 return Err(e);
             }
         }
