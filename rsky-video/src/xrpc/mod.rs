@@ -202,7 +202,7 @@ pub async fn upload_video(
     // only `video/mp4`. Converting here means the PDS blob and Bunny both
     // receive real MP4 bytes.
     let body = if crate::transcode::is_gif(&body) {
-        match crate::transcode::gif_to_mp4(&body).await {
+        match crate::transcode::gif_to_mp4(&state.transcode_limits, &body).await {
             Ok(mp4) => Bytes::from(mp4),
             Err(e) => {
                 error!("GIF transcode failed: {}", e);
@@ -216,7 +216,7 @@ pub async fn upload_video(
             }
         }
     } else if crate::transcode::is_quicktime_container(&body) {
-        match crate::transcode::mov_to_mp4(&body).await {
+        match crate::transcode::mov_to_mp4(&state.transcode_limits, &body).await {
             Ok(mp4) => Bytes::from(mp4),
             Err(e) => {
                 error!("MOV remux failed: {}", e);

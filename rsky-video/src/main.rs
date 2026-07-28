@@ -40,6 +40,7 @@ pub struct AppState {
     pub pds_client: pds::PdsClient,
     pub http_client: reqwest::Client,
     pub signer: Option<signing::ServiceAuthSigner>,
+    pub transcode_limits: transcode::Limits,
 }
 
 #[tokio::main]
@@ -117,6 +118,17 @@ async fn main() -> color_eyre::Result<()> {
         }
     };
 
+    // Resource ceilings for ffmpeg conversions
+    let transcode_limits = transcode::Limits::from_config(&config);
+    info!(
+        "Transcode limits: {} concurrent, {}s deadline, {}s queue wait, {} byte output cap, {} threads each",
+        config.transcode_max_concurrent,
+        config.transcode_timeout_secs,
+        config.transcode_queue_timeout_secs,
+        config.transcode_max_output_bytes,
+        config.transcode_threads,
+    );
+
     // Create shared state
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -125,6 +137,7 @@ async fn main() -> color_eyre::Result<()> {
         pds_client,
         http_client,
         signer,
+        transcode_limits,
     });
 
     // Build router
@@ -151,7 +164,11 @@ async fn main() -> color_eyre::Result<()> {
         .route("/health", get(health_check))
         .route("/_health", get(health_check))
         // Add middleware
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024 * 1024)) // 5GB for video uploads
+        // `upload_video` takes the body as `Bytes`, so axum buffers the whole
+        // request in memory before the handler's own size check can run. Cap
+        // the layer at the same limit so an oversized upload is refused with
+        // 413 while streaming, instead of being allocated first.
+        .layer(DefaultBodyLimit::max(config.max_video_size as usize))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
@@ -166,9 +183,39 @@ async fn main() -> color_eyre::Result<()> {
     info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// Resolves on SIGTERM or SIGINT.
+///
+/// A redeploy sends SIGTERM; without this the process dies immediately and any
+/// in-flight upload is lost after its job row was already created, leaving the
+/// job stuck. Draining lets running uploads finish first.
+async fn shutdown_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install SIGINT handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = interrupt => info!("SIGINT received, draining in-flight requests"),
+        _ = terminate => info!("SIGTERM received, draining in-flight requests"),
+    }
 }
 
 async fn health_check() -> &'static str {
