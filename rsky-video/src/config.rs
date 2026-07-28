@@ -47,6 +47,23 @@ pub struct AppConfig {
     pub daily_video_limit: u32,
     /// Daily byte upload limit per user (default: 10GB)
     pub daily_byte_limit: u64,
+
+    /// Wall-clock ceiling for a single ffmpeg invocation, in seconds
+    /// (default: 120). A transcode that outlives it is killed.
+    pub transcode_timeout_secs: u64,
+    /// How many ffmpeg processes may run at once (default: half the available
+    /// cores, at least one). Bounds total transcode CPU, memory and temp disk.
+    pub transcode_max_concurrent: usize,
+    /// How long an upload waits for a transcode slot before being turned away
+    /// with 429, in seconds (default: 30).
+    pub transcode_queue_timeout_secs: u64,
+    /// Ceiling on ffmpeg output size in bytes (default: 2x `max_video_size`).
+    /// Guards against expansion bombs, where a small input decodes into an
+    /// enormous output.
+    pub transcode_max_output_bytes: u64,
+    /// Threads a single ffmpeg process may use (default: 2). Keeps one
+    /// conversion from saturating every core.
+    pub transcode_threads: u32,
 }
 
 impl AppConfig {
@@ -60,6 +77,11 @@ impl AppConfig {
         } else {
             None
         };
+
+        let max_video_size: u64 = env::var("MAX_VIDEO_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100_000_000); // 100MB
 
         Ok(Self {
             host: env::var("VIDEO_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
@@ -94,10 +116,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "https://video.blacksky.community".to_string()),
             signing_key_path: env::var("SIGNING_KEY_PATH").ok(),
 
-            max_video_size: env::var("MAX_VIDEO_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100_000_000), // 100MB
+            max_video_size,
             max_video_duration: env::var("MAX_VIDEO_DURATION")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -110,6 +129,38 @@ impl AppConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10_737_418_240), // 10GB
+
+            transcode_timeout_secs: env::var("TRANSCODE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120),
+            transcode_max_concurrent: env::var("TRANSCODE_MAX_CONCURRENT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(default_transcode_concurrency)
+                .max(1),
+            transcode_queue_timeout_secs: env::var("TRANSCODE_QUEUE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+            transcode_max_output_bytes: env::var("TRANSCODE_MAX_OUTPUT_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(max_video_size.saturating_mul(2)),
+            transcode_threads: env::var("TRANSCODE_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2)
+                .max(1),
         })
     }
+}
+
+/// Half the available cores, at least one -- leaves headroom for the request
+/// path while a transcode runs.
+fn default_transcode_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 2)
+        .unwrap_or(1)
+        .max(1)
 }
