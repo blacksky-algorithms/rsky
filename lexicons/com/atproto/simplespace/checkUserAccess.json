@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.checkUserAccess",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Check whether a user (and optionally a client application) should be authorized to access a space. Served by the space's managingApp rather than the PDS; called by the space authority with service auth at credential mint time when the space's policy is managing-app.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "did"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the user requesting access."
+          },
+          "clientId": {
+            "type": "string",
+            "description": "The attested client_id of the requesting application, if a client attestation was presented."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["allowed"],
+          "properties": {
+            "allowed": { "type": "boolean" },
+            "reason": {
+              "type": "string",
+              "description": "Optional application-defined explanation for the decision."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    }
+  }
+}

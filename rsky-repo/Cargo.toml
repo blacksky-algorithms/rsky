@@ -1,6 +1,6 @@
 [package]
 name = "rsky-repo"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust crate for atproto repositories, an in particular the Merkle Search Tree (MST) data structure."
 license = "Apache-2.0"

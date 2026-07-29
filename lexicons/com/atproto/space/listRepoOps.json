@@ -1,0 +1,68 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.listRepoOps",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Primary sync mechanism: a permissioned repo's operation log since a given revision, inlining record values by default. Set excludeValues for metadata-only entries. The oplog is a transport optimization; a host may compact or drop it, and a syncer that cannot find its since revision falls back to full-state recovery via getRepo. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "did"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the repo's author."
+          },
+          "since": {
+            "type": "string",
+            "format": "tid",
+            "description": "Return operations after this revision. When omitted, return the earliest available operations."
+          },
+          "cursor": { "type": "string" },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 500
+          },
+          "excludeValues": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, omit inlined record values and return only operation metadata."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ops"],
+          "properties": {
+            "cursor": { "type": "string" },
+            "ops": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "com.atproto.space.defs#repoOp" }
+            },
+            "commit": {
+              "type": "ref",
+              "ref": "com.atproto.space.defs#signedCommit",
+              "description": "The repo's current signed commit. Present if and only if this page includes the last available operation for the repo."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "HistoryUnavailable",
+          "description": "The requested since revision is no longer covered by the host's operation log. Fall back to full-state recovery."
+        },
+        { "name": "RepoNotFound" }
+      ]
+    }
+  }
+}

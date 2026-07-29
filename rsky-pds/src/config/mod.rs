@@ -14,6 +14,76 @@ pub struct ServerConfig {
     pub invites: InvitesConfig,
     pub identity: IdentityConfig,
     pub crawlers: Vec<String>,
+    pub actor_store: ActorStoreConfig,
+    pub service_db: ServiceDbConfig,
+    pub blobstore: BlobstoreConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlobstoreConfig {
+    Disk {
+        location: String,
+        tmp_location: Option<String>,
+    },
+    S3 {
+        bucket: Option<String>,
+    },
+}
+
+pub fn blobstore_cfg_from(
+    disk_location: Option<String>,
+    disk_tmp_location: Option<String>,
+    s3_bucket: Option<String>,
+) -> Result<BlobstoreConfig> {
+    match (disk_location, s3_bucket) {
+        (Some(_), Some(_)) => bail!("Cannot set both S3 and disk blobstore env vars"),
+        (Some(location), None) => Ok(BlobstoreConfig::Disk {
+            location,
+            tmp_location: disk_tmp_location,
+        }),
+        (None, Some(bucket)) => Ok(BlobstoreConfig::S3 {
+            bucket: Some(bucket),
+        }),
+        // legacy deployments derive a per-actor bucket from the DID
+        (None, None) => Ok(BlobstoreConfig::S3 { bucket: None }),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorStoreConfig {
+    pub directory: String,
+    pub cache_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceDbConfig {
+    pub account_db_location: String,
+    pub sequencer_db_location: String,
+    pub did_cache_db_location: String,
+}
+
+pub fn storage_cfg_from(
+    data_directory: Option<String>,
+    actor_store_directory: Option<String>,
+    actor_store_cache_size: Option<usize>,
+    account_db_location: Option<String>,
+    sequencer_db_location: Option<String>,
+    did_cache_db_location: Option<String>,
+) -> (ActorStoreConfig, ServiceDbConfig) {
+    let db_loc = |name: &str| match &data_directory {
+        Some(data_directory) => format!("{data_directory}/{name}"),
+        None => name.to_string(),
+    };
+    let actor_store = ActorStoreConfig {
+        directory: actor_store_directory.unwrap_or_else(|| db_loc("actors")),
+        cache_size: actor_store_cache_size.unwrap_or(100),
+    };
+    let service_db = ServiceDbConfig {
+        account_db_location: account_db_location.unwrap_or_else(|| db_loc("account.sqlite")),
+        sequencer_db_location: sequencer_db_location.unwrap_or_else(|| db_loc("sequencer.sqlite")),
+        did_cache_db_location: did_cache_db_location.unwrap_or_else(|| db_loc("did_cache.sqlite")),
+    };
+    (actor_store, service_db)
 }
 
 /// BksyAppViewConfig, ModServiceConfig, ReportServiceConfig, etc.
@@ -151,6 +221,20 @@ pub fn env_to_cfg() -> ServerConfig {
         },
     };
     let crawlers_cfg = env_list("PDS_CRAWLERS");
+    let (actor_store_cfg, service_db_cfg) = storage_cfg_from(
+        env_str("PDS_DATA_DIRECTORY"),
+        env_str("PDS_ACTOR_STORE_DIRECTORY"),
+        env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
+        env_str("PDS_ACCOUNT_DB_LOCATION"),
+        env_str("PDS_SEQUENCER_DB_LOCATION"),
+        env_str("PDS_DID_CACHE_DB_LOCATION"),
+    );
+    let blobstore_cfg = blobstore_cfg_from(
+        env_str("PDS_BLOBSTORE_DISK_LOCATION"),
+        env_str("PDS_BLOBSTORE_DISK_TMP_LOCATION"),
+        env_str("PDS_BLOBSTORE_S3_BUCKET"),
+    )
+    .expect("invalid blobstore configuration");
 
     ServerConfig {
         service: service_cfg,
@@ -161,6 +245,9 @@ pub fn env_to_cfg() -> ServerConfig {
         invites: invites_cfg,
         crawlers: crawlers_cfg,
         identity: identity_cfg,
+        actor_store: actor_store_cfg,
+        service_db: service_db_cfg,
+        blobstore: blobstore_cfg,
     }
 }
 
@@ -172,5 +259,180 @@ impl ServerConfig {
                 context::service_auth_headers(did, &bsky_app_view.did, lxm).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_to_cfg_builds_default_and_configured_config() {
+        let cfg = env_to_cfg();
+        assert!(cfg.service.port > 0);
+        assert!(!cfg.actor_store.directory.is_empty());
+        assert!(cfg
+            .service_db
+            .account_db_location
+            .ends_with("account.sqlite"));
+        assert!(cfg.invites.required);
+
+        // configured variant: exercises hostname/appview/mod-service/invite branches
+        let vars = [
+            ("PDS_HOSTNAME", "pds.example.com"),
+            ("PDS_SERVICE_HANDLE_DOMAINS", ".pds.example.com"),
+            ("PDS_BSKY_APP_VIEW_URL", "https://appview.example.com"),
+            ("PDS_BSKY_APP_VIEW_DID", "did:web:appview.example.com"),
+            ("PDS_MOD_SERVICE_URL", "https://mod.example.com"),
+            ("PDS_MOD_SERVICE_DID", "did:web:mod.example.com"),
+            ("PDS_REPORT_SERVICE_URL", "https://report.example.com"),
+            ("PDS_REPORT_SERVICE_DID", "did:web:report.example.com"),
+            ("PDS_INVITE_REQUIRED", "false"),
+        ];
+        for (key, value) in vars {
+            std::env::set_var(key, value);
+        }
+        let cfg = env_to_cfg();
+        for (key, _) in vars {
+            std::env::remove_var(key);
+        }
+        assert_eq!(cfg.service.public_url, "https://pds.example.com");
+        assert_eq!(
+            cfg.identity.service_handle_domains,
+            vec![".pds.example.com".to_string()]
+        );
+        assert_eq!(
+            cfg.bsky_app_view.unwrap().did,
+            "did:web:appview.example.com"
+        );
+        assert_eq!(cfg.mod_service.unwrap().did, "did:web:mod.example.com");
+        assert_eq!(
+            cfg.report_service.unwrap().did,
+            "did:web:report.example.com"
+        );
+        assert!(!cfg.invites.required);
+
+        // a mod service without an explicit report service is used for reports,
+        // and a non-localhost hostname derives its own handle domain
+        std::env::set_var("PDS_HOSTNAME", "pds2.example.com");
+        std::env::set_var("PDS_MOD_SERVICE_URL", "https://mod.example.com");
+        std::env::set_var("PDS_MOD_SERVICE_DID", "did:web:mod.example.com");
+        let cfg = env_to_cfg();
+        std::env::remove_var("PDS_HOSTNAME");
+        std::env::remove_var("PDS_MOD_SERVICE_URL");
+        std::env::remove_var("PDS_MOD_SERVICE_DID");
+        assert_eq!(cfg.report_service.unwrap().did, "did:web:mod.example.com");
+        assert_eq!(
+            cfg.identity.service_handle_domains,
+            vec![".pds2.example.com".to_string()]
+        );
+
+        let cfg = env_to_cfg();
+        assert_eq!(
+            cfg.service.public_url,
+            format!("http://localhost:{}", cfg.service.port)
+        );
+
+        // no appview configured means no auth headers
+        let mut no_appview = cfg;
+        no_appview.bsky_app_view = None;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(
+                no_appview.appview_auth_headers("did:example:alice", "app.bsky.feed.getTimeline")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn blobstore_cfg_prefers_disk_when_disk_location_set() {
+        let cfg = blobstore_cfg_from(Some("/data/blobs".to_owned()), None, None).unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: None,
+            }
+        );
+
+        let cfg = blobstore_cfg_from(
+            Some("/data/blobs".to_owned()),
+            Some("/data/tmp".to_owned()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: Some("/data/tmp".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn blobstore_cfg_uses_s3_bucket_when_set() {
+        let cfg = blobstore_cfg_from(None, None, Some("my-bucket".to_owned())).unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::S3 {
+                bucket: Some("my-bucket".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn blobstore_cfg_falls_back_to_legacy_s3() {
+        let cfg = blobstore_cfg_from(None, None, None).unwrap();
+        assert_eq!(cfg, BlobstoreConfig::S3 { bucket: None });
+    }
+
+    #[test]
+    fn blobstore_cfg_rejects_both_disk_and_s3() {
+        assert!(blobstore_cfg_from(
+            Some("/data/blobs".to_owned()),
+            None,
+            Some("my-bucket".to_owned()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn storage_cfg_defaults_without_data_directory() {
+        let (actor_store, service_db) = storage_cfg_from(None, None, None, None, None, None);
+        assert_eq!(actor_store.directory, "actors");
+        assert_eq!(actor_store.cache_size, 100);
+        assert_eq!(service_db.account_db_location, "account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "did_cache.sqlite");
+    }
+
+    #[test]
+    fn storage_cfg_defaults_under_data_directory() {
+        let (actor_store, service_db) =
+            storage_cfg_from(Some("/data".to_owned()), None, None, None, None, None);
+        assert_eq!(actor_store.directory, "/data/actors");
+        assert_eq!(service_db.account_db_location, "/data/account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "/data/sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "/data/did_cache.sqlite");
+    }
+
+    #[test]
+    fn storage_cfg_explicit_values_win() {
+        let (actor_store, service_db) = storage_cfg_from(
+            Some("/data".to_owned()),
+            Some("/elsewhere/actors".to_owned()),
+            Some(5),
+            Some("/dbs/account.sqlite".to_owned()),
+            Some("/dbs/sequencer.sqlite".to_owned()),
+            Some("/dbs/did_cache.sqlite".to_owned()),
+        );
+        assert_eq!(actor_store.directory, "/elsewhere/actors");
+        assert_eq!(actor_store.cache_size, 5);
+        assert_eq!(service_db.account_db_location, "/dbs/account.sqlite");
+        assert_eq!(service_db.sequencer_db_location, "/dbs/sequencer.sqlite");
+        assert_eq!(service_db.did_cache_db_location, "/dbs/did_cache.sqlite");
     }
 }

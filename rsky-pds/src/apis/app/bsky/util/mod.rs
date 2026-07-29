@@ -9,7 +9,7 @@ pub async fn get_did_doc(
     id_resolver: &State<SharedIdResolver>,
     did: &String,
 ) -> Result<DidDocument> {
-    let mut lock = id_resolver.id_resolver.write().await;
+    let lock = id_resolver.id_resolver.write().await;
     match lock.did.resolve(did.clone(), None).await {
         Err(err) => match err.downcast_ref() {
             Some(Error::PoorlyFormattedDidDocumentError(_)) => bail!("invalid did document: {did}"),

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  {% include "oauth_base_style.html" %}
+</head>
+<body>
+  <main>
+    <h1>Sign in</h1>
+    <p class="client">to continue to <strong>{{ client_display }}</strong></p>
+    {% if let Some(error) = error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+    {% if !sessions.is_empty() %}
+    <div class="sessions">
+      <p class="muted">Continue with a signed-in account:</p>
+      {% for session in sessions %}
+      <form method="post" action="/oauth/authorize/select">
+        <input type="hidden" name="request_uri" value="{{ request_uri }}">
+        <input type="hidden" name="client_id" value="{{ client_id }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="did" value="{{ session.did }}">
+        <button type="submit">Continue as {{ session.label }}</button>
+      </form>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <form method="post" action="/oauth/authorize/sign-in">
+      <input type="hidden" name="request_uri" value="{{ request_uri }}">
+      <input type="hidden" name="client_id" value="{{ client_id }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label for="identifier">Handle or email</label>
+      <input type="text" id="identifier" name="identifier" value="{{ login_hint }}" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+    {% if let Some(signup_url) = signup_url %}
+    <p class="muted">New here? <a href="{{ signup_url }}">Create an account</a></p>
+    {% endif %}
+  </main>
+</body>
+</html>

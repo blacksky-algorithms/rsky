@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.registerNotify",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Register an endpoint to be notified of writes via com.atproto.space.notifyWrite. On a space host, subscribes to writes for all repos in the space. On a repo host with a repo specified, subscribes to that repo. Requires a space credential.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "endpoint"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "endpoint": {
+              "type": "string",
+              "format": "uri",
+              "description": "The service endpoint that will receive notifyWrite calls."
+            },
+            "repo": {
+              "type": "string",
+              "format": "did",
+              "description": "When calling a repo host, subscribe to this specific repo rather than the whole space."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["expiresAt"],
+          "properties": {
+            "expiresAt": {
+              "type": "string",
+              "format": "datetime",
+              "description": "When the registration expires. May be later than the expiration of the presented space credential."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }, { "name": "RepoNotFound" }]
+    }
+  }
+}

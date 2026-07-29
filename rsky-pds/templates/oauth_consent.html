@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize {{ client_display }}</title>
+  {% include "oauth_base_style.html" %}
+</head>
+<body>
+  <main>
+    <h1>Authorize {{ client_display }}</h1>
+    <p class="client">{{ client_id }}</p>
+    <p>Signed in as <strong>{{ account_label }}</strong></p>
+    <p class="muted">This app is requesting permission to:</p>
+    <ul class="scopes">
+      {% for item in scopes %}
+      <li>{{ item.description }}<code>{{ item.scope }}</code></li>
+      {% endfor %}
+    </ul>
+    <form method="post" action="/oauth/authorize/accept">
+      <input type="hidden" name="request_uri" value="{{ request_uri }}">
+      <input type="hidden" name="client_id" value="{{ client_id }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="did" value="{{ did }}">
+      <button type="submit" class="primary">Authorize</button>
+    </form>
+    <form method="post" action="/oauth/authorize/reject">
+      <input type="hidden" name="request_uri" value="{{ request_uri }}">
+      <input type="hidden" name="client_id" value="{{ client_id }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Deny</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -48,10 +48,16 @@ pub fn from_str_to_utc(str: &str) -> Result<DateTime<UtcOffset>> {
         .map_err(|e| anyhow!("failed to parse datetime {:?}: {}", str, e))
 }
 
-#[allow(deprecated)]
 pub fn from_micros_to_utc(micros: i64) -> DateTime<UtcOffset> {
-    let nanoseconds = 230 * 1000000;
-    DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(micros, nanoseconds), Utc)
+    // NaiveDateTime::from_timestamp interprets its argument as SECONDS, so
+    // passing a microsecond value overflowed chrono's representable range and
+    // panicked ("invalid or out-of-range datetime"). rotate_refresh_token
+    // formats the rotated expiry through from_micros_to_str, so this panic
+    // surfaced as a 500 on every com.atproto.server.refreshSession call.
+    // (The old code also stamped a fixed 230ms of sub-second noise onto every
+    // converted instant, which this drops.)
+    DateTime::from_timestamp_micros(micros)
+        .unwrap_or_else(|| panic!("timestamp out of range: {micros} micros"))
 }
 
 pub fn from_micros_to_str(micros: i64) -> String {
@@ -74,6 +80,26 @@ mod tests {
 
     const SAMPLE_PRIMARY: &str = "2023-11-14T22:13:20.000Z";
     const SAMPLE_OFFSET: &str = "2023-11-14T22:13:20+00:00";
+
+    #[test]
+    fn from_micros_to_utc_handles_a_current_era_timestamp() {
+        // Regression: the previous implementation passed microseconds to
+        // NaiveDateTime::from_timestamp (which expects seconds), so any real
+        // timestamp overflowed chrono's range and panicked. This asserts the
+        // conversion both survives and is correct for a present-day instant.
+        let micros = 1_700_000_000_000_000_i64; // 2023-11-14T22:13:20 UTC
+        let dt = from_micros_to_utc(micros);
+        assert_eq!(dt.timestamp_micros(), micros);
+        assert_eq!(dt.to_rfc3339(), "2023-11-14T22:13:20+00:00");
+    }
+
+    #[test]
+    fn from_micros_to_utc_preserves_sub_second_precision() {
+        // The old code discarded the caller's sub-second component and stamped
+        // a fixed 230ms onto every instant; the fix round-trips microseconds.
+        let micros = 1_700_000_000_123_456_i64;
+        assert_eq!(from_micros_to_utc(micros).timestamp_micros(), micros);
+    }
 
     #[test]
     fn from_str_to_micros_parses_primary_format() {

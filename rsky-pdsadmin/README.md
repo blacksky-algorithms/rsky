@@ -114,7 +114,8 @@ pdsadmin update
 
 ### RSKY-PDS Specific Commands
 
-Initialize the database:
+Check database initialization (rsky-pds migrates its SQLite databases
+automatically at startup, so this is informational only):
 ```bash
 pdsadmin rsky-pds init-db
 ```
@@ -141,7 +142,6 @@ RSKY-PDS Admin detects if it's running inside a container by checking for the `R
 ### Prerequisites
 
 - Rust (latest stable)
-- PostgreSQL client libraries (for diesel)
 
 ### Building
 

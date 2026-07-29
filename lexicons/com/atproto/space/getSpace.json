@@ -1,0 +1,39 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.getSpace",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Describe a space, including host-specific configuration. Requires a space credential; implemented by a space host.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "config"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "config": {
+              "type": "union",
+              "refs": ["com.atproto.simplespace.defs#config"],
+              "description": "Host-specific space configuration. Open union; space-management implementations other than simplespace supply their own config types."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    }
+  }
+}

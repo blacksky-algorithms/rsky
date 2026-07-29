@@ -3,6 +3,7 @@ use crate::errors::Error;
 use crate::types::DidCache;
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -11,11 +12,11 @@ pub const DOC_PATH: &str = "/.well-known/did.json";
 #[derive(Clone, Debug)]
 pub struct DidWebResolver {
     pub timeout: Duration,
-    pub cache: Option<DidCache>,
+    pub cache: Option<Arc<dyn DidCache>>,
 }
 
 impl DidWebResolver {
-    pub fn new(timeout: Duration, cache: Option<DidCache>) -> Self {
+    pub fn new(timeout: Duration, cache: Option<Arc<dyn DidCache>>) -> Self {
         Self { timeout, cache }
     }
 
@@ -23,19 +24,17 @@ impl DidWebResolver {
         let parsed_id: String = did.split(":").collect::<Vec<&str>>()[2..].join(":");
         let parts = parsed_id
             .split(":")
-            .into_iter()
-            .map(|part| decode_uri_component(part))
+            .map(decode_uri_component)
             .collect::<Result<Vec<String>>>()?;
-        let path: String;
-        if parts.len() < 1 {
+        let path: String = if parts.is_empty() {
             bail!(Error::PoorlyFormattedDidError(did))
         } else if parts.len() == 1 {
-            path = parts[0].clone() + DOC_PATH;
+            parts[0].clone() + DOC_PATH
         } else {
             // how we *would* resolve a did:web with path, if atproto supported it
             // path = parts.join('/') + "/did.json";
             bail!(Error::UnsupportedDidWebPathError(did))
-        }
+        };
 
         let mut url = Url::parse(&format!("https://{path}"))?;
 

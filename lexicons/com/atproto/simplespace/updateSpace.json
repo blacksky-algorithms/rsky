@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.updateSpace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Update the configuration of a simplespace-managed space. The updated configuration is surfaced through com.atproto.space.getSpace. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "config"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "config": {
+              "type": "ref",
+              "ref": "com.atproto.simplespace.defs#config"
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    }
+  }
+}

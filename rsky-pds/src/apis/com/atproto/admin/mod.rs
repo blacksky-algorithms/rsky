@@ -3,6 +3,7 @@ pub mod disable_account_invites;
 pub mod disable_invite_codes;
 pub mod enable_account_invites;
 pub mod get_account_info;
+pub mod get_account_infos;
 pub mod get_invite_codes;
 pub mod get_subject_status;
 pub mod send_email;

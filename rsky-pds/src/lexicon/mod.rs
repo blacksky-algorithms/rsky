@@ -1,14 +1,20 @@
 use crate::lexicon::lexicons::Root;
 use lazy_static::lazy_static;
-use std::fs;
 
 lazy_static! {
-    pub static ref LEXICONS: Root = {
-        let toml_str = fs::read_to_string("lexicons.toml").expect("Failed to open lexicon file");
-        let cargo_toml: Root =
-            toml::from_str(&toml_str).expect("Failed to deserialize lexicons.toml");
-        cargo_toml
-    };
+    // Deserializing Root needs more stack than tokio worker and test
+    // threads provide, so parse on a dedicated thread
+    pub static ref LEXICONS: Box<Root> = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            Box::new(
+                toml::from_str::<Root>(include_str!("lexicons.toml"))
+                    .expect("Failed to deserialize lexicons.toml"),
+            )
+        })
+        .expect("Failed to spawn lexicon parser thread")
+        .join()
+        .expect("Lexicon parser thread panicked");
 }
 
 pub mod lexicons;

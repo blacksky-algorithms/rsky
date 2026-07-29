@@ -1,13 +1,11 @@
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFullImport;
-use crate::db::DbConn;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
 };
-use aws_config::SdkConfig;
 use futures::{stream, StreamExt};
 use lexicon_cid::Cid;
 use reqwest::header;
@@ -77,15 +75,16 @@ impl<'r> FromData<'r> for ImportRepoInput {
 pub async fn import_repo(
     auth: AccessFullImport,
     import_repo_input: ImportRepoInput,
-    s3_config: &State<SdkConfig>,
-    db: DbConn,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
 ) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
-    let mut actor_store = ActorStore::new(
-        requester.clone(),
-        S3BlobStore::new(requester.clone(), s3_config),
-        db,
-    );
+    let mut actor_store = actor_store
+        .transact(
+            requester.clone(),
+            blobstore_factory.blobstore(requester.clone()),
+        )
+        .await?;
 
     // Get current repo if it exists
     let curr_root: Option<Cid> = actor_store.get_repo_root().await;

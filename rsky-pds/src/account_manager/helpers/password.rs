@@ -1,15 +1,13 @@
-use crate::db::DbConn;
-use crate::models;
-use crate::models::AppPassword;
+use crate::db::sqlite::Db;
 use anyhow::{anyhow, bail, Result};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
 use base64ct::{Base64, Encoding};
-use diesel::*;
 use rsky_common::{get_random_str, now};
 use rsky_lexicon::com::atproto::server::CreateAppPasswordOutput;
+use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 pub struct UpdateUserPasswordOpts {
@@ -17,47 +15,40 @@ pub struct UpdateUserPasswordOpts {
     pub password_encrypted: String,
 }
 
-pub async fn verify_account_password(did: &str, password: &String, db: &DbConn) -> Result<bool> {
-    use crate::schema::pds::account::dsl as AccountSchema;
-
+pub async fn verify_account_password(did: &str, password: &String, db: &Db) -> Result<bool> {
     let did = did.to_owned();
-    let found = db
+    let found: Option<String> = db
         .run(move |conn| {
-            AccountSchema::account
-                .filter(AccountSchema::did.eq(did))
-                .select(models::Account::as_select())
-                .first(conn)
-                .optional()
+            Ok(conn
+                .query_row(
+                    "SELECT password FROM account WHERE did = ?1",
+                    params![did],
+                    |row| row.get(0),
+                )
+                .optional()?)
         })
         .await?;
-    if let Some(found) = found {
-        verify(password, &found.password)
+    if let Some(stored_hash) = found {
+        verify(password, &stored_hash)
     } else {
         Ok(false)
     }
 }
 
-pub async fn verify_app_password(did: &str, password: &str, db: &DbConn) -> Result<Option<String>> {
-    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-
+pub async fn verify_app_password(did: &str, password: &str, db: &Db) -> Result<Option<String>> {
     let did = did.to_owned();
     let password = password.to_owned();
     let password_encrypted = hash_app_password(&did, &password).await?;
-    let found = db
-        .run(move |conn| {
-            AppPasswordSchema::app_password
-                .filter(AppPasswordSchema::did.eq(did))
-                .filter(AppPasswordSchema::password.eq(password_encrypted))
-                .select(AppPassword::as_select())
-                .first(conn)
-                .optional()
-        })
-        .await?;
-    if let Some(found) = found {
-        Ok(Some(found.name))
-    } else {
-        Ok(None)
-    }
+    db.run(move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT name FROM app_password WHERE did = ?1 AND password = ?2",
+                params![did, password_encrypted],
+                |row| row.get(0),
+            )
+            .optional()?)
+    })
+    .await
 }
 
 // We use Argon because it's 3x faster than scrypt.
@@ -100,33 +91,31 @@ pub async fn hash_app_password(did: &String, password: &String) -> Result<String
 pub async fn create_app_password(
     did: String,
     name: String,
-    db: &DbConn,
+    db: &Db,
 ) -> Result<CreateAppPasswordOutput> {
     let str = &get_random_str()[0..16].to_lowercase();
     let chunks = [&str[0..4], &str[4..8], &str[8..12], &str[12..16]];
     let password = chunks.join("-");
     let password_encrypted = hash_app_password(&did, &password).await?;
 
-    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-
     let created_at = now();
 
     db.run(move |conn| {
-        let got: Option<AppPassword> = insert_into(AppPasswordSchema::app_password)
-            .values((
-                AppPasswordSchema::did.eq(did),
-                AppPasswordSchema::name.eq(&name),
-                AppPasswordSchema::password.eq(password_encrypted),
-                AppPasswordSchema::createdAt.eq(&created_at),
-            ))
-            .returning(AppPassword::as_select())
-            .get_result(conn)
+        let got: Option<String> = conn
+            .query_row(
+                "INSERT INTO app_password (did, name, password, \"createdAt\") \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (did, name) DO NOTHING \
+                 RETURNING name",
+                params![did, name, password_encrypted, created_at],
+                |row| row.get(0),
+            )
             .optional()?;
         if got.is_some() {
             Ok(CreateAppPasswordOutput {
-                name,
-                password,
-                created_at,
+                name: name.clone(),
+                password: password.clone(),
+                created_at: created_at.clone(),
             })
         } else {
             bail!("could not create app-specific password")
@@ -135,42 +124,38 @@ pub async fn create_app_password(
     .await
 }
 
-pub async fn list_app_passwords(did: &str, db: &DbConn) -> Result<Vec<(String, String)>> {
-    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-
+pub async fn list_app_passwords(did: &str, db: &Db) -> Result<Vec<(String, String)>> {
     let did = did.to_owned();
     db.run(move |conn| {
-        Ok(AppPasswordSchema::app_password
-            .filter(AppPasswordSchema::did.eq(did))
-            .select((AppPasswordSchema::name, AppPasswordSchema::createdAt))
-            .get_results(conn)?)
+        let mut stmt =
+            conn.prepare("SELECT name, \"createdAt\" FROM app_password WHERE did = ?1")?;
+        let rows = stmt
+            .query_map(params![did], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<(String, String)>, rusqlite::Error>>()?;
+        Ok(rows)
     })
     .await
 }
 
-pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &DbConn) -> Result<()> {
-    use crate::schema::pds::account::dsl as AccountSchema;
-
+pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &Db) -> Result<()> {
     db.run(move |conn| {
-        update(AccountSchema::account)
-            .filter(AccountSchema::did.eq(opts.did))
-            .set(AccountSchema::password.eq(opts.password_encrypted))
-            .execute(conn)?;
+        conn.execute(
+            "UPDATE account SET password = ?1 WHERE did = ?2",
+            params![opts.password_encrypted, opts.did],
+        )?;
         Ok(())
     })
     .await
 }
 
-pub async fn delete_app_password(did: &str, name: &str, db: &DbConn) -> Result<()> {
-    use crate::schema::pds::app_password::dsl as AppPasswordSchema;
-
+pub async fn delete_app_password(did: &str, name: &str, db: &Db) -> Result<()> {
     let did = did.to_owned();
     let name = name.to_owned();
     db.run(move |conn| {
-        delete(AppPasswordSchema::app_password)
-            .filter(AppPasswordSchema::did.eq(did))
-            .filter(AppPasswordSchema::name.eq(name))
-            .execute(conn)?;
+        conn.execute(
+            "DELETE FROM app_password WHERE did = ?1 AND name = ?2",
+            params![did, name],
+        )?;
         Ok(())
     })
     .await

@@ -1,20 +1,16 @@
+use crate::actor_store::db::ActorDb;
 use crate::actor_store::preference::util::pref_in_scope;
 use crate::auth_verifier::AuthScope;
-use crate::db::DbConn;
-use crate::models;
-use crate::models::AccountPref;
 use anyhow::{bail, Result};
-use diesel::*;
 use rsky_lexicon::app::bsky::actor::RefPreferences;
-use std::sync::Arc;
 
 pub struct PreferenceReader {
     pub did: String,
-    pub db: Arc<DbConn>,
+    pub db: ActorDb,
 }
 
 impl PreferenceReader {
-    pub fn new(did: String, db: Arc<DbConn>) -> Self {
+    pub fn new(did: String, db: ActorDb) -> Self {
         PreferenceReader { did, db }
     }
 
@@ -23,37 +19,30 @@ impl PreferenceReader {
         namespace: Option<String>,
         scope: AuthScope,
     ) -> Result<Vec<RefPreferences>> {
-        use crate::schema::pds::account_pref::dsl as AccountPrefSchema;
-
-        let did = self.did.clone();
-        self.db
-            .run(move |conn| {
-                let prefs_res = AccountPrefSchema::account_pref
-                    .filter(AccountPrefSchema::did.eq(&did))
-                    .select(AccountPref::as_select())
-                    .order(AccountPrefSchema::id.asc())
-                    .load(conn)?;
-                let account_prefs = prefs_res
-                    .into_iter()
-                    .filter(|pref| match &namespace {
-                        None => true,
-                        Some(namespace) => pref_match_namespace(namespace, &pref.name),
-                    })
-                    .filter(|pref| pref_in_scope(scope.clone(), pref.name.clone()))
-                    .map(|pref| {
-                        let value_json_res = match pref.value_json {
-                            None => bail!("preferences json null for {}", pref.name),
-                            Some(value_json) => serde_json::from_str::<RefPreferences>(&value_json),
-                        };
-                        match value_json_res {
-                            Err(error) => bail!(error.to_string()),
-                            Ok(value_json) => Ok(value_json),
-                        }
-                    })
-                    .collect::<Result<Vec<RefPreferences>>>()?;
-                Ok(account_prefs)
+        let rows: Vec<(String, String)> = self
+            .db
+            .run(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT name, \"valueJson\" FROM account_pref ORDER BY id ASC")?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<(String, String)>, rusqlite::Error>>()?;
+                Ok(rows)
             })
-            .await
+            .await?;
+        rows.into_iter()
+            .filter(|(name, _)| match &namespace {
+                None => true,
+                Some(namespace) => pref_match_namespace(namespace, name),
+            })
+            .filter(|(name, _)| pref_in_scope(scope.clone(), name.clone()))
+            .map(
+                |(name, value_json)| match serde_json::from_str::<RefPreferences>(&value_json) {
+                    Ok(pref) => Ok(pref),
+                    Err(error) => bail!("preferences json invalid for {name}: {error}"),
+                },
+            )
+            .collect::<Result<Vec<RefPreferences>>>()
     }
 
     #[tracing::instrument(skip_all)]
@@ -63,82 +52,290 @@ impl PreferenceReader {
         namespace: String,
         scope: AuthScope,
     ) -> Result<()> {
-        let did = self.did.clone();
+        if !values
+            .iter()
+            .all(|value| pref_match_namespace(&namespace, &value.get_type()))
+        {
+            bail!("Some preferences are not in the {namespace} namespace")
+        }
+        let not_in_scope = values
+            .iter()
+            .filter(|value| !pref_in_scope(scope.clone(), value.get_type()))
+            .collect::<Vec<&RefPreferences>>();
+        if !not_in_scope.is_empty() {
+            bail!("Do not have authorization to set preferences.");
+        }
+        let put_prefs = values
+            .into_iter()
+            .map(|value| Ok((value.get_type(), serde_json::to_string(&value)?)))
+            .collect::<Result<Vec<(String, String)>>>()?;
         self.db
-            .run(move |conn| {
-                match values
+            .tx(move |tx| {
+                // get all current prefs for user and replace all prefs in given namespace
+                let mut stmt = tx.prepare("SELECT id, name FROM account_pref")?;
+                let all_prefs = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<(i64, String)>, rusqlite::Error>>()?;
+                drop(stmt);
+                let all_pref_ids_in_namespace = all_prefs
                     .iter()
-                    .all(|value| pref_match_namespace(&namespace, &value.get_type()))
-                {
-                    false => bail!("Some preferences are not in the {namespace} namespace"),
-                    true => {
-                        let not_in_scope = values
-                            .iter()
-                            .filter(|value| !pref_in_scope(scope.clone(), value.get_type()))
-                            .collect::<Vec<&RefPreferences>>();
-                        if !not_in_scope.is_empty() {
-                            tracing::info!(
-                        "@LOG: PreferenceReader::put_preferences() debug scope: {:?}, values: {:?}",
-                        scope,
-                        values
+                    .filter(|(_, name)| pref_match_namespace(&namespace, name))
+                    .filter(|(_, name)| pref_in_scope(scope.clone(), name.clone()))
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<i64>>();
+                if !all_pref_ids_in_namespace.is_empty() {
+                    let sql = format!(
+                        "DELETE FROM account_pref WHERE id IN ({})",
+                        crate::actor_store::repo::sql_repo::placeholders(
+                            all_pref_ids_in_namespace.len()
+                        )
                     );
-                            bail!("Do not have authorization to set preferences.");
-                        }
-                        // get all current prefs for user and prep new pref rows
-                        use crate::schema::pds::account_pref::dsl as AccountPrefSchema;
-                        let all_prefs = AccountPrefSchema::account_pref
-                            .filter(AccountPrefSchema::did.eq(&did))
-                            .select(models::AccountPref::as_select())
-                            .load(conn)?;
-                        let put_prefs = values
-                            .into_iter()
-                            .map(|value| {
-                                Ok(AccountPref {
-                                    id: 0,
-                                    name: value.get_type(),
-                                    value_json: Some(serde_json::to_string(&value)?),
-                                })
-                            })
-                            .collect::<Result<Vec<AccountPref>>>()?;
-
-                        let all_pref_ids_in_namespace = all_prefs
-                            .iter()
-                            .filter(|pref| pref_match_namespace(&namespace, &pref.name))
-                            .filter(|pref| pref_in_scope(scope.clone(), pref.name.clone()))
-                            .map(|pref| pref.id)
-                            .collect::<Vec<i32>>();
-                        // replace all prefs in given namespace
-                        if !all_pref_ids_in_namespace.is_empty() {
-                            delete(AccountPrefSchema::account_pref)
-                                .filter(AccountPrefSchema::id.eq_any(all_pref_ids_in_namespace))
-                                .execute(conn)?;
-                        }
-                        if !put_prefs.is_empty() {
-                            insert_into(AccountPrefSchema::account_pref)
-                                .values(
-                                    put_prefs
-                                        .into_iter()
-                                        .map(|pref| {
-                                            (
-                                                AccountPrefSchema::did.eq(&did),
-                                                AccountPrefSchema::name.eq(pref.name),
-                                                AccountPrefSchema::valueJson.eq(pref.value_json),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>(),
-                                )
-                                .execute(conn)?;
-                        }
-                        Ok(())
+                    tx.execute(
+                        &sql,
+                        rusqlite::params_from_iter(all_pref_ids_in_namespace.iter()),
+                    )?;
+                }
+                if !put_prefs.is_empty() {
+                    let mut stmt = tx.prepare(
+                        "INSERT INTO account_pref (name, \"valueJson\") VALUES (?1, ?2)",
+                    )?;
+                    for (name, value_json) in &put_prefs {
+                        stmt.execute(rusqlite::params![name, value_json])?;
                     }
                 }
+                Ok(())
             })
             .await
     }
 }
 
-pub fn pref_match_namespace(namespace: &String, fullname: &String) -> bool {
+pub fn pref_match_namespace(namespace: &str, fullname: &str) -> bool {
     fullname == namespace || fullname.starts_with(&format!("{namespace}."))
 }
 
 pub mod util;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actor_store::db::get_migrated_db;
+
+    async fn test_reader() -> (tempfile::TempDir, PreferenceReader) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = get_migrated_db(dir.path().join("store.sqlite"))
+            .await
+            .unwrap();
+        let reader = PreferenceReader::new("did:example:alice".to_owned(), db);
+        (dir, reader)
+    }
+
+    fn pref(value: serde_json::Value) -> RefPreferences {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn adult_content_pref(enabled: bool) -> RefPreferences {
+        pref(serde_json::json!({
+            "$type": "app.bsky.actor.defs#adultContentPref",
+            "enabled": enabled,
+        }))
+    }
+
+    fn personal_details_pref() -> RefPreferences {
+        pref(serde_json::json!({
+            "$type": "app.bsky.actor.defs#personalDetailsPref",
+            "birthDate": "2000-01-01T00:00:00.000Z",
+        }))
+    }
+
+    #[tokio::test]
+    async fn puts_and_gets_preferences() {
+        let (_dir, reader) = test_reader().await;
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .unwrap()
+            .is_empty());
+
+        reader
+            .put_preferences(
+                vec![adult_content_pref(true), personal_details_pref()],
+                "app.bsky".to_owned(),
+                AuthScope::Access,
+            )
+            .await
+            .unwrap();
+        let prefs = reader
+            .get_preferences(Some("app.bsky".to_owned()), AuthScope::Access)
+            .await
+            .unwrap();
+        assert_eq!(prefs.len(), 2);
+
+        // namespace filtering
+        assert!(reader
+            .get_preferences(Some("com.example".to_owned()), AuthScope::Access)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // full-access-only prefs are hidden from app password scope
+        let app_pass_prefs = reader
+            .get_preferences(Some("app.bsky".to_owned()), AuthScope::AppPass)
+            .await
+            .unwrap();
+        assert_eq!(app_pass_prefs.len(), 1);
+
+        // replaces prefs within the namespace
+        reader
+            .put_preferences(
+                vec![adult_content_pref(false)],
+                "app.bsky".to_owned(),
+                AuthScope::Access,
+            )
+            .await
+            .unwrap();
+        let prefs = reader
+            .get_preferences(Some("app.bsky".to_owned()), AuthScope::Access)
+            .await
+            .unwrap();
+        assert_eq!(prefs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn app_pass_scope_preserves_full_access_prefs() {
+        let (_dir, reader) = test_reader().await;
+        reader
+            .put_preferences(
+                vec![adult_content_pref(true), personal_details_pref()],
+                "app.bsky".to_owned(),
+                AuthScope::Access,
+            )
+            .await
+            .unwrap();
+        // app-password writes cannot delete the personal details pref
+        reader
+            .put_preferences(
+                vec![adult_content_pref(false)],
+                "app.bsky".to_owned(),
+                AuthScope::AppPass,
+            )
+            .await
+            .unwrap();
+        let prefs = reader
+            .get_preferences(Some("app.bsky".to_owned()), AuthScope::Access)
+            .await
+            .unwrap();
+        assert_eq!(prefs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_puts() {
+        let (_dir, reader) = test_reader().await;
+        // outside the namespace
+        let res = reader
+            .put_preferences(
+                vec![adult_content_pref(true)],
+                "com.example".to_owned(),
+                AuthScope::Access,
+            )
+            .await;
+        assert!(res.is_err());
+        // not in scope
+        let res = reader
+            .put_preferences(
+                vec![personal_details_pref()],
+                "app.bsky".to_owned(),
+                AuthScope::AppPass,
+            )
+            .await;
+        assert!(res.is_err());
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_put_clears_namespace() {
+        let (_dir, reader) = test_reader().await;
+        reader
+            .put_preferences(
+                vec![adult_content_pref(true)],
+                "app.bsky".to_owned(),
+                AuthScope::Access,
+            )
+            .await
+            .unwrap();
+        // None namespace returns everything
+        assert_eq!(
+            reader
+                .get_preferences(None, AuthScope::Access)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        reader
+            .put_preferences(vec![], "app.bsky".to_owned(), AuthScope::Access)
+            .await
+            .unwrap();
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .unwrap()
+            .is_empty());
+        // clearing an already-empty namespace is a no-op
+        reader
+            .put_preferences(vec![], "app.bsky".to_owned(), AuthScope::Access)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_json_is_an_error() {
+        let (_dir, reader) = test_reader().await;
+        reader
+            .db
+            .run(|conn| {
+                conn.execute(
+                    "INSERT INTO account_pref (name, \"valueJson\") VALUES ('app.bsky.actor.defs#adultContentPref', 'not json')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(reader
+            .get_preferences(None, AuthScope::Access)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn unknown_pref_type_in_namespace_is_accepted() {
+        let pref: RefPreferences = serde_json::from_value(serde_json::json!({
+            "$type": "app.bsky.actor.defs#skyfeedBuilderFeedsPref",
+            "feeds": [],
+        }))
+        .unwrap();
+        let namespace = "app.bsky".to_string();
+        assert!(pref_match_namespace(&namespace, &pref.get_type()));
+        assert!(util::pref_in_scope(AuthScope::AppPass, pref.get_type()));
+    }
+
+    #[test]
+    fn pref_outside_namespace_is_rejected() {
+        let pref: RefPreferences = serde_json::from_value(serde_json::json!({
+            "$type": "com.example.defs#somePref",
+        }))
+        .unwrap();
+        assert!(!pref_match_namespace("app.bsky", &pref.get_type()));
+    }
+
+    #[test]
+    fn pref_without_type_is_rejected() {
+        let pref: RefPreferences =
+            serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
+        assert!(!pref_match_namespace("app.bsky", &pref.get_type()));
+    }
+}

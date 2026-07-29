@@ -1,40 +1,45 @@
 use crate::apis::com::atproto::server::get_random_token;
-use crate::db::DbConn;
+use crate::db::sqlite::Db;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::EmailToken;
 use anyhow::{bail, Result};
-use diesel::*;
-use rsky_common;
 use rsky_common::time::{from_str_to_utc, less_than_ago_s, MINUTE};
+use rusqlite::{params, OptionalExtension, Row};
 
-pub async fn create_email_token(
-    did: &str,
-    purpose: EmailTokenPurpose,
-    db: &DbConn,
-) -> Result<String> {
-    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+pub(crate) fn email_token_from_row(row: &Row) -> Result<EmailToken, rusqlite::Error> {
+    let purpose: String = row.get(0)?;
+    Ok(EmailToken {
+        purpose: EmailTokenPurpose::from_str(&purpose).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                format!("invalid email token purpose: {purpose}").into(),
+            )
+        })?,
+        did: row.get(1)?,
+        token: row.get(2)?,
+        requested_at: row.get(3)?,
+    })
+}
+
+pub async fn create_email_token(did: &str, purpose: EmailTokenPurpose, db: &Db) -> Result<String> {
     let token = get_random_token().to_uppercase();
     let now = rsky_common::now();
 
     let did = did.to_owned();
+    let stored_token = token.clone();
     db.run(move |conn| {
-        insert_into(EmailTokenSchema::email_token)
-            .values((
-                EmailTokenSchema::purpose.eq(purpose),
-                EmailTokenSchema::did.eq(did),
-                EmailTokenSchema::token.eq(&token),
-                EmailTokenSchema::requestedAt.eq(&now),
-            ))
-            .on_conflict((EmailTokenSchema::purpose, EmailTokenSchema::did))
-            .do_update()
-            .set((
-                EmailTokenSchema::token.eq(&token),
-                EmailTokenSchema::requestedAt.eq(&now),
-            ))
-            .execute(conn)?;
-        Ok(token)
+        conn.execute(
+            "INSERT INTO email_token (purpose, did, token, \"requestedAt\") \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (purpose, did) DO UPDATE SET \
+             token = excluded.token, \"requestedAt\" = excluded.\"requestedAt\"",
+            params![purpose.as_str(), did, stored_token, now],
+        )?;
+        Ok(())
     })
-    .await
+    .await?;
+    Ok(token)
 }
 
 pub async fn assert_valid_token(
@@ -42,22 +47,22 @@ pub async fn assert_valid_token(
     purpose: EmailTokenPurpose,
     token: &str,
     expiration_len: Option<i32>,
-    db: &DbConn,
+    db: &Db,
 ) -> Result<()> {
     let expiration_len = expiration_len.unwrap_or(MINUTE * 15);
-    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
 
     let did = did.to_owned();
-    let token = token.to_owned();
+    let token = token.to_uppercase();
     let res = db
         .run(move |conn| {
-            EmailTokenSchema::email_token
-                .filter(EmailTokenSchema::purpose.eq(purpose))
-                .filter(EmailTokenSchema::did.eq(did))
-                .filter(EmailTokenSchema::token.eq(token.to_uppercase()))
-                .select(EmailToken::as_select())
-                .first(conn)
-                .optional()
+            Ok(conn
+                .query_row(
+                    "SELECT purpose, did, token, \"requestedAt\" FROM email_token \
+                     WHERE purpose = ?1 AND did = ?2 AND token = ?3",
+                    params![purpose.as_str(), did, token],
+                    email_token_from_row,
+                )
+                .optional()?)
         })
         .await?;
     if let Some(res) = res {
@@ -76,20 +81,21 @@ pub async fn assert_valid_token_and_find_did(
     purpose: EmailTokenPurpose,
     token: &str,
     expiration_len: Option<i32>,
-    db: &DbConn,
+    db: &Db,
 ) -> Result<String> {
     let expiration_len = expiration_len.unwrap_or(MINUTE * 15);
-    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
 
-    let token = token.to_owned();
+    let token = token.to_uppercase();
     let res = db
         .run(move |conn| {
-            EmailTokenSchema::email_token
-                .filter(EmailTokenSchema::purpose.eq(purpose))
-                .filter(EmailTokenSchema::token.eq(token.to_uppercase()))
-                .select(EmailToken::as_select())
-                .first(conn)
-                .optional()
+            Ok(conn
+                .query_row(
+                    "SELECT purpose, did, token, \"requestedAt\" FROM email_token \
+                     WHERE purpose = ?1 AND token = ?2",
+                    params![purpose.as_str(), token],
+                    email_token_from_row,
+                )
+                .optional()?)
         })
         .await?;
     if let Some(res) = res {
@@ -104,29 +110,23 @@ pub async fn assert_valid_token_and_find_did(
     }
 }
 
-pub async fn delete_email_token(did: &str, purpose: EmailTokenPurpose, db: &DbConn) -> Result<()> {
-    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
+pub async fn delete_email_token(did: &str, purpose: EmailTokenPurpose, db: &Db) -> Result<()> {
     let did = did.to_owned();
     db.run(move |conn| {
-        delete(EmailTokenSchema::email_token)
-            .filter(EmailTokenSchema::did.eq(did))
-            .filter(EmailTokenSchema::purpose.eq(purpose))
-            .execute(conn)
+        conn.execute(
+            "DELETE FROM email_token WHERE did = ?1 AND purpose = ?2",
+            params![did, purpose.as_str()],
+        )?;
+        Ok(())
     })
-    .await?;
-    Ok(())
+    .await
 }
 
-pub async fn delete_all_email_tokens(did: &str, db: &DbConn) -> Result<()> {
-    use crate::schema::pds::email_token::dsl as EmailTokenSchema;
-
+pub async fn delete_all_email_tokens(did: &str, db: &Db) -> Result<()> {
     let did = did.to_owned();
     db.run(move |conn| {
-        delete(EmailTokenSchema::email_token)
-            .filter(EmailTokenSchema::did.eq(did))
-            .execute(conn)
+        conn.execute("DELETE FROM email_token WHERE did = ?1", params![did])?;
+        Ok(())
     })
-    .await?;
-
-    Ok(())
+    .await
 }

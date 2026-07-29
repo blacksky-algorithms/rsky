@@ -7,6 +7,32 @@ pub struct ResolveHandleOutput {
     pub did: String,
 }
 
+/// Resolves DID to DID document. Does not bi-directionally verify handle.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ResolveDidOutput {
+    /// The complete DID document for the identity.
+    #[serde(rename = "didDoc")]
+    pub did_doc: JsonValue,
+}
+
+/// com.atproto.identity.defs#identityInfo
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IdentityInfo {
+    pub did: String,
+    /// The validated handle of the account; or 'handle.invalid' if the handle
+    /// did not bi-directionally match the DID document.
+    pub handle: String,
+    /// The complete DID document for the identity.
+    #[serde(rename = "didDoc")]
+    pub did_doc: JsonValue,
+}
+
+/// Request that the server re-resolve an identity (DID and handle).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RefreshIdentityInput {
+    pub identifier: String,
+}
+
 /// Updates the current account's handle. Verifies handle validity, and updates did:plc document if
 /// necessary. Implemented by PDS, and requires auth.
 #[derive(Debug, Deserialize, Serialize, Clone)]

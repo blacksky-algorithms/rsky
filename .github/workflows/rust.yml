@@ -141,6 +141,31 @@ jobs:
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test --release -p ${{ matrix.package }}
 
+  # Coverage gate for the sqlite PDS stack. Standalone so a coverage
+  # failure never blocks CI for unrelated crates.
+  coverage-pds:
+    needs: determine-workspace-members
+    runs-on: ubuntu-latest
+    if: |
+      contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-pds') ||
+      contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-oauth') ||
+      contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-space') ||
+      contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-space-host') ||
+      contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-daemon')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-pds
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run coverage for PDS crates
+        run: >-
+          cargo llvm-cov --fail-under-lines 95
+          -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
+
   # Run formatting check on the entire workspace
   formatting:
     runs-on: ubuntu-latest

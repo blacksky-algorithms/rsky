@@ -75,25 +75,9 @@ pub fn find_compose_file() -> Result<PathBuf> {
     Err(anyhow::anyhow!("Could not find compose.yaml file"))
 }
 
-/// Check if diesel CLI is installed
-pub fn check_diesel_cli() -> bool {
-    which::which("diesel").is_ok()
-}
-
 /// Check if we're running in a container
 pub fn is_in_container() -> bool {
     env::var("RSKY_PDS_CONTAINER")
         .map(|val| val == "true")
         .unwrap_or(false)
-}
-
-/// Get the database URL
-pub fn get_database_url() -> Result<String> {
-    let default_db_url = if is_in_container() {
-        "postgres://postgres:postgres@postgres:5432/postgres".to_string()
-    } else {
-        "postgres://postgres:postgres@localhost:5678/postgres".to_string()
-    };
-
-    Ok(env::var("DATABASE_URL").unwrap_or(default_db_url))
 }

@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.getDelegationToken",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Mint a delegation token for a space, proving the application is acting on the user's behalf when it asks the space authority for a space credential. The token is single-use, short-lived, and addressed to the space authority. Requires a covering OAuth scope with a read grant; served by the requesting user's PDS.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["token"],
+          "properties": {
+            "token": {
+              "type": "string",
+              "description": "Delegation token (JWT) signed by the account's signing key."
+            }
+          }
+        }
+      }
+    }
+  }
+}

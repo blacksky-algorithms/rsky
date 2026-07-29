@@ -572,6 +572,7 @@ pub enum Ids {
     AppBskyNotificationGetUnreadCount,
     AppBskyNotificationListNotifications,
     AppBskyNotificationRegisterPush,
+    AppBskyNotificationUnregisterPush,
     AppBskyNotificationUpdateSeen,
     AppBskyRichtextFacet,
     AppBskyUnspeccedDefs,
@@ -767,6 +768,7 @@ impl Ids {
             Ids::AppBskyNotificationGetUnreadCount => "app.bsky.notification.getUnreadCount",
             Ids::AppBskyNotificationListNotifications => "app.bsky.notification.listNotifications",
             Ids::AppBskyNotificationRegisterPush => "app.bsky.notification.registerPush",
+            Ids::AppBskyNotificationUnregisterPush => "app.bsky.notification.unregisterPush",
             Ids::AppBskyNotificationUpdateSeen => "app.bsky.notification.updateSeen",
             Ids::AppBskyRichtextFacet => "app.bsky.richtext.facet",
             Ids::AppBskyUnspeccedDefs => "app.bsky.unspecced.defs",
@@ -985,6 +987,7 @@ impl Ids {
                 Ok(Ids::AppBskyNotificationListNotifications)
             }
             "app.bsky.notification.registerPush" => Ok(Ids::AppBskyNotificationRegisterPush),
+            "app.bsky.notification.unregisterPush" => Ok(Ids::AppBskyNotificationUnregisterPush),
             "app.bsky.notification.updateSeen" => Ok(Ids::AppBskyNotificationUpdateSeen),
             "app.bsky.richtext.facet" => Ok(Ids::AppBskyRichtextFacet),
             "app.bsky.unspecced.defs" => Ok(Ids::AppBskyUnspeccedDefs),

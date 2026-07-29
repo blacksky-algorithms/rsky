@@ -1,265 +1,98 @@
 use crate::account_manager::helpers::account::{
     format_account_status, AccountStatus, ActorAccount, FormattedAccountStatus,
 };
+use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::db::DbConn;
-use anyhow::{anyhow, bail, Result};
-use diesel::dsl::sql;
-use diesel::prelude::*;
-use diesel::sql_types::{Bool, Text};
-use diesel::QueryDsl;
+use crate::db::pagination::{SortDirection, TimeCidKeyset};
+use crate::db::sqlite::Db;
+use anyhow::Result;
 use rocket::serde::json::Json;
-use rsky_common::time::{from_millis_to_utc, from_str_to_millis};
-use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::sync::{ListReposOutput, RefRepo as LexiconRepo, RepoStatus};
+use rusqlite::params_from_iter;
+use rusqlite::types::Value as SqlValue;
 
 #[derive(Debug, Clone)]
-pub struct TimeDidResult {
-    pub created_at: String,
+pub struct RepoRow {
     pub did: String,
+    pub cid: String,
+    pub rev: String,
+    pub created_at: String,
+    pub deactivated_at: Option<String>,
+    pub takedown_ref: Option<String>,
 }
 
-pub struct Cursor {
-    pub primary: String,
-    pub secondary: String,
-}
+pub async fn paginate_repos(db: &Db, limit: i64, cursor: Option<String>) -> Result<Vec<RepoRow>> {
+    let keyset = TimeCidKeyset::new("actor.\"createdAt\"", "actor.did");
+    let unpacked = keyset.unpack(cursor.as_deref())?;
 
-pub struct TimeDidKeySet {}
-
-pub struct KeySetPaginateOpts {
-    pub limit: i64,
-    pub cursor: Option<String>,
-    pub direction: Option<String>,
-}
-
-/// The GenericKeyset is an abstract class that sets-up the interface and partial implementation
-/// of a keyset-paginated cursor with two parts. There are three types involved:
-///  - Result: a raw result (i.e. a row from the db) containing data that will make-up a cursor.
-///    - E.g. { createdAt: '2022-01-01T12:00:00Z', cid: 'bafyx' }
-///  - LabeledResult: a Result processed such that the "primary" and "secondary" parts of the cursor are labeled.
-///    - E.g. { primary: '2022-01-01T12:00:00Z', secondary: 'bafyx' }
-///  - Cursor: the two string parts that make-up the packed/string cursor.
-///    - E.g. packed cursor '1641038400000::bafyx' in parts { primary: '1641038400000', secondary: 'bafyx' }
-///
-/// These types relate as such. Implementers define the relations marked with a *:
-///   Result -*-> LabeledResult <-*-> Cursor <--> packed/string cursor
-///                     ↳ SQL Condition
-impl Default for TimeDidKeySet {
-    fn default() -> Self {
-        Self::new()
+    let mut sql = "\
+        SELECT actor.did, repo_root.cid, repo_root.rev, actor.\"createdAt\", \
+        actor.\"deactivatedAt\", actor.\"takedownRef\" \
+        FROM actor JOIN repo_root ON repo_root.did = actor.did"
+        .to_string();
+    let mut sql_params: Vec<SqlValue> = Vec::new();
+    if let Some((created_at, did)) = unpacked {
+        sql.push_str(&format!(
+            " WHERE {}",
+            keyset.where_clause(SortDirection::Asc)
+        ));
+        sql_params.push(SqlValue::Text(created_at));
+        sql_params.push(SqlValue::Text(did));
     }
-}
+    sql.push_str(&format!(
+        " ORDER BY {} LIMIT {limit}",
+        keyset.order_by_clause(SortDirection::Asc)
+    ));
 
-impl TimeDidKeySet {
-    pub fn new() -> Self {
-        TimeDidKeySet {}
-    }
-
-    pub fn label_result(&self, result: TimeDidResult) -> Cursor {
-        Cursor {
-            primary: result.created_at,
-            secondary: result.did,
-        }
-    }
-
-    pub fn labeled_result_to_cursor(&self, labeled: Cursor) -> Result<Cursor> {
-        Ok(Cursor {
-            primary: from_str_to_millis(&labeled.primary)?.to_string(),
-            secondary: labeled.secondary,
-        })
-    }
-
-    pub fn cursor_to_labeled_result(&self, cursor: Cursor) -> Result<Cursor> {
-        let primary_date = from_millis_to_utc(
-            cursor
-                .primary
-                .parse::<i64>()
-                .map_err(|_| anyhow!("Malformed cursor"))?,
-        );
-        Ok(Cursor {
-            primary: format!("{}", primary_date.format(RFC3339_VARIANT)),
-            secondary: cursor.secondary,
-        })
-    }
-
-    pub fn pack_from_result(&self, results: Vec<TimeDidResult>) -> Result<Option<String>> {
-        match results.last() {
-            None => Ok(None),
-            Some(result) => self.pack(Some(self.label_result(result.clone()))),
-        }
-    }
-
-    pub fn pack(&self, labeled: Option<Cursor>) -> Result<Option<String>> {
-        match labeled {
-            None => Ok(None),
-            Some(labeled) => {
-                let cursor = self.labeled_result_to_cursor(labeled)?;
-                Ok(self.pack_cursor(Some(cursor)))
-            }
-        }
-    }
-
-    pub fn unpack(&self, cursor_str: Option<String>) -> Result<Option<Cursor>> {
-        match self.unpack_cursor(cursor_str)? {
-            None => Ok(None),
-            Some(cursor) => Ok(Some(self.cursor_to_labeled_result(cursor)?)),
-        }
-    }
-
-    pub fn pack_cursor(&self, cursor: Option<Cursor>) -> Option<String> {
-        match cursor {
-            None => None,
-            Some(cursor) => Some(format!("{0}::{1}", cursor.primary, cursor.secondary)),
-        }
-    }
-
-    pub fn unpack_cursor(&self, cursor_str: Option<String>) -> Result<Option<Cursor>> {
-        match cursor_str {
-            None => Ok(None),
-            Some(cursor_str) => {
-                let result = cursor_str.split("::").collect::<Vec<&str>>();
-                match (result.first(), result.get(1), result.get(2)) {
-                    (Some(primary), Some(secondary), None) => Ok(Some(Cursor {
-                        primary: primary.to_string(),
-                        secondary: secondary.to_string(),
-                    })),
-                    _ => bail!("Malformed cursor"),
-                }
-            }
-        }
-    }
-
-    pub async fn paginate(
-        &self,
-        opts: KeySetPaginateOpts,
-        db: &DbConn,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )>,
-    > {
-        let KeySetPaginateOpts {
-            limit,
-            cursor,
-            direction,
-        } = opts;
-        let direction = direction.unwrap_or("desc".to_string());
-
-        use crate::schema::pds::actor::dsl as ActorSchema;
-        use crate::schema::pds::repo_root::dsl as RepoRootSchema;
-
-        let labeled = self.unpack(cursor)?;
-
-        let mut builder = ActorSchema::actor
-            .inner_join(RepoRootSchema::repo_root.on(RepoRootSchema::did.eq(ActorSchema::did)))
-            .select((
-                ActorSchema::did,
-                RepoRootSchema::cid,
-                RepoRootSchema::rev,
-                ActorSchema::createdAt,
-                ActorSchema::deactivatedAt,
-                ActorSchema::takedownRef,
-            ))
-            .limit(limit)
-            .into_boxed();
-
-        if direction == "desc" {
-            builder = builder.order((ActorSchema::createdAt.desc(), ActorSchema::did.desc()));
-        } else {
-            builder = builder.order((ActorSchema::createdAt.asc(), ActorSchema::did.asc()));
-        }
-
-        if let Some(labeled) = labeled {
-            if direction == "asc" {
-                builder = builder.filter(
-                    sql::<Bool>("((")
-                        .bind(ActorSchema::createdAt)
-                        .sql(", ")
-                        .bind(ActorSchema::did)
-                        .sql(") > (")
-                        .bind::<Text, _>(labeled.primary)
-                        .sql(", ")
-                        .bind::<Text, _>(labeled.secondary)
-                        .sql("))"),
-                );
-            } else {
-                builder = builder.filter(
-                    sql::<Bool>("((")
-                        .bind(ActorSchema::createdAt)
-                        .sql(", ")
-                        .bind(ActorSchema::did)
-                        .sql(") < (")
-                        .bind::<Text, _>(labeled.primary)
-                        .sql(", ")
-                        .bind::<Text, _>(labeled.secondary)
-                        .sql("))"),
-                );
-            }
-        }
-
-        let res = db
-            .run(move |conn| {
-                builder.load::<(
-                    String,
-                    String,
-                    String,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                )>(conn)
-            })
-            .await?;
-        Ok(res)
-    }
+    db.run(move |conn| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(sql_params.iter()), |row| {
+                Ok(RepoRow {
+                    did: row.get(0)?,
+                    cid: row.get(1)?,
+                    rev: row.get(2)?,
+                    created_at: row.get(3)?,
+                    deactivated_at: row.get(4)?,
+                    takedown_ref: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<RepoRow>, rusqlite::Error>>()?;
+        Ok(rows)
+    })
+    .await
 }
 
 async fn inner_list_repos(
     limit: Option<i64>,
     cursor: Option<String>,
-    db: &DbConn,
+    db: &Db,
 ) -> Result<ListReposOutput> {
-    let keyset = TimeDidKeySet::new();
-    let result = keyset
-        .paginate(
-            KeySetPaginateOpts {
-                limit: limit.unwrap_or(500),
-                cursor,
-                direction: Some("asc".to_string()),
-            },
-            db,
-        )
-        .await?;
-    let time_did_results = result
+    let keyset = TimeCidKeyset::new("actor.\"createdAt\"", "actor.did");
+    let result = paginate_repos(db, limit.unwrap_or(500), cursor).await?;
+    let cursor_rows = result
         .iter()
-        .map(|row| TimeDidResult {
-            created_at: row.3.clone(),
-            did: row.0.clone(),
-        })
-        .collect::<Vec<TimeDidResult>>();
+        .map(|row| (row.created_at.clone(), row.did.clone()))
+        .collect::<Vec<(String, String)>>();
     let repos = result
         .into_iter()
         .map(|row| {
             let FormattedAccountStatus { active, status } =
                 format_account_status(Some(ActorAccount {
-                    did: row.0.clone(),
+                    did: row.did.clone(),
                     handle: None,
-                    created_at: row.3,
-                    takedown_ref: row.5,
-                    deactivated_at: row.4,
+                    created_at: row.created_at,
+                    takedown_ref: row.takedown_ref,
+                    deactivated_at: row.deactivated_at,
                     delete_after: None,
                     email: None,
                     invites_disabled: None,
                     email_confirmed_at: None,
                 }));
             LexiconRepo {
-                did: row.0,
-                head: row.1,
-                rev: row.2,
+                did: row.did,
+                head: row.cid,
+                rev: row.rev,
                 active: Some(active),
                 status: match status {
                     None => None,
@@ -277,7 +110,7 @@ async fn inner_list_repos(
         })
         .collect::<Vec<LexiconRepo>>();
     Ok(ListReposOutput {
-        cursor: keyset.pack_from_result(time_did_results)?,
+        cursor: keyset.pack_from_result(&cursor_rows)?,
         repos,
     })
 }
@@ -287,13 +120,98 @@ async fn inner_list_repos(
 pub async fn list_repos(
     limit: Option<i64>,
     cursor: Option<String>,
-    db: DbConn,
+    account_manager: AccountManager,
 ) -> Result<Json<ListReposOutput>, ApiError> {
-    match inner_list_repos(limit, cursor, &db).await {
+    match inner_list_repos(limit, cursor, &account_manager.db).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account_manager::tests::test_manager;
+    use crate::account_manager::{CreateAccountOpts, UpdateEmailOpts};
+    use lexicon_cid::Cid;
+    use std::str::FromStr;
+
+    const TEST_CID: &str = "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t2v4";
+
+    async fn create_repo(am: &crate::account_manager::AccountManager, did: &str, handle: &str) {
+        am.create_account(CreateAccountOpts {
+            did: did.to_owned(),
+            handle: handle.to_owned(),
+            email: Some(format!("{handle}@example.com")),
+            password: Some("password".to_owned()),
+            repo_cid: Cid::from_str(TEST_CID).unwrap(),
+            repo_rev: "3jzfcijpj2z2a".to_owned(),
+            invite_code: None,
+            deactivated: None,
+        })
+        .await
+        .unwrap();
+        // suppress unused import lint in cfg(test)
+        let _ = UpdateEmailOpts {
+            did: did.to_owned(),
+            email: format!("{handle}@example.com"),
+        };
+    }
+
+    #[tokio::test]
+    async fn lists_repos_with_pagination_and_status() {
+        let (_dir, am) = test_manager().await;
+        create_repo(&am, "did:plc:repo1", "repo1.test").await;
+        create_repo(&am, "did:plc:repo2", "repo2.test").await;
+        create_repo(&am, "did:plc:repo3", "repo3.test").await;
+        am.deactivate_account("did:plc:repo2", None).await.unwrap();
+        am.takedown_account(
+            "did:plc:repo3",
+            rsky_lexicon::com::atproto::admin::StatusAttr {
+                applied: true,
+                r#ref: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let page1 = inner_list_repos(Some(2), None, &am.db).await.unwrap();
+        assert_eq!(page1.repos.len(), 2);
+        let cursor = page1.cursor.clone().unwrap();
+        let page2 = inner_list_repos(Some(2), Some(cursor), &am.db)
+            .await
+            .unwrap();
+        assert_eq!(page2.repos.len(), 1);
+
+        let all = inner_list_repos(None, None, &am.db).await.unwrap();
+        assert_eq!(all.repos.len(), 3);
+        let by_did = |did: &str| all.repos.iter().find(|repo| repo.did == did).unwrap();
+        assert_eq!(by_did("did:plc:repo1").active, Some(true));
+        assert!(by_did("did:plc:repo1").status.is_none());
+        assert_eq!(by_did("did:plc:repo2").active, Some(false));
+        assert!(matches!(
+            by_did("did:plc:repo2").status,
+            Some(RepoStatus::Deactivated)
+        ));
+        assert_eq!(by_did("did:plc:repo3").active, Some(false));
+        assert!(matches!(
+            by_did("did:plc:repo3").status,
+            Some(RepoStatus::Takedown)
+        ));
+
+        // an empty page yields no cursor
+        let empty = inner_list_repos(Some(2), page2.cursor, &am.db)
+            .await
+            .unwrap();
+        assert!(empty.repos.is_empty());
+        assert!(empty.cursor.is_none());
+
+        // malformed cursors are rejected
+        assert!(inner_list_repos(Some(2), Some("bogus".to_owned()), &am.db)
+            .await
+            .is_err());
     }
 }

@@ -1,7 +1,6 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
 use crate::account_manager::AccountManager;
-use crate::actor_store::ActorStore;
-use crate::models::models;
+use crate::actor_store::ActorStoreReader;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util;
 use crate::xrpc_server::auth::create_service_auth_headers;
@@ -21,7 +20,6 @@ use atrium_api::app::bsky::graph::get_list::{
 };
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::{ReqwestClient, ReqwestClientBuilder};
-use diesel::*;
 use futures::stream::{self, StreamExt};
 use ipld_core::ipld::Ipld as AtriumIpld;
 use lexicon_cid::Cid;
@@ -48,7 +46,8 @@ use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
 
-pub type LocalViewerCreator = Box<dyn Fn(ActorStore, AccountManager) -> LocalViewer + Send + Sync>;
+pub type LocalViewerCreator =
+    Box<dyn Fn(ActorStoreReader, AccountManager) -> LocalViewer + Send + Sync>;
 
 pub struct LocalViewerCreatorParams {
     pub pds_hostname: String,
@@ -60,7 +59,7 @@ pub struct LocalViewerCreatorParams {
 pub struct LocalViewer {
     pub account_manager: AccountManager,
     pub did: String,
-    pub actor_store: ActorStore,
+    pub actor_store: ActorStoreReader,
     pub pds_hostname: String,
     pub appview_agent: Option<Agent>,
     appview_agent_str: Option<String>,
@@ -70,7 +69,7 @@ pub struct LocalViewer {
 
 impl LocalViewer {
     pub fn new(
-        actor_store: ActorStore,
+        actor_store: ActorStoreReader,
         account_manager: AccountManager,
         pds_hostname: String,
         appview_agent: Option<Agent>,
@@ -92,7 +91,7 @@ impl LocalViewer {
 
     pub fn creator(params: LocalViewerCreatorParams) -> LocalViewerCreator {
         Box::new(
-            move |actor_store: ActorStore, account_manager: AccountManager| -> LocalViewer {
+            move |actor_store: ActorStoreReader, account_manager: AccountManager| -> LocalViewer {
                 LocalViewer::new(
                     actor_store,
                     account_manager,
@@ -156,39 +155,13 @@ impl LocalViewer {
     }
 
     pub async fn get_profile_basic(&self) -> Result<Option<ProfileViewBasic>> {
-        use crate::schema::pds::record::dsl as RecordSchema;
-        use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
-
-        let db = self.actor_store.record.db.clone();
-        let did = self.actor_store.did.clone();
-        let profile_res: Option<(models::Record, Option<models::RepoBlock>)> = db
-            .run(move |conn| {
-                RecordSchema::record
-                    .left_join(
-                        RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
-                    )
-                    .select((
-                        models::Record::as_select(),
-                        Option::<models::RepoBlock>::as_select(),
-                    ))
-                    .filter(RecordSchema::did.eq(&did))
-                    .filter(RecordSchema::collection.eq(Ids::AppBskyActorProfile.as_str()))
-                    .filter(RecordSchema::rkey.eq("self"))
-                    .first(conn)
-                    .optional()
-            })
-            .await?;
+        let profile_res = self.actor_store.record.get_profile_record().await?;
         let account_res = self.account_manager.get_account(&self.did, None).await?;
         match account_res {
             None => Ok(None),
             Some(account_res) => {
                 let record: Option<Profile> = match profile_res {
-                    Some(profile_res) => match profile_res.1 {
-                        Some(profile_res) => {
-                            serde_ipld_dagcbor::from_slice(profile_res.content.as_slice())?
-                        }
-                        None => None,
-                    },
+                    Some(content) => serde_ipld_dagcbor::from_slice(content.as_slice())?,
                     None => None,
                 };
                 Ok(Some(ProfileViewBasic {
@@ -272,10 +245,7 @@ impl LocalViewer {
         match author {
             None => Ok(None),
             Some(author) => {
-                let embed = match record.embed {
-                    None => None,
-                    Some(_) => self.format_post_embed(record.clone()).await?,
-                };
+                let embed = self.format_post_embed(record.clone()).await?;
                 Ok(Some(PostView {
                     uri: uri.to_string(),
                     cid: cid.to_string(),
@@ -298,24 +268,25 @@ impl LocalViewer {
         match embed {
             None => Ok(None),
             Some(embed) => match embed {
-                Embeds::Images(embed) => Ok(Some(
-                    self.format_simple_embed(MediaUnion::Images(embed)).await,
-                )),
-                Embeds::External(embed) => Ok(Some(
-                    self.format_simple_embed(MediaUnion::External(embed)).await,
-                )),
+                Embeds::Images(embed) => {
+                    Ok(self.format_simple_embed(MediaUnion::Images(embed)).await)
+                }
+                Embeds::External(embed) => {
+                    Ok(self.format_simple_embed(MediaUnion::External(embed)).await)
+                }
                 Embeds::Record(embed) => Ok(Some(EmbedViews::RecordView(
                     self.format_record_embed(embed).await?,
                 ))),
-                Embeds::RecordWithMedia(embed) => Ok(Some(EmbedViews::RecordWithMediaView(
-                    self.format_record_with_media_embed(embed).await?,
-                ))),
-                _ => Ok(None), // @TODO: Handle video
+                Embeds::RecordWithMedia(embed) => Ok(self
+                    .format_record_with_media_embed(embed)
+                    .await?
+                    .map(EmbedViews::RecordWithMediaView)),
+                Embeds::Video(_) => Ok(None),
             },
         }
     }
 
-    pub async fn format_simple_embed(&self, embed: MediaUnion) -> EmbedViews {
+    pub async fn format_simple_embed(&self, embed: MediaUnion) -> Option<EmbedViews> {
         match embed {
             MediaUnion::Images(embed) => {
                 let images = embed
@@ -334,7 +305,7 @@ impl LocalViewer {
                         aspect_ratio: img.aspect_ratio,
                     })
                     .collect::<Vec<ViewImage>>();
-                EmbedViews::ImagesView(ImagesView { images })
+                Some(EmbedViews::ImagesView(ImagesView { images }))
             }
             MediaUnion::External(embed) => {
                 let ExternalObject {
@@ -343,7 +314,7 @@ impl LocalViewer {
                     description,
                     thumb,
                 } = embed.external;
-                EmbedViews::ExternalView(ExternalView {
+                Some(EmbedViews::ExternalView(ExternalView {
                     external: ViewExternal {
                         uri,
                         title,
@@ -356,9 +327,9 @@ impl LocalViewer {
                             )),
                         },
                     },
-                })
+                }))
             }
-            _ => panic!("Can't handle video"), // @TODO: Handle video
+            MediaUnion::Video(_) => None,
         }
     }
 
@@ -462,14 +433,14 @@ impl LocalViewer {
     pub async fn format_record_with_media_embed(
         &self,
         embed: RecordWithMedia,
-    ) -> Result<RecordWithMediaView> {
+    ) -> Result<Option<RecordWithMediaView>> {
         let media = match self.format_simple_embed(embed.media).await {
-            EmbedViews::ImagesView(media) => MediaViewUnion::ImagesView(media),
-            EmbedViews::ExternalView(media) => MediaViewUnion::ExternalView(media),
-            _ => bail!("Unexpected enum for media."),
+            Some(EmbedViews::ImagesView(media)) => MediaViewUnion::ImagesView(media),
+            Some(EmbedViews::ExternalView(media)) => MediaViewUnion::ExternalView(media),
+            _ => return Ok(None),
         };
         let record = self.format_record_embed(embed.record).await?;
-        Ok(RecordWithMediaView { record, media })
+        Ok(Some(RecordWithMediaView { record, media }))
     }
 
     pub fn update_profile_view_basic(
@@ -508,11 +479,12 @@ impl LocalViewer {
             did,
             handle,
             display_name,
-            description,
             avatar,
             labels,
             indexed_at,
+            ..
         } = view;
+        let description = record.description.clone();
         let ProfileViewBasic {
             did,
             handle,
@@ -527,7 +499,7 @@ impl LocalViewer {
                 avatar,
                 associated: None,
                 viewer: None,
-                labels: Some(labels),
+                labels: Some(labels.clone()),
                 created_at: None,
             },
             record,
@@ -538,7 +510,7 @@ impl LocalViewer {
             display_name,
             description,
             avatar,
-            labels: vec![],
+            labels,
             indexed_at,
         }
     }
@@ -547,6 +519,7 @@ impl LocalViewer {
         &self,
         view: ProfileViewDetailed,
         record: Profile,
+        local_posts_count: usize,
     ) -> ProfileViewDetailed {
         let ProfileViewDetailed {
             did,
@@ -599,7 +572,7 @@ impl LocalViewer {
             },
             followers_count,
             follows_count,
-            posts_count,
+            posts_count: apply_local_posts_count(posts_count, local_posts_count),
             associated,
             joined_via_starter_pack,
             viewer,
@@ -631,54 +604,17 @@ impl LocalViewer {
     }
 }
 
-pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Result<LocalRecords> {
-    use crate::schema::pds::record::dsl as RecordSchema;
-    use crate::schema::pds::repo_block::dsl as RepoBlockSchema;
+/// Adds locally written posts to an upstream posts_count.
+/// Returns None if the upstream count is unknown.
+pub fn apply_local_posts_count(upstream: Option<usize>, local_posts: usize) -> Option<usize> {
+    upstream.map(|count| count + local_posts)
+}
 
-    let did = actor_store.did.clone();
-    let did_1 = did.clone();
-    let rev_1 = rev.clone();
-    let res: Vec<(models::Record, models::RepoBlock)> = actor_store
-        .record
-        .db
-        .run(move |conn| {
-            RecordSchema::record
-                .inner_join(
-                    RepoBlockSchema::repo_block.on(RepoBlockSchema::cid.eq(RecordSchema::cid)),
-                )
-                .select((models::Record::as_select(), models::RepoBlock::as_select()))
-                .filter(RecordSchema::did.eq(did_1))
-                .filter(RecordSchema::repoRev.gt(rev_1))
-                .limit(10)
-                .order_by(RecordSchema::repoRev.asc())
-                .get_results(conn)
-        })
-        .await?;
-
-    // sanity check to ensure that the clock received is not before _all_ local records
-    // (for instance in case of account migration)
-    if !res.is_empty() {
-        let sanity_checks = actor_store
-            .record
-            .db
-            .run(move |conn| {
-                RecordSchema::record
-                    .select(models::Record::as_select())
-                    .filter(RecordSchema::did.eq(&did))
-                    .filter(RecordSchema::repoRev.le(&rev))
-                    .limit(1)
-                    .first(conn)
-                    .optional()
-            })
-            .await?;
-        if sanity_checks.is_none() {
-            return Ok(LocalRecords {
-                count: 0,
-                profile: None,
-                posts: vec![],
-            });
-        }
-    }
+pub async fn get_records_since_rev(
+    actor_store: &ActorStoreReader,
+    rev: String,
+) -> Result<LocalRecords> {
+    let res = actor_store.record.get_records_since_rev(rev).await?;
 
     // res.reduce() in javascript
     res.into_iter().try_fold(
@@ -688,24 +624,24 @@ pub async fn get_records_since_rev(actor_store: &ActorStore, rev: String) -> Res
             posts: vec![],
         },
         |mut acc: LocalRecords, cur| {
-            let uri: AtUri = AtUri::new(cur.0.uri, None)?;
+            let uri: AtUri = AtUri::new(cur.uri, None)?;
             if uri.get_collection() == Ids::AppBskyActorProfile.as_str()
                 && uri.get_rkey() == *"self"
             {
-                let profile: Profile = serde_ipld_dagcbor::from_slice(cur.1.content.as_slice())?;
+                let profile: Profile = serde_ipld_dagcbor::from_slice(cur.content.as_slice())?;
                 let descript = RecordDescript {
                     uri,
-                    cid: Cid::from_str(&cur.1.cid)?,
-                    indexed_at: cur.0.indexed_at,
+                    cid: Cid::from_str(&cur.cid)?,
+                    indexed_at: cur.indexed_at,
                     record: profile,
                 };
                 acc.profile = Some(descript);
             } else if uri.get_collection() == Ids::AppBskyFeedPost.as_str() {
-                let post: Post = serde_ipld_dagcbor::from_slice(cur.1.content.as_slice())?;
+                let post: Post = serde_ipld_dagcbor::from_slice(cur.content.as_slice())?;
                 let descript = RecordDescript {
                     uri,
-                    cid: Cid::from_str(&cur.1.cid)?,
-                    indexed_at: cur.0.indexed_at,
+                    cid: Cid::from_str(&cur.cid)?,
+                    indexed_at: cur.indexed_at,
                     record: post,
                 };
                 acc.posts.push(descript);

@@ -1,13 +1,12 @@
 use crate::config::ServerConfig;
-use crate::crawlers::Crawlers;
 use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
 };
 use crate::sequencer::outbox::{Outbox, OutboxOpts};
-use crate::sequencer::Sequencer;
 use crate::xrpc_server::stream::frames::{ErrorFrame, Frame, MessageFrame, MessageFrameOpts};
-use crate::xrpc_server::stream::types::ErrorFrameBody;
+use crate::xrpc_server::stream::types::{ErrorFrameBody, InfoFrameBody};
+use crate::SharedSequencer;
 use chrono::offset::Utc as UtcOffset;
 use chrono::{DateTime, Duration};
 use futures::{pin_mut, StreamExt};
@@ -41,18 +40,16 @@ fn get_backfill_limit(ms: u64) -> String {
 pub async fn subscribe_repos<'a>(
     cursor: Option<i64>,
     cfg: &'a State<ServerConfig>,
+    sequencer: &'a State<SharedSequencer>,
     mut shutdown: Shutdown,
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
-        let sequencer_lock = Sequencer::new(
-            Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
-            None,
-        );
+        let sequencer_lock = sequencer.sequencer.read().await.clone();
         let mut outbox = Outbox::new(
             sequencer_lock.clone(),
             Some(OutboxOpts {
-                max_buffer_size: cfg.subscription.repo_backfill_limit_ms as usize,
+                max_buffer_size: cfg.subscription.max_buffer as usize,
             })
         );
 
@@ -90,14 +87,25 @@ pub async fn subscribe_repos<'a>(
                         message: Some("Cursor in the future.".to_string()),
                     });
                     yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
+                    return;
                 },
                 false => match next {
                     Some(next) if next.sequenced_at < backfill_time => {
-                        let error_frame = ErrorFrame::new(ErrorFrameBody {
-                            error: "OutdatedCursor".to_string(),
-                            message: Some("Requested cursor exceeded limit. Possibly missing events.".to_string()),
-                        });
-                        yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
+                        let info_frame = MessageFrame::new(InfoFrameBody {
+                            name: "OutdatedCursor".to_string(),
+                            message: Some("Requested cursor exceeded limit. Possibly missing events".to_string()),
+                        }, Some(MessageFrameOpts { r#type: Some("#info".to_string()) }));
+                        match info_frame.to_bytes() {
+                            Ok(binary) => yield Message::Binary(binary),
+                            Err(_) => {
+                                let error_frame = ErrorFrame::new(ErrorFrameBody {
+                                    error: "SerializationError".to_string(),
+                                    message: Some("Failed to serialize info frame.".to_string()),
+                                });
+                                yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
+                                return;
+                            }
+                        }
                         match sequencer_lock.earliest_after_time(backfill_time).await {
                             Ok(Some(start_evt)) if start_evt.seq.is_some() => outbox_cursor = Some(start_evt.seq.unwrap() - 1),
                             Ok(None) => outbox_cursor = None,
@@ -167,9 +175,11 @@ pub async fn subscribe_repos<'a>(
                                 ops: ops.into_iter().map(|op| SubscribeReposCommitOperation {
                                     path: op.path,
                                     cid: op.cid,
+                                    prev: op.prev,
                                     action: op.action.to_string()
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
                                 blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
+                                prev_data,
                             };
                             let message_frame = MessageFrame::new(subscribe_commit_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
                             let binary = match message_frame.to_bytes() {

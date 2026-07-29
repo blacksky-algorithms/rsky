@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.simplespace.createSpace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Create a simplespace-managed space anchored on the caller's own DID; the caller becomes the space authority. Requires auth with a covering manage=create grant, implemented by PDS.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["spaceType"],
+          "properties": {
+            "spaceType": {
+              "type": "string",
+              "format": "nsid",
+              "description": "The space type NSID, which resolves to a space type declaration."
+            },
+            "skey": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "The space key. When omitted, generated per the space type declaration's recommended key type."
+            },
+            "config": {
+              "type": "ref",
+              "ref": "com.atproto.simplespace.defs#config",
+              "description": "Initial configuration. Defaults apply when omitted."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI of the created space, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceAlreadyExists" }]
+    }
+  }
+}

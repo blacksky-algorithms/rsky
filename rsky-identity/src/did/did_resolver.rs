@@ -5,6 +5,7 @@ use crate::types::{CacheResult, DidCache, DidDocument, DidResolverOpts};
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -24,7 +25,7 @@ impl ResolverKind {
 
 #[derive(Clone, Debug)]
 pub struct DidResolver {
-    pub cache: Option<DidCache>,
+    pub cache: Option<Arc<dyn DidCache>>,
     pub methods: BTreeMap<String, ResolverKind>,
 }
 
@@ -39,7 +40,7 @@ impl DidResolver {
         let mut methods = BTreeMap::new();
         methods.insert(
             "plc".to_string(),
-            ResolverKind::Plc(DidPlcResolver::new(plc_url, timeout.clone(), None)),
+            ResolverKind::Plc(DidPlcResolver::new(plc_url, timeout, None)),
         );
         methods.insert(
             "web".to_string(),
@@ -79,27 +80,33 @@ impl DidResolver {
         }
     }
 
-    pub async fn resolve_no_cache(&self, did: &String) -> Result<Option<DidDocument>> {
-        match self.resolve_no_check(did.clone()).await? {
+    pub async fn resolve_no_cache(&self, did: &str) -> Result<Option<DidDocument>> {
+        match self.resolve_no_check(did.to_owned()).await? {
             None => Ok(None),
-            Some(got) => Ok(Some(self.validate_did_doc(did.clone(), got)?)),
+            Some(got) => Ok(Some(self.validate_did_doc(did.to_owned(), got)?)),
         }
     }
 
-    pub async fn refresh_cache(&mut self, did: String) -> Result<()> {
-        let resolver = self.clone();
+    pub async fn refresh_cache(&self, did: String) -> Result<()> {
         match self.cache {
             None => Ok(()),
-            Some(ref mut cache) => {
+            Some(ref cache) => {
+                let resolver = self.clone();
+                let get_doc_did = did.clone();
                 cache
-                    .refresh_cache(did.clone(), || resolver.resolve_no_cache(&did))
+                    .refresh_cache(
+                        did,
+                        Box::new(move || {
+                            Box::pin(async move { resolver.resolve_no_cache(&get_doc_did).await })
+                        }),
+                    )
                     .await
             }
         }
     }
 
     pub async fn resolve(
-        &mut self,
+        &self,
         did: String,
         force_refresh: Option<bool>,
     ) -> Result<Option<DidDocument>> {
@@ -108,7 +115,7 @@ impl DidResolver {
         match self.cache {
             None => (),
             Some(ref cache) if !force_refresh => {
-                from_cache = cache.check_cache(did.clone())?;
+                from_cache = cache.check_cache(did.clone()).await?;
                 match from_cache {
                     None => (),
                     Some(from_cache) if !from_cache.expired => {
@@ -125,13 +132,13 @@ impl DidResolver {
 
         match self.resolve_no_cache(&did).await? {
             None => {
-                if let Some(ref mut cache) = self.cache {
-                    cache.clear_entry(did)?;
+                if let Some(ref cache) = self.cache {
+                    cache.clear_entry(did).await?;
                 }
                 Ok(None)
             }
             Some(got) => {
-                if let Some(ref mut cache) = self.cache {
+                if let Some(ref cache) = self.cache {
                     cache.cache_did(did, got.clone()).await?;
                 }
                 Ok(Some(got))
@@ -140,7 +147,7 @@ impl DidResolver {
     }
 
     pub async fn ensure_resolve(
-        &mut self,
+        &self,
         did: &String,
         force_refresh: Option<bool>,
     ) -> Result<DidDocument> {

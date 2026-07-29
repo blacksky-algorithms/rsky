@@ -1,0 +1,45 @@
+[package]
+name = "rsky-space-host"
+version = "0.2.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "atproto permissioned-data space authority/host: issues space credentials, manages a space, routes write notifications"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "rsky-space-host"
+path = "src/main.rs"
+
+[dependencies]
+rsky-space = { path = "../rsky-space", version = "0.2.0" }
+rsky-common = { workspace = true }
+rsky-crypto = { workspace = true }
+rsky-identity = { workspace = true }
+rsky-lexicon = { workspace = true }
+rsky-syntax = { workspace = true }
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = "1.0"
+async-trait = "0.1"
+hex = "0.4"
+base64 = "0.22"
+rand = { workspace = true }
+chrono = { version = "0.4.24", features = ["serde"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
+# 0.6.4+ needs let-chains (Rust 1.88); workspace toolchain is 1.86.
+wiremock = "=0.6.3"
+tempfile = "3"

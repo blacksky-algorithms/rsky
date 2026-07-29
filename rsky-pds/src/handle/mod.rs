@@ -86,10 +86,20 @@ fn base_normalize_and_validate(handle: &str) -> Result<String> {
     }
 }
 
+// Anchor the match at a label boundary so sibling domains
+// (e.g. evilpds.example.com vs pds.example.com) never match
+fn as_dotted_suffix(domain: &String) -> String {
+    if domain.starts_with('.') {
+        domain.clone()
+    } else {
+        format!(".{domain}")
+    }
+}
+
 fn is_service_domain(handle: &str, available_user_domains: &[String]) -> bool {
     available_user_domains
         .iter()
-        .any(|domain| handle.ends_with(domain))
+        .any(|domain| handle.ends_with(as_dotted_suffix(domain).as_str()))
 }
 
 fn ensure_handle_service_constraints(
@@ -99,7 +109,8 @@ fn ensure_handle_service_constraints(
 ) -> Result<()> {
     let supported_domain = available_user_domains
         .iter()
-        .find(|domain| handle.ends_with(*domain))
+        .map(as_dotted_suffix)
+        .find(|domain| handle.ends_with(domain.as_str()))
         .ok_or_else(|| Error::new(ErrorKind::InvalidHandle, "Invalid domain"))?;
 
     let front = handle[..handle.len() - supported_domain.len()].to_string();

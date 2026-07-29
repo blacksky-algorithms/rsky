@@ -37,6 +37,8 @@ pub struct CommitEvtOp {
     pub action: CommitEvtOpAction,
     pub path: String,
     pub cid: Option<Cid>,
+    /// For updates and deletes, the previous record CID. Omitted for creates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev: Option<Cid>,
 }
 
@@ -47,6 +49,8 @@ pub struct CommitEvt {
     pub too_big: bool,
     pub repo: String,
     pub commit: Cid,
+    /// DEPRECATED -- unused in sync v1.1. Retained for deserializing legacy events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev: Option<Cid>,
     pub rev: String,
     pub since: Option<String>,
@@ -54,7 +58,7 @@ pub struct CommitEvt {
     pub blocks: Vec<u8>,
     pub ops: Vec<CommitEvtOp>,
     pub blobs: Vec<Cid>,
-    #[serde(rename = "prevData")]
+    #[serde(rename = "prevData", default, skip_serializing_if = "Option::is_none")]
     pub prev_data: Option<Cid>,
 }
 
@@ -67,6 +71,7 @@ pub struct HandleEvt {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct IdentityEvt {
     pub did: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
 }
 
@@ -81,6 +86,7 @@ pub struct AccountEvt {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SyncEvt {
     pub did: String,
+    #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
     pub rev: String,
 }
@@ -248,7 +254,7 @@ pub async fn format_seq_commit(
         too_big: false, // always false in Sync 1.1
         repo: did.clone(),
         commit: commit_data.commit_data.cid,
-        prev: commit_data.commit_data.prev,
+        prev: None, // deprecated in Sync 1.1; reference implementation omits it
         rev: commit_data.commit_data.rev,
         since: commit_data.commit_data.since,
         blocks: car_slice,

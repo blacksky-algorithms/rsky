@@ -1,4 +1,5 @@
-use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
+use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
@@ -8,6 +9,42 @@ use rocket::serde::json::Json;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::admin::AccountView;
 use rsky_syntax::handle::INVALID_HANDLE;
+use std::collections::BTreeMap;
+
+pub fn manages_own_invites() -> bool {
+    env_str("PDS_ENTRYWAY_URL").is_none()
+}
+
+pub fn format_account_view(
+    account: ActorAccount,
+    invites: Vec<CodeDetail>,
+    invited_by: &BTreeMap<String, CodeDetail>,
+    manages_own_invites: bool,
+) -> AccountView {
+    AccountView {
+        did: account.did.clone(),
+        handle: account.handle.unwrap_or(INVALID_HANDLE.to_string()),
+        email: account.email,
+        indexed_at: account.created_at,
+        email_confirmed_at: account.email_confirmed_at,
+        invited_by: match invited_by.get(&account.did) {
+            Some(code_detail) if manages_own_invites => Some(code_detail.clone()),
+            _ => None,
+        },
+        invites: if manages_own_invites {
+            Some(invites)
+        } else {
+            None
+        },
+        invites_disabled: if manages_own_invites {
+            Some(account.invites_disabled == Some(1))
+        } else {
+            None
+        },
+        related_records: None,
+        invite_note: None,
+    }
+}
 
 async fn inner_get_account_info(
     did: String,
@@ -25,30 +62,12 @@ async fn inner_get_account_info(
         account_manager.get_invited_by_for_accounts(vec![did.clone()])
     )?;
     if let Some(account) = account {
-        let manages_own_invites = env_str("PDS_ENTRYWAY_URL").is_none();
-        Ok(AccountView {
-            did: account.did,
-            handle: account.handle.unwrap_or(INVALID_HANDLE.to_string()),
-            email: account.email,
-            indexed_at: account.created_at,
-            email_confirmed_at: account.email_confirmed_at,
-            invited_by: match invited_by.get(&did) {
-                Some(code_detail) if manages_own_invites => Some(code_detail.clone()),
-                _ => None,
-            },
-            invites: if manages_own_invites {
-                Some(invites)
-            } else {
-                None
-            },
-            invites_disabled: if manages_own_invites {
-                Some(account.invites_disabled == Some(1))
-            } else {
-                None
-            },
-            related_records: None,
-            invite_note: None,
-        })
+        Ok(format_account_view(
+            account,
+            invites,
+            &invited_by,
+            manages_own_invites(),
+        ))
     } else {
         bail!("Account not found")
     }

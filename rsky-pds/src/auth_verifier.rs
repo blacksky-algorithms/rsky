@@ -23,6 +23,23 @@ use thiserror::Error;
 
 const INFINITY: u64 = u64::MAX;
 
+/// True when `err` is jwt-simple's expiry error (`JWTError::TokenHasExpired`),
+/// as opposed to a signature, format, or other verification failure.
+///
+/// jwt-simple raises the error via `ensure!(..., JWTError::TokenHasExpired)`,
+/// so the concrete cause is wrapped in the `anyhow::Error` that propagates out
+/// of [`verify_jwt`]; `downcast_ref` recovers it. This lets an expired token
+/// surface as `ExpiredToken` instead of being collapsed into a generic
+/// `BadJwt`. jwt-simple verifies the signature *before* validating claims, so a
+/// token signed by a different key fails at signature (never at expiry) and is
+/// unaffected.
+pub(crate) fn is_expired_jwt(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<jwt_simple::JWTError>(),
+        Some(jwt_simple::JWTError::TokenHasExpired)
+    )
+}
+
 pub static PDS_JWT_KEYPAIR: LazyLock<ES256kKeyPair> = LazyLock::new(|| {
     let secp = Secp256k1::new();
     let private_key = env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX").unwrap();
@@ -134,6 +151,8 @@ pub struct JwtPayload {
 
 #[derive(Error, Debug)]
 pub enum AuthError {
+    #[error("ExpiredToken: `Token is expired`")]
+    ExpiredToken,
     #[error("BadJwt: `{0}`")]
     BadJwt(String),
     #[error("BadJwtAudience: `{0}`")]
@@ -184,14 +203,21 @@ impl<'r> FromRequest<'r> for Refresh {
                     None => {
                         let error =
                             AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
-                        req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                        req.local_cache(|| Some(ApiError::from(&error)));
                         return Outcome::Error((Status::BadRequest, error));
                     }
                 }
             }
             Err(error) => {
-                let error = AuthError::BadJwt(error.to_string());
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                // The refresh guard bypasses `access_check`, so map expiry here
+                // too: an expired REFRESH token on refreshSession must surface as
+                // ExpiredToken so clients know the session is unrecoverable.
+                let error = if is_expired_jwt(&error) {
+                    AuthError::ExpiredToken
+                } else {
+                    AuthError::BadJwt(error.to_string())
+                };
+                req.local_cache(|| Some(ApiError::from(&error)));
                 return Outcome::Error((Status::BadRequest, error));
             }
         };
@@ -233,6 +259,9 @@ pub async fn access_check(
                 Status::BadRequest,
                 AuthError::AccountTakedown(error.to_string()),
             )),
+            _ if is_expired_jwt(&error) => {
+                Outcome::Error((Status::BadRequest, AuthError::ExpiredToken))
+            }
             _ => Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string()))),
         },
     }
@@ -271,7 +300,7 @@ impl<'r> FromRequest<'r> for AccessFull {
         match access_check(req, vec![AuthScope::Access], None).await {
             Outcome::Success(access) => Outcome::Success(AccessFull { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -297,7 +326,7 @@ impl<'r> FromRequest<'r> for AccessPrivileged {
         {
             Outcome::Success(access) => Outcome::Success(Self { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -327,7 +356,7 @@ impl<'r> FromRequest<'r> for AccessStandard {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandard { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -361,7 +390,7 @@ impl<'r> FromRequest<'r> for AccessStandardIncludeChecks {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardIncludeChecks { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -395,7 +424,7 @@ impl<'r> FromRequest<'r> for AccessStandardCheckTakedown {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardCheckTakedown { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -426,7 +455,7 @@ impl<'r> FromRequest<'r> for AccessStandardSignupQueued {
         {
             Outcome::Success(access) => Outcome::Success(AccessStandardSignupQueued { access }),
             Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.1.to_string())));
+                req.local_cache(|| Some(ApiError::from(&error.1)));
                 Outcome::Error(error)
             }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -453,13 +482,20 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
                 Some(jti) => Outcome::Success(RevokeRefreshToken { id: jti }),
                 None => {
                     let error = AuthError::BadJwt("Unexpected missing refresh token id".to_owned());
-                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&error)));
                     Outcome::Error((Status::BadRequest, error))
                 }
             },
             Err(error) => {
-                req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
+                // RevokeRefreshToken also bypasses `access_check`; surface expiry
+                // rather than collapsing it into BadJwt.
+                let error = if is_expired_jwt(&error) {
+                    AuthError::ExpiredToken
+                } else {
+                    AuthError::BadJwt(error.to_string())
+                };
+                req.local_cache(|| Some(ApiError::from(&error)));
+                Outcome::Error((Status::BadRequest, error))
             }
         }
     }
@@ -527,7 +563,7 @@ impl<'r> FromRequest<'r> for UserDidAuthOptional {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during UserDidAuthOptional"),
@@ -617,7 +653,7 @@ impl<'r> FromRequest<'r> for Moderator {
                     access: output.access,
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during Moderator"),
@@ -628,7 +664,7 @@ impl<'r> FromRequest<'r> for Moderator {
                     access: output.access,
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during Moderator"),
@@ -655,7 +691,13 @@ impl<'r> FromRequest<'r> for AdminToken {
             Some(parsed) => {
                 let BasicAuth { username, password } = parsed;
 
-                if username != "admin" || password != env::var("PDS_ADMIN_PASS").unwrap() {
+                let Some(admin_password) = admin_password_from_env() else {
+                    tracing::error!("admin password is not configured");
+                    let error = AuthError::AuthRequired("BadAuth".to_string());
+                    req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
+                    return Outcome::Error((Status::InternalServerError, error));
+                };
+                if username != "admin" || password != admin_password {
                     let error = AuthError::AuthRequired("BadAuth".to_string());
                     req.local_cache(|| Some(ApiError::InvalidRequest(error.to_string())));
                     Outcome::Error((Status::BadRequest, error))
@@ -697,7 +739,7 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
@@ -708,7 +750,7 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),
                 Outcome::Error(err) => {
-                    req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
+                    req.local_cache(|| Some(ApiError::from(&err.1)));
                     Outcome::Error(err)
                 }
                 _ => panic!("Unexpected outcome during OptionalAccessOrAdminToken"),
@@ -793,12 +835,183 @@ pub fn validate_bearer_token(
     }
 }
 
-// @TODO: Implement DPop/OAuth
+/// Maps the granted OAuth scopes onto the closest legacy [`AuthScope`],
+/// mirroring the upstream transition-scope semantics: `transition:generic`
+/// is app-password-equivalent access and `transition:chat.bsky` raises it
+/// to privileged app-password access.
+pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
+    let has = |scope: &str| scopes.iter().any(|granted| granted == scope);
+    if !has("atproto") {
+        bail!("Bad token scope")
+    }
+    if has("transition:chat.bsky") {
+        Ok(AuthScope::AppPassPrivileged)
+    } else if has("transition:generic") {
+        Ok(AuthScope::AppPass)
+    } else {
+        bail!("Bad token scope")
+    }
+}
+
+pub fn dpop_token_from_req(request: &Request) -> Option<String> {
+    match request.headers().get_one("authorization") {
+        Some(header)
+            if header.len() > DPOP.len() && header[..DPOP.len()].eq_ignore_ascii_case(DPOP) =>
+        {
+            Some(header[DPOP.len()..].to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Validates a DPoP-bound OAuth access token against the provider,
+/// mapping the granted scopes onto the legacy [`AuthScope`] model.
+async fn validate_dpop_access_token(
+    request: &Request<'_>,
+    token: String,
+    scopes: Vec<AuthScope>,
+    opts: Option<ValidateAccessTokenOpts>,
+) -> Result<AccessOutput> {
+    let Some(shared) = request
+        .rocket()
+        .state::<crate::oauth::SharedOAuthProvider>()
+    else {
+        bail!("OAuth provider is not configured")
+    };
+    let Some(cfg) = request.rocket().state::<crate::config::ServerConfig>() else {
+        bail!("Server config is not available")
+    };
+    let provider = &shared.provider;
+    let now = crate::oauth::now_secs();
+    let uri = format!("{}{}", cfg.service.public_url, request.uri());
+    let dpop_headers: Vec<String> = request.headers().get("dpop").map(String::from).collect();
+    let dpop_refs: Vec<&str> = dpop_headers.iter().map(String::as_str).collect();
+    let verified = provider
+        .verify_access_token(
+            &token,
+            &rsky_oauth::DpopRequest {
+                method: request.method().as_str(),
+                uri: &uri,
+                dpop_headers: &dpop_refs,
+                access_token: Some(&token),
+            },
+            now,
+        )
+        .await;
+    let verified = match verified {
+        Ok(verified) => {
+            crate::oauth::stage_oauth_headers(
+                request,
+                crate::oauth::OAuthResponseHeaders {
+                    dpop_nonce: provider.next_dpop_nonce(now),
+                    www_authenticate: None,
+                },
+            );
+            verified
+        }
+        Err(error) => {
+            crate::oauth::stage_oauth_headers(
+                request,
+                crate::oauth::OAuthResponseHeaders {
+                    dpop_nonce: provider.next_dpop_nonce(now),
+                    www_authenticate: Some(format!(
+                        "DPoP error=\"{}\", error_description=\"{}\"",
+                        error.error_code(),
+                        error.error_description()
+                    )),
+                },
+            );
+            bail!("{}", error.error_description())
+        }
+    };
+    let scope = oauth_scopes_to_auth_scope(&verified.scopes)?;
+    if !scopes.is_empty() && !scopes.contains(&scope) {
+        bail!("Bad token scope")
+    }
+    let ValidateAccessTokenOpts {
+        check_takedown,
+        check_deactivated,
+    } = opts.unwrap_or(ValidateAccessTokenOpts {
+        check_takedown: Some(false),
+        check_deactivated: Some(false),
+    });
+    check_account_status(
+        request,
+        &verified.did,
+        check_takedown.unwrap_or(false),
+        check_deactivated.unwrap_or(false),
+    )
+    .await?;
+    Ok(AccessOutput {
+        credentials: Some(Credentials {
+            r#type: "oauth".to_string(),
+            did: Some(verified.did),
+            scope: Some(scope),
+            audience: Some(env::var("PDS_SERVICE_DID")?),
+            token_id: Some(verified.token_id),
+            aud: None,
+            iss: None,
+            is_privileged: None,
+        }),
+        artifacts: Some(token),
+    })
+}
+
+async fn check_account_status(
+    request: &Request<'_>,
+    did: &str,
+    check_takedown: bool,
+    check_deactivated: bool,
+) -> Result<()> {
+    if !check_takedown && !check_deactivated {
+        return Ok(());
+    }
+    let account_manager = match request.guard::<AccountManager>().await {
+        Outcome::Success(account_manager) => account_manager,
+        _ => {
+            return Err(anyhow::Error::new(AuthError::InternalServerError(
+                "Unexpected Error Occurred".to_string(),
+            )))
+        }
+    };
+    let found: ActorAccount = match account_manager
+        .get_account(
+            did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await
+    {
+        Ok(Some(found)) => found,
+        _ => {
+            return Err(anyhow::Error::new(AuthError::AccountNotFound(
+                "Account not found".to_string(),
+            )))
+        }
+    };
+    if check_takedown && found.takedown_ref.is_some() {
+        return Err(anyhow::Error::new(AuthError::AccountTakedown(
+            "Account has been taken down".to_string(),
+        )));
+    }
+    if check_deactivated && found.deactivated_at.is_some() {
+        return Err(anyhow::Error::new(AuthError::AccountDeactivated(
+            "Account is deactivated".to_string(),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn validate_access_token(
     request: &Request<'_>,
     scopes: Vec<AuthScope>,
     opts: Option<ValidateAccessTokenOpts>,
 ) -> Result<AccessOutput> {
+    if let Some(token) = dpop_token_from_req(request) {
+        return validate_dpop_access_token(request, token, scopes, opts).await;
+    }
     let options = VerificationOptions {
         allowed_audiences: Some(HashSet::from_strings(&[env::var("PDS_SERVICE_DID")?])),
         ..Default::default()
@@ -818,55 +1031,13 @@ pub async fn validate_access_token(
         check_takedown: Some(false),
         check_deactivated: Some(false),
     });
-    let check_takedown = check_takedown.unwrap_or(false);
-    let check_deactivated = check_deactivated.unwrap_or(false);
-
-    let account_manager = match request
-        .guard::<AccountManager>()
-        .await
-        .map(|account_manager| account_manager)
-    {
-        Outcome::Success(account_manager) => account_manager,
-        Outcome::Error(_) => {
-            return Err(anyhow::Error::new(AuthError::InternalServerError(
-                "Unexpected Error Occurred".to_string(),
-            )))
-        }
-        Outcome::Forward(_) => {
-            return Err(anyhow::Error::new(AuthError::InternalServerError(
-                "Unexpected Error Occurred".to_string(),
-            )))
-        }
-    };
-    if check_takedown || check_deactivated {
-        let found: ActorAccount = match account_manager
-            .get_account(
-                &did,
-                Some(AvailabilityFlags {
-                    include_deactivated: Some(true),
-                    include_taken_down: Some(true),
-                }),
-            )
-            .await
-        {
-            Ok(Some(found)) => found,
-            _ => {
-                return Err(anyhow::Error::new(AuthError::AccountNotFound(
-                    "Account not found".to_string(),
-                )))
-            }
-        };
-        if check_takedown && found.takedown_ref.is_some() {
-            return Err(anyhow::Error::new(AuthError::AccountTakedown(
-                "Account has been taken down".to_string(),
-            )));
-        }
-        if check_deactivated && found.deactivated_at.is_some() {
-            return Err(anyhow::Error::new(AuthError::AccountDeactivated(
-                "Account is deactivated".to_string(),
-            )));
-        }
-    }
+    check_account_status(
+        request,
+        &did,
+        check_takedown.unwrap_or(false),
+        check_deactivated.unwrap_or(false),
+    )
+    .await?;
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -900,7 +1071,7 @@ pub async fn verify_service_jwt(
             } else {
                 "atproto"
             };
-            let mut lock = futures::executor::block_on(id_resolver.id_resolver.write());
+            let lock = futures::executor::block_on(id_resolver.id_resolver.write());
             let did_doc: Result<DidDocument> =
                 futures::executor::block_on(lock.did.ensure_resolve(&did, Some(force_refresh)));
             let did_doc: DidDocument = match did_doc {
@@ -945,6 +1116,7 @@ pub fn is_user_or_admin(auth: AccessOutput, did: &String) -> bool {
 
 const BEARER: &str = "Bearer ";
 const BASIC: &str = "Basic ";
+const DPOP: &str = "DPoP ";
 
 pub fn is_bearer_token(request: &Request) -> bool {
     match request.headers().get_one("Authorization") {
@@ -986,12 +1158,21 @@ pub fn verify_jwt(jwt: &str, verify_options: Option<VerificationOptions>) -> Res
     })
 }
 
+pub fn admin_password_from_env() -> Option<String> {
+    env::var("PDS_ADMIN_PASSWORD")
+        .or_else(|_| env::var("PDS_ADMIN_PASS"))
+        .ok()
+}
+
 pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
-    if !token.starts_with(BASIC) {
+    let mut parts = token.split_whitespace();
+    if parts.next() != Some("Basic") {
         return None;
     }
-
-    let b64 = &token[BASIC.len()..];
+    let b64 = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let decoded: Vec<u8> = match base64pad.decode(b64) {
         Err(_) => return None,
         Ok(decoded) => decoded,
@@ -1000,13 +1181,104 @@ pub fn parse_basic_auth(token: &str) -> Option<BasicAuth> {
         Err(_) => return None,
         Ok(res) => res,
     };
-    let parsed_parts = parsed_str.split(":").collect::<Vec<&str>>();
+    let (username, password) = parsed_str.split_once(':')?;
+    Some(BasicAuth {
+        username: username.to_string(),
+        password: password.to_string(),
+    })
+}
 
-    match (parsed_parts.first(), parsed_parts.get(1)) {
-        (Some(username), Some(password)) => Some(BasicAuth {
-            username: username.to_string(),
-            password: password.to_string(),
-        }),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // base64("admin:password")
+    const CREDS: &str = "YWRtaW46cGFzc3dvcmQ=";
+
+    #[test]
+    fn oauth_scope_mapping_follows_transition_semantics() {
+        let scopes = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:generic"])).unwrap(),
+            AuthScope::AppPass
+        );
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "transition:generic",
+                "transition:chat.bsky"
+            ]))
+            .unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // chat access alone still maps to privileged app-password access
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:chat.bsky"])).unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // atproto alone grants no legacy access level
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto"])).is_err());
+        // missing the mandatory atproto scope is rejected outright
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["transition:generic"])).is_err());
+        assert!(oauth_scopes_to_auth_scope(&[]).is_err());
+    }
+
+    fn assert_admin(parsed: Option<BasicAuth>) {
+        let parsed = parsed.expect("expected successful parse");
+        assert_eq!(parsed.username, "admin");
+        assert_eq!(parsed.password, "password");
+    }
+
+    #[test]
+    fn parses_normal_basic_auth() {
+        assert_admin(parse_basic_auth(&format!("Basic {CREDS}")));
+    }
+
+    #[test]
+    fn tolerates_extra_whitespace() {
+        assert_admin(parse_basic_auth(&format!("Basic  {CREDS}")));
+        assert_admin(parse_basic_auth(&format!("Basic \t {CREDS}")));
+    }
+
+    #[test]
+    fn tolerates_trailing_whitespace() {
+        assert_admin(parse_basic_auth(&format!("Basic {CREDS} ")));
+        assert_admin(parse_basic_auth(&format!("  Basic {CREDS}  ")));
+    }
+
+    #[test]
+    fn preserves_colons_in_password() {
+        // base64("admin:pass:word")
+        let parsed = parse_basic_auth("Basic YWRtaW46cGFzczp3b3Jk").expect("expected parse");
+        assert_eq!(parsed.username, "admin");
+        assert_eq!(parsed.password, "pass:word");
+    }
+
+    // Single test: sequential env mutation stays deterministic across threads
+    #[test]
+    fn admin_password_prefers_upstream_env_name() {
+        env::remove_var("PDS_ADMIN_PASSWORD");
+        env::remove_var("PDS_ADMIN_PASS");
+        assert_eq!(admin_password_from_env(), None);
+
+        env::set_var("PDS_ADMIN_PASS", "legacy");
+        assert_eq!(admin_password_from_env(), Some("legacy".to_string()));
+
+        env::set_var("PDS_ADMIN_PASSWORD", "standard");
+        assert_eq!(admin_password_from_env(), Some("standard".to_string()));
+
+        env::remove_var("PDS_ADMIN_PASSWORD");
+        env::remove_var("PDS_ADMIN_PASS");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_basic_auth("").is_none());
+        assert!(parse_basic_auth("Basic").is_none());
+        assert!(parse_basic_auth("Basic not-base64!").is_none());
+        assert!(parse_basic_auth(&format!("Bearer {CREDS}")).is_none());
+        assert!(parse_basic_auth(&format!("Basic {CREDS} extra")).is_none());
+        // base64("no-colon")
+        assert!(parse_basic_auth("Basic bm8tY29sb24=").is_none());
     }
 }

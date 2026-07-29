@@ -1,14 +1,12 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
-use crate::actor_store::aws::s3::S3BlobStore;
+use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
-use crate::db::DbConn;
 use crate::repo::prepare::{prepare_delete, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
-use aws_config::SdkConfig;
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -21,8 +19,8 @@ async fn inner_delete_record(
     body: Json<DeleteRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
-    db: DbConn,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<()> {
     let DeleteRecordInput {
@@ -65,8 +63,9 @@ async fn inner_delete_record(
                 rkey,
                 swap_cid: swap_record_cid,
             })?;
-            let mut actor_store =
-                ActorStore::new(did.clone(), S3BlobStore::new(did.clone(), s3_config), db);
+            let mut actor_store = actor_store
+                .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
+                .await?;
             let write_at_uri: AtUri = write.uri.clone().try_into()?;
             let record = actor_store
                 .record
@@ -102,11 +101,20 @@ pub async fn delete_record(
     body: Json<DeleteRecordInput>,
     auth: AccessStandardIncludeChecks,
     sequencer: &State<SharedSequencer>,
-    s3_config: &State<SdkConfig>,
-    db: DbConn,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_delete_record(body, auth, sequencer, s3_config, db, account_manager).await {
+    match inner_delete_record(
+        body,
+        auth,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        account_manager,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

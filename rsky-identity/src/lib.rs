@@ -2,7 +2,8 @@ extern crate url;
 
 use crate::did::did_resolver::DidResolver;
 use crate::handle::HandleResolver;
-use crate::types::{DidCache, DidResolverOpts, HandleResolverOpts, IdentityResolverOpts};
+use crate::types::{DidResolverOpts, HandleResolverOpts, IdentityResolverOpts, MemoryCache};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -20,10 +21,11 @@ impl IdResolver {
             backup_nameservers,
         } = opts;
         let timeout = timeout.unwrap_or_else(|| Duration::from_millis(3000));
-        let did_cache = did_cache.unwrap_or_else(|| DidCache {
-            stale_ttl: Default::default(),
-            max_ttl: Default::default(),
-            cache: Default::default(),
+        let did_cache = did_cache.unwrap_or_else(|| {
+            Arc::new(MemoryCache::new(
+                Some(Duration::default()),
+                Some(Duration::default()),
+            ))
         });
 
         Self {
