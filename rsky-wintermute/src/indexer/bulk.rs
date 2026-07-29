@@ -128,8 +128,9 @@ pub async fn copy_insert_records(
     let rows = client
         .query(
             "INSERT INTO record (uri, cid, did, json, rev, \"indexedAt\")
-             SELECT uri, cid, did, json, rev, indexed_at
+             SELECT DISTINCT ON (uri) uri, cid, did, json, rev, indexed_at
              FROM _bulk_record
+             ORDER BY uri, rev DESC
              ON CONFLICT (uri) DO UPDATE SET
                rev = EXCLUDED.rev,
                cid = EXCLUDED.cid,
@@ -511,6 +512,23 @@ pub async fn copy_insert_likes(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
+    // A fresh record supersedes any stale row for the same pair left by a
+    // missed delete; without this the pair-unique index rejects the new row.
+    client
+        .execute(
+            "WITH del AS (
+                 DELETE FROM \"like\" l USING _bulk_like b
+                 WHERE l.subject = b.subject AND l.creator = b.creator
+                   AND l.uri != b.uri
+                 RETURNING l.uri
+             ), delrec AS (
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+             )
+             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+            &[],
+        )
+        .await?;
+
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
     client
@@ -600,6 +618,23 @@ pub async fn copy_insert_follows(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
+
+    // A fresh record supersedes any stale row for the same pair left by a
+    // missed delete; without this the pair-unique index rejects the new row.
+    client
+        .execute(
+            "WITH del AS (
+                 DELETE FROM follow f USING _bulk_follow b
+                 WHERE f.creator = b.creator AND f.\"subjectDid\" = b.subject_did
+                   AND f.uri != b.uri
+                 RETURNING f.uri
+             ), delrec AS (
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+             )
+             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+            &[],
+        )
+        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
@@ -720,6 +755,25 @@ pub async fn copy_insert_reposts(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
+
+    // A fresh record supersedes any stale row for the same pair left by a
+    // missed delete; without this the pair-unique index rejects the new row.
+    client
+        .execute(
+            "WITH del AS (
+                 DELETE FROM repost r USING _bulk_repost b
+                 WHERE r.creator = b.creator AND r.subject = b.subject
+                   AND r.uri != b.uri
+                 RETURNING r.uri
+             ), delrec AS (
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+             ), delfeed AS (
+                 DELETE FROM feed_item WHERE uri IN (SELECT uri FROM del)
+             )
+             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+            &[],
+        )
+        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
@@ -895,6 +949,21 @@ pub async fn copy_insert_blocks(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
+
+    // A fresh record supersedes any stale row for the same pair left by a
+    // missed delete; without this the pair-unique index rejects the new row.
+    client
+        .execute(
+            "WITH del AS (
+                 DELETE FROM actor_block a USING _bulk_block b
+                 WHERE a.creator = b.creator AND a.\"subjectDid\" = b.subject
+                   AND a.uri != b.uri
+                 RETURNING a.uri
+             )
+             DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
+            &[],
+        )
+        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();

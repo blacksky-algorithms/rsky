@@ -2,10 +2,13 @@
 //!
 //! Streams `https://plc.directory/export` with pagination, extracts
 //! `did` + `alsoKnownAs` handle from each operation, and bulk-updates
-//! actors that currently have NULL handles using the COPY protocol.
+//! actors using the COPY protocol.
 //!
 //! Imported handles are marked with `indexedAt = 1970-01-01T00:00:01Z`
 //! so the normal handle resolution loop still verifies them bidirectionally.
+//! Rows carrying that marker stay writable by later operations in the
+//! stream, so each actor converges to its newest exported handle rather
+//! than freezing on the first (oldest) one.
 
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
@@ -114,7 +117,8 @@ fn dedup_batch(data: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 /// Bulk-update actor handles using COPY protocol.
-/// Only updates actors with NULL handles if null_only is true.
+/// With null_only, touches only NULL-handle rows and rows this import
+/// previously stamped, so later PLC operations supersede earlier ones.
 /// Returns the number of actors updated.
 async fn copy_update_handles(
     client: &tokio_postgres::Client,
@@ -170,7 +174,9 @@ async fn copy_update_handles(
     let query = if null_only {
         "UPDATE actor SET handle = p.handle, \"indexedAt\" = $1
          FROM _plc_handles p
-         WHERE actor.did = p.did AND actor.handle IS NULL
+         WHERE actor.did = p.did
+           AND (actor.handle IS NULL OR actor.\"indexedAt\" = $1)
+           AND actor.handle IS DISTINCT FROM p.handle
            AND NOT EXISTS (
              SELECT 1 FROM actor a2 WHERE a2.handle = p.handle AND a2.did != p.did
            )"

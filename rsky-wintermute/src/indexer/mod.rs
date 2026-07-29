@@ -51,8 +51,8 @@ pub enum QueueSource {
 type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 #[cfg(test)]
 type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
+#[cfg(test)]
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
-type JobTaskJoinResult = Result<JobTaskResult, tokio::task::JoinError>;
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 
@@ -340,13 +340,19 @@ impl IndexerManager {
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
 
+        // Seed queue gauges once off the hot path: recomputing them per
+        // iteration is an O(n) partition scan that dominated the drain cycle.
+        // The gauges stay current via inc/sub in enqueue/dequeue.
+        let metrics_storage = Arc::clone(&self.storage);
+        drop(tokio::task::spawn_blocking(move || {
+            Self::update_queue_metrics_for(&metrics_storage);
+        }));
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for firehose_live processor");
                 break;
             }
-
-            self.update_queue_metrics();
 
             let batch: Vec<(Vec<u8>, IndexJob)> =
                 match self.storage.dequeue_firehose_live_batch(batch_size) {
@@ -365,9 +371,25 @@ impl IndexerManager {
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
             let (results, _batch_failed) =
                 Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode).await;
+            let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> =
+                batch.iter().map(|(k, j)| (k.as_slice(), j)).collect();
             for (key, result) in results {
                 processed_count += 1;
-                self.handle_single_job_result(Ok((key, QueueSource::FirehoseLive, result)));
+                if let Err(e) = result {
+                    crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
+                    let msg = e.to_string();
+                    // Dequeue already removed the entry, so a failed job must be
+                    // re-enqueued or the event is lost; only unparseable jobs
+                    // can never succeed and are dropped.
+                    if msg.contains("invalid uri") {
+                        tracing::error!("dropping unprocessable firehose_live job: {msg}");
+                    } else if let Some(job) = jobs_by_key.get(key.as_slice()) {
+                        tracing::warn!("requeueing failed firehose_live job {}: {msg}", job.uri);
+                        if let Err(e2) = self.storage.enqueue_firehose_live(job) {
+                            tracing::error!("failed to requeue firehose_live job: {e2}");
+                        }
+                    }
+                }
             }
 
             if last_log.elapsed() > Duration::from_secs(5) {
@@ -666,16 +688,21 @@ impl IndexerManager {
         }
     }
 
+    #[cfg(test)]
     fn update_queue_metrics(&self) {
-        if let Ok(live_len) = self.storage.firehose_live_len() {
+        Self::update_queue_metrics_for(&self.storage);
+    }
+
+    fn update_queue_metrics_for(storage: &Storage) {
+        if let Ok(live_len) = storage.firehose_live_len() {
             crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
                 .set(i64::try_from(live_len).unwrap_or(i64::MAX));
         }
-        if let Ok(backfill_len) = self.storage.firehose_backfill_len() {
+        if let Ok(backfill_len) = storage.firehose_backfill_len() {
             crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
                 .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
         }
-        if let Ok(label_len) = self.storage.label_live_len() {
+        if let Ok(label_len) = storage.label_live_len() {
             crate::metrics::INGESTER_LABEL_LIVE_LENGTH
                 .set(i64::try_from(label_len).unwrap_or(i64::MAX));
         }
@@ -739,28 +766,6 @@ impl IndexerManager {
         }
         let label_jobs = self.dequeue_label_jobs();
         (jobs, label_jobs)
-    }
-
-    fn handle_single_job_result(&self, result: JobTaskJoinResult) {
-        match result {
-            Ok((key, source, Ok(()))) => {
-                let remove_result = match source {
-                    QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
-                    QueueSource::FirehoseBackfill => self.storage.remove_firehose_backfill(&key),
-                    QueueSource::LabelLive => self.storage.remove_label_live(&key),
-                };
-                if let Err(e) = remove_result {
-                    tracing::error!("failed to remove index job from {:?}: {e}", source);
-                }
-            }
-            Ok((_, _, Err(e))) => {
-                crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
-                tracing::error!("index job failed: {e}");
-            }
-            Err(e) => {
-                tracing::error!("task panicked: {e}");
-            }
-        }
     }
 
     #[cfg(test)]
@@ -1829,8 +1834,16 @@ impl IndexerManager {
             Ok(results) => results,
             Err(e) => {
                 tracing::error!("COPY record insert failed: {e}");
-                batch_failed = true;
-                vec![false; parsed_jobs.len()]
+                // Fail every job in the batch so callers can requeue; treating
+                // them as stale-skips would silently drop the events.
+                let err_msg = format!("record COPY failed: {e}");
+                for pj in &parsed_jobs {
+                    results.push((
+                        (*pj.key).clone(),
+                        Err(WintermuteError::Other(err_msg.clone())),
+                    ));
+                }
+                return (results, true);
             }
         };
         let records_ms = records_start.elapsed().as_millis();
@@ -2487,6 +2500,16 @@ impl IndexerManager {
         if jobs.is_empty() {
             return Ok(());
         }
+
+        // Keep only the last event per uri: duplicates in one batch would make
+        // the single-statement upsert illegal.
+        let mut seen = std::collections::HashSet::new();
+        let mut jobs: Vec<&&ParsedJob<'_>> = jobs
+            .iter()
+            .rev()
+            .filter(|pj| seen.insert(pj.uri.to_string()))
+            .collect();
+        jobs.reverse();
 
         let mut uris: Vec<String> = Vec::with_capacity(jobs.len());
         let mut cids: Vec<String> = Vec::with_capacity(jobs.len());
@@ -3757,6 +3780,18 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str());
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM \"like\" WHERE subject = $1 AND creator = $2 AND uri != $3
+                     RETURNING uri
+                 ), delrec AS (
+                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+                 )
+                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+                &[&subject, &did, &uri],
+            )
+            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
@@ -3859,6 +3894,18 @@ impl IndexerManager {
             }
         }
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM follow WHERE creator = $1 AND \"subjectDid\" = $2 AND uri != $3
+                     RETURNING uri
+                 ), delrec AS (
+                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+                 )
+                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+                &[&did, &subject, &uri],
+            )
+            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -3981,6 +4028,20 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str());
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM repost WHERE creator = $1 AND subject = $2 AND uri != $3
+                     RETURNING uri
+                 ), delrec AS (
+                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+                 ), delfeed AS (
+                     DELETE FROM feed_item WHERE uri IN (SELECT uri FROM del)
+                 )
+                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+                &[&did, &subject, &uri],
+            )
+            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
@@ -4103,6 +4164,16 @@ impl IndexerManager {
             }
         }
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM actor_block WHERE creator = $1 AND \"subjectDid\" = $2 AND uri != $3
+                     RETURNING uri
+                 )
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
+                &[&did, &subject, &uri],
+            )
+            .await?;
         client
             .execute(
                 "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -4361,6 +4432,16 @@ impl IndexerManager {
 
         client
             .execute(
+                "WITH del AS (
+                     DELETE FROM list_item WHERE \"listUri\" = $1 AND \"subjectDid\" = $2 AND uri != $3
+                     RETURNING uri
+                 )
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
+                &[&list_uri, &subject, &uri],
+            )
+            .await?;
+        client
+            .execute(
                 "INSERT INTO list_item (uri, cid, creator, \"listUri\", \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT DO NOTHING",
@@ -4402,6 +4483,16 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM list_block WHERE creator = $1 AND \"subjectUri\" = $2 AND uri != $3
+                     RETURNING uri
+                 )
+                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
+                &[&did, &subject, &uri],
+            )
+            .await?;
         client
             .execute(
                 "INSERT INTO list_block (uri, cid, creator, \"subjectUri\", \"createdAt\", \"indexedAt\")
@@ -4800,6 +4891,18 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
+        client
+            .execute(
+                "WITH del AS (
+                     DELETE FROM verification WHERE subject = $1 AND creator = $2 AND uri != $3
+                     RETURNING uri
+                 ), delrec AS (
+                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
+                 )
+                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
+                &[&subject, &did, &uri],
+            )
+            .await?;
         client
             .execute(
                 "INSERT INTO verification (uri, cid, rkey, creator, subject, handle, \"displayName\", \"createdAt\", \"indexedAt\")
