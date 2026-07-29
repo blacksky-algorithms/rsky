@@ -1157,6 +1157,95 @@ mod ingester_tests {
         }
     }
 
+    mod identity_event_upsert {
+        use crate::ingester::IngesterManager;
+        use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+        use tokio_postgres::NoTls;
+
+        fn setup_test_pool() -> Pool {
+            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+            });
+            let mut pg_config = Config::new();
+            pg_config.url = Some(database_url);
+            pg_config.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            pg_config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap()
+        }
+
+        async fn delete_actor(pool: &Pool, did: &str) {
+            let client = pool.get().await.unwrap();
+            client
+                .execute("DELETE FROM actor WHERE did = $1", &[&did])
+                .await
+                .unwrap();
+        }
+
+        async fn read_handle(pool: &Pool, did: &str) -> Option<Option<String>> {
+            let client = pool.get().await.unwrap();
+            client
+                .query_opt("SELECT handle FROM actor WHERE did = $1", &[&did])
+                .await
+                .unwrap()
+                .map(|row| row.get(0))
+        }
+
+        #[tokio::test]
+        async fn creates_actor_row_for_unseen_did() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-identity-new";
+            delete_actor(&pool, did).await;
+
+            IngesterManager::process_identity_event(
+                &pool,
+                did,
+                "2026-07-29T12:00:00.000Z",
+                Some("Identity-New.Test"),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                read_handle(&pool, did).await,
+                Some(Some("identity-new.test".to_owned()))
+            );
+            delete_actor(&pool, did).await;
+        }
+
+        #[tokio::test]
+        async fn updates_handle_for_known_did() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-identity-known";
+            delete_actor(&pool, did).await;
+            let client = pool.get().await.unwrap();
+            let inserted = client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\") \
+                     VALUES ($1, 'identity-old.test', '2026-01-01T00:00:00.000Z')",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+            assert_eq!(inserted, 1);
+
+            IngesterManager::process_identity_event(
+                &pool,
+                did,
+                "2026-07-29T12:00:00.000Z",
+                Some("identity-renamed.test"),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                read_handle(&pool, did).await,
+                Some(Some("identity-renamed.test".to_owned()))
+            );
+            delete_actor(&pool, did).await;
+        }
+    }
+
     mod pds_verification {
         use crate::ingester::parse_active_flag;
 
