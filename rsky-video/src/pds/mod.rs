@@ -249,6 +249,27 @@ impl PdsClient {
             size, upload_response.blob.cid_ref.link
         );
 
+        // The PDS tags a blob by sniffing its bytes, ignoring the Content-Type we
+        // sent above -- `sniffedMime || userSuggestedMime` in the TypeScript PDS,
+        // `sniffed_mime.unwrap_or(user_suggested_mime)` in rsky-pds. So a
+        // disagreement here means our bytes were not the container we claimed,
+        // and the returned ref is one the caller's lexicon will reject.
+        //
+        // Without this check that rejection lands on the client as a validation
+        // error from applyWrites, with nothing recorded server-side: the video
+        // job completes, the post silently fails, and the only trace is the
+        // mimeType sitting in the job row. That is how `.mov` uploads stayed
+        // broken for six months. Fail here instead, naming the actual mime, so a
+        // container we do not yet normalize is a visible error and not a
+        // successful job the user cannot post.
+        if upload_response.blob.mime_type != mime_type {
+            return Err(Error::Internal(format!(
+                "PDS stored blob as {} but we uploaded it as {}; the bytes are not \
+                 {} and this blob cannot be embedded",
+                upload_response.blob.mime_type, mime_type, mime_type
+            )));
+        }
+
         // Convert to atrium BlobRef format
         // We need to construct the proper BlobRef type
         let blob_ref = BlobRef::Typed(TypedBlobRef::Blob(atrium_api::types::Blob {
