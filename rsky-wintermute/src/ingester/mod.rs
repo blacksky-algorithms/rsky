@@ -962,24 +962,23 @@ impl IngesterManager {
             }
         };
 
-        // Update actor table
+        // Identity events arrive before any commit for brand-new accounts,
+        // so an update-only write would drop the handle the event carries.
         let client = pool.get().await?;
-        let result = client
+        client
             .execute(
-                "UPDATE actor SET handle = $1, \"indexedAt\" = $2 WHERE did = $3",
-                &[&handle, &timestamp, &did],
+                "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
+                 ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
+                 \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                &[&did, &handle, &timestamp],
             )
             .await?;
 
-        if result > 0 {
-            tracing::info!(
-                "updated handle for {} to {:?}",
-                did,
-                handle.as_deref().unwrap_or("null")
-            );
-        } else {
-            tracing::debug!("no actor found to update for {}", did);
-        }
+        tracing::info!(
+            "upserted handle for {} to {:?}",
+            did,
+            handle.as_deref().unwrap_or("null")
+        );
 
         Ok(())
     }
