@@ -88,7 +88,7 @@ async fn process_did(
         did_cache: None,
         backup_nameservers: None,
     };
-    let mut resolver = IdResolver::new(resolver_opts);
+    let resolver = IdResolver::new(resolver_opts);
     let doc = resolver
         .did
         .resolve(did.to_string(), None)

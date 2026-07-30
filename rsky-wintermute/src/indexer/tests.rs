@@ -62,10 +62,24 @@ mod indexer_tests {
             "notification",
         ];
 
+        // post_agg is keyed by post uri, so it must go before the posts do.
+        drop(
+            client
+                .execute(
+                    "DELETE FROM post_agg WHERE uri IN (SELECT uri FROM post WHERE creator = $1)",
+                    &[&did],
+                )
+                .await,
+        );
+
+        // One DELETE per candidate column: a single OR query fails outright on
+        // tables that lack any one of these columns, silently deleting nothing.
+        // Table names are quoted ("like" is a reserved word).
         for table in &tables {
-            let query =
-                format!("DELETE FROM {table} WHERE creator = $1 OR did = $1 OR author = $1");
-            drop(client.execute(&query, &[&did]).await);
+            for column in ["creator", "did", "author"] {
+                let query = format!("DELETE FROM \"{table}\" WHERE {column} = $1");
+                drop(client.execute(&query, &[&did]).await);
+            }
         }
 
         drop(
@@ -76,14 +90,6 @@ mod indexer_tests {
         drop(
             client
                 .execute("DELETE FROM profile_agg WHERE did = $1", &[&did])
-                .await,
-        );
-        drop(
-            client
-                .execute(
-                    "DELETE FROM post_agg WHERE uri IN (SELECT uri FROM post WHERE creator = $1)",
-                    &[&did],
-                )
                 .await,
         );
     }
@@ -2019,6 +2025,256 @@ mod indexer_tests {
         assert_eq!(row.get::<_, i64>(0), 1, "followersCount must be exactly 1");
 
         for did in [creator, subject] {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
+
+    #[test]
+    fn collect_subject_notifications_recipients_and_self_skips() {
+        let record = serde_json::json!({
+            "subject": {"uri": "at://did:plc:subject-author/app.bsky.feed.post/abc"},
+            "via": {"uri": "at://did:plc:reposter/app.bsky.feed.repost/xyz"},
+        });
+        let mut rows = Vec::new();
+        IndexerManager::collect_subject_notifications(
+            &mut rows,
+            &record,
+            "did:plc:liker",
+            "at://did:plc:liker/app.bsky.feed.like/1",
+            "cid1",
+            "at://did:plc:subject-author/app.bsky.feed.post/abc",
+            "2026-07-30T00:00:00.000Z",
+            "like",
+            "like-via-repost",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].did, "did:plc:subject-author");
+        assert_eq!(rows[0].reason, "like");
+        assert_eq!(
+            rows[0].reason_subject.as_deref(),
+            Some("at://did:plc:subject-author/app.bsky.feed.post/abc")
+        );
+        assert_eq!(rows[1].did, "did:plc:reposter");
+        assert_eq!(rows[1].reason, "like-via-repost");
+
+        // Self-like and self-via generate nothing
+        let mut rows = Vec::new();
+        IndexerManager::collect_subject_notifications(
+            &mut rows,
+            &serde_json::json!({
+                "subject": {"uri": "at://did:plc:liker/app.bsky.feed.post/own"},
+                "via": {"uri": "at://did:plc:liker/app.bsky.feed.repost/own"},
+            }),
+            "did:plc:liker",
+            "at://did:plc:liker/app.bsky.feed.like/2",
+            "cid2",
+            "at://did:plc:liker/app.bsky.feed.post/own",
+            "2026-07-30T00:00:00.000Z",
+            "like",
+            "like-via-repost",
+        );
+        assert!(rows.is_empty());
+
+        // Empty subject generates nothing
+        let mut rows = Vec::new();
+        IndexerManager::collect_subject_notifications(
+            &mut rows,
+            &serde_json::json!({}),
+            "did:plc:liker",
+            "at://did:plc:liker/app.bsky.feed.like/3",
+            "cid3",
+            "",
+            "2026-07-30T00:00:00.000Z",
+            "like",
+            "like-via-repost",
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_notifications_and_post_agg_are_exact_and_replay_safe() {
+        use crate::indexer::bulk::{self, NotificationRow, PostCopyRow};
+
+        let pool = setup_test_pool();
+        let author = "did:plc:wintermute-test-notif-author";
+        let recipient = "did:plc:wintermute-test-notif-recip";
+        for did in [author, recipient] {
+            cleanup_test_data(&pool, did).await;
+        }
+
+        let client = pool.get().await.unwrap();
+        for did in [author, recipient] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+
+        let parent_uri = format!("at://{recipient}/app.bsky.feed.post/notifparent");
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned();
+        let ts = "2026-07-30T00:00:00.000Z".to_owned();
+        client
+            .execute("DELETE FROM post_agg WHERE uri = $1", &[&parent_uri])
+            .await
+            .unwrap();
+        client
+            .execute("DELETE FROM quote WHERE subject = $1", &[&parent_uri])
+            .await
+            .unwrap();
+
+        // Parent post by recipient, then a batch reply by author: replyCount
+        // increments exactly once across a replay.
+        let parent = PostCopyRow {
+            uri: parent_uri.clone(),
+            cid: cid.clone(),
+            creator: recipient.to_owned(),
+            text: "parent".to_owned(),
+            reply_root: None,
+            reply_root_cid: None,
+            reply_parent: None,
+            reply_parent_cid: None,
+            created_at: ts.clone(),
+            indexed_at: ts.clone(),
+            langs: None,
+            tags: None,
+        };
+        let reply = PostCopyRow {
+            uri: format!("at://{author}/app.bsky.feed.post/notifreply"),
+            cid: cid.clone(),
+            creator: author.to_owned(),
+            text: "reply".to_owned(),
+            reply_root: Some(parent_uri.clone()),
+            reply_root_cid: Some(cid.clone()),
+            reply_parent: Some(parent_uri.clone()),
+            reply_parent_cid: Some(cid.clone()),
+            created_at: ts.clone(),
+            indexed_at: ts.clone(),
+            langs: None,
+            tags: None,
+        };
+        let applied = bulk::copy_insert_posts(&client, &[parent, reply], true)
+            .await
+            .unwrap();
+        assert_eq!(applied.len(), 2, "both posts must apply");
+        let replay_row = PostCopyRow {
+            uri: format!("at://{author}/app.bsky.feed.post/notifreply"),
+            cid: cid.clone(),
+            creator: author.to_owned(),
+            text: "reply replay".to_owned(),
+            reply_root: Some(parent_uri.clone()),
+            reply_root_cid: Some(cid.clone()),
+            reply_parent: Some(parent_uri.clone()),
+            reply_parent_cid: Some(cid.clone()),
+            created_at: ts.clone(),
+            indexed_at: ts.clone(),
+            langs: None,
+            tags: None,
+        };
+        let replayed = bulk::copy_insert_posts(&client, &[replay_row], true)
+            .await
+            .unwrap();
+        assert!(replayed.is_empty(), "replayed post must not re-apply");
+
+        // Batch likes and reposts of the parent: likeCount/repostCount exact
+        // across replays.
+        let like = (
+            format!("at://{author}/app.bsky.feed.like/notiflike"),
+            cid.clone(),
+            author.to_owned(),
+            parent_uri.clone(),
+            cid.clone(),
+            ts.clone(),
+            ts.clone(),
+        );
+        let like_applied = bulk::copy_insert_likes(&client, std::slice::from_ref(&like), true)
+            .await
+            .unwrap();
+        assert_eq!(like_applied.len(), 1);
+        let like_replayed = bulk::copy_insert_likes(&client, std::slice::from_ref(&like), true)
+            .await
+            .unwrap();
+        assert!(like_replayed.is_empty());
+
+        let repost = (
+            format!("at://{author}/app.bsky.feed.repost/notifrepost"),
+            cid.clone(),
+            author.to_owned(),
+            parent_uri.clone(),
+            cid.clone(),
+            ts.clone(),
+            ts.clone(),
+        );
+        bulk::copy_insert_reposts(&client, std::slice::from_ref(&repost), true)
+            .await
+            .unwrap();
+        bulk::copy_insert_reposts(&client, std::slice::from_ref(&repost), true)
+            .await
+            .unwrap();
+
+        // Batch quote of the parent: quoteCount exact across replays.
+        let quote = (
+            format!("at://{author}/app.bsky.feed.post/notifquote"),
+            cid.clone(),
+            parent_uri.clone(),
+            cid.clone(),
+            ts.clone(),
+            ts.clone(),
+        );
+        bulk::copy_insert_quotes(&client, std::slice::from_ref(&quote), true)
+            .await
+            .unwrap();
+        bulk::copy_insert_quotes(&client, std::slice::from_ref(&quote), true)
+            .await
+            .unwrap();
+
+        let agg = client
+            .query_one(
+                "SELECT \"replyCount\", \"likeCount\", \"repostCount\", \"quoteCount\" \
+                 FROM post_agg WHERE uri = $1",
+                &[&parent_uri],
+            )
+            .await
+            .unwrap();
+        assert_eq!(agg.get::<_, i64>(0), 1, "replyCount must be exactly 1");
+        assert_eq!(agg.get::<_, i64>(1), 1, "likeCount must be exactly 1");
+        assert_eq!(agg.get::<_, i64>(2), 1, "repostCount must be exactly 1");
+        assert_eq!(agg.get::<_, i64>(3), 1, "quoteCount must be exactly 1");
+
+        // Bulk notifications dedupe on (did, recordUri, reason).
+        let notif = NotificationRow {
+            did: recipient.to_owned(),
+            author: author.to_owned(),
+            record_uri: format!("at://{author}/app.bsky.feed.like/notiflike"),
+            record_cid: cid.clone(),
+            reason: "like",
+            reason_subject: Some(parent_uri.clone()),
+            sort_at: ts.clone(),
+        };
+        bulk::copy_insert_notifications(&client, std::slice::from_ref(&notif))
+            .await
+            .unwrap();
+        bulk::copy_insert_notifications(&client, std::slice::from_ref(&notif))
+            .await
+            .unwrap();
+        let notif_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM notification WHERE did = $1 AND author = $2",
+                &[&recipient, &author],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(notif_count, 1, "notification must dedupe to exactly 1");
+
+        client
+            .execute("DELETE FROM post_agg WHERE uri = $1", &[&parent_uri])
+            .await
+            .unwrap();
+        for did in [author, recipient] {
             cleanup_test_data(&pool, did).await;
         }
     }
