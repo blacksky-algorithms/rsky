@@ -2757,12 +2757,12 @@ impl IndexerManager {
                     .map(str::to_owned);
                 let langs = record
                     .get("langs")
-                    .filter(|v| !v.is_null())
-                    .map(std::string::ToString::to_string);
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| bulk::pg_text_array_literal(items));
                 let tags = record
                     .get("tags")
-                    .filter(|v| !v.is_null())
-                    .map(std::string::ToString::to_string);
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| bulk::pg_text_array_literal(items));
 
                 post_data.push(bulk::PostCopyRow {
                     uri: uri.clone(),

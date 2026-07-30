@@ -1883,4 +1883,58 @@ mod indexer_tests {
 
         cleanup_test_data(&pool, test_did).await;
     }
+
+    #[tokio::test]
+    async fn bulk_post_langs_tags_round_trip_as_arrays() {
+        use crate::indexer::bulk::{self, PostCopyRow};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:wintermute-test-langs-arrays";
+        cleanup_test_data(&pool, test_did).await;
+
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                 ON CONFLICT (did) DO NOTHING",
+                &[&test_did],
+            )
+            .await
+            .unwrap();
+
+        let uri = format!("at://{test_did}/app.bsky.feed.post/langstest1");
+        let langs_json = vec![serde_json::json!("en"), serde_json::json!("pt-BR")];
+        let tags_json = vec![serde_json::json!(r#"tag "quoted""#)];
+        let row = PostCopyRow {
+            uri: uri.clone(),
+            cid: "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            creator: test_did.to_owned(),
+            text: "langs round trip".to_owned(),
+            reply_root: None,
+            reply_root_cid: None,
+            reply_parent: None,
+            reply_parent_cid: None,
+            created_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            indexed_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            langs: Some(bulk::pg_text_array_literal(&langs_json)),
+            tags: Some(bulk::pg_text_array_literal(&tags_json)),
+        };
+        bulk::copy_insert_posts(&client, &[row], true)
+            .await
+            .unwrap();
+
+        let db_row = client
+            .query_one(
+                "SELECT langs::text[], tags::text[] FROM post WHERE uri = $1",
+                &[&uri],
+            )
+            .await
+            .unwrap();
+        let langs: Vec<String> = db_row.get(0);
+        let tags: Vec<String> = db_row.get(1);
+        assert_eq!(langs, vec!["en".to_owned(), "pt-BR".to_owned()]);
+        assert_eq!(tags, vec![r#"tag "quoted""#.to_owned()]);
+
+        cleanup_test_data(&pool, test_did).await;
+    }
 }
