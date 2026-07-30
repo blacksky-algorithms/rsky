@@ -1894,7 +1894,7 @@ impl IndexerManager {
             Self::parallel_copy_posts(pool, &posts, bulk_load),
             Self::parallel_copy_likes(pool, &likes, bulk_load),
             Self::parallel_copy_follows(pool, &follows, bulk_load),
-            Self::parallel_copy_reposts(pool, &reposts),
+            Self::parallel_copy_reposts(pool, &reposts, bulk_load),
             Self::parallel_copy_blocks(pool, &blocks),
             Self::parallel_copy_profiles(pool, &profiles),
         );
@@ -2623,7 +2623,9 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_likes(&client, jobs).await.err();
+        let err = Self::copy_batch_insert_likes(&client, jobs, !bulk_load)
+            .await
+            .err();
         (start.elapsed().as_millis(), count, err)
     }
 
@@ -2650,6 +2652,7 @@ impl IndexerManager {
     async fn parallel_copy_reposts(
         pool: &Pool,
         jobs: &[&ParsedJob<'_>],
+        bulk_load: bool,
     ) -> (u128, usize, Option<WintermuteError>) {
         let count = jobs.len();
         if count == 0 {
@@ -2660,7 +2663,9 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_reposts(&client, jobs).await.err();
+        let err = Self::copy_batch_insert_reposts(&client, jobs, !bulk_load)
+            .await
+            .err();
         (start.elapsed().as_millis(), count, err)
     }
 
@@ -2717,6 +2722,9 @@ impl IndexerManager {
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
         let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
         let mut quote_data: Vec<(String, String, String, String, String, String)> = Vec::new();
+        let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
+        // (did, uri, cid, sort_at) for reply posts; ancestor notifications need queries
+        let mut reply_posts: Vec<(String, String, String, String)> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -2764,6 +2772,7 @@ impl IndexerManager {
                     .and_then(serde_json::Value::as_array)
                     .map(|items| bulk::pg_text_array_literal(items));
 
+                let is_reply = reply_parent.is_some();
                 post_data.push(bulk::PostCopyRow {
                     uri: uri.clone(),
                     cid: pj.job.cid.clone(),
@@ -2785,8 +2794,44 @@ impl IndexerManager {
                     pj.job.cid.clone(),
                     uri.clone(),
                     pj.did.clone(),
-                    sort_at,
+                    sort_at.clone(),
                 ));
+
+                // Mention notifications from facets
+                if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
+                    for facet in facets {
+                        let features = facet.get("features").and_then(|f| f.as_array());
+                        for feature in features.into_iter().flatten() {
+                            let feature_type =
+                                feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                            if feature_type != "app.bsky.richtext.facet#mention" {
+                                continue;
+                            }
+                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
+                                if mention_did != pj.did {
+                                    notif_rows.push(bulk::NotificationRow {
+                                        did: mention_did.to_owned(),
+                                        author: pj.did.clone(),
+                                        record_uri: uri.clone(),
+                                        record_cid: pj.job.cid.clone(),
+                                        reason: "mention",
+                                        reason_subject: None,
+                                        sort_at: sort_at.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if is_reply {
+                    reply_posts.push((
+                        pj.did.clone(),
+                        uri.clone(),
+                        pj.job.cid.clone(),
+                        sort_at.clone(),
+                    ));
+                }
 
                 // Extract embed data for images and videos
                 if let Some(embed) = record.get("embed") {
@@ -2796,6 +2841,7 @@ impl IndexerManager {
                         &mut embed_image_data,
                         &mut embed_video_data,
                     );
+                    let quotes_before = quote_data.len();
                     Self::extract_quote(
                         embed,
                         &uri,
@@ -2804,6 +2850,23 @@ impl IndexerManager {
                         &pj.job.indexed_at,
                         &mut quote_data,
                     );
+                    // Quote notifications for freshly extracted quote subjects
+                    for (_, _, subject, _, _, _) in &quote_data[quotes_before..] {
+                        if let Ok(subject_uri) = AtUri::new(subject.clone(), None) {
+                            let quoted_author = subject_uri.get_hostname();
+                            if quoted_author != pj.did.as_str() {
+                                notif_rows.push(bulk::NotificationRow {
+                                    did: quoted_author.to_owned(),
+                                    author: pj.did.clone(),
+                                    record_uri: uri.clone(),
+                                    record_cid: pj.job.cid.clone(),
+                                    reason: "quote",
+                                    reason_subject: Some(subject.clone()),
+                                    sort_at: sort_at.clone(),
+                                });
+                            }
+                        }
+                    }
                 }
 
                 metrics::INDEXER_POST_EVENTS_TOTAL.inc();
@@ -2814,7 +2877,17 @@ impl IndexerManager {
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
         bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
         bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
-        bulk::copy_insert_quotes(client, &quote_data).await?;
+        bulk::copy_insert_quotes(client, &quote_data, compute_agg).await?;
+
+        // Notifications are deliberately not limited to newly applied rows:
+        // gap-heal replays must generate them for rows indexed by older code,
+        // and the (did, recordUri, reason) dedupe keeps replays exact.
+        if compute_agg {
+            bulk::copy_insert_notifications(client, &notif_rows).await?;
+            for (did, uri, cid, sort_at) in &reply_posts {
+                Self::write_reply_notifications(client, did, uri, cid, sort_at).await?;
+            }
+        }
 
         Ok(())
     }
@@ -2939,6 +3012,7 @@ impl IndexerManager {
     async fn copy_batch_insert_likes(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
+        compute_agg: bool,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
@@ -2948,6 +3022,7 @@ impl IndexerManager {
 
         let mut like_data: Vec<(String, String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
+        let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -2966,6 +3041,18 @@ impl IndexerManager {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&pj.job.indexed_at);
 
+                Self::collect_subject_notifications(
+                    &mut notif_rows,
+                    record,
+                    &pj.did,
+                    &uri,
+                    &pj.job.cid,
+                    subject_uri,
+                    &pj.job.indexed_at,
+                    "like",
+                    "like-via-repost",
+                );
+
                 like_data.push((
                     uri,
                     pj.job.cid.clone(),
@@ -2980,7 +3067,65 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_likes(client, &like_data).await
+        bulk::copy_insert_likes(client, &like_data, compute_agg).await?;
+        if compute_agg {
+            bulk::copy_insert_notifications(client, &notif_rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Collect subject + via notifications for a like or repost record,
+    /// mirroring the per-record path's recipients and self-skips.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_subject_notifications(
+        notif_rows: &mut Vec<bulk::NotificationRow>,
+        record: &serde_json::Value,
+        did: &str,
+        uri: &str,
+        cid: &str,
+        subject_uri: &str,
+        indexed_at: &str,
+        reason: &'static str,
+        via_reason: &'static str,
+    ) {
+        if subject_uri.is_empty() {
+            return;
+        }
+        let Ok(subject) = AtUri::new(subject_uri.to_owned(), None) else {
+            return;
+        };
+        let subject_author = subject.get_hostname();
+        if subject_author != did {
+            notif_rows.push(bulk::NotificationRow {
+                did: subject_author.to_owned(),
+                author: did.to_owned(),
+                record_uri: uri.to_owned(),
+                record_cid: cid.to_owned(),
+                reason,
+                reason_subject: Some(subject_uri.to_owned()),
+                sort_at: indexed_at.to_owned(),
+            });
+        }
+        let via_uri_str = record
+            .get("via")
+            .and_then(|v| v.get("uri"))
+            .and_then(|v| v.as_str());
+        if let Some(via_uri_str) = via_uri_str {
+            if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
+                let reposter = via_uri.get_hostname();
+                if reposter != did {
+                    notif_rows.push(bulk::NotificationRow {
+                        did: reposter.to_owned(),
+                        author: did.to_owned(),
+                        record_uri: uri.to_owned(),
+                        record_cid: cid.to_owned(),
+                        reason: via_reason,
+                        reason_subject: Some(via_uri_str.to_owned()),
+                        sort_at: indexed_at.to_owned(),
+                    });
+                }
+            }
+        }
     }
 
     async fn copy_batch_insert_follows(
@@ -2996,6 +3141,7 @@ impl IndexerManager {
 
         let mut follow_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
+        let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -3005,6 +3151,18 @@ impl IndexerManager {
                     .get("createdAt")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&pj.job.indexed_at);
+
+                if !subject.is_empty() {
+                    notif_rows.push(bulk::NotificationRow {
+                        did: subject.to_owned(),
+                        author: pj.did.clone(),
+                        record_uri: uri.clone(),
+                        record_cid: pj.job.cid.clone(),
+                        reason: "follow",
+                        reason_subject: None,
+                        sort_at: pj.job.indexed_at.clone(),
+                    });
+                }
 
                 follow_data.push((
                     uri,
@@ -3019,12 +3177,17 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_follows(client, &follow_data, compute_agg).await
+        bulk::copy_insert_follows(client, &follow_data, compute_agg).await?;
+        if compute_agg {
+            bulk::copy_insert_notifications(client, &notif_rows).await?;
+        }
+        Ok(())
     }
 
     async fn copy_batch_insert_reposts(
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
+        compute_agg: bool,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
@@ -3036,6 +3199,7 @@ impl IndexerManager {
             Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
+        let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -3060,6 +3224,18 @@ impl IndexerManager {
                     created_at.clone()
                 };
 
+                Self::collect_subject_notifications(
+                    &mut notif_rows,
+                    record,
+                    &pj.did,
+                    &uri,
+                    &pj.job.cid,
+                    subject_uri,
+                    &pj.job.indexed_at,
+                    "repost",
+                    "repost-via-repost",
+                );
+
                 repost_data.push((
                     uri.clone(),
                     pj.job.cid.clone(),
@@ -3083,8 +3259,11 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_reposts(client, &repost_data).await?;
+        bulk::copy_insert_reposts(client, &repost_data, compute_agg).await?;
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
+        if compute_agg {
+            bulk::copy_insert_notifications(client, &notif_rows).await?;
+        }
 
         Ok(())
     }
@@ -3352,6 +3531,39 @@ impl IndexerManager {
         // Reply notifications: walk ancestor chain up to REPLY_NOTIF_DEPTH
         // Matches official Bluesky behavior from post.ts notifsForInsert
         if let Some(parent_uri_str) = reply_parent {
+            Self::write_reply_notifications(client, did, &uri, cid, sort_at).await?;
+
+            // Update replyCount for parent post
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"replyCount\")
+                     SELECT $1::varchar, COUNT(*) FROM post
+                     WHERE \"replyParent\" = $1
+                       AND (\"violatesThreadGate\" IS NULL OR \"violatesThreadGate\" = false)
+                     ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = EXCLUDED.\"replyCount\"",
+                    &[&parent_uri_str],
+                )
+                .await?;
+        }
+
+        // Handle embed.record (quote posts)
+        if let Some(embed) = record.get("embed") {
+            Self::handle_post_embeds(client, embed, &uri, cid, did, created_at, indexed_at).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Notify ancestor authors of a new reply, including descendant repair for
+    /// out-of-order indexing. Shared by the per-record and batch paths.
+    async fn write_reply_notifications(
+        client: &deadpool_postgres::Client,
+        did: &str,
+        uri: &str,
+        cid: &str,
+        sort_at: &str,
+    ) -> Result<(), WintermuteError> {
+        {
             const REPLY_NOTIF_DEPTH: i32 = 5;
 
             // Query ancestors using recursive CTE
@@ -3466,23 +3678,6 @@ impl IndexerManager {
                     }
                 }
             }
-
-            // Update replyCount for parent post
-            client
-                .execute(
-                    "INSERT INTO post_agg (uri, \"replyCount\")
-                     SELECT $1::varchar, COUNT(*) FROM post
-                     WHERE \"replyParent\" = $1
-                       AND (\"violatesThreadGate\" IS NULL OR \"violatesThreadGate\" = false)
-                     ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = EXCLUDED.\"replyCount\"",
-                    &[&parent_uri_str],
-                )
-                .await?;
-        }
-
-        // Handle embed.record (quote posts)
-        if let Some(embed) = record.get("embed") {
-            Self::handle_post_embeds(client, embed, &uri, cid, did, created_at, indexed_at).await?;
         }
 
         Ok(())

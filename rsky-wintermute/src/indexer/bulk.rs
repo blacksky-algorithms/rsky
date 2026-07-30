@@ -79,6 +79,77 @@ pub struct PostCopyRow {
     pub tags: Option<String>,
 }
 
+/// A notification destined for the `notification` table.
+pub struct NotificationRow {
+    pub did: String,
+    pub author: String,
+    pub record_uri: String,
+    pub record_cid: String,
+    pub reason: &'static str,
+    pub reason_subject: Option<String>,
+    pub sort_at: String,
+}
+
+/// Bulk insert notifications in one statement. Deduped on
+/// `(did, "recordUri", reason)` so replays add nothing.
+pub async fn copy_insert_notifications(
+    client: &deadpool_postgres::Client,
+    rows: &[NotificationRow],
+) -> Result<(), WintermuteError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut dids = Vec::with_capacity(rows.len());
+    let mut authors = Vec::with_capacity(rows.len());
+    let mut uris = Vec::with_capacity(rows.len());
+    let mut cids = Vec::with_capacity(rows.len());
+    let mut reasons = Vec::with_capacity(rows.len());
+    let mut subjects: Vec<Option<&str>> = Vec::with_capacity(rows.len());
+    let mut sort_ats = Vec::with_capacity(rows.len());
+    for row in rows {
+        dids.push(row.did.as_str());
+        authors.push(row.author.as_str());
+        uris.push(row.record_uri.as_str());
+        cids.push(row.record_cid.as_str());
+        reasons.push(row.reason);
+        subjects.push(row.reason_subject.as_deref());
+        sort_ats.push(row.sort_at.as_str());
+    }
+    client
+        .execute(
+            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+             SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+            &[&dids, &authors, &uris, &cids, &reasons, &subjects, &sort_ats],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Increment a `post_agg` count column by exact per-uri deltas.
+async fn increment_post_agg(
+    client: &deadpool_postgres::Client,
+    column: &str,
+    counts: std::collections::HashMap<String, i64>,
+) -> Result<(), WintermuteError> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let (uris, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO post_agg (uri, \"{column}\")
+                 SELECT * FROM unnest($1::text[], $2::int8[])
+                 ON CONFLICT (uri) DO UPDATE
+                   SET \"{column}\" = COALESCE(post_agg.\"{column}\", 0) + EXCLUDED.\"{column}\""
+            ),
+            &[&uris, &deltas],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Bulk insert records using `COPY` protocol.
 /// Returns vector of booleans indicating which records were applied (not stale).
 pub async fn copy_insert_records(
@@ -273,11 +344,11 @@ pub async fn copy_insert_posts(
     client: &deadpool_postgres::Client,
     data: &[PostCopyRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
-) -> Result<(), WintermuteError> {
+) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
 
     if data.is_empty() {
-        return Ok(());
+        return Ok(std::collections::HashSet::new());
     }
 
     let count = data.len();
@@ -342,8 +413,9 @@ pub async fn copy_insert_posts(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // Phase 3: INSERT...ON CONFLICT, returning creators of rows actually
-    // inserted so aggregates can increment exactly (dupes/replays add zero).
+    // Phase 3: INSERT...ON CONFLICT, returning rows actually inserted so
+    // aggregates can increment exactly (dupes/replays add zero) and callers
+    // can run per-post side effects only for applied rows.
     let insert_start = Instant::now();
     let inserted = client
         .query(
@@ -351,31 +423,40 @@ pub async fn copy_insert_posts(
              SELECT uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs::varchar[], tags::varchar[]
              FROM _bulk_post
              ON CONFLICT DO NOTHING
-             RETURNING creator",
+             RETURNING uri, creator, \"replyParent\"",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: increment profile_agg postsCount by exact per-creator deltas.
-    // A full recount here scales with each creator's lifetime post count and
-    // dominated batch time on large tables.
+    // Phase 4: increment profile_agg postsCount and post_agg replyCount by
+    // exact per-key deltas. A full recount here scales with each creator's
+    // lifetime post count and dominated batch time on large tables.
     let agg_start = Instant::now();
-    if compute_agg && !inserted.is_empty() {
+    let mut applied = std::collections::HashSet::with_capacity(inserted.len());
+    if !inserted.is_empty() {
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut replies: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for row in &inserted {
-            *counts.entry(row.get::<_, String>(0)).or_insert(0) += 1;
+            applied.insert(row.get::<_, String>(0));
+            *counts.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+            if let Some(parent) = row.get::<_, Option<String>>(2) {
+                *replies.entry(parent).or_insert(0) += 1;
+            }
         }
-        let (dids, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
-        client
-            .execute(
-                "INSERT INTO profile_agg (did, \"postsCount\")
-                 SELECT * FROM unnest($1::text[], $2::int8[])
-                 ON CONFLICT (did) DO UPDATE
-                   SET \"postsCount\" = COALESCE(profile_agg.\"postsCount\", 0) + EXCLUDED.\"postsCount\"",
-                &[&dids, &deltas],
-            )
-            .await?;
+        if compute_agg {
+            let (dids, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+            client
+                .execute(
+                    "INSERT INTO profile_agg (did, \"postsCount\")
+                     SELECT * FROM unnest($1::text[], $2::int8[])
+                     ON CONFLICT (did) DO UPDATE
+                       SET \"postsCount\" = COALESCE(profile_agg.\"postsCount\", 0) + EXCLUDED.\"postsCount\"",
+                    &[&dids, &deltas],
+                )
+                .await?;
+            increment_post_agg(client, "replyCount", replies).await?;
+        }
     }
     let agg_ms = agg_start.elapsed().as_millis();
 
@@ -393,7 +474,7 @@ pub async fn copy_insert_posts(
         );
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 /// Bulk insert `feed_item` records using `COPY` protocol.
@@ -489,11 +570,12 @@ pub async fn copy_insert_feed_items(
 pub async fn copy_insert_likes(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
-) -> Result<(), WintermuteError> {
+    compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
+) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
 
     if data.is_empty() {
-        return Ok(());
+        return Ok(std::collections::HashSet::new());
     }
 
     let count = data.len();
@@ -547,33 +629,48 @@ pub async fn copy_insert_likes(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // Phase 3: INSERT...ON CONFLICT
+    // Phase 3: INSERT...ON CONFLICT, returning rows actually inserted so
+    // likeCount increments exactly (dupes/replays add zero).
     let insert_start = Instant::now();
-    client
-        .execute(
+    let inserted = client
+        .query(
             "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
              SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
              FROM _bulk_like
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT DO NOTHING
+             RETURNING uri, subject",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
+    let agg_start = Instant::now();
+    let mut applied = std::collections::HashSet::with_capacity(inserted.len());
+    let mut likes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for row in &inserted {
+        applied.insert(row.get::<_, String>(0));
+        *likes.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+    }
+    if compute_agg {
+        increment_post_agg(client, "likeCount", likes).await?;
+    }
+    let agg_ms = agg_start.elapsed().as_millis();
+
     // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms;
+    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW like bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW like bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
             total_ms,
             setup_ms,
             copy_ms,
             insert_ms,
+            agg_ms,
             count
         );
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 /// Bulk insert follows using `COPY` protocol.
@@ -581,11 +678,11 @@ pub async fn copy_insert_follows(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
-) -> Result<(), WintermuteError> {
+) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
 
     if data.is_empty() {
-        return Ok(());
+        return Ok(std::collections::HashSet::new());
     }
 
     let count = data.len();
@@ -646,7 +743,7 @@ pub async fn copy_insert_follows(
              SELECT uri, cid, creator, subject_did, created_at, indexed_at
              FROM _bulk_follow
              ON CONFLICT DO NOTHING
-             RETURNING creator, \"subjectDid\"",
+             RETURNING uri, creator, \"subjectDid\"",
             &[],
         )
         .await?;
@@ -656,13 +753,17 @@ pub async fn copy_insert_follows(
     // recounts here scale with each account's lifetime follow graph (a
     // popular subject re-counted every follower on every new follow).
     let agg_start = Instant::now();
+    let mut applied = std::collections::HashSet::with_capacity(inserted.len());
+    for row in &inserted {
+        applied.insert(row.get::<_, String>(0));
+    }
     if compute_agg && !inserted.is_empty() {
         let mut follows: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut followers: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
         for row in &inserted {
-            *follows.entry(row.get::<_, String>(0)).or_insert(0) += 1;
-            *followers.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+            *follows.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+            *followers.entry(row.get::<_, String>(2)).or_insert(0) += 1;
         }
         let (f_dids, f_deltas): (Vec<String>, Vec<i64>) = follows.into_iter().unzip();
         client
@@ -701,18 +802,19 @@ pub async fn copy_insert_follows(
         );
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 /// Bulk insert reposts using `COPY` protocol.
 pub async fn copy_insert_reposts(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
-) -> Result<(), WintermuteError> {
+    compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
+) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
 
     if data.is_empty() {
-        return Ok(());
+        return Ok(std::collections::HashSet::new());
     }
 
     let count = data.len();
@@ -766,39 +868,55 @@ pub async fn copy_insert_reposts(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // Phase 3: INSERT...ON CONFLICT
+    // Phase 3: INSERT...ON CONFLICT, returning rows actually inserted so
+    // repostCount increments exactly (dupes/replays add zero).
     let insert_start = Instant::now();
-    client
-        .execute(
+    let inserted = client
+        .query(
             "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
              SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
              FROM _bulk_repost
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT DO NOTHING
+             RETURNING uri, subject",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
+    let agg_start = Instant::now();
+    let mut applied = std::collections::HashSet::with_capacity(inserted.len());
+    let mut reposts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for row in &inserted {
+        applied.insert(row.get::<_, String>(0));
+        *reposts.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+    }
+    if compute_agg {
+        increment_post_agg(client, "repostCount", reposts).await?;
+    }
+    let agg_ms = agg_start.elapsed().as_millis();
+
     // Log if total > 100ms (worth investigating)
-    let total_ms = setup_ms + copy_ms + insert_ms;
+    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW repost bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW repost bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
             total_ms,
             setup_ms,
             copy_ms,
             insert_ms,
+            agg_ms,
             count
         );
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 /// Bulk insert quotes using `COPY` protocol.
 pub async fn copy_insert_quotes(
     client: &deadpool_postgres::Client,
     data: &[(String, String, String, String, String, String)], // uri, cid, subject, subject_cid, created_at, indexed_at
+    compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<(), WintermuteError> {
     use std::time::Instant;
 
@@ -855,25 +973,37 @@ pub async fn copy_insert_quotes(
 
     // sortAt is GENERATED ALWAYS; creator is unread by the appview so neither is written.
     let insert_start = Instant::now();
-    client
-        .execute(
+    let inserted = client
+        .query(
             "INSERT INTO quote (uri, cid, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
              SELECT uri, cid, subject, subject_cid, created_at, indexed_at
              FROM _bulk_quote
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT DO NOTHING
+             RETURNING subject",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    let total_ms = setup_ms + copy_ms + insert_ms;
+    let agg_start = Instant::now();
+    if compute_agg {
+        let mut quotes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for row in &inserted {
+            *quotes.entry(row.get::<_, String>(0)).or_insert(0) += 1;
+        }
+        increment_post_agg(client, "quoteCount", quotes).await?;
+    }
+    let agg_ms = agg_start.elapsed().as_millis();
+
+    let total_ms = setup_ms + copy_ms + insert_ms + agg_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW quote bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW quote bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms, agg={}ms) for {} rows",
             total_ms,
             setup_ms,
             copy_ms,
             insert_ms,
+            agg_ms,
             count
         );
     }

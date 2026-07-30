@@ -247,7 +247,7 @@ async fn mark_event_at_now(pool: &Pool, did: &str) -> Result<()> {
 }
 
 async fn resolve_pds(plc_url: &str, did: &str) -> Result<Option<String>> {
-    let mut resolver = IdResolver::new(IdentityResolverOpts {
+    let resolver = IdResolver::new(IdentityResolverOpts {
         timeout: Some(std::time::Duration::from_secs(5)),
         plc_url: Some(plc_url.to_owned()),
         did_cache: None,
