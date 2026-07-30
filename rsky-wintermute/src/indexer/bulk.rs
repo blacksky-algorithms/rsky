@@ -35,8 +35,35 @@ fn escape_copy_opt(v: Option<&str>) -> std::borrow::Cow<'_, str> {
     v.map_or(std::borrow::Cow::Borrowed("\\N"), escape_copy_field)
 }
 
+/// Render JSON array items as a Postgres array literal (`{"en","es"}`) for
+/// `text[]`/`varchar[]` columns. Elements are always double-quoted with `\`
+/// and `"` escaped; non-string items are skipped. COPY-level escaping is
+/// applied separately by `escape_copy_field`, so the two layers compose.
+pub fn pg_text_array_literal(items: &[serde_json::Value]) -> String {
+    let mut out = String::from("{");
+    let mut first = true;
+    for item in items {
+        let Some(s) = item.as_str() else { continue };
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                _ => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out
+}
+
 /// A post row for bulk `COPY`. `reply_*` are `None` for non-replies; `langs`/`tags`
-/// hold compact JSON text destined for the `jsonb` columns, `None` when absent.
+/// hold Postgres array literals destined for the `varchar[]` columns, `None` when absent.
 pub struct PostCopyRow {
     pub uri: String,
     pub cid: String,
@@ -270,8 +297,8 @@ pub async fn copy_insert_posts(
                 reply_parent_cid text,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL,
-                langs jsonb,
-                tags jsonb
+                langs text[],
+                tags text[]
             )",
             &[],
         )
@@ -320,7 +347,7 @@ pub async fn copy_insert_posts(
     client
         .execute(
             "INSERT INTO post (uri, cid, creator, text, \"replyRoot\", \"replyRootCid\", \"replyParent\", \"replyParentCid\", \"createdAt\", \"indexedAt\", langs, tags)
-             SELECT uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs, tags
+             SELECT uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs::varchar[], tags::varchar[]
              FROM _bulk_post
              ON CONFLICT DO NOTHING",
             &[],
@@ -512,23 +539,6 @@ pub async fn copy_insert_likes(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // A fresh record supersedes any stale row for the same pair left by a
-    // missed delete; without this the pair-unique index rejects the new row.
-    client
-        .execute(
-            "WITH del AS (
-                 DELETE FROM \"like\" l USING _bulk_like b
-                 WHERE l.subject = b.subject AND l.creator = b.creator
-                   AND l.uri != b.uri
-                 RETURNING l.uri
-             ), delrec AS (
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-             )
-             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-            &[],
-        )
-        .await?;
-
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
     client
@@ -618,23 +628,6 @@ pub async fn copy_insert_follows(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
-
-    // A fresh record supersedes any stale row for the same pair left by a
-    // missed delete; without this the pair-unique index rejects the new row.
-    client
-        .execute(
-            "WITH del AS (
-                 DELETE FROM follow f USING _bulk_follow b
-                 WHERE f.creator = b.creator AND f.\"subjectDid\" = b.subject_did
-                   AND f.uri != b.uri
-                 RETURNING f.uri
-             ), delrec AS (
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-             )
-             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-            &[],
-        )
-        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
@@ -755,25 +748,6 @@ pub async fn copy_insert_reposts(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
-
-    // A fresh record supersedes any stale row for the same pair left by a
-    // missed delete; without this the pair-unique index rejects the new row.
-    client
-        .execute(
-            "WITH del AS (
-                 DELETE FROM repost r USING _bulk_repost b
-                 WHERE r.creator = b.creator AND r.subject = b.subject
-                   AND r.uri != b.uri
-                 RETURNING r.uri
-             ), delrec AS (
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-             ), delfeed AS (
-                 DELETE FROM feed_item WHERE uri IN (SELECT uri FROM del)
-             )
-             DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-            &[],
-        )
-        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
@@ -949,21 +923,6 @@ pub async fn copy_insert_blocks(
     sink.send(bytes::Bytes::from(buffer)).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
-
-    // A fresh record supersedes any stale row for the same pair left by a
-    // missed delete; without this the pair-unique index rejects the new row.
-    client
-        .execute(
-            "WITH del AS (
-                 DELETE FROM actor_block a USING _bulk_block b
-                 WHERE a.creator = b.creator AND a.\"subjectDid\" = b.subject
-                   AND a.uri != b.uri
-                 RETURNING a.uri
-             )
-             DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
-            &[],
-        )
-        .await?;
 
     // Phase 3: INSERT...ON CONFLICT
     let insert_start = Instant::now();
@@ -1164,7 +1123,38 @@ pub async fn copy_insert_post_embed_videos(
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_copy_field, escape_copy_opt};
+    use super::{escape_copy_field, escape_copy_opt, pg_text_array_literal};
+
+    #[test]
+    fn array_literal_renders_quoted_elements() {
+        let items = vec![serde_json::json!("en"), serde_json::json!("pt-BR")];
+        assert_eq!(pg_text_array_literal(&items), r#"{"en","pt-BR"}"#);
+    }
+
+    #[test]
+    fn array_literal_escapes_quotes_and_backslashes() {
+        let items = vec![
+            serde_json::json!(r#"tag "quoted""#),
+            serde_json::json!(r"back\slash"),
+            serde_json::json!("with,comma"),
+            serde_json::json!("with{brace}"),
+        ];
+        assert_eq!(
+            pg_text_array_literal(&items),
+            r#"{"tag \"quoted\"","back\\slash","with,comma","with{brace}"}"#
+        );
+    }
+
+    #[test]
+    fn array_literal_empty_and_non_string_items() {
+        assert_eq!(pg_text_array_literal(&[]), "{}");
+        let items = vec![
+            serde_json::json!(42),
+            serde_json::json!("kept"),
+            serde_json::json!(null),
+        ];
+        assert_eq!(pg_text_array_literal(&items), r#"{"kept"}"#);
+    }
 
     #[test]
     fn escapes_backslash_and_whitespace_for_copy() {

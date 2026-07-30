@@ -10,35 +10,11 @@ mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
-    use crate::types::{BackfillJob, IndexJob, LabelEvent, WriteAction};
+    use crate::types::{BackfillJob, LabelEvent, WriteAction};
     use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio_postgres::NoTls;
-
-    // A record whose pair key (e.g. follow creator+subject) is already
-    // claimed supersedes the older row, so repos containing same-key
-    // duplicates index to one row per key.
-    fn pair_key(job: &IndexJob) -> Option<String> {
-        let collection = job.uri.split('/').nth(3)?;
-        let record = job.record.as_ref()?;
-        let key = match collection {
-            "app.bsky.feed.like" | "app.bsky.feed.repost" => {
-                record.get("subject")?.get("uri")?.as_str()?.to_owned()
-            }
-            "app.bsky.graph.follow"
-            | "app.bsky.graph.block"
-            | "app.bsky.graph.listblock"
-            | "app.bsky.graph.verification" => record.get("subject")?.as_str()?.to_owned(),
-            "app.bsky.graph.listitem" => format!(
-                "{}\n{}",
-                record.get("list")?.as_str()?,
-                record.get("subject")?.as_str()?
-            ),
-            _ => return None,
-        };
-        Some(format!("{collection}\n{key}"))
-    }
 
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("indexer_test_").unwrap();
@@ -165,8 +141,6 @@ mod indexer_tests {
         });
         let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
-        let mut pair_counts: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
         let mut processed = 0;
         let batch_size = 100;
         let mut consecutive_empty = 0;
@@ -177,9 +151,6 @@ mod indexer_tests {
             for _ in 0..batch_size {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
-                        if let Some(k) = pair_key(&index_job) {
-                            *pair_counts.entry(k).or_insert(0) += 1;
-                        }
                         let result =
                             IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
 
@@ -252,35 +223,11 @@ mod indexer_tests {
             .get(0);
         tracing::info!("notifications created: {notification_count}");
 
-        let collapsed: i64 = pair_counts.values().map(|n| i64::from(n - 1)).sum();
-        let expected_records =
-            i64::try_from(queue_len).expect("queue_len should fit in i64") - collapsed;
         assert_eq!(
-            record_count, expected_records,
-            "expected {expected_records} records in generic record table ({queue_len} queued minus {collapsed} superseded same-pair duplicates), found {record_count}"
+            record_count,
+            i64::try_from(queue_len).expect("queue_len should fit in i64"),
+            "expected all {queue_len} records in generic record table, found {record_count}"
         );
-
-        for (table, key_cols) in [
-            ("\"like\"", "subject, creator"),
-            ("repost", "creator, subject"),
-            ("follow", "creator, \"subjectDid\""),
-            ("actor_block", "creator, \"subjectDid\""),
-            ("list_item", "\"listUri\", \"subjectDid\""),
-            ("list_block", "creator, \"subjectUri\""),
-            ("verification", "subject, creator"),
-        ] {
-            let dup_groups: i64 = client
-                .query_one(
-                    &format!(
-                        "SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE creator = $1 GROUP BY {key_cols} HAVING COUNT(*) > 1) t"
-                    ),
-                    &[&test_did],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            assert_eq!(dup_groups, 0, "{table} still holds duplicate pair keys");
-        }
 
         let post_count: i64 = client
             .query_one("SELECT COUNT(*) FROM post WHERE creator = $1", &[&test_did])
@@ -1933,6 +1880,60 @@ mod indexer_tests {
                 result.err()
             );
         }
+
+        cleanup_test_data(&pool, test_did).await;
+    }
+
+    #[tokio::test]
+    async fn bulk_post_langs_tags_round_trip_as_arrays() {
+        use crate::indexer::bulk::{self, PostCopyRow};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:wintermute-test-langs-arrays";
+        cleanup_test_data(&pool, test_did).await;
+
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                 ON CONFLICT (did) DO NOTHING",
+                &[&test_did],
+            )
+            .await
+            .unwrap();
+
+        let uri = format!("at://{test_did}/app.bsky.feed.post/langstest1");
+        let langs_json = vec![serde_json::json!("en"), serde_json::json!("pt-BR")];
+        let tags_json = vec![serde_json::json!(r#"tag "quoted""#)];
+        let row = PostCopyRow {
+            uri: uri.clone(),
+            cid: "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            creator: test_did.to_owned(),
+            text: "langs round trip".to_owned(),
+            reply_root: None,
+            reply_root_cid: None,
+            reply_parent: None,
+            reply_parent_cid: None,
+            created_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            indexed_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            langs: Some(bulk::pg_text_array_literal(&langs_json)),
+            tags: Some(bulk::pg_text_array_literal(&tags_json)),
+        };
+        bulk::copy_insert_posts(&client, &[row], true)
+            .await
+            .unwrap();
+
+        let db_row = client
+            .query_one(
+                "SELECT langs::text[], tags::text[] FROM post WHERE uri = $1",
+                &[&uri],
+            )
+            .await
+            .unwrap();
+        let langs: Vec<String> = db_row.get(0);
+        let tags: Vec<String> = db_row.get(1);
+        assert_eq!(langs, vec!["en".to_owned(), "pt-BR".to_owned()]);
+        assert_eq!(tags, vec![r#"tag "quoted""#.to_owned()]);
 
         cleanup_test_data(&pool, test_did).await;
     }
