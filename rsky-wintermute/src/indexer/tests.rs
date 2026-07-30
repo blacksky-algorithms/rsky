@@ -1937,4 +1937,89 @@ mod indexer_tests {
 
         cleanup_test_data(&pool, test_did).await;
     }
+
+    #[tokio::test]
+    async fn bulk_aggregates_increment_exactly_and_are_replay_safe() {
+        use crate::indexer::bulk::{self, PostCopyRow};
+
+        let pool = setup_test_pool();
+        let creator = "did:plc:wintermute-test-agg-creator";
+        let subject = "did:plc:wintermute-test-agg-subject";
+        for did in [creator, subject] {
+            cleanup_test_data(&pool, did).await;
+        }
+
+        let client = pool.get().await.unwrap();
+        for did in [creator, subject] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+
+        let post = |rkey: &str| PostCopyRow {
+            uri: format!("at://{creator}/app.bsky.feed.post/{rkey}"),
+            cid: "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            creator: creator.to_owned(),
+            text: format!("agg test {rkey}"),
+            reply_root: None,
+            reply_root_cid: None,
+            reply_parent: None,
+            reply_parent_cid: None,
+            created_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            indexed_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            langs: None,
+            tags: None,
+        };
+        let posts = vec![post("aggpost1"), post("aggpost2")];
+        bulk::copy_insert_posts(&client, &posts, true)
+            .await
+            .unwrap();
+        // Replay the identical batch: dupes insert nothing and add nothing.
+        bulk::copy_insert_posts(&client, &posts, true)
+            .await
+            .unwrap();
+
+        let follow = (
+            format!("at://{creator}/app.bsky.graph.follow/aggfollow1"),
+            "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            creator.to_owned(),
+            subject.to_owned(),
+            "2026-07-30T00:00:00.000Z".to_owned(),
+            "2026-07-30T00:00:00.000Z".to_owned(),
+        );
+        bulk::copy_insert_follows(&client, std::slice::from_ref(&follow), true)
+            .await
+            .unwrap();
+        bulk::copy_insert_follows(&client, std::slice::from_ref(&follow), true)
+            .await
+            .unwrap();
+
+        let row = client
+            .query_one(
+                "SELECT \"postsCount\", \"followsCount\" FROM profile_agg WHERE did = $1",
+                &[&creator],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 2, "postsCount must be exactly 2");
+        assert_eq!(row.get::<_, i64>(1), 1, "followsCount must be exactly 1");
+
+        let row = client
+            .query_one(
+                "SELECT \"followersCount\" FROM profile_agg WHERE did = $1",
+                &[&subject],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 1, "followersCount must be exactly 1");
+
+        for did in [creator, subject] {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
 }

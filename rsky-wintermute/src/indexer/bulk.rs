@@ -342,30 +342,38 @@ pub async fn copy_insert_posts(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // Phase 3: INSERT...ON CONFLICT
+    // Phase 3: INSERT...ON CONFLICT, returning creators of rows actually
+    // inserted so aggregates can increment exactly (dupes/replays add zero).
     let insert_start = Instant::now();
-    client
-        .execute(
+    let inserted = client
+        .query(
             "INSERT INTO post (uri, cid, creator, text, \"replyRoot\", \"replyRootCid\", \"replyParent\", \"replyParentCid\", \"createdAt\", \"indexedAt\", langs, tags)
              SELECT uri, cid, creator, text, reply_root, reply_root_cid, reply_parent, reply_parent_cid, created_at, indexed_at, langs::varchar[], tags::varchar[]
              FROM _bulk_post
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT DO NOTHING
+             RETURNING creator",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg postsCount for affected creators (skipped during bulk load)
+    // Phase 4: increment profile_agg postsCount by exact per-creator deltas.
+    // A full recount here scales with each creator's lifetime post count and
+    // dominated batch time on large tables.
     let agg_start = Instant::now();
-    if compute_agg {
+    if compute_agg && !inserted.is_empty() {
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for row in &inserted {
+            *counts.entry(row.get::<_, String>(0)).or_insert(0) += 1;
+        }
+        let (dids, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"postsCount\")
-                 SELECT creator, COUNT(*) FROM post
-                 WHERE creator IN (SELECT DISTINCT creator FROM _bulk_post)
-                 GROUP BY creator
-                 ON CONFLICT (did) DO UPDATE SET \"postsCount\" = EXCLUDED.\"postsCount\"",
-                &[],
+                 SELECT * FROM unnest($1::text[], $2::int8[])
+                 ON CONFLICT (did) DO UPDATE
+                   SET \"postsCount\" = COALESCE(profile_agg.\"postsCount\", 0) + EXCLUDED.\"postsCount\"",
+                &[&dids, &deltas],
             )
             .await?;
     }
@@ -629,42 +637,51 @@ pub async fn copy_insert_follows(
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
-    // Phase 3: INSERT...ON CONFLICT
+    // Phase 3: INSERT...ON CONFLICT, returning both pair sides of rows
+    // actually inserted so aggregates can increment exactly.
     let insert_start = Instant::now();
-    client
-        .execute(
+    let inserted = client
+        .query(
             "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
              SELECT uri, cid, creator, subject_did, created_at, indexed_at
              FROM _bulk_follow
-             ON CONFLICT DO NOTHING",
+             ON CONFLICT DO NOTHING
+             RETURNING creator, \"subjectDid\"",
             &[],
         )
         .await?;
     let insert_ms = insert_start.elapsed().as_millis();
 
-    // Phase 4: Update profile_agg followsCount and followersCount (skipped during bulk load)
+    // Phase 4: increment followsCount/followersCount by exact deltas. Full
+    // recounts here scale with each account's lifetime follow graph (a
+    // popular subject re-counted every follower on every new follow).
     let agg_start = Instant::now();
-    if compute_agg {
-        // Update followsCount for creators (those who are following)
+    if compute_agg && !inserted.is_empty() {
+        let mut follows: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut followers: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        for row in &inserted {
+            *follows.entry(row.get::<_, String>(0)).or_insert(0) += 1;
+            *followers.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+        }
+        let (f_dids, f_deltas): (Vec<String>, Vec<i64>) = follows.into_iter().unzip();
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followsCount\")
-                 SELECT creator, COUNT(*) FROM follow
-                 WHERE creator IN (SELECT DISTINCT creator FROM _bulk_follow)
-                 GROUP BY creator
-                 ON CONFLICT (did) DO UPDATE SET \"followsCount\" = EXCLUDED.\"followsCount\"",
-                &[],
+                 SELECT * FROM unnest($1::text[], $2::int8[])
+                 ON CONFLICT (did) DO UPDATE
+                   SET \"followsCount\" = COALESCE(profile_agg.\"followsCount\", 0) + EXCLUDED.\"followsCount\"",
+                &[&f_dids, &f_deltas],
             )
             .await?;
-        // Update followersCount for subjects (those who are followed)
+        let (s_dids, s_deltas): (Vec<String>, Vec<i64>) = followers.into_iter().unzip();
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followersCount\")
-                 SELECT \"subjectDid\", COUNT(*) FROM follow
-                 WHERE \"subjectDid\" IN (SELECT DISTINCT subject_did FROM _bulk_follow)
-                 GROUP BY \"subjectDid\"
-                 ON CONFLICT (did) DO UPDATE SET \"followersCount\" = EXCLUDED.\"followersCount\"",
-                &[],
+                 SELECT * FROM unnest($1::text[], $2::int8[])
+                 ON CONFLICT (did) DO UPDATE
+                   SET \"followersCount\" = COALESCE(profile_agg.\"followersCount\", 0) + EXCLUDED.\"followersCount\"",
+                &[&s_dids, &s_deltas],
             )
             .await?;
     }
