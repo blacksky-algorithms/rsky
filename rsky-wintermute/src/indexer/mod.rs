@@ -3780,18 +3780,6 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str());
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM \"like\" WHERE subject = $1 AND creator = $2 AND uri != $3
-                     RETURNING uri
-                 ), delrec AS (
-                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-                 )
-                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-                &[&subject, &did, &uri],
-            )
-            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
@@ -3894,18 +3882,6 @@ impl IndexerManager {
             }
         }
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM follow WHERE creator = $1 AND \"subjectDid\" = $2 AND uri != $3
-                     RETURNING uri
-                 ), delrec AS (
-                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-                 )
-                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-                &[&did, &subject, &uri],
-            )
-            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -4028,20 +4004,6 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str());
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM repost WHERE creator = $1 AND subject = $2 AND uri != $3
-                     RETURNING uri
-                 ), delrec AS (
-                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-                 ), delfeed AS (
-                     DELETE FROM feed_item WHERE uri IN (SELECT uri FROM del)
-                 )
-                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-                &[&did, &subject, &uri],
-            )
-            .await?;
         let row_count = client
             .execute(
                 "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", via, \"viaCid\", \"createdAt\", \"indexedAt\")
@@ -4164,16 +4126,6 @@ impl IndexerManager {
             }
         }
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM actor_block WHERE creator = $1 AND \"subjectDid\" = $2 AND uri != $3
-                     RETURNING uri
-                 )
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
-                &[&did, &subject, &uri],
-            )
-            .await?;
         client
             .execute(
                 "INSERT INTO actor_block (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
@@ -4432,16 +4384,6 @@ impl IndexerManager {
 
         client
             .execute(
-                "WITH del AS (
-                     DELETE FROM list_item WHERE \"listUri\" = $1 AND \"subjectDid\" = $2 AND uri != $3
-                     RETURNING uri
-                 )
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
-                &[&list_uri, &subject, &uri],
-            )
-            .await?;
-        client
-            .execute(
                 "INSERT INTO list_item (uri, cid, creator, \"listUri\", \"subjectDid\", \"createdAt\", \"indexedAt\")
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT DO NOTHING",
@@ -4483,16 +4425,6 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM list_block WHERE creator = $1 AND \"subjectUri\" = $2 AND uri != $3
-                     RETURNING uri
-                 )
-                 DELETE FROM record WHERE uri IN (SELECT uri FROM del)",
-                &[&did, &subject, &uri],
-            )
-            .await?;
         client
             .execute(
                 "INSERT INTO list_block (uri, cid, creator, \"subjectUri\", \"createdAt\", \"indexedAt\")
@@ -4891,18 +4823,6 @@ impl IndexerManager {
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
 
-        client
-            .execute(
-                "WITH del AS (
-                     DELETE FROM verification WHERE subject = $1 AND creator = $2 AND uri != $3
-                     RETURNING uri
-                 ), delrec AS (
-                     DELETE FROM record WHERE uri IN (SELECT uri FROM del)
-                 )
-                 DELETE FROM notification WHERE \"recordUri\" IN (SELECT uri FROM del)",
-                &[&subject, &did, &uri],
-            )
-            .await?;
         client
             .execute(
                 "INSERT INTO verification (uri, cid, rkey, creator, subject, handle, \"displayName\", \"createdAt\", \"indexedAt\")

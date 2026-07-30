@@ -10,35 +10,11 @@ mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
-    use crate::types::{BackfillJob, IndexJob, LabelEvent, WriteAction};
+    use crate::types::{BackfillJob, LabelEvent, WriteAction};
     use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio_postgres::NoTls;
-
-    // A record whose pair key (e.g. follow creator+subject) is already
-    // claimed supersedes the older row, so repos containing same-key
-    // duplicates index to one row per key.
-    fn pair_key(job: &IndexJob) -> Option<String> {
-        let collection = job.uri.split('/').nth(3)?;
-        let record = job.record.as_ref()?;
-        let key = match collection {
-            "app.bsky.feed.like" | "app.bsky.feed.repost" => {
-                record.get("subject")?.get("uri")?.as_str()?.to_owned()
-            }
-            "app.bsky.graph.follow"
-            | "app.bsky.graph.block"
-            | "app.bsky.graph.listblock"
-            | "app.bsky.graph.verification" => record.get("subject")?.as_str()?.to_owned(),
-            "app.bsky.graph.listitem" => format!(
-                "{}\n{}",
-                record.get("list")?.as_str()?,
-                record.get("subject")?.as_str()?
-            ),
-            _ => return None,
-        };
-        Some(format!("{collection}\n{key}"))
-    }
 
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("indexer_test_").unwrap();
@@ -165,8 +141,6 @@ mod indexer_tests {
         });
         let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
-        let mut pair_counts: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
         let mut processed = 0;
         let batch_size = 100;
         let mut consecutive_empty = 0;
@@ -177,9 +151,6 @@ mod indexer_tests {
             for _ in 0..batch_size {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
-                        if let Some(k) = pair_key(&index_job) {
-                            *pair_counts.entry(k).or_insert(0) += 1;
-                        }
                         let result =
                             IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
 
@@ -252,35 +223,11 @@ mod indexer_tests {
             .get(0);
         tracing::info!("notifications created: {notification_count}");
 
-        let collapsed: i64 = pair_counts.values().map(|n| i64::from(n - 1)).sum();
-        let expected_records =
-            i64::try_from(queue_len).expect("queue_len should fit in i64") - collapsed;
         assert_eq!(
-            record_count, expected_records,
-            "expected {expected_records} records in generic record table ({queue_len} queued minus {collapsed} superseded same-pair duplicates), found {record_count}"
+            record_count,
+            i64::try_from(queue_len).expect("queue_len should fit in i64"),
+            "expected all {queue_len} records in generic record table, found {record_count}"
         );
-
-        for (table, key_cols) in [
-            ("\"like\"", "subject, creator"),
-            ("repost", "creator, subject"),
-            ("follow", "creator, \"subjectDid\""),
-            ("actor_block", "creator, \"subjectDid\""),
-            ("list_item", "\"listUri\", \"subjectDid\""),
-            ("list_block", "creator, \"subjectUri\""),
-            ("verification", "subject, creator"),
-        ] {
-            let dup_groups: i64 = client
-                .query_one(
-                    &format!(
-                        "SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE creator = $1 GROUP BY {key_cols} HAVING COUNT(*) > 1) t"
-                    ),
-                    &[&test_did],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            assert_eq!(dup_groups, 0, "{table} still holds duplicate pair keys");
-        }
 
         let post_count: i64 = client
             .query_one("SELECT COUNT(*) FROM post WHERE creator = $1", &[&test_did])
