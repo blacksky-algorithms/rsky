@@ -348,29 +348,46 @@ impl IndexerManager {
             Self::update_queue_metrics_for(&metrics_storage);
         }));
 
+        // The dequeue walks and removes thousands of Fjall entries per batch;
+        // it runs on a blocking thread and is prefetched while the previous
+        // batch's database work is in flight, so neither cost serializes
+        // behind the other.
+        let dequeue = |storage: Arc<Storage>| {
+            tokio::task::spawn_blocking(move || {
+                storage
+                    .dequeue_firehose_live_batch(batch_size)
+                    .map_err(|e| {
+                        tracing::error!("failed to dequeue firehose_live batch: {e}");
+                    })
+            })
+        };
+        let mut prefetched: Option<Vec<(Vec<u8>, IndexJob)>> = None;
+
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
                 tracing::info!("shutdown requested for firehose_live processor");
                 break;
             }
 
-            let batch: Vec<(Vec<u8>, IndexJob)> =
-                match self.storage.dequeue_firehose_live_batch(batch_size) {
-                    Ok(jobs) => jobs,
-                    Err(e) => {
-                        tracing::error!("failed to dequeue firehose_live batch: {e}");
-                        Vec::new()
-                    }
-                };
+            let batch: Vec<(Vec<u8>, IndexJob)> = match prefetched.take() {
+                Some(jobs) => jobs,
+                None => dequeue(Arc::clone(&self.storage))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default(),
+            };
 
             if batch.is_empty() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
 
+            let prefetch = dequeue(Arc::clone(&self.storage));
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
             let (results, _batch_failed) =
                 Box::pin(Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode)).await;
+            prefetched = prefetch.await.ok().and_then(Result::ok);
             let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> =
                 batch.iter().map(|(k, j)| (k.as_slice(), j)).collect();
             for (key, result) in results {
@@ -432,7 +449,10 @@ impl IndexerManager {
             let processed = Arc::clone(&processed_total);
 
             let handle = tokio::spawn(async move {
-                Self::backfill_worker_loop(worker_id, storage, pool, batch_size, processed).await;
+                Box::pin(Self::backfill_worker_loop(
+                    worker_id, storage, pool, batch_size, processed,
+                ))
+                .await;
             });
             worker_handles.push(handle);
         }
@@ -1460,7 +1480,7 @@ impl IndexerManager {
         }
 
         for (key, job) in sequential {
-            let result = Self::process_job(pool, job).await;
+            let result = Box::pin(Self::process_job(pool, job)).await;
             if result.is_err() {
                 batch_failed = true;
             }
@@ -1471,14 +1491,16 @@ impl IndexerManager {
         // phase split must clear the old row first, or the new record is
         // silently dropped on its (subject, creator)-style unique conflict.
         if !deletes.is_empty() {
-            let (delete_results, bf) = Self::batch_delete_records(pool, &deletes, bulk_load).await;
+            let (delete_results, bf) =
+                Box::pin(Self::batch_delete_records(pool, &deletes, bulk_load)).await;
             batch_failed |= bf;
             results.extend(delete_results);
         }
 
         // Process creates in batch (uses parallel COPY for different collection types)
         if !creates.is_empty() {
-            let (batch_results, bf) = Self::batch_insert_records(pool, &creates, bulk_load).await;
+            let (batch_results, bf) =
+                Box::pin(Self::batch_insert_records(pool, &creates, bulk_load)).await;
             batch_failed |= bf;
             results.extend(batch_results);
         }
