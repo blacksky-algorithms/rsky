@@ -154,7 +154,7 @@ impl IndexerManager {
             // Spawn each processor as independent task for true parallelism
             let live_handle = {
                 let mgr = manager.clone();
-                tokio::spawn(async move { mgr.process_firehose_live_loop().await })
+                tokio::spawn(async move { Box::pin(mgr.process_firehose_live_loop()).await })
             };
 
             let backfill_handle = {
@@ -370,7 +370,7 @@ impl IndexerManager {
 
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
             let (results, _batch_failed) =
-                Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode).await;
+                Box::pin(Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode)).await;
             let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> =
                 batch.iter().map(|(k, j)| (k.as_slice(), j)).collect();
             for (key, result) in results {
@@ -2711,7 +2711,7 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_likes(&client, jobs, !bulk_load)
+        let err = Self::copy_batch_insert_likes(pool, &client, jobs, !bulk_load)
             .await
             .err();
         (start.elapsed().as_millis(), count, err)
@@ -2731,7 +2731,7 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_follows(&client, jobs, !bulk_load)
+        let err = Self::copy_batch_insert_follows(pool, &client, jobs, !bulk_load)
             .await
             .err();
         (start.elapsed().as_millis(), count, err)
@@ -2751,7 +2751,7 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_reposts(&client, jobs, !bulk_load)
+        let err = Self::copy_batch_insert_reposts(pool, &client, jobs, !bulk_load)
             .await
             .err();
         (start.elapsed().as_millis(), count, err)
@@ -3108,6 +3108,7 @@ impl IndexerManager {
     }
 
     async fn copy_batch_insert_likes(
+        pool: &Pool,
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
         compute_agg: bool,
@@ -3165,11 +3166,27 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_likes(client, &like_data, compute_agg).await?;
-        if compute_agg {
-            bulk::copy_insert_notifications(client, &notif_rows).await?;
+        // The notification insert is independent of the like rows (ungated,
+        // deduped), so it runs on its own connection concurrently with the
+        // bulk insert instead of serially extending the worker's cycle.
+        let (insert_result, notif_result) = futures::join!(
+            bulk::copy_insert_likes(client, &like_data, compute_agg),
+            Self::insert_notifications_pooled(pool, &notif_rows, compute_agg)
+        );
+        insert_result?;
+        notif_result
+    }
+
+    async fn insert_notifications_pooled(
+        pool: &Pool,
+        notif_rows: &[bulk::NotificationRow],
+        compute_agg: bool,
+    ) -> Result<(), WintermuteError> {
+        if !compute_agg || notif_rows.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let conn = pool.get().await.map_err(WintermuteError::Pool)?;
+        bulk::copy_insert_notifications(&conn, notif_rows).await
     }
 
     /// Collect subject + via notifications for a like or repost record,
@@ -3227,6 +3244,7 @@ impl IndexerManager {
     }
 
     async fn copy_batch_insert_follows(
+        pool: &Pool,
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
         compute_agg: bool,
@@ -3275,14 +3293,16 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_follows(client, &follow_data, compute_agg).await?;
-        if compute_agg {
-            bulk::copy_insert_notifications(client, &notif_rows).await?;
-        }
-        Ok(())
+        let (insert_result, notif_result) = futures::join!(
+            bulk::copy_insert_follows(client, &follow_data, compute_agg),
+            Self::insert_notifications_pooled(pool, &notif_rows, compute_agg)
+        );
+        insert_result?;
+        notif_result
     }
 
     async fn copy_batch_insert_reposts(
+        pool: &Pool,
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
         compute_agg: bool,
@@ -3357,13 +3377,15 @@ impl IndexerManager {
             }
         }
 
-        bulk::copy_insert_reposts(client, &repost_data, compute_agg).await?;
-        bulk::copy_insert_feed_items(client, &feed_item_data).await?;
-        if compute_agg {
-            bulk::copy_insert_notifications(client, &notif_rows).await?;
-        }
-
-        Ok(())
+        let (insert_result, notif_result) = futures::join!(
+            async {
+                bulk::copy_insert_reposts(client, &repost_data, compute_agg).await?;
+                bulk::copy_insert_feed_items(client, &feed_item_data).await
+            },
+            Self::insert_notifications_pooled(pool, &notif_rows, compute_agg)
+        );
+        insert_result?;
+        notif_result
     }
 
     async fn copy_batch_insert_blocks(
