@@ -2392,10 +2392,55 @@ mod indexer_tests {
             .get(0);
         assert_eq!(agg, 1, "likeCount must be exactly 1 after toggle");
 
-        // Unlike in a LATER batch: the batch delete path must decrement.
+        // Cross-batch toggle: unlike toggle2 and re-like as toggle3 in ONE
+        // batch (the create of toggle2 was a prior batch). Deletes must run
+        // before creates or toggle3 dies on the (subject, creator) conflict
+        // with toggle2's still-present row.
+        let cross_jobs = vec![
+            (
+                b"k4".to_vec(),
+                job("toggle2", WriteAction::Delete, "3d", false),
+            ),
+            (
+                b"k5".to_vec(),
+                job("toggle3", WriteAction::Create, "3e", true),
+            ),
+        ];
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &cross_jobs, false).await;
+        assert!(!batch_failed);
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+
+        let final_like: Option<String> = client
+            .query_opt(
+                "SELECT uri FROM \"like\" WHERE creator = $1 AND subject = $2",
+                &[&liker, &post_uri],
+            )
+            .await
+            .unwrap()
+            .map(|r| r.get(0));
+        assert_eq!(
+            final_like.as_deref(),
+            Some(like_uri("toggle3").as_str()),
+            "the cross-batch re-like must survive the phase split"
+        );
+        let agg: i64 = client
+            .query_one(
+                "SELECT \"likeCount\" FROM post_agg WHERE uri = $1",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            agg, 1,
+            "likeCount must be exactly 1 after cross-batch toggle"
+        );
+
+        // Final unlike in its own batch: the batch delete path must decrement.
         let delete_jobs = vec![(
-            b"k4".to_vec(),
-            job("toggle2", WriteAction::Delete, "3d", false),
+            b"k6".to_vec(),
+            job("toggle3", WriteAction::Delete, "3f", false),
         )];
         let (results, batch_failed) =
             IndexerManager::process_jobs_batch(&pool, &delete_jobs, false).await;

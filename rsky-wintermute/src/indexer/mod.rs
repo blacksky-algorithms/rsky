@@ -1426,42 +1426,30 @@ impl IndexerManager {
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
-        // The batch phases run all creates before all deletes, which reorders a
-        // user's rapid create/delete/create sequences within one drain batch
-        // (e.g. like, unlike, re-like: the re-like collides with the not-yet
-        // deleted first like and is silently dropped). Any (did, collection)
-        // pair with both creates and deletes in this batch is processed
-        // per-record in queue order instead.
-        let mut create_pairs: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-        let mut delete_pairs: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
+        // A record created AND deleted within one drain batch cannot be
+        // phase-split at all; those rare same-uri pairs process per-record in
+        // queue order first.
+        let mut create_uris: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut delete_uris: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (_, job) in jobs {
-            if let Ok(uri) = AtUri::new(job.uri.clone(), None) {
-                let pair = (uri.get_hostname().clone(), uri.get_collection());
-                match job.action {
-                    WriteAction::Create | WriteAction::Update => {
-                        create_pairs.insert(pair);
-                    }
-                    WriteAction::Delete => {
-                        delete_pairs.insert(pair);
-                    }
+            match job.action {
+                WriteAction::Create | WriteAction::Update => {
+                    create_uris.insert(job.uri.as_str());
+                }
+                WriteAction::Delete => {
+                    delete_uris.insert(job.uri.as_str());
                 }
             }
         }
-        let conflicted: std::collections::HashSet<(String, String)> =
-            create_pairs.intersection(&delete_pairs).cloned().collect();
+        let conflicted: std::collections::HashSet<&str> =
+            create_uris.intersection(&delete_uris).copied().collect();
 
-        // Separate creates/updates from deletes; conflicted pairs go sequential
         let mut creates: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
         let mut deletes: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
         let mut sequential: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
 
         for job_tuple in jobs {
-            let is_conflicted = AtUri::new(job_tuple.1.uri.clone(), None)
-                .map(|uri| conflicted.contains(&(uri.get_hostname().clone(), uri.get_collection())))
-                .unwrap_or(false);
-            if is_conflicted && !bulk_load {
+            if !bulk_load && conflicted.contains(job_tuple.1.uri.as_str()) {
                 sequential.push(job_tuple);
                 continue;
             }
@@ -1471,25 +1459,28 @@ impl IndexerManager {
             }
         }
 
-        // Process creates in batch (uses parallel COPY for different collection types)
-        if !creates.is_empty() {
-            let (batch_results, bf) = Self::batch_insert_records(pool, &creates, bulk_load).await;
-            batch_failed |= bf;
-            results.extend(batch_results);
-        }
-
-        if !deletes.is_empty() {
-            let (delete_results, bf) = Self::batch_delete_records(pool, &deletes, bulk_load).await;
-            batch_failed |= bf;
-            results.extend(delete_results);
-        }
-
         for (key, job) in sequential {
             let result = Self::process_job(pool, job).await;
             if result.is_err() {
                 batch_failed = true;
             }
             results.push((key.clone(), result));
+        }
+
+        // Deletes run before creates: a user's unlike-then-relike spanning the
+        // phase split must clear the old row first, or the new record is
+        // silently dropped on its (subject, creator)-style unique conflict.
+        if !deletes.is_empty() {
+            let (delete_results, bf) = Self::batch_delete_records(pool, &deletes, bulk_load).await;
+            batch_failed |= bf;
+            results.extend(delete_results);
+        }
+
+        // Process creates in batch (uses parallel COPY for different collection types)
+        if !creates.is_empty() {
+            let (batch_results, bf) = Self::batch_insert_records(pool, &creates, bulk_load).await;
+            batch_failed |= bf;
+            results.extend(batch_results);
         }
 
         (results, batch_failed)
@@ -3976,25 +3967,34 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
 
-        // Fetch creator before deleting so we can decrement postsCount
-        let row = client
-            .query_opt("SELECT creator FROM post WHERE uri = $1", &[&uri])
-            .await?;
-
-        client
-            .execute("DELETE FROM post WHERE uri = $1", &[&uri])
+        let deleted = client
+            .query(
+                "DELETE FROM post WHERE uri = $1 RETURNING creator, \"replyParent\"",
+                &[&uri],
+            )
             .await?;
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
 
-        if let Some(row) = row {
-            let creator: Option<String> = row.get("creator");
-            if let Some(creator) = creator {
+        if let Some(row) = deleted.first() {
+            if let Some(creator) = row.get::<_, Option<String>>(0) {
                 client
                     .execute(
                         "UPDATE profile_agg SET \"postsCount\" = GREATEST(\"postsCount\" - 1, 0) WHERE did = $1",
                         &[&creator],
+                    )
+                    .await?;
+            }
+            if let Some(parent) = row.get::<_, Option<String>>(1) {
+                client
+                    .execute(
+                        "INSERT INTO post_agg (uri, \"replyCount\")
+                         SELECT $1::varchar, COUNT(*) FROM post
+                         WHERE \"replyParent\" = $1
+                           AND (\"violatesThreadGate\" IS NULL OR \"violatesThreadGate\" = false)
+                         ON CONFLICT (uri) DO UPDATE SET \"replyCount\" = EXCLUDED.\"replyCount\"",
+                        &[&parent],
                     )
                     .await?;
             }
@@ -4152,9 +4152,23 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
 
-        client
-            .execute("DELETE FROM \"like\" WHERE uri = $1", &[&uri])
+        let deleted = client
+            .query(
+                "DELETE FROM \"like\" WHERE uri = $1 RETURNING subject",
+                &[&uri],
+            )
             .await?;
+
+        if let Some(subject) = deleted.first().and_then(|r| r.get::<_, Option<String>>(0)) {
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"likeCount\")
+                     SELECT $1::varchar, COUNT(*) FROM \"like\" WHERE subject = $1
+                     ON CONFLICT (uri) DO UPDATE SET \"likeCount\" = EXCLUDED.\"likeCount\"",
+                    &[&subject],
+                )
+                .await?;
+        }
 
         Ok(())
     }
@@ -4393,12 +4407,26 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
 
-        client
-            .execute("DELETE FROM repost WHERE uri = $1", &[&uri])
+        let deleted = client
+            .query(
+                "DELETE FROM repost WHERE uri = $1 RETURNING subject",
+                &[&uri],
+            )
             .await?;
         client
             .execute("DELETE FROM feed_item WHERE uri = $1", &[&uri])
             .await?;
+
+        if let Some(subject) = deleted.first().and_then(|r| r.get::<_, Option<String>>(0)) {
+            client
+                .execute(
+                    "INSERT INTO post_agg (uri, \"repostCount\")
+                     SELECT $1::varchar, COUNT(*) FROM repost WHERE subject = $1
+                     ON CONFLICT (uri) DO UPDATE SET \"repostCount\" = EXCLUDED.\"repostCount\"",
+                    &[&subject],
+                )
+                .await?;
+        }
 
         Ok(())
     }
