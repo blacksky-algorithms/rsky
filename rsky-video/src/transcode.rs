@@ -465,7 +465,16 @@ mod tests {
         let path = dir.path().join("audio.m4a");
         let status = Command::new("ffmpeg")
             .args([
-                "-y", "-f", "lavfi", "-i", "sine=frequency=440", "-c:a", "aac", "-t", "1", "-f",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-c:a",
+                "aac",
+                "-t",
+                "1",
+                "-f",
                 "ipod",
             ])
             .arg(&path)
