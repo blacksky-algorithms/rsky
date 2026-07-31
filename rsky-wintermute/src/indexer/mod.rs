@@ -1426,11 +1426,45 @@ impl IndexerManager {
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
 
-        // Separate creates/updates from deletes
+        // The batch phases run all creates before all deletes, which reorders a
+        // user's rapid create/delete/create sequences within one drain batch
+        // (e.g. like, unlike, re-like: the re-like collides with the not-yet
+        // deleted first like and is silently dropped). Any (did, collection)
+        // pair with both creates and deletes in this batch is processed
+        // per-record in queue order instead.
+        let mut create_pairs: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut delete_pairs: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (_, job) in jobs {
+            if let Ok(uri) = AtUri::new(job.uri.clone(), None) {
+                let pair = (uri.get_hostname().clone(), uri.get_collection());
+                match job.action {
+                    WriteAction::Create | WriteAction::Update => {
+                        create_pairs.insert(pair);
+                    }
+                    WriteAction::Delete => {
+                        delete_pairs.insert(pair);
+                    }
+                }
+            }
+        }
+        let conflicted: std::collections::HashSet<(String, String)> =
+            create_pairs.intersection(&delete_pairs).cloned().collect();
+
+        // Separate creates/updates from deletes; conflicted pairs go sequential
         let mut creates: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
         let mut deletes: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
+        let mut sequential: Vec<&(Vec<u8>, IndexJob)> = Vec::new();
 
         for job_tuple in jobs {
+            let is_conflicted = AtUri::new(job_tuple.1.uri.clone(), None)
+                .map(|uri| conflicted.contains(&(uri.get_hostname().clone(), uri.get_collection())))
+                .unwrap_or(false);
+            if is_conflicted && !bulk_load {
+                sequential.push(job_tuple);
+                continue;
+            }
             match job_tuple.1.action {
                 WriteAction::Create | WriteAction::Update => creates.push(job_tuple),
                 WriteAction::Delete => deletes.push(job_tuple),
@@ -1448,6 +1482,14 @@ impl IndexerManager {
             let (delete_results, bf) = Self::batch_delete_records(pool, &deletes, bulk_load).await;
             batch_failed |= bf;
             results.extend(delete_results);
+        }
+
+        for (key, job) in sequential {
+            let result = Self::process_job(pool, job).await;
+            if result.is_err() {
+                batch_failed = true;
+            }
+            results.push((key.clone(), result));
         }
 
         (results, batch_failed)
@@ -1570,9 +1612,27 @@ impl IndexerManager {
             let group_result: Result<(), WintermuteError> = async {
                 match collection {
                     "app.bsky.feed.like" => {
-                        client
-                            .execute("DELETE FROM \"like\" WHERE uri = ANY($1)", &[&group_uris])
-                            .await?;
+                        let subjects: Vec<String> = client
+                            .query(
+                                "DELETE FROM \"like\" WHERE uri = ANY($1) RETURNING subject",
+                                &[&group_uris],
+                            )
+                            .await?
+                            .iter()
+                            .filter_map(|r| r.get::<_, Option<String>>(0))
+                            .collect();
+                        if !bulk_load && !subjects.is_empty() {
+                            client
+                                .execute(
+                                    "UPDATE post_agg p
+                                     SET \"likeCount\" = GREATEST(p.\"likeCount\" - d.c, 0)
+                                     FROM (SELECT uri, count(*)::int8 AS c
+                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
+                                     WHERE p.uri = d.uri",
+                                    &[&subjects],
+                                )
+                                .await?;
+                        }
                     }
                     "app.bsky.graph.block" => {
                         client
@@ -1583,23 +1643,48 @@ impl IndexerManager {
                             .await?;
                     }
                     "app.bsky.feed.repost" => {
-                        client
-                            .execute("DELETE FROM repost WHERE uri = ANY($1)", &[&group_uris])
-                            .await?;
-                        client
-                            .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
-                            .await?;
-                    }
-                    "app.bsky.feed.post" => {
-                        let creators: Vec<String> = client
+                        let subjects: Vec<String> = client
                             .query(
-                                "DELETE FROM post WHERE uri = ANY($1) RETURNING creator",
+                                "DELETE FROM repost WHERE uri = ANY($1) RETURNING subject",
                                 &[&group_uris],
                             )
                             .await?
                             .iter()
                             .filter_map(|r| r.get::<_, Option<String>>(0))
                             .collect();
+                        client
+                            .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
+                            .await?;
+                        if !bulk_load && !subjects.is_empty() {
+                            client
+                                .execute(
+                                    "UPDATE post_agg p
+                                     SET \"repostCount\" = GREATEST(p.\"repostCount\" - d.c, 0)
+                                     FROM (SELECT uri, count(*)::int8 AS c
+                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
+                                     WHERE p.uri = d.uri",
+                                    &[&subjects],
+                                )
+                                .await?;
+                        }
+                    }
+                    "app.bsky.feed.post" => {
+                        let deleted = client
+                            .query(
+                                "DELETE FROM post WHERE uri = ANY($1) RETURNING creator, \"replyParent\"",
+                                &[&group_uris],
+                            )
+                            .await?;
+                        let mut creators: Vec<String> = Vec::with_capacity(deleted.len());
+                        let mut parents: Vec<String> = Vec::new();
+                        for r in &deleted {
+                            if let Some(creator) = r.get::<_, Option<String>>(0) {
+                                creators.push(creator);
+                            }
+                            if let Some(parent) = r.get::<_, Option<String>>(1) {
+                                parents.push(parent);
+                            }
+                        }
                         client
                             .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
                             .await?;
@@ -1612,6 +1697,18 @@ impl IndexerManager {
                                            FROM unnest($1::text[]) AS u(did) GROUP BY did) d
                                      WHERE p.did = d.did",
                                     &[&creators],
+                                )
+                                .await?;
+                        }
+                        if !bulk_load && !parents.is_empty() {
+                            client
+                                .execute(
+                                    "UPDATE post_agg p
+                                     SET \"replyCount\" = GREATEST(p.\"replyCount\" - d.c, 0)
+                                     FROM (SELECT uri, count(*)::int8 AS c
+                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
+                                     WHERE p.uri = d.uri",
+                                    &[&parents],
                                 )
                                 .await?;
                         }
@@ -2594,7 +2691,7 @@ impl IndexerManager {
             Ok(c) => c,
             Err(e) => return (0, count, Some(WintermuteError::Pool(e))),
         };
-        let err = Self::copy_batch_insert_posts(&client, jobs, !bulk_load)
+        let err = Self::copy_batch_insert_posts(pool, &client, jobs, !bulk_load)
             .await
             .err();
         (start.elapsed().as_millis(), count, err)
@@ -2706,6 +2803,7 @@ impl IndexerManager {
     // COPY-based batch insert wrappers that extract data and call bulk functions
 
     async fn copy_batch_insert_posts(
+        pool: &Pool,
         client: &deadpool_postgres::Client,
         jobs: &[&ParsedJob<'_>],
         compute_agg: bool,
@@ -2884,8 +2982,17 @@ impl IndexerManager {
         // and the (did, recordUri, reason) dedupe keeps replays exact.
         if compute_agg {
             bulk::copy_insert_notifications(client, &notif_rows).await?;
-            for (did, uri, cid, sort_at) in &reply_posts {
-                Self::write_reply_notifications(client, did, uri, cid, sort_at).await?;
+            // The per-reply ancestor walk is two queries per reply; run a few
+            // concurrently on their own pooled connections or it dominates the
+            // post worker's cycle and caps drain throughput.
+            for chunk in reply_posts.chunks(3) {
+                let walks = chunk.iter().map(|(did, uri, cid, sort_at)| async move {
+                    let conn = pool.get().await.map_err(WintermuteError::Pool)?;
+                    Self::write_reply_notifications(&conn, did, uri, cid, sort_at).await
+                });
+                for result in futures::future::join_all(walks).await {
+                    result?;
+                }
             }
         }
 

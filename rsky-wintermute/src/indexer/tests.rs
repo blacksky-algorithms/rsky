@@ -2278,4 +2278,155 @@ mod indexer_tests {
             cleanup_test_data(&pool, did).await;
         }
     }
+
+    #[tokio::test]
+    async fn batch_toggle_sequence_keeps_final_like_and_exact_counts() {
+        use crate::indexer::bulk::PostCopyRow;
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let liker = "did:plc:wintermute-test-toggle-liker";
+        let author = "did:plc:wintermute-test-toggle-author";
+        for did in [liker, author] {
+            cleanup_test_data(&pool, did).await;
+        }
+
+        let client = pool.get().await.unwrap();
+        for did in [liker, author] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+
+        let post_uri = format!("at://{author}/app.bsky.feed.post/togglepost");
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned();
+        let ts = "2026-07-31T00:00:00.000Z".to_owned();
+        client
+            .execute("DELETE FROM post_agg WHERE uri = $1", &[&post_uri])
+            .await
+            .unwrap();
+        crate::indexer::bulk::copy_insert_posts(
+            &client,
+            &[PostCopyRow {
+                uri: post_uri.clone(),
+                cid: cid.clone(),
+                creator: author.to_owned(),
+                text: "toggle target".to_owned(),
+                reply_root: None,
+                reply_root_cid: None,
+                reply_parent: None,
+                reply_parent_cid: None,
+                created_at: ts.clone(),
+                indexed_at: ts.clone(),
+                langs: None,
+                tags: None,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+        let like_record = serde_json::json!({
+            "$type": "app.bsky.feed.like",
+            "subject": {"uri": post_uri, "cid": cid},
+            "createdAt": ts,
+        });
+        let like_uri = |rkey: &str| format!("at://{liker}/app.bsky.feed.like/{rkey}");
+        let job = |rkey: &str, action: WriteAction, rev: &str, with_record: bool| IndexJob {
+            uri: like_uri(rkey),
+            cid: cid.clone(),
+            action,
+            record: with_record.then(|| like_record.clone()),
+            indexed_at: ts.clone(),
+            rev: rev.to_owned(),
+        };
+
+        // like, unlike, re-like within ONE drain batch: the phase split
+        // (creates before deletes) must not eat the final like.
+        let jobs = vec![
+            (
+                b"k1".to_vec(),
+                job("toggle1", WriteAction::Create, "3a", true),
+            ),
+            (
+                b"k2".to_vec(),
+                job("toggle1", WriteAction::Delete, "3b", false),
+            ),
+            (
+                b"k3".to_vec(),
+                job("toggle2", WriteAction::Create, "3c", true),
+            ),
+        ];
+        let (results, batch_failed) = IndexerManager::process_jobs_batch(&pool, &jobs, false).await;
+        assert!(!batch_failed);
+        assert_eq!(results.len(), 3);
+        for (_, r) in &results {
+            assert!(r.is_ok(), "job failed: {r:?}");
+        }
+
+        let final_like: Option<String> = client
+            .query_opt(
+                "SELECT uri FROM \"like\" WHERE creator = $1 AND subject = $2",
+                &[&liker, &post_uri],
+            )
+            .await
+            .unwrap()
+            .map(|r| r.get(0));
+        assert_eq!(
+            final_like.as_deref(),
+            Some(like_uri("toggle2").as_str()),
+            "the re-like must survive the toggle sequence"
+        );
+        let agg: i64 = client
+            .query_one(
+                "SELECT \"likeCount\" FROM post_agg WHERE uri = $1",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(agg, 1, "likeCount must be exactly 1 after toggle");
+
+        // Unlike in a LATER batch: the batch delete path must decrement.
+        let delete_jobs = vec![(
+            b"k4".to_vec(),
+            job("toggle2", WriteAction::Delete, "3d", false),
+        )];
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &delete_jobs, false).await;
+        assert!(!batch_failed);
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+
+        let remaining: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM \"like\" WHERE creator = $1 AND subject = $2",
+                &[&liker, &post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(remaining, 0, "unlike must delete the like row");
+        let agg: i64 = client
+            .query_one(
+                "SELECT \"likeCount\" FROM post_agg WHERE uri = $1",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(agg, 0, "likeCount must return to exactly 0 after unlike");
+
+        client
+            .execute("DELETE FROM post_agg WHERE uri = $1", &[&post_uri])
+            .await
+            .unwrap();
+        for did in [liker, author] {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
 }
