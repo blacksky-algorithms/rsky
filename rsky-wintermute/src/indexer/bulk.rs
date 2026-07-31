@@ -221,14 +221,15 @@ pub async fn decrement_profile_agg(
     Ok(())
 }
 
-/// Set-based reply notifications for a batch of new reply posts, replacing a
-/// per-reply pair of round-trips with two statements. Seeds are
-/// `(did, uri, cid, sort_at)` of the new replies. Semantics mirror the
-/// per-record walk: ancestors up to depth 4 are notified of each new reply,
-/// and existing descendants (out-of-order indexing) are re-linked to the new
-/// post's ancestor chain, including the new post itself. Inserts are ordered
-/// by conflict key for deadlock-free concurrency and deduped on
-/// (did, "recordUri", reason).
+/// Set-based reply notifications for a batch of new reply posts, replacing
+/// per-reply round-trips with one recursive statement over pkey joins. Seeds
+/// are `(did, uri, cid, sort_at)` of the new replies; ancestors up to depth 4
+/// are notified of each. The per-record path's descendant repair is deliberately
+/// omitted here: descendants of a just-created post only exist when indexing
+/// ran out of order, the backfill path still repairs that case per-record, and
+/// the planner cannot be trusted to bound a descendants recursion over the
+/// post table from unnest seeds. Inserts are ordered by conflict key for
+/// deadlock-free concurrency and deduped on (did, "recordUri", reason).
 pub async fn write_reply_notifications_bulk(
     client: &deadpool_postgres::Client,
     seeds: &[(String, String, String, String)],
@@ -269,40 +270,6 @@ pub async fn write_reply_notifications_bulk(
              ORDER BY 1, 3
              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
             &[&dids, &uris, &cids, &sort_ats],
-        )
-        .await?;
-
-    client
-        .execute(
-            "WITH RECURSIVE seeds AS (
-                 SELECT * FROM unnest($1::text[], $2::text[]) AS s(did, uri)
-             ),
-             ancestor(seed_uri, uri, parent, height) AS (
-                 SELECT s.uri, p.uri, p.\"replyParent\", 0
-                 FROM seeds s JOIN post p ON p.uri = s.uri
-               UNION ALL
-                 SELECT a.seed_uri, p.uri, p.\"replyParent\", a.height + 1
-                 FROM ancestor a JOIN post p ON p.uri = a.parent
-                 WHERE a.height < 4
-             ),
-             descendent(seed_uri, uri, depth) AS (
-                 SELECT s.uri, p.uri, 1
-                 FROM seeds s JOIN post p ON p.\"replyParent\" = s.uri
-               UNION ALL
-                 SELECT d.seed_uri, p.uri, d.depth + 1
-                 FROM descendent d JOIN post p ON p.\"replyParent\" = d.uri
-                 WHERE d.depth < 4
-             )
-             INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-             SELECT DISTINCT split_part(a.uri, '/', 3), dp.creator, dp.uri, dp.cid, 'reply', a.uri, dp.\"sortAt\"
-             FROM descendent d
-             JOIN post dp ON dp.uri = d.uri
-             JOIN ancestor a ON a.seed_uri = d.seed_uri
-             WHERE d.depth + a.height < 5
-               AND split_part(a.uri, '/', 3) <> dp.creator
-             ORDER BY 1, 3
-             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-            &[&dids, &uris],
         )
         .await?;
 
