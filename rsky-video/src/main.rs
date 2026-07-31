@@ -65,6 +65,13 @@ async fn main() -> color_eyre::Result<()> {
         config.host, config.port
     );
 
+    // Every upload shells out to ffmpeg/ffprobe (resolved via PATH at spawn
+    // time), so a host missing either would boot clean and then fail 100% of
+    // uploads. Fail the boot instead.
+    transcode::preflight()
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("transcode preflight failed: {e}"))?;
+
     // Initialize database pool
     let mut pg_config = PgConfig::new();
     pg_config.url = Some(config.database_url.clone());

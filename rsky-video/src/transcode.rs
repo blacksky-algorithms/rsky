@@ -15,11 +15,38 @@ use crate::error::{Error, Result};
 /// failing.
 static ENCODE_SLOTS: Semaphore = Semaphore::const_new(2);
 
-/// Hard ceiling on a single ffmpeg run. Uploads are capped at 100MB /
-/// max_video_duration, which veryfast x264 chews through in well under a
-/// minute; anything still running at this point is a hung or adversarial
-/// input and the process is killed rather than pinning a slot forever.
+/// Hard ceiling on a single ffmpeg run. Uploads are capped at 100MB by size
+/// (duration is not enforced anywhere, so a long low-bitrate clip is
+/// possible), but veryfast x264 sustains well over realtime even
+/// single-threaded; anything still running at this point is a hung or
+/// adversarial input and the process is killed rather than pinning a slot
+/// forever.
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Ceiling for ffprobe runs. Probing headers takes milliseconds; this only
+/// exists so a wedged probe can't pin an upload.
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Verify the external binaries this module shells out to actually exist.
+/// Both are resolved via PATH at spawn time, so without this check a missing
+/// ffprobe builds and boots clean and then fails every single upload; run it
+/// at startup so a bad image/host fails loudly at boot instead.
+pub async fn preflight() -> Result<()> {
+    for bin in ["ffmpeg", "ffprobe"] {
+        let status = Command::new(bin)
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(|e| Error::Internal(format!("{bin} is not available: {e}")))?;
+        if !status.success() {
+            return Err(Error::Internal(format!("{bin} -version failed ({status})")));
+        }
+    }
+    Ok(())
+}
 
 /// True when the payload is an animated/static GIF (magic bytes GIF87a/GIF89a).
 pub fn is_gif(bytes: &[u8]) -> bool {
@@ -64,11 +91,20 @@ pub async fn gif_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
 /// than the stream, leaving a runt first frame interval (~5ms at 60fps instead
 /// of 16.7ms). Bluesky's federated video ingest deterministically rejects such
 /// streams -- permanent 404 on video.bsky.app with no retry -- while accepting
-/// the same content after one re-encode, which regenerates the timeline.
-/// Bluesky's own video service re-encodes every upload for exactly this
-/// reason. Proven by controlled experiment on 2026-07-31: identical content,
-/// same account, minutes apart -- lossless remux 404s, this encode ingests in
-/// under a minute (see obsidian/Design/video-federation-blacksky-to-bluesky-ingest.md).
+/// the same content after one re-encode. Bluesky's own video service
+/// re-encodes every upload for exactly this reason.
+///
+/// Precisely what the re-encode fixes: decoding discards edit lists and
+/// sub-frame timestamp offsets, so the output timeline starts clean. It is
+/// NOT forced CFR -- genuine variable frame rate (dropped frames at whole-
+/// frame gaps, e.g. screen recordings) passes through, which is fine:
+/// Bluesky's ingest accepts whole-frame-gap VFR (live-verified 2026-07-31,
+/// along with the edit-list findings; controlled experiment on identical
+/// content, same account, minutes apart -- lossless remux 404s, this encode
+/// ingests in under a minute; see
+/// obsidian/Design/video-federation-blacksky-to-bluesky-ingest.md). Forcing
+/// CFR was considered and rejected: with a pathological r_frame_rate tag it
+/// duplicates frames unboundedly.
 ///
 /// The encode settings mirror that experiment's passing variant: H.264 Main
 /// profile / yuv420p for broad decoder support (and to match what Bluesky's
@@ -105,8 +141,24 @@ pub async fn reencode_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
             "veryfast",
             "-crf",
             "23",
+            // Cap the encoder's thread pool: x264 defaults to ~1.5x cores,
+            // so on a large box even the two-slot semaphore would admit
+            // nearly full-machine CPU bursts (and that machine also runs
+            // other services). 4 threads x 2 slots keeps encodes brisk
+            // without saturating the host.
+            "-threads",
+            "4",
+            // out_color_matrix converts whatever matrix the source uses
+            // (bt2020nc for iPhone HDR, bt601 for old SD) to bt709, and
+            // setparams stamps the output as plain SDR bt709. Without this a
+            // 10-bit HDR source came out bit-crushed to 8-bit but still
+            // *tagged* HDR, so players applied HLG/PQ display mapping to SDR
+            // data (washed-out picture). Full gamut/transfer tonemapping
+            // needs zscale/libzimg, which not every ffmpeg build carries;
+            // matrix conversion + honest tags is the portable subset.
             "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709,\
+             setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
             "-c:a",
             "aac",
             "-b:a",
@@ -171,7 +223,7 @@ async fn video_frame_count(mp4: &[u8]) -> Result<u64> {
     let _ = stdin.write_all(mp4).await;
     drop(stdin);
 
-    let output = tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
+    let output = tokio::time::timeout(FFPROBE_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| Error::Internal("ffprobe timed out".to_string()))?
         .map_err(|e| Error::Internal(format!("ffprobe failed: {e}")))?;
@@ -244,7 +296,11 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: String = stderr.chars().rev().take(300).collect::<String>();
         let tail: String = tail.chars().rev().collect();
-        return Err(Error::Internal(format!(
+        // A non-zero ffmpeg exit here almost always means the *upload* is
+        // bad -- corrupt, truncated, or a codec MP4 can't hold -- so surface
+        // it as a 400, not a 500 that pages on user-supplied garbage.
+        // Spawn/IO problems (our side) stay Internal above.
+        return Err(Error::BadRequest(format!(
             "ffmpeg {label} failed ({}): {tail}",
             output.status
         )));
@@ -417,6 +473,69 @@ mod tests {
                 "{muxer} output brand should sniff as video/mp4"
             );
         }
+    }
+
+    /// HDR input must come out as honestly-tagged SDR. Without the color
+    /// conversion in the filter chain, a 10-bit BT.2020/HLG source (iPhone
+    /// default since the 12) was bit-crushed to 8-bit but kept its HDR tags,
+    /// so players applied HLG display mapping to SDR data.
+    ///
+    /// `cargo test -p rsky-video reencode_tags_bt709 -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_tags_bt709() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hlg.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=30",
+                "-t",
+                "1",
+                "-vf",
+                "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=arib-std-b67,\
+                 format=yuv420p10le",
+                "-c:v",
+                "libx264",
+            ])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "hlg fixture generation failed");
+
+        let hlg = tokio::fs::read(&path).await.unwrap();
+        let out = reencode_to_mp4(&hlg)
+            .await
+            .expect("re-encode should succeed");
+        let probe_path = dir.path().join("out.mp4");
+        tokio::fs::write(&probe_path, &out).await.unwrap();
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=pix_fmt,color_space,color_transfer,color_primaries",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&probe_path)
+            .output()
+            .await
+            .expect("ffprobe should be on PATH");
+        let tags = String::from_utf8_lossy(&probe.stdout);
+        assert_eq!(
+            tags.trim(),
+            "yuv420p,bt709,bt709,bt709",
+            "HDR input must come out as tagged bt709 SDR, got: {tags}"
+        );
     }
 
     /// Still-image input must fail loudly: ffmpeg exposes a PNG/JPEG as a
