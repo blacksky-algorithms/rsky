@@ -1625,26 +1625,21 @@ impl IndexerManager {
             let group_result: Result<(), WintermuteError> = async {
                 match collection {
                     "app.bsky.feed.like" => {
-                        let subjects: Vec<String> = client
+                        let mut subjects: std::collections::HashMap<String, i64> =
+                            std::collections::HashMap::new();
+                        for r in client
                             .query(
                                 "DELETE FROM \"like\" WHERE uri = ANY($1) RETURNING subject",
                                 &[&group_uris],
                             )
                             .await?
-                            .iter()
-                            .filter_map(|r| r.get::<_, Option<String>>(0))
-                            .collect();
-                        if !bulk_load && !subjects.is_empty() {
-                            client
-                                .execute(
-                                    "UPDATE post_agg p
-                                     SET \"likeCount\" = GREATEST(p.\"likeCount\" - d.c, 0)
-                                     FROM (SELECT uri, count(*)::int8 AS c
-                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
-                                     WHERE p.uri = d.uri",
-                                    &[&subjects],
-                                )
-                                .await?;
+                        {
+                            if let Some(subject) = r.get::<_, Option<String>>(0) {
+                                *subjects.entry(subject).or_insert(0) += 1;
+                            }
+                        }
+                        if !bulk_load {
+                            bulk::decrement_post_agg(&client, "likeCount", subjects).await?;
                         }
                     }
                     "app.bsky.graph.block" => {
@@ -1656,29 +1651,24 @@ impl IndexerManager {
                             .await?;
                     }
                     "app.bsky.feed.repost" => {
-                        let subjects: Vec<String> = client
+                        let mut subjects: std::collections::HashMap<String, i64> =
+                            std::collections::HashMap::new();
+                        for r in client
                             .query(
                                 "DELETE FROM repost WHERE uri = ANY($1) RETURNING subject",
                                 &[&group_uris],
                             )
                             .await?
-                            .iter()
-                            .filter_map(|r| r.get::<_, Option<String>>(0))
-                            .collect();
+                        {
+                            if let Some(subject) = r.get::<_, Option<String>>(0) {
+                                *subjects.entry(subject).or_insert(0) += 1;
+                            }
+                        }
                         client
                             .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
                             .await?;
-                        if !bulk_load && !subjects.is_empty() {
-                            client
-                                .execute(
-                                    "UPDATE post_agg p
-                                     SET \"repostCount\" = GREATEST(p.\"repostCount\" - d.c, 0)
-                                     FROM (SELECT uri, count(*)::int8 AS c
-                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
-                                     WHERE p.uri = d.uri",
-                                    &[&subjects],
-                                )
-                                .await?;
+                        if !bulk_load {
+                            bulk::decrement_post_agg(&client, "repostCount", subjects).await?;
                         }
                     }
                     "app.bsky.feed.post" => {
@@ -1688,42 +1678,24 @@ impl IndexerManager {
                                 &[&group_uris],
                             )
                             .await?;
-                        let mut creators: Vec<String> = Vec::with_capacity(deleted.len());
-                        let mut parents: Vec<String> = Vec::new();
+                        let mut creators: std::collections::HashMap<String, i64> =
+                            std::collections::HashMap::new();
+                        let mut parents: std::collections::HashMap<String, i64> =
+                            std::collections::HashMap::new();
                         for r in &deleted {
                             if let Some(creator) = r.get::<_, Option<String>>(0) {
-                                creators.push(creator);
+                                *creators.entry(creator).or_insert(0) += 1;
                             }
                             if let Some(parent) = r.get::<_, Option<String>>(1) {
-                                parents.push(parent);
+                                *parents.entry(parent).or_insert(0) += 1;
                             }
                         }
                         client
                             .execute("DELETE FROM feed_item WHERE uri = ANY($1)", &[&group_uris])
                             .await?;
-                        if !bulk_load && !creators.is_empty() {
-                            client
-                                .execute(
-                                    "UPDATE profile_agg p
-                                     SET \"postsCount\" = GREATEST(p.\"postsCount\" - d.c, 0)
-                                     FROM (SELECT did, count(*)::int AS c
-                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
-                                     WHERE p.did = d.did",
-                                    &[&creators],
-                                )
-                                .await?;
-                        }
-                        if !bulk_load && !parents.is_empty() {
-                            client
-                                .execute(
-                                    "UPDATE post_agg p
-                                     SET \"replyCount\" = GREATEST(p.\"replyCount\" - d.c, 0)
-                                     FROM (SELECT uri, count(*)::int8 AS c
-                                           FROM unnest($1::text[]) AS u(uri) GROUP BY uri) d
-                                     WHERE p.uri = d.uri",
-                                    &[&parents],
-                                )
-                                .await?;
+                        if !bulk_load {
+                            bulk::decrement_profile_agg(&client, "postsCount", creators).await?;
+                            bulk::decrement_post_agg(&client, "replyCount", parents).await?;
                         }
                     }
                     "app.bsky.graph.follow" => {
@@ -1738,29 +1710,16 @@ impl IndexerManager {
                             .map(|r| (r.get(0), r.get(1)))
                             .collect();
                         if !bulk_load && !pairs.is_empty() {
-                            let creators: Vec<String> =
-                                pairs.iter().map(|(c, _)| c.clone()).collect();
-                            let subjects: Vec<String> =
-                                pairs.iter().map(|(_, s)| s.clone()).collect();
-                            client
-                                .execute(
-                                    "UPDATE profile_agg p
-                                     SET \"followsCount\" = GREATEST(p.\"followsCount\" - d.c, 0)
-                                     FROM (SELECT did, count(*)::int AS c
-                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
-                                     WHERE p.did = d.did",
-                                    &[&creators],
-                                )
-                                .await?;
-                            client
-                                .execute(
-                                    "UPDATE profile_agg p
-                                     SET \"followersCount\" = GREATEST(p.\"followersCount\" - d.c, 0)
-                                     FROM (SELECT did, count(*)::int AS c
-                                           FROM unnest($1::text[]) AS u(did) GROUP BY did) d
-                                     WHERE p.did = d.did",
-                                    &[&subjects],
-                                )
+                            let mut creators: std::collections::HashMap<String, i64> =
+                                std::collections::HashMap::new();
+                            let mut subjects: std::collections::HashMap<String, i64> =
+                                std::collections::HashMap::new();
+                            for (c, s) in &pairs {
+                                *creators.entry(c.clone()).or_insert(0) += 1;
+                                *subjects.entry(s.clone()).or_insert(0) += 1;
+                            }
+                            bulk::decrement_profile_agg(&client, "followsCount", creators).await?;
+                            bulk::decrement_profile_agg(&client, "followersCount", subjects)
                                 .await?;
                         }
                     }

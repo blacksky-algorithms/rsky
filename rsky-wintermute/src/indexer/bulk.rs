@@ -99,6 +99,12 @@ pub async fn copy_insert_notifications(
     if rows.is_empty() {
         return Ok(());
     }
+    // Sorted by conflict key so concurrent notification writers acquire
+    // unique-index locks in one global order.
+    let mut ordered: Vec<&NotificationRow> = rows.iter().collect();
+    ordered.sort_unstable_by(|a, b| {
+        (&a.did, &a.record_uri, a.reason).cmp(&(&b.did, &b.record_uri, b.reason))
+    });
     let mut dids = Vec::with_capacity(rows.len());
     let mut authors = Vec::with_capacity(rows.len());
     let mut uris = Vec::with_capacity(rows.len());
@@ -106,7 +112,7 @@ pub async fn copy_insert_notifications(
     let mut reasons = Vec::with_capacity(rows.len());
     let mut subjects: Vec<Option<&str>> = Vec::with_capacity(rows.len());
     let mut sort_ats = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in ordered {
         dids.push(row.did.as_str());
         authors.push(row.author.as_str());
         uris.push(row.record_uri.as_str());
@@ -126,6 +132,14 @@ pub async fn copy_insert_notifications(
     Ok(())
 }
 
+/// Sort delta keys so every concurrent aggregate upsert visits rows in one
+/// global order; unordered multi-row upserts on shared rows deadlock.
+pub fn sorted_deltas(counts: std::collections::HashMap<String, i64>) -> (Vec<String>, Vec<i64>) {
+    let mut pairs: Vec<(String, i64)> = counts.into_iter().collect();
+    pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    pairs.into_iter().unzip()
+}
+
 /// Increment a `post_agg` count column by exact per-uri deltas.
 async fn increment_post_agg(
     client: &deadpool_postgres::Client,
@@ -135,7 +149,7 @@ async fn increment_post_agg(
     if counts.is_empty() {
         return Ok(());
     }
-    let (uris, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+    let (uris, deltas) = sorted_deltas(counts);
     client
         .execute(
             &format!(
@@ -145,6 +159,63 @@ async fn increment_post_agg(
                    SET \"{column}\" = COALESCE(post_agg.\"{column}\", 0) + EXCLUDED.\"{column}\""
             ),
             &[&uris, &deltas],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Decrement a `post_agg` count column by exact per-uri deltas, floored at 0.
+/// Rows are locked in sorted uri order first so concurrent aggregate writers
+/// cannot deadlock; absent rows hydrate as 0 and need no decrement.
+pub async fn decrement_post_agg(
+    client: &deadpool_postgres::Client,
+    column: &str,
+    counts: std::collections::HashMap<String, i64>,
+) -> Result<(), WintermuteError> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let (uris, deltas) = sorted_deltas(counts);
+    client
+        .execute(
+            &format!(
+                "WITH locked AS (
+                     SELECT uri FROM post_agg WHERE uri = ANY($1) ORDER BY uri FOR UPDATE
+                 )
+                 UPDATE post_agg p
+                 SET \"{column}\" = GREATEST(COALESCE(p.\"{column}\", 0) - d.c, 0)
+                 FROM unnest($1::text[], $2::int8[]) AS d(u, c)
+                 WHERE p.uri = d.u AND p.uri IN (SELECT uri FROM locked)"
+            ),
+            &[&uris, &deltas],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Decrement a `profile_agg` count column by exact per-did deltas, floored at
+/// 0, with the same sorted lock acquisition as [`decrement_post_agg`].
+pub async fn decrement_profile_agg(
+    client: &deadpool_postgres::Client,
+    column: &str,
+    counts: std::collections::HashMap<String, i64>,
+) -> Result<(), WintermuteError> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let (dids, deltas) = sorted_deltas(counts);
+    client
+        .execute(
+            &format!(
+                "WITH locked AS (
+                     SELECT did FROM profile_agg WHERE did = ANY($1) ORDER BY did FOR UPDATE
+                 )
+                 UPDATE profile_agg p
+                 SET \"{column}\" = GREATEST(COALESCE(p.\"{column}\", 0) - d.c, 0)
+                 FROM unnest($1::text[], $2::int8[]) AS d(u, c)
+                 WHERE p.did = d.u AND p.did IN (SELECT did FROM locked)"
+            ),
+            &[&dids, &deltas],
         )
         .await?;
     Ok(())
@@ -445,7 +516,7 @@ pub async fn copy_insert_posts(
             }
         }
         if compute_agg {
-            let (dids, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+            let (dids, deltas) = sorted_deltas(counts);
             client
                 .execute(
                     "INSERT INTO profile_agg (did, \"postsCount\")
@@ -765,7 +836,7 @@ pub async fn copy_insert_follows(
             *follows.entry(row.get::<_, String>(1)).or_insert(0) += 1;
             *followers.entry(row.get::<_, String>(2)).or_insert(0) += 1;
         }
-        let (f_dids, f_deltas): (Vec<String>, Vec<i64>) = follows.into_iter().unzip();
+        let (f_dids, f_deltas) = sorted_deltas(follows);
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followsCount\")
@@ -775,7 +846,7 @@ pub async fn copy_insert_follows(
                 &[&f_dids, &f_deltas],
             )
             .await?;
-        let (s_dids, s_deltas): (Vec<String>, Vec<i64>) = followers.into_iter().unzip();
+        let (s_dids, s_deltas) = sorted_deltas(followers);
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followersCount\")
