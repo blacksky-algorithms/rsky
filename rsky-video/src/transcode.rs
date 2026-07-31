@@ -141,24 +141,8 @@ pub async fn reencode_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
             "veryfast",
             "-crf",
             "23",
-            // Cap the encoder's thread pool: x264 defaults to ~1.5x cores,
-            // so on a large box even the two-slot semaphore would admit
-            // nearly full-machine CPU bursts (and that machine also runs
-            // other services). 4 threads x 2 slots keeps encodes brisk
-            // without saturating the host.
-            "-threads",
-            "4",
-            // out_color_matrix converts whatever matrix the source uses
-            // (bt2020nc for iPhone HDR, bt601 for old SD) to bt709, and
-            // setparams stamps the output as plain SDR bt709. Without this a
-            // 10-bit HDR source came out bit-crushed to 8-bit but still
-            // *tagged* HDR, so players applied HLG/PQ display mapping to SDR
-            // data (washed-out picture). Full gamut/transfer tonemapping
-            // needs zscale/libzimg, which not every ffmpeg build carries;
-            // matrix conversion + honest tags is the portable subset.
             "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709,\
-             setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            &video_filter(bytes).await,
             "-c:a",
             "aac",
             "-b:a",
@@ -189,6 +173,71 @@ pub async fn reencode_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
         frames
     );
     Ok(mp4)
+}
+
+/// Build the normalization filter chain, conditioned on the input's tagged
+/// color matrix.
+///
+/// The goal: every output is honestly-tagged bt709 SDR. Without any color
+/// handling, a 10-bit BT.2020/HLG source (iPhone default) came out
+/// bit-crushed to 8-bit but still *tagged* HDR, so players applied HLG
+/// display mapping to SDR data. The conversion must be conditional, though:
+/// swscale's fallback for an *untagged* input matrix is bt601 with no SD/HD
+/// heuristic, so an unconditional `out_color_matrix=bt709` applies a
+/// spurious bt601->bt709 rotation to untagged HD files -- and untagged mp4s
+/// (Twitter rips, web re-encodes) are common. So: convert only when the
+/// input is tagged with a non-bt709 matrix; otherwise leave pixels alone and
+/// stamp tags only.
+///
+/// The tags-only half is still a known half-fix for HDR: after conversion
+/// the matrix is right, but HLG/PQ pixels keep their transfer curve and
+/// BT.2020 primaries while tagged bt709, so they render flat and
+/// undersaturated (un-mapped, where before they were double-mapped) until a
+/// real tonemap lands. Full gamut/transfer tonemapping needs zscale/libzimg,
+/// which not every ffmpeg build carries.
+async fn video_filter(bytes: &[u8]) -> String {
+    const SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+    const TAGS: &str = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+    match input_color_space(bytes).await.as_deref() {
+        Some("unknown") | Some("") | Some("bt709") | None => format!("{SCALE},{TAGS}"),
+        Some(_) => format!("{SCALE}:out_color_matrix=bt709,{TAGS}"),
+    }
+}
+
+/// The input's tagged color matrix (`color_space`) per ffprobe, or None if
+/// probing fails. Probes from a temp file rather than a pipe because
+/// arbitrary uploads put the moov atom at the end, which a pipe can't seek
+/// to. Failure is not fatal -- the caller just skips matrix conversion.
+async fn input_color_space(bytes: &[u8]) -> Option<String> {
+    let dir = tempfile::tempdir().ok()?;
+    let path = dir.path().join("probe.video");
+    tokio::fs::write(&path, bytes).await.ok()?;
+    let output = tokio::time::timeout(
+        FFPROBE_TIMEOUT,
+        Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_space",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Count the frames in the first video stream of an in-memory MP4 by piping
@@ -273,6 +322,11 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         .arg("-i")
         .arg(&in_path)
         .args(args)
+        // Cap the encoder's thread pool: x264 defaults to ~1.5x cores, so on
+        // a large box even the two-slot semaphore would admit nearly
+        // full-machine CPU bursts (and that machine also runs other
+        // services). Applied here so every encode -- GIF included -- gets it.
+        .args(["-threads", "4"])
         .arg(&out_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -296,14 +350,20 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: String = stderr.chars().rev().take(300).collect::<String>();
         let tail: String = tail.chars().rev().collect();
-        // A non-zero ffmpeg exit here almost always means the *upload* is
-        // bad -- corrupt, truncated, or a codec MP4 can't hold -- so surface
-        // it as a 400, not a 500 that pages on user-supplied garbage.
-        // Spawn/IO problems (our side) stay Internal above.
-        return Err(Error::BadRequest(format!(
-            "ffmpeg {label} failed ({}): {tail}",
-            output.status
-        )));
+        // A non-zero ffmpeg exit almost always means the *upload* is bad --
+        // corrupt, truncated, or a codec MP4 can't hold -- so surface it as
+        // a 400, not a 500 that pages on user-supplied garbage. A None exit
+        // code means the process died to a signal (OOM kill, host trouble):
+        // that's our infrastructure, and it stays Internal so it *does* page.
+        return Err(match output.status.code() {
+            Some(_) => {
+                Error::BadRequest(format!("ffmpeg {label} failed ({}): {tail}", output.status))
+            }
+            None => Error::Internal(format!(
+                "ffmpeg {label} killed by signal ({}): {tail}",
+                output.status
+            )),
+        });
     }
 
     tokio::fs::read(&out_path)
@@ -535,6 +595,71 @@ mod tests {
             tags.trim(),
             "yuv420p,bt709,bt709,bt709",
             "HDR input must come out as tagged bt709 SDR, got: {tags}"
+        );
+    }
+
+    /// Untagged input (no colr atom -- typical Twitter rip / web re-encode)
+    /// must NOT get a matrix conversion: swscale's fallback for an untagged
+    /// input matrix is bt601, so an unconditional out_color_matrix=bt709
+    /// applies a spurious color rotation. The conditional chain must produce
+    /// byte-identical output for untagged and explicitly-bt709-tagged
+    /// variants of the same pixels (both skip conversion).
+    ///
+    /// `cargo test -p rsky-video reencode_leaves_untagged_colors_alone -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_leaves_untagged_colors_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let untagged_path = dir.path().join("untagged.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&untagged_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "untagged fixture generation failed");
+
+        // Same pixels, explicitly tagged bt709.
+        let tagged_path = dir.path().join("tagged.mp4");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-i"])
+            .arg(&untagged_path)
+            .args([
+                "-c:v",
+                "copy",
+                "-bsf:v",
+                "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1",
+            ])
+            .arg(&tagged_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "bt709-tagged fixture generation failed");
+
+        let untagged = tokio::fs::read(&untagged_path).await.unwrap();
+        let tagged = tokio::fs::read(&tagged_path).await.unwrap();
+        let out_untagged = reencode_to_mp4(&untagged).await.unwrap();
+        let out_tagged = reencode_to_mp4(&tagged).await.unwrap();
+        assert_eq!(
+            out_untagged, out_tagged,
+            "untagged input must skip matrix conversion (bt601 fallback would \
+             shift colors); outputs of untagged vs bt709-tagged pixels differ"
         );
     }
 
