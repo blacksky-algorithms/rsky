@@ -1,10 +1,25 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::error::{Error, Result};
+
+/// How many ffmpeg encodes may run at once. x264 spawns a thread per core, so
+/// without this a burst of concurrent uploads oversubscribes the box
+/// superlinearly and stalls every request handler; two encodes keep the CPU
+/// busy while bounding the damage. Queued uploads wait here rather than
+/// failing.
+static ENCODE_SLOTS: Semaphore = Semaphore::const_new(2);
+
+/// Hard ceiling on a single ffmpeg run. Uploads are capped at 100MB /
+/// max_video_duration, which veryfast x264 chews through in well under a
+/// minute; anything still running at this point is a hung or adversarial
+/// input and the process is killed rather than pinning a slot forever.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// True when the payload is an animated/static GIF (magic bytes GIF87a/GIF89a).
 pub fn is_gif(bytes: &[u8]) -> bool {
@@ -101,12 +116,76 @@ pub async fn reencode_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
         ],
     )
     .await?;
+
+    // `-map 0:v:0` only guarantees *a* video stream exists; ffmpeg happily
+    // exposes a still image (PNG/JPEG/HEIC) as a one-frame video stream, so
+    // without this check an image posted to uploadVideo would mint a valid
+    // `video/mp4` blob that embeds as a broken single-frame video. The old
+    // passthrough rejected those loudly at the PDS mimeType check; keep that
+    // guarantee by refusing any output that isn't a real moving picture.
+    let frames = video_frame_count(&mp4).await?;
+    if frames < 2 {
+        return Err(Error::BadRequest(format!(
+            "input is not a video ({frames} frame(s) after normalization)"
+        )));
+    }
+
     info!(
-        "re-encoded video ({} bytes) to normalized mp4 ({} bytes)",
+        "re-encoded video ({} bytes) to normalized mp4 ({} bytes, {} frames)",
         bytes.len(),
-        mp4.len()
+        mp4.len(),
+        frames
     );
     Ok(mp4)
+}
+
+/// Count the frames in the first video stream of an in-memory MP4 by piping
+/// it to ffprobe. The input is always our own faststart output (moov before
+/// mdat), so ffprobe can read the count from the headers without seeking.
+async fn video_frame_count(mp4: &[u8]) -> Result<u64> {
+    let mut child = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames",
+            "-of",
+            "csv=p=0",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("ffprobe spawn failed: {e}")))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Internal("ffprobe stdin unavailable".to_string()))?;
+    // ffprobe stops reading once it has the moov headers; a write error past
+    // that point is expected, not a failure.
+    let _ = stdin.write_all(mp4).await;
+    drop(stdin);
+
+    let output = tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| Error::Internal("ffprobe timed out".to_string()))?
+        .map_err(|e| Error::Internal(format!("ffprobe failed: {e}")))?;
+
+    if !output.status.success() {
+        return Err(Error::Internal(format!(
+            "ffprobe failed ({})",
+            output.status
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| Error::Internal("ffprobe returned no frame count".to_string()))
 }
 
 /// Write `bytes` to a temp file, run `ffmpeg -y -i <in> <args> out.mp4`, and
@@ -130,7 +209,14 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         .map_err(|e| Error::Internal(format!("transcode flush failed: {e}")))?;
     drop(infile);
 
-    let output = Command::new("ffmpeg")
+    // Bound concurrent encodes; a closed semaphore is impossible here, so the
+    // only await is queueing behind other uploads.
+    let _slot = ENCODE_SLOTS
+        .acquire()
+        .await
+        .map_err(|e| Error::Internal(format!("encode slot unavailable: {e}")))?;
+
+    let child = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(&in_path)
@@ -139,9 +225,20 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| Error::Internal(format!("ffmpeg spawn failed: {e}")))?;
+
+    let output = tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            // kill_on_drop reaps the hung process when the future is dropped.
+            Error::Internal(format!(
+                "ffmpeg {label} timed out after {}s",
+                FFMPEG_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| Error::Internal(format!("ffmpeg {label} failed: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -320,6 +417,41 @@ mod tests {
                 "{muxer} output brand should sniff as video/mp4"
             );
         }
+    }
+
+    /// Still-image input must fail loudly: ffmpeg exposes a PNG/JPEG as a
+    /// one-frame video stream, so `-map 0:v:0` alone would mint a degenerate
+    /// `video/mp4` blob. The frame-count check is what rejects it.
+    ///
+    /// `cargo test -p rsky-video reencode_rejects_still_image -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_rejects_still_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("still.png");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=100x100",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "png fixture generation failed");
+
+        let png = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            reencode_to_mp4(&png).await.is_err(),
+            "a still image must not produce a video blob"
+        );
     }
 
     /// Audio-only input must fail loudly rather than mint a `video/mp4` blob

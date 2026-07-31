@@ -241,6 +241,22 @@ pub async fn upload_video(
         }
     };
 
+    // The size gate above measured the *input*, but the PDS and Bunny receive
+    // the re-encoded output, which can be larger than an already-tightly-
+    // compressed source. Re-check here so an inflated encode fails now with a
+    // clear error instead of shipping a blob that app.bsky.embed.video (whose
+    // maxSize matches max_video_size) rejects after all the work is done.
+    if body.len() as u64 > state.config.max_video_size {
+        let msg = format!(
+            "normalized video ({} bytes) exceeds the maximum allowed size ({} bytes)",
+            body.len(),
+            state.config.max_video_size
+        );
+        error!("{}", msg);
+        db::fail_job(&state.db_pool, job_id, &msg).await?;
+        return Err(Error::VideoTooLarge(msg));
+    }
+
     // STEP 1: Upload blob to user's PDS FIRST
     // Forward the client's service auth token to the PDS.
     // The token should have aud: user's PDS DID (not video service).
