@@ -2945,30 +2945,29 @@ impl IndexerManager {
 
         bulk::copy_insert_posts(client, &post_data, compute_agg).await?;
         bulk::copy_insert_feed_items(client, &feed_item_data).await?;
-        bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
-        bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
-        bulk::copy_insert_quotes(client, &quote_data, compute_agg).await?;
 
         // Notifications are deliberately not limited to newly applied rows:
         // gap-heal replays must generate them for rows indexed by older code,
-        // and the (did, recordUri, reason) dedupe keeps replays exact.
-        if compute_agg {
-            bulk::copy_insert_notifications(client, &notif_rows).await?;
-            // The per-reply ancestor walk is two queries per reply; run a few
-            // concurrently on their own pooled connections or it dominates the
-            // post worker's cycle and caps drain throughput.
-            for chunk in reply_posts.chunks(3) {
-                let walks = chunk.iter().map(|(did, uri, cid, sort_at)| async move {
-                    let conn = pool.get().await.map_err(WintermuteError::Pool)?;
-                    Self::write_reply_notifications(&conn, did, uri, cid, sort_at).await
-                });
-                for result in futures::future::join_all(walks).await {
-                    result?;
+        // and the (did, recordUri, reason) dedupe keeps replays exact. The
+        // notification work runs on its own connection concurrently with the
+        // embed/quote inserts.
+        let (embed_result, notif_result) = futures::join!(
+            async {
+                bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
+                bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
+                bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
+            },
+            async {
+                if !compute_agg {
+                    return Ok(());
                 }
+                let conn = pool.get().await.map_err(WintermuteError::Pool)?;
+                bulk::copy_insert_notifications(&conn, &notif_rows).await?;
+                bulk::write_reply_notifications_bulk(&conn, &reply_posts).await
             }
-        }
-
-        Ok(())
+        );
+        embed_result?;
+        notif_result
     }
 
     /// Extract a quote subject (uri, cid) from a post's embed, mirroring the live path.

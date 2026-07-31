@@ -221,6 +221,94 @@ pub async fn decrement_profile_agg(
     Ok(())
 }
 
+/// Set-based reply notifications for a batch of new reply posts, replacing a
+/// per-reply pair of round-trips with two statements. Seeds are
+/// `(did, uri, cid, sort_at)` of the new replies. Semantics mirror the
+/// per-record walk: ancestors up to depth 4 are notified of each new reply,
+/// and existing descendants (out-of-order indexing) are re-linked to the new
+/// post's ancestor chain, including the new post itself. Inserts are ordered
+/// by conflict key for deadlock-free concurrency and deduped on
+/// (did, "recordUri", reason).
+pub async fn write_reply_notifications_bulk(
+    client: &deadpool_postgres::Client,
+    seeds: &[(String, String, String, String)],
+) -> Result<(), WintermuteError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let mut dids = Vec::with_capacity(seeds.len());
+    let mut uris = Vec::with_capacity(seeds.len());
+    let mut cids = Vec::with_capacity(seeds.len());
+    let mut sort_ats = Vec::with_capacity(seeds.len());
+    for (did, uri, cid, sort_at) in seeds {
+        dids.push(did.as_str());
+        uris.push(uri.as_str());
+        cids.push(cid.as_str());
+        sort_ats.push(sort_at.as_str());
+    }
+
+    client
+        .execute(
+            "WITH RECURSIVE seeds AS (
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+                     AS s(did, uri, cid, sort_at)
+             ),
+             ancestor(seed_uri, uri, parent, height) AS (
+                 SELECT s.uri, p.uri, p.\"replyParent\", 0
+                 FROM seeds s JOIN post p ON p.uri = s.uri
+               UNION ALL
+                 SELECT a.seed_uri, p.uri, p.\"replyParent\", a.height + 1
+                 FROM ancestor a JOIN post p ON p.uri = a.parent
+                 WHERE a.height < 4
+             )
+             INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+             SELECT split_part(a.uri, '/', 3), s.did, s.uri, s.cid, 'reply', a.uri, s.sort_at
+             FROM ancestor a
+             JOIN seeds s ON s.uri = a.seed_uri
+             WHERE a.height >= 1 AND split_part(a.uri, '/', 3) <> s.did
+             ORDER BY 1, 3
+             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+            &[&dids, &uris, &cids, &sort_ats],
+        )
+        .await?;
+
+    client
+        .execute(
+            "WITH RECURSIVE seeds AS (
+                 SELECT * FROM unnest($1::text[], $2::text[]) AS s(did, uri)
+             ),
+             ancestor(seed_uri, uri, parent, height) AS (
+                 SELECT s.uri, p.uri, p.\"replyParent\", 0
+                 FROM seeds s JOIN post p ON p.uri = s.uri
+               UNION ALL
+                 SELECT a.seed_uri, p.uri, p.\"replyParent\", a.height + 1
+                 FROM ancestor a JOIN post p ON p.uri = a.parent
+                 WHERE a.height < 4
+             ),
+             descendent(seed_uri, uri, depth) AS (
+                 SELECT s.uri, p.uri, 1
+                 FROM seeds s JOIN post p ON p.\"replyParent\" = s.uri
+               UNION ALL
+                 SELECT d.seed_uri, p.uri, d.depth + 1
+                 FROM descendent d JOIN post p ON p.\"replyParent\" = d.uri
+                 WHERE d.depth < 4
+             )
+             INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+             SELECT DISTINCT split_part(a.uri, '/', 3), dp.creator, dp.uri, dp.cid, 'reply', a.uri, dp.\"sortAt\"
+             FROM descendent d
+             JOIN post dp ON dp.uri = d.uri
+             JOIN ancestor a ON a.seed_uri = d.seed_uri
+             WHERE d.depth + a.height < 5
+               AND split_part(a.uri, '/', 3) <> dp.creator
+             ORDER BY 1, 3
+             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+            &[&dids, &uris],
+        )
+        .await?;
+
+    Ok(())
+}
+
 /// Bulk insert records using `COPY` protocol.
 /// Returns vector of booleans indicating which records were applied (not stale).
 pub async fn copy_insert_records(

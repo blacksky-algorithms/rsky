@@ -2466,6 +2466,47 @@ mod indexer_tests {
             .get(0);
         assert_eq!(agg, 0, "likeCount must return to exactly 0 after unlike");
 
+        // A batch reply must notify the parent author via the set-based walk.
+        let reply_uri = format!("at://{liker}/app.bsky.feed.post/togglereply");
+        let reply_record = serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": "reply via batch",
+            "reply": {
+                "root": {"uri": post_uri, "cid": cid},
+                "parent": {"uri": post_uri, "cid": cid},
+            },
+            "createdAt": ts,
+        });
+        let reply_jobs = vec![(
+            b"k7".to_vec(),
+            IndexJob {
+                uri: reply_uri.clone(),
+                cid: cid.clone(),
+                action: WriteAction::Create,
+                record: Some(reply_record),
+                indexed_at: ts.clone(),
+                rev: "3g".to_owned(),
+            },
+        )];
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &reply_jobs, false).await;
+        assert!(!batch_failed);
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+
+        let reply_notif: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM notification \
+                 WHERE did = $1 AND \"recordUri\" = $2 AND reason = 'reply'",
+                &[&author, &reply_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            reply_notif, 1,
+            "parent author must get a reply notification"
+        );
+
         client
             .execute("DELETE FROM post_agg WHERE uri = $1", &[&post_uri])
             .await
