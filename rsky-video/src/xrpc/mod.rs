@@ -193,18 +193,24 @@ pub async fn upload_video(
     let job_id = job.job_id;
     info!("Created job: {}", job_id);
 
-    // Normalize the container to MP4 before either upload below.
+    // Normalize every upload to a re-encoded H.264/AAC MP4 before either
+    // upload below.
     //
     // Bunny cannot transcode GIF input at all, and the PDS tags blobs by
     // sniffing their bytes rather than the content-type we send -- so a
     // QuickTime `.mov` (every iPhone capture), an `M4V ` export or a `3g*`
     // capture would come back tagged something other than `video/mp4` and be
     // rejected by app.bsky.embed.video, which accepts only `video/mp4`.
-    // Converting here means the PDS blob and Bunny both receive real MP4 bytes.
     //
-    // Containers this cannot rescue with a stream copy (`.webm`, `.mkv`,
-    // `.avi`) still fail, but they fail loudly at the mimeType check in
-    // upload_blob_with_token rather than silently in the client's applyWrites.
+    // Re-encoding (rather than passthrough for MP4 and stream copy for the
+    // rest, as this used to do) is load-bearing for federation: copy-mode
+    // edits (trim / frame removal in Apple's tooling, Twitter rips) leave
+    // irregular frame timestamps that Bluesky's federated video ingest
+    // permanently rejects -- the video plays on Blacksky but 404s on
+    // video.bsky.app forever, with no retry. A re-encode regenerates the
+    // timeline and those same videos ingest within a minute. Bluesky's own
+    // video service re-encodes every upload for the same reason. See
+    // reencode_to_mp4 and the 2026-07-31 experiment it cites.
     let body = if crate::transcode::is_gif(&body) {
         match crate::transcode::gif_to_mp4(&body).await {
             Ok(mp4) => Bytes::from(mp4),
@@ -219,23 +225,37 @@ pub async fn upload_video(
                 return Err(e);
             }
         }
-    } else if crate::transcode::needs_mp4_remux(&body) {
-        match crate::transcode::mov_to_mp4(&body).await {
+    } else {
+        match crate::transcode::reencode_to_mp4(&body).await {
             Ok(mp4) => Bytes::from(mp4),
             Err(e) => {
-                error!("Container remux failed: {}", e);
+                error!("Video normalize failed: {}", e);
                 db::fail_job(
                     &state.db_pool,
                     job_id,
-                    &format!("Container remux failed: {}", e),
+                    &format!("Video normalize failed: {}", e),
                 )
                 .await?;
                 return Err(e);
             }
         }
-    } else {
-        body
     };
+
+    // The size gate above measured the *input*, but the PDS and Bunny receive
+    // the re-encoded output, which can be larger than an already-tightly-
+    // compressed source. Re-check here so an inflated encode fails now with a
+    // clear error instead of shipping a blob that app.bsky.embed.video (whose
+    // maxSize matches max_video_size) rejects after all the work is done.
+    if body.len() as u64 > state.config.max_video_size {
+        let msg = format!(
+            "normalized video ({} bytes) exceeds the maximum allowed size ({} bytes)",
+            body.len(),
+            state.config.max_video_size
+        );
+        error!("{}", msg);
+        db::fail_job(&state.db_pool, job_id, &msg).await?;
+        return Err(Error::VideoTooLarge(msg));
+    }
 
     // STEP 1: Upload blob to user's PDS FIRST
     // Forward the client's service auth token to the PDS.

@@ -1,86 +1,56 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::error::{Error, Result};
 
+/// How many ffmpeg encodes may run at once. x264 spawns a thread per core, so
+/// without this a burst of concurrent uploads oversubscribes the box
+/// superlinearly and stalls every request handler; two encodes keep the CPU
+/// busy while bounding the damage. Queued uploads wait here rather than
+/// failing.
+static ENCODE_SLOTS: Semaphore = Semaphore::const_new(2);
+
+/// Hard ceiling on a single ffmpeg run. Uploads are capped at 100MB by size
+/// (duration is not enforced anywhere, so a long low-bitrate clip is
+/// possible), but veryfast x264 sustains well over realtime even
+/// single-threaded; anything still running at this point is a hung or
+/// adversarial input and the process is killed rather than pinning a slot
+/// forever.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Ceiling for ffprobe runs. Probing headers takes milliseconds; this only
+/// exists so a wedged probe can't pin an upload.
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Verify the external binaries this module shells out to actually exist.
+/// Both are resolved via PATH at spawn time, so without this check a missing
+/// ffprobe builds and boots clean and then fails every single upload; run it
+/// at startup so a bad image/host fails loudly at boot instead.
+pub async fn preflight() -> Result<()> {
+    for bin in ["ffmpeg", "ffprobe"] {
+        let status = Command::new(bin)
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(|e| Error::Internal(format!("{bin} is not available: {e}")))?;
+        if !status.success() {
+            return Err(Error::Internal(format!("{bin} -version failed ({status})")));
+        }
+    }
+    Ok(())
+}
+
 /// True when the payload is an animated/static GIF (magic bytes GIF87a/GIF89a).
 pub fn is_gif(bytes: &[u8]) -> bool {
     bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
-}
-
-/// True when the payload is a QuickTime container.
-///
-/// This is what iPhone camera captures and screen recordings ship as -- H.264
-/// and AAC inside a `.mov`. The PDS sniffs blob bytes instead of trusting the
-/// content-type we send, so uploading these verbatim yields a blob tagged
-/// `video/quicktime`, and `app.bsky.embed.video` -- which accepts only
-/// `video/mp4` -- then rejects the record.
-///
-/// The predicate deliberately mirrors what the PDS sniffers treat as
-/// QuickTime, since anything they tag `video/quicktime` fails lexicon
-/// validation: an `ftyp` box with the `qt  ` brand (what iOS writes), or a
-/// leading `moov`/`mdat`/`free`/`wide` box for older MOVs that carry no `ftyp`
-/// at all. Verified against `file-type` 16.5.4 (TypeScript PDS, `core.js:457`
-/// and `core.js:1025`) and `infer` 0.15 (rsky-pds, `matchers/video.rs:49`).
-///
-/// Note this covers only QuickTime; other `ftyp` brands also fail validation
-/// without being QuickTime -- see [`needs_mp4_remux`], which is the predicate
-/// the upload path actually gates on.
-///
-/// Known divergence, deliberately not mirrored: `infer` 0.15's `is_mov` has a
-/// fourth clause, `bytes[12..16] == "mdat"` (`matchers/video.rs:55`), which
-/// fires for a 12-byte leading box followed by `mdat`. It affects rsky-pds
-/// only, and only for brands outside `infer`'s `is_mp4` whitelist (that
-/// matcher runs first, `map.rs:217`); the `free`/`moov` clauses above already
-/// catch the realistic shapes. Mirroring it faithfully would mean duplicating
-/// that whitelist here. The mimeType check in `pds::upload_blob_with_token`
-/// is what catches this case if it ever occurs in the wild.
-pub fn is_quicktime_container(bytes: &[u8]) -> bool {
-    if bytes.len() < 12 {
-        return false;
-    }
-    match &bytes[4..8] {
-        b"ftyp" => &bytes[8..12] == b"qt  ",
-        b"moov" | b"mdat" | b"free" | b"wide" => true,
-        _ => false,
-    }
-}
-
-/// True when the container needs remuxing to MP4 before the PDS sees it.
-///
-/// The failing condition is not "is QuickTime" but "the PDS sniffer will not
-/// report `video/mp4`", so this covers every *video* brand that trips it:
-///
-/// - QuickTime, via [`is_quicktime_container`] -- iPhone captures.
-/// - `M4V `/`M4VH`/`M4VP` -> `video/x-m4v`. Apple exports, Handbrake's m4v
-///   presets, and ffmpeg's own `ipod` muxer. Rejected by *both* sniffers
-///   (`file-type` `core.js:480`, `infer` `is_m4v` at `matchers/video.rs:2`).
-/// - `3g*` -> `video/3gpp` / `video/3gpp2`. Older Android capture. Rejected by
-///   the TypeScript PDS (`core.js:500`); `infer` has no 3GPP matcher at all,
-///   so rsky-pds falls back to the content-type we send and lets these pass.
-///
-/// All of these are H.264/AAC in an ISO BMFF box in practice, so the same
-/// stream copy [`mov_to_mp4`] performs handles them -- verified end to end
-/// against both sniffer libraries.
-///
-/// Audio-only brands (`M4A `/`M4B `/`F4A `/`F4B `) and image brands
-/// (`avif`/`mif1`/`msf1`/`heic`/`heix`/`hevc`/`hevx`/`crx`) also fail
-/// validation but are deliberately **not** remuxed: they carry no video track,
-/// so converting them would mint a `video/mp4` blob that embeds as a broken
-/// video instead of failing. Those surface as an explicit error from the
-/// mimeType check in `pds::upload_blob_with_token`.
-pub fn needs_mp4_remux(bytes: &[u8]) -> bool {
-    if is_quicktime_container(bytes) {
-        return true;
-    }
-    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
-        return false;
-    }
-    let brand = &bytes[8..12];
-    matches!(brand, b"M4V " | b"M4VH" | b"M4VP") || brand.starts_with(b"3g")
 }
 
 /// Convert a GIF to a silent MP4 that Bunny Stream can transcode.
@@ -112,31 +82,211 @@ pub async fn gif_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(mp4)
 }
 
-/// Remux a QuickTime or other non-MP4 ISO BMFF container to MP4 without
-/// re-encoding. Gated by [`needs_mp4_remux`], so it also receives `M4V ` and
-/// `3g*` input; ffmpeg demuxes all of them with the same `mov,mp4,m4a,3gp,3g2`
-/// demuxer, and the mp4 muxer writes an `isom` brand regardless of the input.
+/// Re-encode any video upload into a normalized H.264/AAC MP4.
 ///
-/// `-c copy` keeps the existing H.264/AAC streams and only rewrites the
-/// container, so this is lossless and fast -- the cost is copying the bytes
-/// once (typically under a second for 100MB). Inputs carrying codecs MP4
-/// cannot hold (ProRes, or H.263/AMR in a very old 3GP) fail here with
-/// ffmpeg's own error instead of producing a blob the PDS would tag as
-/// something `app.bsky.embed.video` rejects.
-pub async fn mov_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
+/// Every non-GIF upload goes through this, including input that is already
+/// MP4. Passing MP4 bytes through untouched -- and stream-copying QuickTime --
+/// shipped blobs whose *frame timestamps* were irregular: copy-mode trims and
+/// frame deletions (Apple's editors, Twitter rips) rewrite edit lists rather
+/// than the stream, leaving a runt first frame interval (~5ms at 60fps instead
+/// of 16.7ms). Bluesky's federated video ingest deterministically rejects such
+/// streams -- permanent 404 on video.bsky.app with no retry -- while accepting
+/// the same content after one re-encode. Bluesky's own video service
+/// re-encodes every upload for exactly this reason.
+///
+/// Precisely what the re-encode fixes: decoding discards edit lists and
+/// sub-frame timestamp offsets, so the output timeline starts clean. It is
+/// NOT forced CFR -- genuine variable frame rate (dropped frames at whole-
+/// frame gaps, e.g. screen recordings) passes through, which is fine:
+/// Bluesky's ingest accepts whole-frame-gap VFR (live-verified 2026-07-31,
+/// along with the edit-list findings; controlled experiment on identical
+/// content, same account, minutes apart -- lossless remux 404s, this encode
+/// ingests in under a minute; see
+/// obsidian/Design/video-federation-blacksky-to-bluesky-ingest.md). Forcing
+/// CFR was considered and rejected: with a pathological r_frame_rate tag it
+/// duplicates frames unboundedly.
+///
+/// The encode settings mirror that experiment's passing variant: H.264 Main
+/// profile / yuv420p for broad decoder support (and to match what Bluesky's
+/// own transcoder emits), source frame rate preserved. On top of it:
+/// even-dimension scaling (x264 rejects odd sizes in yuv420p), AAC audio (MP4
+/// cannot carry the PCM/AMR audio some containers arrive with, so copy would
+/// fail exactly where a re-encode succeeds), and explicit stream mapping so a
+/// video track is *required* -- audio-only input (`.m4a` and friends) fails
+/// here loudly instead of minting a `video/mp4` blob that embeds as a broken
+/// video. Subtitle/data tracks are dropped.
+///
+/// This also replaces the old container gate: QuickTime, `M4V `, `3g*`, and
+/// even `.webm`/`.mkv` all decode through the same path and come out as an
+/// `isom` MP4 the PDS sniffers accept, so the brand no longer matters.
+pub async fn reencode_to_mp4(bytes: &[u8]) -> Result<Vec<u8>> {
     let mp4 = run_ffmpeg(
-        "mov->mp4",
-        "in.mov",
+        "video->mp4",
+        "in.video",
         bytes,
-        &["-c", "copy", "-movflags", "faststart"],
+        &[
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "main",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-vf",
+            &video_filter(bytes).await,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "faststart",
+        ],
     )
     .await?;
+
+    // `-map 0:v:0` only guarantees *a* video stream exists; ffmpeg happily
+    // exposes a still image (PNG/JPEG/HEIC) as a one-frame video stream, so
+    // without this check an image posted to uploadVideo would mint a valid
+    // `video/mp4` blob that embeds as a broken single-frame video. The old
+    // passthrough rejected those loudly at the PDS mimeType check; keep that
+    // guarantee by refusing any output that isn't a real moving picture.
+    let frames = video_frame_count(&mp4).await?;
+    if frames < 2 {
+        return Err(Error::BadRequest(format!(
+            "input is not a video ({frames} frame(s) after normalization)"
+        )));
+    }
+
     info!(
-        "remuxed mov ({} bytes) to mp4 ({} bytes)",
+        "re-encoded video ({} bytes) to normalized mp4 ({} bytes, {} frames)",
         bytes.len(),
-        mp4.len()
+        mp4.len(),
+        frames
     );
     Ok(mp4)
+}
+
+/// Build the normalization filter chain, conditioned on the input's tagged
+/// color matrix.
+///
+/// The goal: every output is honestly-tagged bt709 SDR. Without any color
+/// handling, a 10-bit BT.2020/HLG source (iPhone default) came out
+/// bit-crushed to 8-bit but still *tagged* HDR, so players applied HLG
+/// display mapping to SDR data. The conversion must be conditional, though:
+/// swscale's fallback for an *untagged* input matrix is bt601 with no SD/HD
+/// heuristic, so an unconditional `out_color_matrix=bt709` applies a
+/// spurious bt601->bt709 rotation to untagged HD files -- and untagged mp4s
+/// (Twitter rips, web re-encodes) are common. So: convert only when the
+/// input is tagged with a non-bt709 matrix; otherwise leave pixels alone and
+/// stamp tags only.
+///
+/// The tags-only half is still a known half-fix for HDR: after conversion
+/// the matrix is right, but HLG/PQ pixels keep their transfer curve and
+/// BT.2020 primaries while tagged bt709, so they render flat and
+/// undersaturated (un-mapped, where before they were double-mapped) until a
+/// real tonemap lands. Full gamut/transfer tonemapping needs zscale/libzimg,
+/// which not every ffmpeg build carries.
+async fn video_filter(bytes: &[u8]) -> String {
+    const SCALE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+    const TAGS: &str = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+    match input_color_space(bytes).await.as_deref() {
+        Some("unknown") | Some("") | Some("bt709") | None => format!("{SCALE},{TAGS}"),
+        Some(_) => format!("{SCALE}:out_color_matrix=bt709,{TAGS}"),
+    }
+}
+
+/// The input's tagged color matrix (`color_space`) per ffprobe, or None if
+/// probing fails. Probes from a temp file rather than a pipe because
+/// arbitrary uploads put the moov atom at the end, which a pipe can't seek
+/// to. Failure is not fatal -- the caller just skips matrix conversion.
+async fn input_color_space(bytes: &[u8]) -> Option<String> {
+    let dir = tempfile::tempdir().ok()?;
+    let path = dir.path().join("probe.video");
+    tokio::fs::write(&path, bytes).await.ok()?;
+    let output = tokio::time::timeout(
+        FFPROBE_TIMEOUT,
+        Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_space",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Count the frames in the first video stream of an in-memory MP4 by piping
+/// it to ffprobe. The input is always our own faststart output (moov before
+/// mdat), so ffprobe can read the count from the headers without seeking.
+async fn video_frame_count(mp4: &[u8]) -> Result<u64> {
+    let mut child = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames",
+            "-of",
+            "csv=p=0",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Internal(format!("ffprobe spawn failed: {e}")))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Internal("ffprobe stdin unavailable".to_string()))?;
+    // ffprobe stops reading once it has the moov headers; a write error past
+    // that point is expected, not a failure.
+    let _ = stdin.write_all(mp4).await;
+    drop(stdin);
+
+    let output = tokio::time::timeout(FFPROBE_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| Error::Internal("ffprobe timed out".to_string()))?
+        .map_err(|e| Error::Internal(format!("ffprobe failed: {e}")))?;
+
+    if !output.status.success() {
+        return Err(Error::Internal(format!(
+            "ffprobe failed ({})",
+            output.status
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| Error::Internal("ffprobe returned no frame count".to_string()))
 }
 
 /// Write `bytes` to a temp file, run `ffmpeg -y -i <in> <args> out.mp4`, and
@@ -160,27 +310,60 @@ async fn run_ffmpeg(label: &str, in_name: &str, bytes: &[u8], args: &[&str]) -> 
         .map_err(|e| Error::Internal(format!("transcode flush failed: {e}")))?;
     drop(infile);
 
-    let output = Command::new("ffmpeg")
+    // Bound concurrent encodes; a closed semaphore is impossible here, so the
+    // only await is queueing behind other uploads.
+    let _slot = ENCODE_SLOTS
+        .acquire()
+        .await
+        .map_err(|e| Error::Internal(format!("encode slot unavailable: {e}")))?;
+
+    let child = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
         .arg(&in_path)
         .args(args)
+        // Cap the encoder's thread pool: x264 defaults to ~1.5x cores, so on
+        // a large box even the two-slot semaphore would admit nearly
+        // full-machine CPU bursts (and that machine also runs other
+        // services). Applied here so every encode -- GIF included -- gets it.
+        .args(["-threads", "4"])
         .arg(&out_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| Error::Internal(format!("ffmpeg spawn failed: {e}")))?;
+
+    let output = tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            // kill_on_drop reaps the hung process when the future is dropped.
+            Error::Internal(format!(
+                "ffmpeg {label} timed out after {}s",
+                FFMPEG_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| Error::Internal(format!("ffmpeg {label} failed: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: String = stderr.chars().rev().take(300).collect::<String>();
         let tail: String = tail.chars().rev().collect();
-        return Err(Error::Internal(format!(
-            "ffmpeg {label} failed ({}): {tail}",
-            output.status
-        )));
+        // A non-zero ffmpeg exit almost always means the *upload* is bad --
+        // corrupt, truncated, or a codec MP4 can't hold -- so surface it as
+        // a 400, not a 500 that pages on user-supplied garbage. A None exit
+        // code means the process died to a signal (OOM kill, host trouble):
+        // that's our infrastructure, and it stays Internal so it *does* page.
+        return Err(match output.status.code() {
+            Some(_) => {
+                Error::BadRequest(format!("ffmpeg {label} failed ({}): {tail}", output.status))
+            }
+            None => Error::Internal(format!(
+                "ffmpeg {label} killed by signal ({}): {tail}",
+                output.status
+            )),
+        });
     }
 
     tokio::fs::read(&out_path)
@@ -201,122 +384,10 @@ mod tests {
         assert!(!is_gif(b""));
     }
 
-    #[test]
-    fn detects_quicktime_brand() {
-        // What an iPhone capture / screen recording actually starts with.
-        assert!(is_quicktime_container(
-            b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"
-        ));
-    }
-
-    #[test]
-    fn iso_bmff_brands_are_not_quicktime() {
-        // Already sniff as video/mp4 on the PDS -- must not be remuxed.
-        assert!(!is_quicktime_container(
-            b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"
-        ));
-        assert!(!is_quicktime_container(
-            b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"
-        ));
-    }
-
-    #[test]
-    fn detects_ftyp_less_quicktime() {
-        // Older MOVs lead with a bare box; both PDS sniffers call these
-        // video/quicktime, so they need the remux too.
-        for tag in [b"moov", b"mdat", b"free", b"wide"] {
-            let mut buf = vec![0x00, 0x00, 0x00, 0x14];
-            buf.extend_from_slice(tag);
-            buf.extend_from_slice(&[0u8; 8]);
-            assert!(is_quicktime_container(&buf), "expected {tag:?} to match");
-        }
-    }
-
-    /// Build a minimal `ftyp` header with the given major brand.
-    fn ftyp(brand: &[u8; 4]) -> Vec<u8> {
-        let mut buf = vec![0x00, 0x00, 0x00, 0x18];
-        buf.extend_from_slice(b"ftyp");
-        buf.extend_from_slice(brand);
-        buf.extend_from_slice(&[0u8; 8]);
-        buf
-    }
-
-    #[test]
-    fn remuxes_every_non_mp4_video_brand() {
-        // QuickTime, plus the brands that sniff as video/x-m4v and video/3gpp*.
-        // All observed in production; all rejected by app.bsky.embed.video.
-        assert!(needs_mp4_remux(b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"));
-        for brand in [b"M4V ", b"M4VH", b"M4VP"] {
-            assert!(needs_mp4_remux(&ftyp(brand)), "expected {brand:?} to match");
-        }
-        for brand in [b"3gp4", b"3gp5", b"3gp6", b"3g2a", b"3g2b"] {
-            assert!(needs_mp4_remux(&ftyp(brand)), "expected {brand:?} to match");
-        }
-        // And the ftyp-less QuickTime shapes.
-        for tag in [b"moov", b"mdat", b"free", b"wide"] {
-            let mut buf = vec![0x00, 0x00, 0x00, 0x14];
-            buf.extend_from_slice(tag);
-            buf.extend_from_slice(&[0u8; 8]);
-            assert!(needs_mp4_remux(&buf), "expected {tag:?} to match");
-        }
-    }
-
-    #[test]
-    fn leaves_mp4_sniffing_brands_alone() {
-        // These already sniff as video/mp4; remuxing them would be pure waste.
-        for brand in [
-            b"isom", b"mp42", b"mp41", b"iso2", b"avc1", b"dash", b"M4P ",
-        ] {
-            assert!(
-                !needs_mp4_remux(&ftyp(brand)),
-                "expected {brand:?} to pass through"
-            );
-        }
-    }
-
-    #[test]
-    fn does_not_remux_audio_or_image_brands() {
-        // These fail lexicon validation too, but they carry no video track --
-        // remuxing would mint a video/mp4 blob that embeds as a broken video.
-        // They are meant to surface via the mimeType check on the PDS response.
-        for brand in [b"M4A ", b"M4B ", b"F4A ", b"F4B "] {
-            assert!(
-                !needs_mp4_remux(&ftyp(brand)),
-                "audio brand {brand:?} must not be remuxed"
-            );
-        }
-        for brand in [
-            b"avif", b"mif1", b"msf1", b"heic", b"heix", b"hevc", b"hevx",
-        ] {
-            assert!(
-                !needs_mp4_remux(&ftyp(brand)),
-                "image brand {brand:?} must not be remuxed"
-            );
-        }
-    }
-
-    #[test]
-    fn needs_mp4_remux_rejects_junk() {
-        assert!(!needs_mp4_remux(b""));
-        assert!(!needs_mp4_remux(b"GIF89a\x00\x00\x00\x00\x00\x00"));
-        assert!(!needs_mp4_remux(b"\x00\x00\x00\x14skip\x00\x00\x00\x00"));
-        assert!(!needs_mp4_remux(b"\x1a\x45\xdf\xa3webm-ish\x00\x00"));
-        // Shorter than the 12 bytes the brand check needs -- must not panic.
-        assert!(!needs_mp4_remux(b"\x00\x00\x00\x14ftypqt"));
-        assert!(!needs_mp4_remux(b"\x00\x00\x00\x14ftyp3g"));
-    }
-
-    /// End-to-end proof that the remux produces bytes the PDS will tag
-    /// `video/mp4`: builds an H.264/AAC QuickTime file the way iOS ships one,
-    /// runs it through `mov_to_mp4`, and checks the container brand flipped.
-    ///
-    /// Run from the repository root with:
-    /// `cargo test -p rsky-video mov_remux -- --ignored`
-    #[tokio::test]
-    #[ignore = "requires ffmpeg on PATH"]
-    async fn mov_remux_yields_an_mp4_brand() {
-        let dir = tempfile::tempdir().unwrap();
-        let mov_path = dir.path().join("fixture.mov");
+    /// Generate a 1-second H.264/AAC fixture with the given muxer, returning
+    /// its bytes. Used by the ignored end-to-end tests below.
+    async fn fixture(dir: &std::path::Path, muxer: &str, name: &str) -> Vec<u8> {
+        let path = dir.join(name);
         let status = Command::new("ffmpeg")
             .args([
                 "-y",
@@ -335,109 +406,333 @@ mod tests {
                 "-t",
                 "1",
                 "-f",
-                "mov",
+                muxer,
             ])
-            .arg(&mov_path)
+            .arg(&path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .await
             .expect("ffmpeg should be on PATH");
-        assert!(status.success(), "fixture generation failed");
+        assert!(status.success(), "{muxer} fixture generation failed");
+        tokio::fs::read(&path).await.unwrap()
+    }
 
-        let mov = tokio::fs::read(&mov_path).await.unwrap();
+    /// Presentation-order intervals between the first video packets, in
+    /// stream timebase units. The poison pattern this module exists to fix
+    /// shows up as a runt first interval (a fraction of the frame duration)
+    /// followed by regular steps. The final interval is dropped: reading a
+    /// fixed count of packets in decode order truncates the presentation
+    /// tail, which fabricates a gap there.
+    async fn video_pts_deltas(dir: &std::path::Path, bytes: &[u8]) -> Vec<i64> {
+        let path = dir.join("probe.mp4");
+        tokio::fs::write(&path, bytes).await.unwrap();
+        let output = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts",
+                "-read_intervals",
+                "%+#12",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&path)
+            .output()
+            .await
+            .expect("ffprobe should be on PATH");
+        let mut pts: Vec<i64> = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(|l| l.parse().expect("ffprobe should report numeric pts"))
+            .collect();
+        pts.sort_unstable();
+        let mut deltas: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
+        deltas.pop();
+        deltas
+    }
+
+    /// End-to-end proof for the timestamp fix: recreate the wild poison
+    /// pattern (all frames except the first shifted 3/4 of a frame earlier,
+    /// leaving a runt first interval -- what copy-mode trims and frame
+    /// deletions produce), then require the re-encode to emit uniform frame
+    /// intervals. Bluesky's federated ingest permanently rejects the former
+    /// and accepts the latter.
+    ///
+    /// `cargo test -p rsky-video reencode_normalizes_timestamps -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_normalizes_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path(), "mp4", "clean.mp4").await;
+
+        // 30 fps in x264's default 15360 timebase = 512 ticks per frame;
+        // shifting all but the first packet back 384 ticks leaves a 128-tick
+        // (quarter-frame) first interval, matching the failing wild blobs.
+        let src = dir.path().join("clean.mp4");
+        let poison_path = dir.path().join("poison.mp4");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-i"])
+            .arg(&src)
+            .args([
+                "-c",
+                "copy",
+                "-bsf:v",
+                "setts=pts=if(eq(N\\,0)\\,PTS\\,PTS-384):dts=DTS-384",
+            ])
+            .arg(&poison_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "poison fixture generation failed");
+        let poison = tokio::fs::read(&poison_path).await.unwrap();
+
+        let deltas = video_pts_deltas(dir.path(), &poison).await;
         assert!(
-            is_quicktime_container(&mov),
-            "ffmpeg -f mov should emit the `qt  ` brand"
+            deltas.iter().min() < deltas.iter().max(),
+            "fixture should reproduce the runt-interval poison: {deltas:?}"
         );
 
-        let mp4 = mov_to_mp4(&mov).await.expect("remux should succeed");
-        assert_eq!(&mp4[4..8], b"ftyp", "output should be ISO BMFF");
+        let normalized = reencode_to_mp4(&poison)
+            .await
+            .expect("re-encode should succeed");
+        assert_eq!(&normalized[4..8], b"ftyp", "output should be ISO BMFF");
+        let deltas = video_pts_deltas(dir.path(), &normalized).await;
         assert!(
-            !is_quicktime_container(&mp4),
-            "output still sniffs as QuickTime: brand {:?}",
-            String::from_utf8_lossy(&mp4[8..12])
+            !deltas.is_empty() && deltas.iter().min() == deltas.iter().max(),
+            "re-encode must emit uniform frame intervals, got {deltas:?}"
         );
     }
 
-    /// Same proof for the other two containers the gate now catches: ffmpeg's
-    /// `ipod` muxer emits the `M4V ` brand and `3gp` emits `3gp6`, both of
-    /// which a PDS reports as something `app.bsky.embed.video` rejects. Each
-    /// must stream-copy into a brand that sniffs as `video/mp4`.
+    /// The re-encode also subsumes the old container remux: QuickTime, M4V,
+    /// and 3GP input (all H.264/AAC in practice) must come out as an MP4 brand
+    /// the PDS sniffers tag `video/mp4`.
     ///
-    /// `cargo test -p rsky-video remux_normalizes -- --ignored`
+    /// `cargo test -p rsky-video reencode_normalizes_containers -- --ignored`
     #[tokio::test]
-    #[ignore = "requires ffmpeg on PATH"]
-    async fn remux_normalizes_m4v_and_3gp_brands() {
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_normalizes_containers() {
         let dir = tempfile::tempdir().unwrap();
-
-        for (muxer, name, expected_brand) in [
-            ("ipod", "fixture.m4v", b"M4V "),
-            ("3gp", "fixture.3gp", b"3gp6"),
+        for (muxer, name) in [
+            ("mov", "fixture.mov"),
+            ("ipod", "fixture.m4v"),
+            ("3gp", "fixture.3gp"),
         ] {
-            let path = dir.path().join(name);
-            let status = Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc=size=320x240:rate=15",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "sine=frequency=440",
-                    "-c:v",
-                    "libx264",
-                    "-c:a",
-                    "aac",
-                    "-t",
-                    "1",
-                    "-f",
-                    muxer,
-                ])
-                .arg(&path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
+            let input = fixture(dir.path(), muxer, name).await;
+            let mp4 = reencode_to_mp4(&input)
                 .await
-                .expect("ffmpeg should be on PATH");
-            assert!(status.success(), "{muxer} fixture generation failed");
-
-            let input = tokio::fs::read(&path).await.unwrap();
+                .unwrap_or_else(|e| panic!("{muxer} re-encode should succeed: {e}"));
+            assert_eq!(&mp4[4..8], b"ftyp", "{muxer} output should be ISO BMFF");
             assert_eq!(
-                &input[8..12],
-                expected_brand,
-                "expected ffmpeg -f {muxer} to emit brand {:?}",
-                String::from_utf8_lossy(expected_brand)
-            );
-            assert!(
-                needs_mp4_remux(&input),
-                "{muxer} output should be gated for remux"
-            );
-            // Not QuickTime -- these are a distinct failure mode.
-            assert!(!is_quicktime_container(&input));
-
-            let mp4 = mov_to_mp4(&input)
-                .await
-                .unwrap_or_else(|e| panic!("{muxer} remux should succeed: {e}"));
-            assert_eq!(&mp4[4..8], b"ftyp");
-            assert!(
-                !needs_mp4_remux(&mp4),
-                "{muxer} output still needs remux: brand {:?}",
-                String::from_utf8_lossy(&mp4[8..12])
+                &mp4[8..12],
+                b"isom",
+                "{muxer} output brand should sniff as video/mp4"
             );
         }
     }
 
-    #[test]
-    fn non_quicktime_payloads_are_rejected() {
-        assert!(!is_quicktime_container(b""));
-        assert!(!is_quicktime_container(b"GIF89a\x00\x00\x00\x00\x00\x00"));
-        assert!(!is_quicktime_container(
-            b"\x00\x00\x00\x14skip\x00\x00\x00\x00"
-        ));
-        // Shorter than the 12 bytes the brand check needs -- must not panic.
-        assert!(!is_quicktime_container(b"\x00\x00\x00\x14ftypqt"));
+    /// HDR input must come out as honestly-tagged SDR. Without the color
+    /// conversion in the filter chain, a 10-bit BT.2020/HLG source (iPhone
+    /// default since the 12) was bit-crushed to 8-bit but kept its HDR tags,
+    /// so players applied HLG display mapping to SDR data.
+    ///
+    /// `cargo test -p rsky-video reencode_tags_bt709 -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_tags_bt709() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hlg.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=30",
+                "-t",
+                "1",
+                "-vf",
+                "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=arib-std-b67,\
+                 format=yuv420p10le",
+                "-c:v",
+                "libx264",
+            ])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "hlg fixture generation failed");
+
+        let hlg = tokio::fs::read(&path).await.unwrap();
+        let out = reencode_to_mp4(&hlg)
+            .await
+            .expect("re-encode should succeed");
+        let probe_path = dir.path().join("out.mp4");
+        tokio::fs::write(&probe_path, &out).await.unwrap();
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=pix_fmt,color_space,color_transfer,color_primaries",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&probe_path)
+            .output()
+            .await
+            .expect("ffprobe should be on PATH");
+        let tags = String::from_utf8_lossy(&probe.stdout);
+        assert_eq!(
+            tags.trim(),
+            "yuv420p,bt709,bt709,bt709",
+            "HDR input must come out as tagged bt709 SDR, got: {tags}"
+        );
+    }
+
+    /// Untagged input (no colr atom -- typical Twitter rip / web re-encode)
+    /// must NOT get a matrix conversion: swscale's fallback for an untagged
+    /// input matrix is bt601, so an unconditional out_color_matrix=bt709
+    /// applies a spurious color rotation. The conditional chain must produce
+    /// byte-identical output for untagged and explicitly-bt709-tagged
+    /// variants of the same pixels (both skip conversion).
+    ///
+    /// `cargo test -p rsky-video reencode_leaves_untagged_colors_alone -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_leaves_untagged_colors_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let untagged_path = dir.path().join("untagged.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&untagged_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "untagged fixture generation failed");
+
+        // Same pixels, explicitly tagged bt709.
+        let tagged_path = dir.path().join("tagged.mp4");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-i"])
+            .arg(&untagged_path)
+            .args([
+                "-c:v",
+                "copy",
+                "-bsf:v",
+                "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1",
+            ])
+            .arg(&tagged_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "bt709-tagged fixture generation failed");
+
+        let untagged = tokio::fs::read(&untagged_path).await.unwrap();
+        let tagged = tokio::fs::read(&tagged_path).await.unwrap();
+        let out_untagged = reencode_to_mp4(&untagged).await.unwrap();
+        let out_tagged = reencode_to_mp4(&tagged).await.unwrap();
+        assert_eq!(
+            out_untagged, out_tagged,
+            "untagged input must skip matrix conversion (bt601 fallback would \
+             shift colors); outputs of untagged vs bt709-tagged pixels differ"
+        );
+    }
+
+    /// Still-image input must fail loudly: ffmpeg exposes a PNG/JPEG as a
+    /// one-frame video stream, so `-map 0:v:0` alone would mint a degenerate
+    /// `video/mp4` blob. The frame-count check is what rejects it.
+    ///
+    /// `cargo test -p rsky-video reencode_rejects_still_image -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    async fn reencode_rejects_still_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("still.png");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=100x100",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "png fixture generation failed");
+
+        let png = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            reencode_to_mp4(&png).await.is_err(),
+            "a still image must not produce a video blob"
+        );
+    }
+
+    /// Audio-only input must fail loudly rather than mint a `video/mp4` blob
+    /// that embeds as a broken video (the `-map 0:v:0` requirement).
+    ///
+    /// `cargo test -p rsky-video reencode_rejects_audio_only -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires ffmpeg on PATH"]
+    async fn reencode_rejects_audio_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.m4a");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-c:a",
+                "aac",
+                "-t",
+                "1",
+                "-f",
+                "ipod",
+            ])
+            .arg(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("ffmpeg should be on PATH");
+        assert!(status.success(), "audio fixture generation failed");
+
+        let audio = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            reencode_to_mp4(&audio).await.is_err(),
+            "audio-only input must not produce a video blob"
+        );
     }
 }

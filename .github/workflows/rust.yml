@@ -140,6 +140,16 @@ jobs:
         run: cargo build --release -p ${{ matrix.package }}
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test --release -p ${{ matrix.package }}
+      # The transcode e2e tests are #[ignore]d so plain `cargo test` doesn't
+      # require ffmpeg on every dev machine; CI installs it and runs them
+      # explicitly, otherwise the video normalization fix has zero coverage
+      # in the green build.
+      - name: Install ffmpeg for rsky-video e2e tests
+        if: matrix.package == 'rsky-video'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Run rsky-video transcode e2e tests
+        if: matrix.package == 'rsky-video'
+        run: cargo test --release -p rsky-video -- --ignored transcode
 
   # Coverage gate for the sqlite PDS stack. Standalone so a coverage
   # failure never blocks CI for unrelated crates.
