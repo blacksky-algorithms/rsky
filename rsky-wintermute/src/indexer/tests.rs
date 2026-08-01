@@ -2739,25 +2739,25 @@ mod indexer_tests {
                 );
             }
         }
-        let toggle_record = serde_json::json!({
-            "$type": "app.bsky.feed.like",
-            "subject": {"uri": post_uris[0], "cid": cid},
-            "createdAt": ts,
-        });
-        push(
-            &mut jobs,
-            toggle_uri.clone(),
-            WriteAction::Create,
-            Some(toggle_record),
-            "3a",
-        );
-        push(
-            &mut jobs,
-            toggle_uri.clone(),
-            WriteAction::Delete,
-            None,
-            "3b",
-        );
+        let second_toggle_uri = format!("at://{}/app.bsky.feed.like/shardtoggle2", likers[1]);
+        for (uri, subject) in [
+            (&toggle_uri, &post_uris[0]),
+            (&second_toggle_uri, &post_uris[1]),
+        ] {
+            let record = serde_json::json!({
+                "$type": "app.bsky.feed.like",
+                "subject": {"uri": subject, "cid": cid},
+                "createdAt": ts,
+            });
+            push(
+                &mut jobs,
+                uri.clone(),
+                WriteAction::Create,
+                Some(record),
+                "3a",
+            );
+            push(&mut jobs, uri.clone(), WriteAction::Delete, None, "3b");
+        }
 
         let mut snapshots = Vec::new();
         for shards in [1usize, 3] {
@@ -2784,15 +2784,14 @@ mod indexer_tests {
             assert_eq!(snap.0, vec![3, 3, 3], "like rows wrong at shards={shards}");
             assert_eq!(snap.1, vec![3, 3, 3], "likeCount wrong at shards={shards}");
             let client = pool.get().await.unwrap();
-            let toggle_left: i64 = client
-                .query_one(
-                    "SELECT COUNT(*) FROM \"like\" WHERE uri = $1",
-                    &[&toggle_uri],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            assert_eq!(toggle_left, 0, "toggled like survived at shards={shards}");
+            for uri in [&toggle_uri, &second_toggle_uri] {
+                let toggle_left: i64 = client
+                    .query_one("SELECT COUNT(*) FROM \"like\" WHERE uri = $1", &[uri])
+                    .await
+                    .unwrap()
+                    .get(0);
+                assert_eq!(toggle_left, 0, "toggled like survived at shards={shards}");
+            }
             snapshots.push(snap);
         }
         assert_eq!(

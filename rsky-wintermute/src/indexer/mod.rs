@@ -1539,12 +1539,51 @@ impl IndexerManager {
             }
         }
 
-        for (key, job) in sequential {
-            let result = Box::pin(Self::process_job(pool, job)).await;
-            if result.is_err() {
-                batch_failed = true;
+        // Distinct conflicted uris are independent rows, so their groups run
+        // concurrently; jobs within one uri keep strict queue order.
+        if !sequential.is_empty() {
+            let prepass_start = std::time::Instant::now();
+            let mut uri_groups: Vec<Vec<&(Vec<u8>, IndexJob)>> = Vec::new();
+            let mut group_index: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for job_tuple in sequential {
+                let uri = job_tuple.1.uri.as_str();
+                if let Some(&idx) = group_index.get(uri) {
+                    uri_groups[idx].push(job_tuple);
+                } else {
+                    group_index.insert(uri, uri_groups.len());
+                    uri_groups.push(vec![job_tuple]);
+                }
             }
-            results.push((key.clone(), result));
+            let group_count = uri_groups.len();
+            let group_futures: Vec<_> = uri_groups
+                .into_iter()
+                .map(|group| {
+                    Box::pin(async move {
+                        let mut out = Vec::with_capacity(group.len());
+                        for (key, job) in group {
+                            out.push((key.clone(), Box::pin(Self::process_job(pool, job)).await));
+                        }
+                        out
+                    })
+                })
+                .collect();
+            let group_results: Vec<_> = futures::stream::iter(group_futures)
+                .buffer_unordered(4)
+                .collect()
+                .await;
+            for group in group_results {
+                for (key, result) in group {
+                    if result.is_err() {
+                        batch_failed = true;
+                    }
+                    results.push((key, result));
+                }
+            }
+            let prepass_ms = prepass_start.elapsed().as_millis();
+            if prepass_ms > 500 {
+                tracing::warn!("SLOW conflicted pre-pass: {prepass_ms}ms for {group_count} uris");
+            }
         }
 
         // Deletes run before creates: a user's unlike-then-relike spanning the
