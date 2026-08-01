@@ -30,6 +30,7 @@ pub struct Storage {
     // head and tombstones pile up there; scanning from the last dequeued key
     // (wrapping when exhausted) avoids re-walking them every batch.
     firehose_live_cursor: std::sync::Mutex<Option<Vec<u8>>>,
+    live_notify: tokio::sync::Notify,
 }
 
 impl Storage {
@@ -149,6 +150,7 @@ impl Storage {
             lmdb_env,
             firehose_backfill_db,
             firehose_live_cursor: std::sync::Mutex::new(None),
+            live_notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -289,7 +291,14 @@ impl Storage {
         self.firehose_live
             .insert(key.as_bytes(), value.as_slice())?;
         crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.inc();
+        self.live_notify.notify_one();
         Ok(())
+    }
+
+    /// Block until an enqueue signals the live queue, or `timeout` elapses.
+    /// A permit stored by a `notify_one` that raced ahead completes immediately.
+    pub async fn wait_for_live_enqueue(&self, timeout: std::time::Duration) {
+        drop(tokio::time::timeout(timeout, self.live_notify.notified()).await);
     }
 
     pub fn dequeue_firehose_live(&self) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {

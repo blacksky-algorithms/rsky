@@ -293,7 +293,7 @@ pub async fn copy_insert_records(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_record (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -301,13 +301,10 @@ pub async fn copy_insert_records(
                 json text,
                 rev text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_record",
         )
         .await?;
-
-    // Truncate in case of reuse
-    client.execute("TRUNCATE _bulk_record", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data into temp table
@@ -405,15 +402,13 @@ pub async fn copy_ensure_actors(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_actor (
                 did text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_actor",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_actor", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY dids
@@ -482,7 +477,7 @@ pub async fn copy_insert_posts(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -496,12 +491,10 @@ pub async fn copy_insert_posts(
                 indexed_at text NOT NULL,
                 langs text[],
                 tags text[]
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_post", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data. text is NOT NULL so empty string is preserved; reply_*/langs/tags
@@ -619,7 +612,7 @@ pub async fn copy_insert_feed_items(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_feed_item (
                 type text NOT NULL,
                 uri text NOT NULL,
@@ -627,12 +620,10 @@ pub async fn copy_insert_feed_items(
                 post_uri text NOT NULL,
                 originator_did text NOT NULL,
                 sort_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_feed_item",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_feed_item", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -709,7 +700,7 @@ pub async fn copy_insert_likes(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_like (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -718,12 +709,10 @@ pub async fn copy_insert_likes(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_like",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_like", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -816,7 +805,7 @@ pub async fn copy_insert_follows(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_follow (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -824,12 +813,10 @@ pub async fn copy_insert_follows(
                 subject_did text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_follow",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_follow", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -948,7 +935,7 @@ pub async fn copy_insert_reposts(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_repost (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -957,12 +944,10 @@ pub async fn copy_insert_reposts(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_repost",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_repost", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -1054,7 +1039,7 @@ pub async fn copy_insert_quotes(
 
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_quote (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -1062,12 +1047,10 @@ pub async fn copy_insert_quotes(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_quote",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_quote", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     let copy_start = Instant::now();
@@ -1153,7 +1136,7 @@ pub async fn copy_insert_blocks(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_block (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -1161,12 +1144,10 @@ pub async fn copy_insert_blocks(
                 subject text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_block",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_block", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -1242,19 +1223,15 @@ pub async fn copy_insert_post_embed_images(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_image (
                 post_uri text NOT NULL,
                 position text NOT NULL,
                 image_cid text NOT NULL,
                 alt text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post_embed_image",
         )
-        .await?;
-
-    client
-        .execute("TRUNCATE _bulk_post_embed_image", &[])
         .await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
@@ -1326,18 +1303,14 @@ pub async fn copy_insert_post_embed_videos(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_video (
                 post_uri text NOT NULL,
                 video_cid text NOT NULL,
                 alt text
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post_embed_video",
         )
-        .await?;
-
-    client
-        .execute("TRUNCATE _bulk_post_embed_video", &[])
         .await?;
     let setup_ms = setup_start.elapsed().as_millis();
 

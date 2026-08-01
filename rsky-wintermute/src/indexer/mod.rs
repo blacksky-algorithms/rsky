@@ -7,7 +7,10 @@ use crate::config::{
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
-use crate::config::{FIREHOSE_LIVE_DRAIN_BATCH, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS};
+use crate::config::{
+    FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
+    LIVE_LIKE_SERIALIZE,
+};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
@@ -91,12 +94,20 @@ impl IndexerManager {
         // Create separate pools for each stream to prevent starvation
         // Backfill gets 50% of connections since it's the main bottleneck
         let backfill_pool_size = pool_size / 2;
-        let live_pool_size = pool_size / 4;
+        // Each live shard can hold up to 8 connections at once and deadpool has
+        // no acquire timeout, so the pool must always cover every shard fully.
+        let live_shards = *FIREHOSE_LIVE_SHARDS;
+        let live_pool_size = if live_shards > 1 {
+            (pool_size / 4).max(live_shards * 8)
+        } else {
+            pool_size / 4
+        };
         let labels_pool_size = pool_size / 4;
 
         tracing::info!(
-            "indexer DB pools: live={}, backfill={}, labels={}",
+            "indexer DB pools: live={} (shards={}), backfill={}, labels={}",
             live_pool_size,
+            live_shards,
             backfill_pool_size,
             labels_pool_size
         );
@@ -379,17 +390,23 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                self.storage
+                    .wait_for_live_enqueue(Duration::from_millis(50))
+                    .await;
                 continue;
             }
 
             let prefetch = dequeue(Arc::clone(&self.storage));
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
-            let (results, _batch_failed) =
-                Box::pin(Self::process_jobs_batch(&self.pool_live, &batch, bulk_mode)).await;
+            let shard_batches = Self::shard_live_jobs(batch, *FIREHOSE_LIVE_SHARDS);
+            let results =
+                Self::process_live_shards(&self.pool_live, &shard_batches, bulk_mode).await;
             prefetched = prefetch.await.ok().and_then(Result::ok);
-            let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> =
-                batch.iter().map(|(k, j)| (k.as_slice(), j)).collect();
+            let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> = shard_batches
+                .iter()
+                .flatten()
+                .map(|(k, j)| (k.as_slice(), j))
+                .collect();
             for (key, result) in results {
                 processed_count += 1;
                 if let Err(e) = result {
@@ -424,6 +441,49 @@ impl IndexerManager {
                 last_log = std::time::Instant::now();
             }
         }
+    }
+
+    /// Partition a live batch by repo DID so each shard owns every job for its
+    /// repos: per-repo ordering and same-URI pairing survive concurrent shards.
+    fn shard_live_jobs(
+        batch: Vec<(Vec<u8>, IndexJob)>,
+        shards: usize,
+    ) -> Vec<Vec<(Vec<u8>, IndexJob)>> {
+        if shards <= 1 {
+            return vec![batch];
+        }
+        let mut out: Vec<Vec<(Vec<u8>, IndexJob)>> = (0..shards).map(|_| Vec::new()).collect();
+        let shard_count = shards as u64;
+        for entry in batch {
+            let shard = {
+                let did = entry.1.uri.split('/').nth(2).unwrap_or(&entry.1.uri);
+                let mut hasher = std::hash::DefaultHasher::new();
+                std::hash::Hash::hash(did, &mut hasher);
+                usize::try_from(std::hash::Hasher::finish(&hasher) % shard_count).unwrap_or(0)
+            };
+            out[shard].push(entry);
+        }
+        out
+    }
+
+    /// Run `process_jobs_batch` for every non-empty shard concurrently and
+    /// merge the per-job results. Awaiting all shards before the next dequeue
+    /// keeps per-repo ordering intact across batches.
+    async fn process_live_shards(
+        pool: &Pool,
+        shard_batches: &[Vec<(Vec<u8>, IndexJob)>],
+        bulk_mode: bool,
+    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+        futures::future::join_all(
+            shard_batches
+                .iter()
+                .filter(|shard| !shard.is_empty())
+                .map(|shard| Box::pin(Self::process_jobs_batch(pool, shard, bulk_mode))),
+        )
+        .await
+        .into_iter()
+        .flat_map(|(results, _batch_failed)| results)
+        .collect()
     }
 
     async fn process_firehose_backfill_loop(&self) {
@@ -2682,7 +2742,7 @@ impl IndexerManager {
 
         // Serialize live like inserts across workers (the like index causes contention).
         // The bulk CAR load runs with indexes dropped, so the semaphore would only throttle it.
-        let _permit = if bulk_load {
+        let _permit = if bulk_load || !*LIVE_LIKE_SERIALIZE {
             None
         } else {
             Some(LIKE_INSERT_SEMAPHORE.acquire().await)
@@ -2958,7 +3018,7 @@ impl IndexerManager {
                 bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
             },
             async {
-                if !compute_agg {
+                if !compute_agg || (notif_rows.is_empty() && reply_posts.is_empty()) {
                     return Ok(());
                 }
                 let conn = pool.get().await.map_err(WintermuteError::Pool)?;

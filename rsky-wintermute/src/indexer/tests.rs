@@ -2515,4 +2515,293 @@ mod indexer_tests {
             cleanup_test_data(&pool, did).await;
         }
     }
+
+    #[test]
+    fn shard_live_jobs_is_deterministic_and_did_sticky() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let job = |did: &str, rkey: &str| IndexJob {
+            uri: format!("at://{did}/app.bsky.feed.post/{rkey}"),
+            cid: "cid".to_owned(),
+            action: WriteAction::Create,
+            record: None,
+            indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
+            rev: "3a".to_owned(),
+        };
+        let batch: Vec<(Vec<u8>, IndexJob)> = (0u8..40)
+            .map(|i| {
+                let did = format!("did:plc:sharddid{}", i % 7);
+                (vec![i], job(&did, &format!("r{i}")))
+            })
+            .collect();
+
+        let single = IndexerManager::shard_live_jobs(batch.clone(), 1);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].len(), 40);
+
+        let shards = IndexerManager::shard_live_jobs(batch.clone(), 4);
+        assert_eq!(shards.len(), 4);
+        assert_eq!(shards.iter().map(Vec::len).sum::<usize>(), 40);
+
+        let mut did_to_shard = std::collections::HashMap::new();
+        for (idx, shard) in shards.iter().enumerate() {
+            for (_, j) in shard {
+                let did = j.uri.split('/').nth(2).unwrap().to_owned();
+                if let Some(prev) = did_to_shard.insert(did, idx) {
+                    assert_eq!(prev, idx, "did split across shards");
+                }
+            }
+        }
+        assert!(
+            did_to_shard
+                .values()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
+            "test dids all hashed to one shard"
+        );
+
+        let again = IndexerManager::shard_live_jobs(batch, 4);
+        for (a, b) in shards.iter().zip(again.iter()) {
+            assert!(
+                a.iter().map(|(k, _)| k).eq(b.iter().map(|(k, _)| k)),
+                "shard assignment not deterministic"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_enqueue_wakes_waiting_drain() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let (storage, _dir) = setup_test_storage();
+        let storage = Arc::new(storage);
+        let job = IndexJob {
+            uri: "at://did:plc:wintermute-test-wakeup/app.bsky.feed.post/r1".to_owned(),
+            cid: "cid".to_owned(),
+            action: WriteAction::Create,
+            record: None,
+            indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
+            rev: "3a".to_owned(),
+        };
+
+        // An enqueue from a plain thread stores a permit even with no waiter,
+        // so the subsequent wait completes without consuming the timeout.
+        let enqueuer = {
+            let storage = Arc::clone(&storage);
+            let job = job.clone();
+            std::thread::spawn(move || storage.enqueue_firehose_live(&job).unwrap())
+        };
+        enqueuer.join().unwrap();
+
+        let start = std::time::Instant::now();
+        storage
+            .wait_for_live_enqueue(std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "stored notify permit did not wake the waiter"
+        );
+
+        let start = std::time::Instant::now();
+        storage
+            .wait_for_live_enqueue(std::time::Duration::from_millis(20))
+            .await;
+        assert!(start.elapsed() >= std::time::Duration::from_millis(20));
+    }
+
+    async fn shard_pass_snapshot(
+        pool: &Pool,
+        post_uris: &[String],
+        authors: &[String],
+    ) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+        let client = pool.get().await.unwrap();
+        let mut like_rows = Vec::new();
+        let mut like_counts = Vec::new();
+        for uri in post_uris {
+            let rows: i64 = client
+                .query_one("SELECT COUNT(*) FROM \"like\" WHERE subject = $1", &[&uri])
+                .await
+                .unwrap()
+                .get(0);
+            like_rows.push(rows);
+            let agg: i64 = client
+                .query_one(
+                    "SELECT COALESCE((SELECT \"likeCount\" FROM post_agg WHERE uri = $1), 0)",
+                    &[&uri],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            like_counts.push(agg);
+        }
+        let mut notif_counts = Vec::new();
+        for did in authors {
+            let n: i64 = client
+                .query_one(
+                    "SELECT COUNT(*) FROM notification WHERE did = $1 AND reason = 'like'",
+                    &[&did],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            notif_counts.push(n);
+        }
+        (like_rows, like_counts, notif_counts)
+    }
+
+    async fn run_shard_pass(
+        pool: &Pool,
+        jobs: &[(Vec<u8>, crate::types::IndexJob)],
+        shards: usize,
+    ) {
+        let shard_batches = IndexerManager::shard_live_jobs(jobs.to_vec(), shards);
+        let results = IndexerManager::process_live_shards(pool, &shard_batches, false).await;
+        assert_eq!(results.len(), jobs.len());
+        for (_, r) in &results {
+            assert!(r.is_ok(), "job failed: {r:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sharded_live_drain_matches_single_shard_results() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let authors: Vec<String> = (0..3)
+            .map(|i| format!("did:plc:wintermute-test-shard-author{i}"))
+            .collect();
+        let likers: Vec<String> = (0..3)
+            .map(|i| format!("did:plc:wintermute-test-shard-liker{i}"))
+            .collect();
+        let all_dids: Vec<&str> = authors
+            .iter()
+            .chain(likers.iter())
+            .map(String::as_str)
+            .collect();
+
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned();
+        let ts = "2026-08-01T00:00:00.000Z".to_owned();
+        let post_uris: Vec<String> = authors
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("at://{a}/app.bsky.feed.post/shardpost{i}"))
+            .collect();
+        let toggle_uri = format!("at://{}/app.bsky.feed.like/shardtoggle", likers[0]);
+
+        let mut jobs: Vec<(Vec<u8>, IndexJob)> = Vec::new();
+        let mut key = 0u8;
+        let mut push = |jobs: &mut Vec<(Vec<u8>, IndexJob)>,
+                        uri: String,
+                        action: WriteAction,
+                        record: Option<serde_json::Value>,
+                        rev: &str| {
+            key += 1;
+            jobs.push((
+                vec![key],
+                IndexJob {
+                    uri,
+                    cid: cid.clone(),
+                    action,
+                    record,
+                    indexed_at: ts.clone(),
+                    rev: rev.to_owned(),
+                },
+            ));
+        };
+        for (i, uri) in post_uris.iter().enumerate() {
+            let record = serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": format!("shard post {i}"),
+                "createdAt": ts,
+            });
+            push(
+                &mut jobs,
+                uri.clone(),
+                WriteAction::Create,
+                Some(record),
+                "3a",
+            );
+        }
+        for (i, post_uri) in post_uris.iter().enumerate() {
+            for (j, liker) in likers.iter().enumerate() {
+                let record = serde_json::json!({
+                    "$type": "app.bsky.feed.like",
+                    "subject": {"uri": post_uri, "cid": cid},
+                    "createdAt": ts,
+                });
+                push(
+                    &mut jobs,
+                    format!("at://{liker}/app.bsky.feed.like/sl{i}{j}"),
+                    WriteAction::Create,
+                    Some(record),
+                    "3a",
+                );
+            }
+        }
+        let toggle_record = serde_json::json!({
+            "$type": "app.bsky.feed.like",
+            "subject": {"uri": post_uris[0], "cid": cid},
+            "createdAt": ts,
+        });
+        push(
+            &mut jobs,
+            toggle_uri.clone(),
+            WriteAction::Create,
+            Some(toggle_record),
+            "3a",
+        );
+        push(
+            &mut jobs,
+            toggle_uri.clone(),
+            WriteAction::Delete,
+            None,
+            "3b",
+        );
+
+        let mut snapshots = Vec::new();
+        for shards in [1usize, 3] {
+            for did in &all_dids {
+                cleanup_test_data(&pool, did).await;
+            }
+            let client = pool.get().await.unwrap();
+            for did in &all_dids {
+                client
+                    .execute(
+                        "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                         ON CONFLICT (did) DO NOTHING",
+                        &[&did],
+                    )
+                    .await
+                    .unwrap();
+            }
+            drop(client);
+
+            run_shard_pass(&pool, &jobs, shards).await;
+
+            let snap = shard_pass_snapshot(&pool, &post_uris, &authors).await;
+            // Exact counts: 3 likes per post; the toggled like must be gone.
+            assert_eq!(snap.0, vec![3, 3, 3], "like rows wrong at shards={shards}");
+            assert_eq!(snap.1, vec![3, 3, 3], "likeCount wrong at shards={shards}");
+            let client = pool.get().await.unwrap();
+            let toggle_left: i64 = client
+                .query_one(
+                    "SELECT COUNT(*) FROM \"like\" WHERE uri = $1",
+                    &[&toggle_uri],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(toggle_left, 0, "toggled like survived at shards={shards}");
+            snapshots.push(snap);
+        }
+        assert_eq!(
+            snapshots[0], snapshots[1],
+            "sharded results diverge from single-shard results"
+        );
+
+        for did in &all_dids {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
 }
