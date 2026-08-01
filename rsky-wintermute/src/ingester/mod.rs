@@ -757,6 +757,15 @@ impl IngesterManager {
                 }
             };
 
+            // Drop disallowed collections before they occupy the queue: junk
+            // record storms otherwise create crest lag for real events even
+            // though the indexer would discard them at parse.
+            let collection = op.path.split('/').next().unwrap_or("");
+            if !crate::config::record_collection_allowed(collection) {
+                crate::metrics::INGESTER_OPS_FILTERED_TOTAL.inc();
+                continue;
+            }
+
             // Build AT-URI from repo DID + record path
             let uri = format!("at://{}/{}", event.did, op.path);
 
@@ -851,6 +860,15 @@ impl IngesterManager {
                     continue;
                 }
             };
+
+            // Drop disallowed collections before they occupy the queue: junk
+            // record storms otherwise create crest lag for real events even
+            // though the indexer would discard them at parse.
+            let collection = op.path.split('/').next().unwrap_or("");
+            if !crate::config::record_collection_allowed(collection) {
+                crate::metrics::INGESTER_OPS_FILTERED_TOTAL.inc();
+                continue;
+            }
 
             // Build AT-URI from repo DID + record path
             let uri = format!("at://{}/{}", event.did, op.path);
