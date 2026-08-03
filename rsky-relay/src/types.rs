@@ -64,7 +64,13 @@ impl Recycle<Message> for MessageRecycle {
         Message { data: Bytes::new(), hostname: String::new() }
     }
 
-    fn recycle(&self, _: &mut Message) {}
+    // A released slot must drop its frame: retaining the Bytes turns the ring
+    // into a frame cache of capacity * frame_size, which reaches tens of GiB
+    // during large-commit floods.
+    fn recycle(&self, msg: &mut Message) {
+        msg.data = Bytes::new();
+        msg.hostname.clear();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
