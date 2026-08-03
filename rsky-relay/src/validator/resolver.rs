@@ -38,6 +38,10 @@ pub trait IdentityResolver: Send {
 const POLL_TIMEOUT: Duration = Duration::from_micros(10);
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
+// Hard ceiling on concurrent DID fetches: event floods from never-before-seen
+// DIDs must not grow the future set without bound. Skipped DIDs retry on
+// their next event once capacity frees.
+const MAX_INFLIGHT_FETCHES: usize = 4096;
 
 const PLC_URL: &str = "https://plc.directory";
 const PLC_EXPORT: &str = "export?count=1000&after";
@@ -73,6 +77,10 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new() -> Result<Self, ResolverError> {
+        Self::with_db_path("plc_directory.db")
+    }
+
+    fn with_db_path(db_path: &str) -> Result<Self, ResolverError> {
         #[expect(clippy::unwrap_used)]
         let cache = LruCache::new(NonZeroUsize::new(CAPACITY_CACHE).unwrap());
         let flag = if *DO_PLC_EXPORT {
@@ -80,8 +88,7 @@ impl Resolver {
         } else {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         };
-        let conn =
-            Connection::open_with_flags("plc_directory.db", flag | OpenFlags::SQLITE_OPEN_CREATE)?;
+        let conn = Connection::open_with_flags(db_path, flag | OpenFlags::SQLITE_OPEN_CREATE)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;")?;
         if *DO_PLC_EXPORT {
@@ -169,29 +176,34 @@ impl Resolver {
     }
 
     fn request_inner(&mut self, did: &str, force_direct: bool) {
-        self.inflight.insert(did.to_owned());
+        // One fetch per DID at a time, bounded overall: repeat events for a
+        // pending DID must not stack additional futures.
+        if self.inflight.contains(did) || self.futures.len() >= MAX_INFLIGHT_FETCHES {
+            return;
+        }
         if let Some(plc) = did.strip_prefix("did:plc:") {
             let plc = if *DO_PLC_EXPORT && !force_direct { None } else { Some(plc) };
-            self.send_req(None, plc);
+            self.inflight.insert(did.to_owned());
+            self.send_req(Some(did), None, plc);
         } else if let Some(web) = did.strip_prefix("did:web:") {
             let Ok(web) = urlencoding::decode(web) else {
                 tracing::debug!(%did, "invalid did");
                 return;
             };
-            self.send_req(Some(&web), None);
+            self.inflight.insert(did.to_owned());
+            self.send_req(Some(did), Some(&web), None);
         } else {
             tracing::debug!(%did, "invalid did");
-            self.inflight.remove(did);
         }
     }
 
-    fn send_req(&mut self, web: Option<&str>, plc: Option<&str>) {
-        let (req, query) = if let Some(web) = web {
+    fn send_req(&mut self, did: Option<&str>, web: Option<&str>, plc: Option<&str>) {
+        let (req, query) = if let (Some(did), Some(web)) = (did, web) {
             tracing::trace!("fetching did");
-            (self.client.get(format!("https://{web}/{DOC_PATH}")), Query::Did(web.to_owned()))
-        } else if let Some(plc) = plc {
+            (self.client.get(format!("https://{web}/{DOC_PATH}")), Query::Did(did.to_owned()))
+        } else if let (Some(did), Some(plc)) = (did, plc) {
             tracing::trace!("fetching did");
-            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Query::Did(plc.to_owned()))
+            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Query::Did(did.to_owned()))
         } else if let Some(after) = self.after.take() {
             tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
@@ -215,12 +227,14 @@ impl Resolver {
             match res {
                 Ok(bytes) => match query {
                     Query::Did(query) => {
+                        // Clear inflight on every fetch outcome so the DID can
+                        // be retried; a stuck entry would pin it unresolved.
+                        self.inflight.remove(&query);
                         if let Some((did, (pds, key))) = parse_did_doc(&bytes) {
-                            if query != did[8..] {
-                                tracing::warn!(%query, found = %&did[8..], "did query mismatch");
+                            if query != did {
+                                tracing::warn!(%query, %did, "did query mismatch");
                                 return Ok(Vec::new());
                             }
-                            self.inflight.remove(&did);
                             self.cache.put(did.clone(), (pds, key));
                             return Ok(vec![did]);
                         }
@@ -250,7 +264,7 @@ impl Resolver {
                         drop(stmt);
                         tx.commit()?;
                         if count == 1000 {
-                            self.send_req(None, None);
+                            self.send_req(None, None, None);
                         } else {
                             // no more plc operations, drain inflight dids
                             dids.extend(
@@ -262,14 +276,20 @@ impl Resolver {
                 },
                 Err(err) => {
                     tracing::debug!(%err, "fetch error");
-                    // Restore the after cursor on export failure so exports can be retried
-                    if let Query::Export(after) = query {
-                        self.after = Some(after);
+                    match query {
+                        // Restore the after cursor on export failure so exports can be retried
+                        Query::Export(after) => {
+                            self.after = Some(after);
+                        }
+                        // Clear inflight on failed DID fetches so they can be retried
+                        Query::Did(query) => {
+                            self.inflight.remove(&query);
+                        }
                     }
                 }
             }
         } else if *DO_PLC_EXPORT && self.last.elapsed() > PLC_EXPORT_INTERVAL {
-            self.send_req(None, None);
+            self.send_req(None, None, None);
         }
         Ok(Vec::new())
     }
@@ -475,5 +495,57 @@ mod tests {
             Some((Some(pds), _key)) => assert_eq!(pds.as_ref(), "pds.example.com"),
             other => panic!("expected Some endpoint, got {other:?}"),
         }
+    }
+
+    fn test_resolver(dir: &tempfile::TempDir) -> Resolver {
+        let db_path = dir.path().join("plc_directory.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE plc_operations (cid TEXT, did TEXT, created_at TEXT, nullified INT, operation BLOB);
+             CREATE TABLE plc_keys (did TEXT PRIMARY KEY, pds_endpoint TEXT, pds_key TEXT, labeler_endpoint TEXT, labeler_key TEXT);
+             INSERT INTO plc_operations (cid, did, created_at, nullified, operation)
+             VALUES ('cid', 'did:plc:seed', '2026-01-01T00:00:00Z', 0, x'7b7d');",
+        )
+        .unwrap();
+        drop(conn);
+        Resolver::with_db_path(db_path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn repeat_requests_for_pending_did_do_not_stack_futures() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        for _ in 0..5 {
+            resolver.request_direct("did:web:pds.example.com");
+        }
+        assert_eq!(resolver.futures.len(), 1);
+        assert_eq!(resolver.inflight.len(), 1);
+        for _ in 0..5 {
+            resolver.request_direct("did:plc:aaaabbbbccccdddd");
+        }
+        assert_eq!(resolver.futures.len(), 2);
+        assert_eq!(resolver.inflight.len(), 2);
+    }
+
+    #[test]
+    fn distinct_did_fetches_are_capped() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        for i in 0..(MAX_INFLIGHT_FETCHES + 10) {
+            resolver.request_direct(&format!("did:web:host{i}.example.com"));
+        }
+        assert_eq!(resolver.futures.len(), MAX_INFLIGHT_FETCHES);
+        assert_eq!(resolver.inflight.len(), MAX_INFLIGHT_FETCHES);
+    }
+
+    #[test]
+    fn invalid_did_leaves_no_inflight_entry() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        resolver.request_direct("did:example:nonsense");
+        resolver.request_direct("not-a-did");
+        assert_eq!(resolver.futures.len(), 0);
+        assert_eq!(resolver.inflight.len(), 0);
     }
 }
