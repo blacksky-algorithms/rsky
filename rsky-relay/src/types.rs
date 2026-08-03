@@ -262,15 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn message_recycle_no_op() {
+    fn message_recycle_clears_slot() {
         let recycler = MessageRecycle;
         let mut msg = recycler.new_element();
         msg.data = Bytes::from_static(b"x");
         msg.hostname = "h".to_owned();
-        // recycle is a no-op; message must be untouched.
+        // recycle must drop the frame so released ring slots hold no data
         recycler.recycle(&mut msg);
-        assert_eq!(msg.data, Bytes::from_static(b"x"));
-        assert_eq!(msg.hostname, "h");
+        assert!(msg.data.is_empty());
+        assert!(msg.hostname.is_empty());
     }
 
     #[test]
