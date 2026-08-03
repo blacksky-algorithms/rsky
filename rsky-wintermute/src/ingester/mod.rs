@@ -406,6 +406,10 @@ impl IngesterManager {
                     .with_label_values(&["firehose_live"])
                     .inc();
 
+                if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&event.time) {
+                    metrics::INGESTER_LAST_EVENT_TIME_SECONDS.set(t.timestamp());
+                }
+
                 // Handle identity events separately (handle changes, key rotations)
                 if event.kind == "identity" {
                     let pool_clone = Arc::clone(pool);
