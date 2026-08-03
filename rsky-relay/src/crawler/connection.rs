@@ -70,7 +70,9 @@ impl Connection {
     // true: polled
     pub fn poll(&mut self) -> Result<bool, ConnectionError> {
         for _ in 0..128 {
-            if self.message_tx.remaining() < 16 {
+            if self.message_tx.remaining() < 16
+                || crate::types::intake_bytes() > crate::config::INTAKE_BYTE_BUDGET
+            {
                 return Ok(false);
             }
 
@@ -98,6 +100,7 @@ impl Connection {
             };
 
             let mut slot = self.message_tx.send_ref()?;
+            crate::types::intake_bytes_add(bytes.len());
             slot.data = bytes;
             slot.hostname.clone_from(&self.hostname);
         }

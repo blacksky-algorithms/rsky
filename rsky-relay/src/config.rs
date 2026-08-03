@@ -21,6 +21,7 @@ pub static METRICS_LISTEN: LazyLock<Option<String>> =
 // Bounds unconsumed intake to capacity * frame_size while the validator lags;
 // crawler backpressure engages when the ring nears full.
 pub const CAPACITY_MSGS: usize = 1 << 13;
+pub const INTAKE_BYTE_BUDGET: usize = 2 * 1024 * 1024 * 1024;
 pub const CAPACITY_REQS: usize = 1 << 12;
 pub const CAPACITY_STATUS: usize = 1 << 10;
 pub const WORKERS_CRAWLERS: usize = 4;

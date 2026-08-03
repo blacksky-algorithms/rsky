@@ -67,10 +67,36 @@ impl Recycle<Message> for MessageRecycle {
     // A released slot must drop its frame: retaining the Bytes turns the ring
     // into a frame cache of capacity * frame_size, which reaches tens of GiB
     // during large-commit floods.
-    fn recycle(&self, msg: &mut Message) {
-        msg.data = Bytes::new();
-        msg.hostname.clear();
+    fn recycle(&self, element: &mut Message) {
+        element.data = Bytes::new();
+        element.hostname.clear();
     }
+}
+
+// Unconsumed intake bytes across the ring. Slot count alone cannot bound
+// memory because commit frames vary from bytes to many megabytes; crawlers
+// pause reading once this passes the budget.
+static INFLIGHT_INTAKE_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub fn intake_bytes_add(len: usize) {
+    INFLIGHT_INTAKE_BYTES.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn intake_bytes_sub(len: usize) {
+    #[expect(clippy::unwrap_used)]
+    INFLIGHT_INTAKE_BYTES
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |v| Some(v.saturating_sub(len)),
+        )
+        .unwrap();
+}
+
+#[must_use]
+pub fn intake_bytes() -> usize {
+    INFLIGHT_INTAKE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -271,6 +297,18 @@ mod tests {
         recycler.recycle(&mut msg);
         assert!(msg.data.is_empty());
         assert!(msg.hostname.is_empty());
+    }
+
+    #[test]
+    fn intake_byte_accounting_saturates_at_zero() {
+        let before = intake_bytes();
+        intake_bytes_add(10);
+        assert_eq!(intake_bytes(), before + 10);
+        intake_bytes_sub(before + 25);
+        assert_eq!(intake_bytes(), 0);
+        intake_bytes_add(7);
+        intake_bytes_sub(7);
+        assert_eq!(intake_bytes(), 0);
     }
 
     #[test]

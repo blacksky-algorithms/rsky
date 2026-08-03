@@ -203,6 +203,7 @@ impl<R: IdentityResolver> Manager<R> {
             };
 
             let host = &msg.hostname;
+            crate::types::intake_bytes_sub(msg.data.len());
             let span = tracing::info_span!("msg_recv", %host, len = %msg.data.len());
             let _enter = span.enter();
             let event = match SubscribeReposEvent::parse(&msg.data) {
