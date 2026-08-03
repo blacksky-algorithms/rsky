@@ -1990,14 +1990,16 @@ mod indexer_tests {
             .await
             .unwrap();
 
-        let follow = (
-            format!("at://{creator}/app.bsky.graph.follow/aggfollow1"),
-            "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
-            creator.to_owned(),
-            subject.to_owned(),
-            "2026-07-30T00:00:00.000Z".to_owned(),
-            "2026-07-30T00:00:00.000Z".to_owned(),
-        );
+        let follow = bulk::FollowCopyRow {
+            uri: format!("at://{creator}/app.bsky.graph.follow/aggfollow1"),
+            cid: "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            creator: creator.to_owned(),
+            subject_did: subject.to_owned(),
+            created_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            indexed_at: "2026-07-30T00:00:00.000Z".to_owned(),
+            via: None,
+            via_cid: None,
+        };
         bulk::copy_insert_follows(&client, std::slice::from_ref(&follow), true)
             .await
             .unwrap();
@@ -2181,15 +2183,17 @@ mod indexer_tests {
 
         // Batch likes and reposts of the parent: likeCount/repostCount exact
         // across replays.
-        let like = (
-            format!("at://{author}/app.bsky.feed.like/notiflike"),
-            cid.clone(),
-            author.to_owned(),
-            parent_uri.clone(),
-            cid.clone(),
-            ts.clone(),
-            ts.clone(),
-        );
+        let like = bulk::SubjectRecordRow {
+            uri: format!("at://{author}/app.bsky.feed.like/notiflike"),
+            cid: cid.clone(),
+            creator: author.to_owned(),
+            subject: parent_uri.clone(),
+            subject_cid: cid.clone(),
+            created_at: ts.clone(),
+            indexed_at: ts.clone(),
+            via: None,
+            via_cid: None,
+        };
         let like_applied = bulk::copy_insert_likes(&client, std::slice::from_ref(&like), true)
             .await
             .unwrap();
@@ -2199,15 +2203,17 @@ mod indexer_tests {
             .unwrap();
         assert!(like_replayed.is_empty());
 
-        let repost = (
-            format!("at://{author}/app.bsky.feed.repost/notifrepost"),
-            cid.clone(),
-            author.to_owned(),
-            parent_uri.clone(),
-            cid.clone(),
-            ts.clone(),
-            ts.clone(),
-        );
+        let repost = bulk::SubjectRecordRow {
+            uri: format!("at://{author}/app.bsky.feed.repost/notifrepost"),
+            cid: cid.clone(),
+            creator: author.to_owned(),
+            subject: parent_uri.clone(),
+            subject_cid: cid.clone(),
+            created_at: ts.clone(),
+            indexed_at: ts.clone(),
+            via: None,
+            via_cid: None,
+        };
         bulk::copy_insert_reposts(&client, std::slice::from_ref(&repost), true)
             .await
             .unwrap();
@@ -2800,6 +2806,115 @@ mod indexer_tests {
         );
 
         for did in &all_dids {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn via_attribution_persists_from_batch_path() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let author = "did:plc:wintermute-test-via-author";
+        let actor = "did:plc:wintermute-test-via-actor";
+        for did in [author, actor] {
+            cleanup_test_data(&pool, did).await;
+        }
+        let client = pool.get().await.unwrap();
+        for did in [author, actor] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+        drop(client);
+
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let ts = "2026-08-03T00:00:00.000Z";
+        let post_uri = format!("at://{author}/app.bsky.feed.post/viapost");
+        let via_uri = format!("at://{author}/app.bsky.feed.repost/viasource");
+        let subject = serde_json::json!({"uri": post_uri, "cid": cid});
+        let via = serde_json::json!({"uri": via_uri, "cid": cid});
+
+        let job = |coll: &str, rkey: &str, record: serde_json::Value| IndexJob {
+            uri: format!("at://{actor}/{coll}/{rkey}"),
+            cid: cid.to_owned(),
+            action: WriteAction::Create,
+            record: Some(record),
+            indexed_at: ts.to_owned(),
+            rev: "3a".to_owned(),
+        };
+        let jobs = vec![
+            (
+                b"v1".to_vec(),
+                job(
+                    "app.bsky.feed.like",
+                    "withvia",
+                    serde_json::json!({"$type": "app.bsky.feed.like", "subject": subject, "via": via, "createdAt": ts}),
+                ),
+            ),
+            (
+                b"v2".to_vec(),
+                job(
+                    "app.bsky.feed.like",
+                    "novia",
+                    serde_json::json!({"$type": "app.bsky.feed.like", "subject": {"uri": format!("at://{author}/app.bsky.feed.post/viapost2"), "cid": cid}, "createdAt": ts}),
+                ),
+            ),
+            (
+                b"v3".to_vec(),
+                job(
+                    "app.bsky.feed.repost",
+                    "withvia",
+                    serde_json::json!({"$type": "app.bsky.feed.repost", "subject": subject, "via": via, "createdAt": ts}),
+                ),
+            ),
+            (
+                b"v4".to_vec(),
+                job(
+                    "app.bsky.graph.follow",
+                    "withvia",
+                    serde_json::json!({"$type": "app.bsky.graph.follow", "subject": author, "via": via, "createdAt": ts}),
+                ),
+            ),
+        ];
+        let (results, batch_failed) = IndexerManager::process_jobs_batch(&pool, &jobs, false).await;
+        assert!(!batch_failed);
+        for (_, r) in &results {
+            assert!(r.is_ok(), "job failed: {r:?}");
+        }
+
+        let client = pool.get().await.unwrap();
+        for (table, coll, rkey, expect_via) in [
+            ("\"like\"", "app.bsky.feed.like", "withvia", true),
+            ("\"like\"", "app.bsky.feed.like", "novia", false),
+            ("repost", "app.bsky.feed.repost", "withvia", true),
+            ("follow", "app.bsky.graph.follow", "withvia", true),
+        ] {
+            let uri = format!("at://{actor}/{coll}/{rkey}");
+            let row = client
+                .query_one(
+                    &format!("SELECT via, \"viaCid\" FROM {table} WHERE uri = $1"),
+                    &[&uri],
+                )
+                .await
+                .unwrap();
+            let got_via: Option<String> = row.get(0);
+            let got_via_cid: Option<String> = row.get(1);
+            if expect_via {
+                assert_eq!(got_via.as_deref(), Some(via_uri.as_str()), "{uri}");
+                assert_eq!(got_via_cid.as_deref(), Some(cid), "{uri}");
+            } else {
+                assert!(got_via.is_none() && got_via_cid.is_none(), "{uri}");
+            }
+        }
+        drop(client);
+
+        for did in [author, actor] {
             cleanup_test_data(&pool, did).await;
         }
     }

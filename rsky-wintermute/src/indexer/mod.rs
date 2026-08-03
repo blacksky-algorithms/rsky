@@ -3198,8 +3198,7 @@ impl IndexerManager {
             return Ok(());
         }
 
-        let mut like_data: Vec<(String, String, String, String, String, String, String)> =
-            Vec::with_capacity(jobs.len());
+        let mut like_data: Vec<bulk::SubjectRecordRow> = Vec::with_capacity(jobs.len());
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
 
         for pj in jobs {
@@ -3218,6 +3217,7 @@ impl IndexerManager {
                     .get("createdAt")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&pj.job.indexed_at);
+                let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
                     &mut notif_rows,
@@ -3231,15 +3231,17 @@ impl IndexerManager {
                     "like-via-repost",
                 );
 
-                like_data.push((
+                like_data.push(bulk::SubjectRecordRow {
                     uri,
-                    pj.job.cid.clone(),
-                    pj.did.clone(),
-                    subject_uri.to_owned(),
-                    subject_cid.to_owned(),
-                    created_at.to_owned(),
-                    pj.job.indexed_at.clone(),
-                ));
+                    cid: pj.job.cid.clone(),
+                    creator: pj.did.clone(),
+                    subject: subject_uri.to_owned(),
+                    subject_cid: subject_cid.to_owned(),
+                    created_at: created_at.to_owned(),
+                    indexed_at: pj.job.indexed_at.clone(),
+                    via,
+                    via_cid,
+                });
 
                 metrics::INDEXER_LIKE_EVENTS_TOTAL.inc();
             }
@@ -3266,6 +3268,19 @@ impl IndexerManager {
         }
         let conn = pool.get().await.map_err(WintermuteError::Pool)?;
         bulk::copy_insert_notifications(&conn, notif_rows).await
+    }
+
+    /// Extract via attribution `{uri, cid}` from a like/repost/follow record.
+    fn extract_via(record: &serde_json::Value) -> (Option<String>, Option<String>) {
+        let via = record.get("via");
+        (
+            via.and_then(|v| v.get("uri"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            via.and_then(|v| v.get("cid"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        )
     }
 
     /// Collect subject + via notifications for a like or repost record,
@@ -3334,8 +3349,7 @@ impl IndexerManager {
             return Ok(());
         }
 
-        let mut follow_data: Vec<(String, String, String, String, String, String)> =
-            Vec::with_capacity(jobs.len());
+        let mut follow_data: Vec<bulk::FollowCopyRow> = Vec::with_capacity(jobs.len());
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
 
         for pj in jobs {
@@ -3346,6 +3360,7 @@ impl IndexerManager {
                     .get("createdAt")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&pj.job.indexed_at);
+                let (via, via_cid) = Self::extract_via(record);
 
                 if !subject.is_empty() {
                     notif_rows.push(bulk::NotificationRow {
@@ -3359,14 +3374,16 @@ impl IndexerManager {
                     });
                 }
 
-                follow_data.push((
+                follow_data.push(bulk::FollowCopyRow {
                     uri,
-                    pj.job.cid.clone(),
-                    pj.did.clone(),
-                    subject.to_owned(),
-                    created_at.to_owned(),
-                    pj.job.indexed_at.clone(),
-                ));
+                    cid: pj.job.cid.clone(),
+                    creator: pj.did.clone(),
+                    subject_did: subject.to_owned(),
+                    created_at: created_at.to_owned(),
+                    indexed_at: pj.job.indexed_at.clone(),
+                    via,
+                    via_cid,
+                });
 
                 metrics::INDEXER_FOLLOW_EVENTS_TOTAL.inc();
             }
@@ -3392,8 +3409,7 @@ impl IndexerManager {
             return Ok(());
         }
 
-        let mut repost_data: Vec<(String, String, String, String, String, String, String)> =
-            Vec::with_capacity(jobs.len());
+        let mut repost_data: Vec<bulk::SubjectRecordRow> = Vec::with_capacity(jobs.len());
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
@@ -3420,6 +3436,7 @@ impl IndexerManager {
                 } else {
                     created_at.clone()
                 };
+                let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
                     &mut notif_rows,
@@ -3433,15 +3450,17 @@ impl IndexerManager {
                     "repost-via-repost",
                 );
 
-                repost_data.push((
-                    uri.clone(),
-                    pj.job.cid.clone(),
-                    pj.did.clone(),
-                    subject_uri.to_owned(),
-                    subject_cid.to_owned(),
+                repost_data.push(bulk::SubjectRecordRow {
+                    uri: uri.clone(),
+                    cid: pj.job.cid.clone(),
+                    creator: pj.did.clone(),
+                    subject: subject_uri.to_owned(),
+                    subject_cid: subject_cid.to_owned(),
                     created_at,
-                    pj.job.indexed_at.clone(),
-                ));
+                    indexed_at: pj.job.indexed_at.clone(),
+                    via,
+                    via_cid,
+                });
 
                 feed_item_data.push((
                     "repost".to_owned(),
@@ -4290,6 +4309,7 @@ impl IndexerManager {
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
+        let (via, via_cid) = Self::extract_via(record);
 
         // Ensure the follow subject also has an actor row (cached)
         if !subject.is_empty() && !ACTOR_CACHE.contains_key(subject) {
@@ -4301,10 +4321,10 @@ impl IndexerManager {
 
         let row_count = client
             .execute(
-                "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT DO NOTHING",
-                &[&uri, &cid, &did, &subject, &created_at, &indexed_at],
+                &[&uri, &cid, &did, &subject, &created_at, &indexed_at, &via, &via_cid],
             )
             .await?;
 

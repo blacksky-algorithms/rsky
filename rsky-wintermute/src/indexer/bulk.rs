@@ -79,6 +79,32 @@ pub struct PostCopyRow {
     pub tags: Option<String>,
 }
 
+/// A like or repost row for bulk `COPY`: strong-ref subject plus optional
+/// via attribution.
+pub struct SubjectRecordRow {
+    pub uri: String,
+    pub cid: String,
+    pub creator: String,
+    pub subject: String,
+    pub subject_cid: String,
+    pub created_at: String,
+    pub indexed_at: String,
+    pub via: Option<String>,
+    pub via_cid: Option<String>,
+}
+
+/// A follow row for bulk `COPY`: DID subject plus optional via attribution.
+pub struct FollowCopyRow {
+    pub uri: String,
+    pub cid: String,
+    pub creator: String,
+    pub subject_did: String,
+    pub created_at: String,
+    pub indexed_at: String,
+    pub via: Option<String>,
+    pub via_cid: Option<String>,
+}
+
 /// A notification destined for the `notification` table.
 pub struct NotificationRow {
     pub did: String,
@@ -686,7 +712,7 @@ pub async fn copy_insert_feed_items(
 /// Bulk insert likes using `COPY` protocol.
 pub async fn copy_insert_likes(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
+    data: &[SubjectRecordRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -708,7 +734,9 @@ pub async fn copy_insert_likes(
                 subject text NOT NULL,
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
             );
             TRUNCATE _bulk_like",
         )
@@ -718,24 +746,26 @@ pub async fn copy_insert_likes(
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
-    for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject = escape_copy_field(subject);
-        let subject_cid = escape_copy_field(subject_cid);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject = escape_copy_field(&row.subject);
+        let subject_cid = escape_copy_field(&row.subject_cid);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
+        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -749,8 +779,8 @@ pub async fn copy_insert_likes(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
+            "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid
              FROM _bulk_like
              ON CONFLICT DO NOTHING
              RETURNING uri, subject",
@@ -791,7 +821,7 @@ pub async fn copy_insert_likes(
 /// Bulk insert follows using `COPY` protocol.
 pub async fn copy_insert_follows(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
+    data: &[FollowCopyRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -812,7 +842,9 @@ pub async fn copy_insert_follows(
                 creator text NOT NULL,
                 subject_did text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
             );
             TRUNCATE _bulk_follow",
         )
@@ -822,23 +854,25 @@ pub async fn copy_insert_follows(
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_follow (uri, cid, creator, subject_did, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
+        .copy_in("COPY _bulk_follow (uri, cid, creator, subject_did, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 200);
-    for (uri, cid, creator, subject_did, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject_did = escape_copy_field(subject_did);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject_did = escape_copy_field(&row.subject_did);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_opt(row.via.as_deref());
+        let via_cid = escape_copy_opt(row.via_cid.as_deref());
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -852,8 +886,8 @@ pub async fn copy_insert_follows(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject_did, created_at, indexed_at
+            "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject_did, created_at, indexed_at, via, via_cid
              FROM _bulk_follow
              ON CONFLICT DO NOTHING
              RETURNING uri, creator, \"subjectDid\"",
@@ -921,7 +955,7 @@ pub async fn copy_insert_follows(
 /// Bulk insert reposts using `COPY` protocol.
 pub async fn copy_insert_reposts(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
+    data: &[SubjectRecordRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -943,7 +977,9 @@ pub async fn copy_insert_reposts(
                 subject text NOT NULL,
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
             );
             TRUNCATE _bulk_repost",
         )
@@ -953,24 +989,26 @@ pub async fn copy_insert_reposts(
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
-    for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject = escape_copy_field(subject);
-        let subject_cid = escape_copy_field(subject_cid);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject = escape_copy_field(&row.subject);
+        let subject_cid = escape_copy_field(&row.subject_cid);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
+        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -984,8 +1022,8 @@ pub async fn copy_insert_reposts(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
+            "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid
              FROM _bulk_repost
              ON CONFLICT DO NOTHING
              RETURNING uri, subject",
