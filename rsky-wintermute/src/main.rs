@@ -241,9 +241,24 @@ fn start_metrics_server(port: u16) -> Result<()> {
                                         color_eyre::eyre::eyre!("failed to build response: {e}")
                                     })?)
                             } else {
+                                let last_event = metrics::INGESTER_LAST_EVENT_TIME_SECONDS.get();
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0);
+                                // gauge at 0 = no event since boot; lag is unknown, not now-0.
+                                // clamped: event times are source-declared and can be skewed
+                                let lag = (last_event > 0).then(|| (now - last_event).max(0));
+                                let body = serde_json::json!({
+                                    "status": "ok",
+                                    "ingestLagSeconds": lag,
+                                    "indexerQueueLength":
+                                        metrics::INGESTER_FIREHOSE_LIVE_LENGTH.get(),
+                                });
                                 Ok(Response::builder()
                                     .status(200)
-                                    .body(Full::new(Bytes::from("ok")))
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(body.to_string())))
                                     .map_err(|e| {
                                         color_eyre::eyre::eyre!("failed to build response: {e}")
                                     })?)

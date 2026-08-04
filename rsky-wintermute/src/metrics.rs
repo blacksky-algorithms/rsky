@@ -18,6 +18,14 @@ pub static INGESTER_FIREHOSE_EVENTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::n
     .unwrap()
 });
 
+pub static INGESTER_LAST_EVENT_TIME_SECONDS: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "ingester_last_event_time_seconds",
+        "Unix timestamp of the most recent firehose event's declared time"
+    )
+    .unwrap()
+});
+
 pub static INGESTER_FIREHOSE_CREATE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "ingester_firehose_create_events_total",
