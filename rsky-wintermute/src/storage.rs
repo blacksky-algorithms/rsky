@@ -6,6 +6,7 @@ use heed::{Database as HeedDatabase, Env, EnvOpenOptions};
 use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// LMDB max map size: 4TB for `firehose_backfill` queue.
 /// Tests use 1GB: repeated 4TB reservations exhaust macOS address space.
@@ -21,6 +22,10 @@ pub struct Storage {
     firehose_events: PartitionHandle,
     repo_backfill: PartitionHandle,
     firehose_live: PartitionHandle,
+    // Sequence-keyed successor to `firehose_live`: monotonic u64 keys mean the
+    // read cursor only moves forward and dequeue tombstones are never
+    // re-scanned. The legacy uri-keyed partition drains first, then this one.
+    firehose_live_seq: PartitionHandle,
     label_live: PartitionHandle,
     cursors: PartitionHandle,
     // LMDB for firehose_backfill - eliminates L0 compaction stalls
@@ -30,6 +35,10 @@ pub struct Storage {
     // head and tombstones pile up there; scanning from the last dequeued key
     // (wrapping when exhausted) avoids re-walking them every batch.
     firehose_live_cursor: std::sync::Mutex<Option<Vec<u8>>>,
+    firehose_live_seq_cursor: std::sync::Mutex<Option<Vec<u8>>>,
+    live_seq_next: AtomicU64,
+    legacy_live_drained: AtomicBool,
+    live_notify: tokio::sync::Notify,
 }
 
 impl Storage {
@@ -102,6 +111,18 @@ impl Storage {
                 .block_size(BLOCK_SIZE),
         )?;
 
+        let firehose_live_seq = db.open_partition(
+            "firehose_live_seq",
+            PartitionCreateOptions::default()
+                .max_memtable_size(MEMTABLE_SIZE)
+                .block_size(BLOCK_SIZE),
+        )?;
+        let live_seq_start = firehose_live_seq.last_key_value()?.map_or(0, |(k, _)| {
+            k.as_ref()
+                .try_into()
+                .map_or(0, |b: [u8; 8]| u64::from_be_bytes(b).saturating_add(1))
+        });
+
         let label_live = db.open_partition(
             "label_live",
             PartitionCreateOptions::default()
@@ -144,11 +165,16 @@ impl Storage {
             firehose_events,
             repo_backfill,
             firehose_live,
+            firehose_live_seq,
             label_live,
             cursors,
             lmdb_env,
             firehose_backfill_db,
             firehose_live_cursor: std::sync::Mutex::new(None),
+            firehose_live_seq_cursor: std::sync::Mutex::new(None),
+            live_seq_next: AtomicU64::new(live_seq_start),
+            legacy_live_drained: AtomicBool::new(false),
+            live_notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -276,35 +302,33 @@ impl Storage {
         Ok(())
     }
 
-    // Firehose live queue (from ingester)
+    // Firehose live queue (from ingester); keys are monotonic so dequeue order
+    // is arrival order and the read cursor never revisits tombstones.
     pub fn enqueue_firehose_live(&self, job: &IndexJob) -> Result<(), WintermuteError> {
-        let key = format!(
-            "{}:{}",
-            job.uri,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
+        let seq = self.live_seq_next.fetch_add(1, Ordering::Relaxed);
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
-        self.firehose_live
-            .insert(key.as_bytes(), value.as_slice())?;
+        self.firehose_live_seq
+            .insert(seq.to_be_bytes(), value.as_slice())?;
         crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.inc();
+        self.live_notify.notify_one();
         Ok(())
     }
 
+    /// Block until an enqueue signals the live queue, or `timeout` elapses.
+    /// A permit stored by a `notify_one` that raced ahead completes immediately.
+    pub async fn wait_for_live_enqueue(&self, timeout: std::time::Duration) {
+        drop(tokio::time::timeout(timeout, self.live_notify.notified()).await);
+    }
+
     pub fn dequeue_firehose_live(&self) -> Result<Option<(Vec<u8>, IndexJob)>, WintermuteError> {
-        let mut iter = self.firehose_live.iter();
-        let Some(entry) = iter.next() else {
-            return Ok(None);
-        };
-        let (key, value) = entry?;
-        let key_vec = key.to_vec();
-        let job = ciborium::from_reader(value.as_ref())
-            .map_err(|e| WintermuteError::Serialization(format!("failed to deserialize: {e}")))?;
-        // Remove immediately to prevent re-dequeue race condition
-        self.firehose_live.remove(&key_vec)?;
-        crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.dec();
-        Ok(Some((key_vec, job)))
+        let mut batch = self.dequeue_firehose_live_batch(1)?;
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch.remove(0)))
+        }
     }
 
     #[allow(clippy::missing_const_for_fn)]
@@ -332,14 +356,93 @@ impl Storage {
         Ok(())
     }
 
-    /// Dequeue up to `limit` `firehose_live` jobs with a single sweep-cursor
-    /// range scan. Scanning resumes after the last dequeued key and wraps to
-    /// the partition start when exhausted, so each batch walks fresh keyspace
-    /// instead of re-skipping the tombstones of every prior batch. Per-record
-    /// ordering holds because keys are uri-first with a timestamp suffix.
+    /// Dequeue up to `limit` live jobs in arrival order. The legacy uri-keyed
+    /// partition drains completely first (existing entries predate the
+    /// sequence keys); afterwards the forward-only sequence scan starts after
+    /// the last dequeued key, so removal tombstones are never revisited.
+    pub fn dequeue_firehose_live_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let start = std::time::Instant::now();
+        let mut legacy = false;
+        let results = if self.legacy_live_drained.load(Ordering::Relaxed) {
+            self.dequeue_live_seq_batch(limit)?
+        } else {
+            let legacy_results = self.dequeue_live_legacy_batch(limit)?;
+            if legacy_results.is_empty() {
+                self.legacy_live_drained.store(true, Ordering::Relaxed);
+                tracing::info!("legacy firehose_live partition drained, switching to seq keys");
+                self.dequeue_live_seq_batch(limit)?
+            } else {
+                legacy = true;
+                legacy_results
+            }
+        };
+        let elapsed_ms = start.elapsed().as_millis();
+        if elapsed_ms > 1000 {
+            tracing::warn!(
+                "SLOW live dequeue: {elapsed_ms}ms for {} jobs (legacy={legacy})",
+                results.len()
+            );
+        }
+        Ok(results)
+    }
+
+    /// Forward-only scan of the sequence-keyed partition.
+    fn dequeue_live_seq_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        let cursor = self
+            .firehose_live_seq_cursor
+            .lock()
+            .map_or(None, |c| c.clone());
+
+        let mut results = Vec::with_capacity(limit);
+        let mut poisoned: Vec<Vec<u8>> = Vec::new();
+        if let Some(after) = cursor {
+            let range = (Bound::Excluded(after), Bound::<Vec<u8>>::Unbounded);
+            Self::collect_live_entries(
+                self.firehose_live_seq.range(range),
+                limit,
+                &mut results,
+                &mut poisoned,
+            )?;
+        } else {
+            Self::collect_live_entries(
+                self.firehose_live_seq.iter(),
+                limit,
+                &mut results,
+                &mut poisoned,
+            )?;
+        }
+
+        let last_key = results
+            .last()
+            .map(|(k, _)| k.clone())
+            .or_else(|| poisoned.last().cloned());
+        if let (Some(key), Ok(mut guard)) = (last_key, self.firehose_live_seq_cursor.lock()) {
+            *guard = Some(key);
+        }
+
+        for (key, _) in &results {
+            self.firehose_live_seq.remove(key.as_slice())?;
+        }
+        for key in &poisoned {
+            self.firehose_live_seq.remove(key.as_slice())?;
+        }
+
+        #[allow(clippy::cast_possible_wrap)]
+        crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.sub((results.len() + poisoned.len()) as i64);
+        Ok(results)
+    }
+
+    /// Sweep-cursor scan of the legacy uri-keyed partition: resumes after the
+    /// last dequeued key and wraps to the partition start when exhausted.
     /// Undeserializable entries are removed and skipped so a poison entry
     /// cannot wedge the sweep.
-    pub fn dequeue_firehose_live_batch(
+    fn dequeue_live_legacy_batch(
         &self,
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
@@ -861,7 +964,7 @@ impl Storage {
     }
 
     pub fn firehose_live_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.firehose_live.len()?)
+        Ok(self.firehose_live.len()? + self.firehose_live_seq.len()?)
     }
 
     pub fn firehose_backfill_len(&self) -> Result<usize, WintermuteError> {
@@ -1516,5 +1619,90 @@ mod tests {
         assert_eq!(storage.repo_backfill_len().unwrap(), 0);
         storage.clear_repo_backfill().unwrap();
         assert_eq!(storage.repo_backfill_len().unwrap(), 0);
+    }
+
+    fn live_job(uri: &str) -> IndexJob {
+        IndexJob {
+            uri: uri.to_owned(),
+            cid: "cid".to_owned(),
+            action: WriteAction::Create,
+            record: None,
+            indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
+            rev: "3a".to_owned(),
+        }
+    }
+
+    #[test]
+    fn live_queue_dequeues_in_arrival_order() {
+        let (storage, _dir) = setup_test_storage();
+        for i in 0..5 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/r{i}"
+                )))
+                .unwrap();
+        }
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(batch.len(), 5);
+        for (i, (key, job)) in batch.iter().enumerate() {
+            assert_eq!(job.uri, format!("at://did:plc:a/app.bsky.feed.post/r{i}"));
+            assert_eq!(key.len(), 8);
+        }
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/r5"))
+            .unwrap();
+        let next = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].1.uri, "at://did:plc:a/app.bsky.feed.post/r5");
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_queue_drains_legacy_partition_first() {
+        let (storage, _dir) = setup_test_storage();
+        for i in 0..3 {
+            let job = live_job(&format!("at://did:plc:legacy/app.bsky.feed.post/l{i}"));
+            let mut value = Vec::new();
+            ciborium::into_writer(&job, &mut value).unwrap();
+            storage
+                .firehose_live
+                .insert(format!("{}:{i}", job.uri).as_bytes(), value.as_slice())
+                .unwrap();
+        }
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:new/app.bsky.feed.post/n0"))
+            .unwrap();
+        assert_eq!(storage.firehose_live_len().unwrap(), 4);
+
+        let first = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|(_, j)| j.uri.contains("did:plc:legacy")));
+
+        let second = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].1.uri, "at://did:plc:new/app.bsky.feed.post/n0");
+        assert!(storage.legacy_live_drained.load(Ordering::Relaxed));
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn live_queue_keys_stay_monotonic_across_reopen() {
+        let temp_dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = temp_dir.path().join("test_db");
+        {
+            let storage = Storage::new(Some(db_path.clone())).unwrap();
+            storage
+                .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/first"))
+                .unwrap();
+        }
+        let storage = Storage::new(Some(db_path)).unwrap();
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/second"))
+            .unwrap();
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].1.uri, "at://did:plc:a/app.bsky.feed.post/first");
+        assert_eq!(batch[1].1.uri, "at://did:plc:a/app.bsky.feed.post/second");
+        assert!(batch[0].0 < batch[1].0);
     }
 }

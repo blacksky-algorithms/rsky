@@ -79,6 +79,32 @@ pub struct PostCopyRow {
     pub tags: Option<String>,
 }
 
+/// A like or repost row for bulk `COPY`: strong-ref subject plus optional
+/// via attribution.
+pub struct SubjectRecordRow {
+    pub uri: String,
+    pub cid: String,
+    pub creator: String,
+    pub subject: String,
+    pub subject_cid: String,
+    pub created_at: String,
+    pub indexed_at: String,
+    pub via: Option<String>,
+    pub via_cid: Option<String>,
+}
+
+/// A follow row for bulk `COPY`: DID subject plus optional via attribution.
+pub struct FollowCopyRow {
+    pub uri: String,
+    pub cid: String,
+    pub creator: String,
+    pub subject_did: String,
+    pub created_at: String,
+    pub indexed_at: String,
+    pub via: Option<String>,
+    pub via_cid: Option<String>,
+}
+
 /// A notification destined for the `notification` table.
 pub struct NotificationRow {
     pub did: String,
@@ -99,6 +125,12 @@ pub async fn copy_insert_notifications(
     if rows.is_empty() {
         return Ok(());
     }
+    // Sorted by conflict key so concurrent notification writers acquire
+    // unique-index locks in one global order.
+    let mut ordered: Vec<&NotificationRow> = rows.iter().collect();
+    ordered.sort_unstable_by(|a, b| {
+        (&a.did, &a.record_uri, a.reason).cmp(&(&b.did, &b.record_uri, b.reason))
+    });
     let mut dids = Vec::with_capacity(rows.len());
     let mut authors = Vec::with_capacity(rows.len());
     let mut uris = Vec::with_capacity(rows.len());
@@ -106,7 +138,7 @@ pub async fn copy_insert_notifications(
     let mut reasons = Vec::with_capacity(rows.len());
     let mut subjects: Vec<Option<&str>> = Vec::with_capacity(rows.len());
     let mut sort_ats = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in ordered {
         dids.push(row.did.as_str());
         authors.push(row.author.as_str());
         uris.push(row.record_uri.as_str());
@@ -126,6 +158,14 @@ pub async fn copy_insert_notifications(
     Ok(())
 }
 
+/// Sort delta keys so every concurrent aggregate upsert visits rows in one
+/// global order; unordered multi-row upserts on shared rows deadlock.
+pub fn sorted_deltas(counts: std::collections::HashMap<String, i64>) -> (Vec<String>, Vec<i64>) {
+    let mut pairs: Vec<(String, i64)> = counts.into_iter().collect();
+    pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    pairs.into_iter().unzip()
+}
+
 /// Increment a `post_agg` count column by exact per-uri deltas.
 async fn increment_post_agg(
     client: &deadpool_postgres::Client,
@@ -135,7 +175,7 @@ async fn increment_post_agg(
     if counts.is_empty() {
         return Ok(());
     }
-    let (uris, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+    let (uris, deltas) = sorted_deltas(counts);
     client
         .execute(
             &format!(
@@ -147,6 +187,118 @@ async fn increment_post_agg(
             &[&uris, &deltas],
         )
         .await?;
+    Ok(())
+}
+
+/// Decrement a `post_agg` count column by exact per-uri deltas, floored at 0.
+/// Rows are locked in sorted uri order first so concurrent aggregate writers
+/// cannot deadlock; absent rows hydrate as 0 and need no decrement.
+pub async fn decrement_post_agg(
+    client: &deadpool_postgres::Client,
+    column: &str,
+    counts: std::collections::HashMap<String, i64>,
+) -> Result<(), WintermuteError> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let (uris, deltas) = sorted_deltas(counts);
+    client
+        .execute(
+            &format!(
+                "WITH locked AS (
+                     SELECT uri FROM post_agg WHERE uri = ANY($1) ORDER BY uri FOR UPDATE
+                 )
+                 UPDATE post_agg p
+                 SET \"{column}\" = GREATEST(COALESCE(p.\"{column}\", 0) - d.c, 0)
+                 FROM unnest($1::text[], $2::int8[]) AS d(u, c)
+                 WHERE p.uri = d.u AND p.uri IN (SELECT uri FROM locked)"
+            ),
+            &[&uris, &deltas],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Decrement a `profile_agg` count column by exact per-did deltas, floored at
+/// 0, with the same sorted lock acquisition as [`decrement_post_agg`].
+pub async fn decrement_profile_agg(
+    client: &deadpool_postgres::Client,
+    column: &str,
+    counts: std::collections::HashMap<String, i64>,
+) -> Result<(), WintermuteError> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let (dids, deltas) = sorted_deltas(counts);
+    client
+        .execute(
+            &format!(
+                "WITH locked AS (
+                     SELECT did FROM profile_agg WHERE did = ANY($1) ORDER BY did FOR UPDATE
+                 )
+                 UPDATE profile_agg p
+                 SET \"{column}\" = GREATEST(COALESCE(p.\"{column}\", 0) - d.c, 0)
+                 FROM unnest($1::text[], $2::int8[]) AS d(u, c)
+                 WHERE p.did = d.u AND p.did IN (SELECT did FROM locked)"
+            ),
+            &[&dids, &deltas],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Set-based reply notifications for a batch of new reply posts, replacing
+/// per-reply round-trips with one recursive statement over pkey joins. Seeds
+/// are `(did, uri, cid, sort_at)` of the new replies; ancestors up to depth 4
+/// are notified of each. The per-record path's descendant repair is deliberately
+/// omitted here: descendants of a just-created post only exist when indexing
+/// ran out of order, the backfill path still repairs that case per-record, and
+/// the planner cannot be trusted to bound a descendants recursion over the
+/// post table from unnest seeds. Inserts are ordered by conflict key for
+/// deadlock-free concurrency and deduped on (did, "recordUri", reason).
+pub async fn write_reply_notifications_bulk(
+    client: &deadpool_postgres::Client,
+    seeds: &[(String, String, String, String)],
+) -> Result<(), WintermuteError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let mut dids = Vec::with_capacity(seeds.len());
+    let mut uris = Vec::with_capacity(seeds.len());
+    let mut cids = Vec::with_capacity(seeds.len());
+    let mut sort_ats = Vec::with_capacity(seeds.len());
+    for (did, uri, cid, sort_at) in seeds {
+        dids.push(did.as_str());
+        uris.push(uri.as_str());
+        cids.push(cid.as_str());
+        sort_ats.push(sort_at.as_str());
+    }
+
+    client
+        .execute(
+            "WITH RECURSIVE seeds AS (
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+                     AS s(did, uri, cid, sort_at)
+             ),
+             ancestor(seed_uri, uri, parent, height) AS (
+                 SELECT s.uri, p.uri, p.\"replyParent\", 0
+                 FROM seeds s JOIN post p ON p.uri = s.uri
+               UNION ALL
+                 SELECT a.seed_uri, p.uri, p.\"replyParent\", a.height + 1
+                 FROM ancestor a JOIN post p ON p.uri = a.parent
+                 WHERE a.height < 4
+             )
+             INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+             SELECT split_part(a.uri, '/', 3), s.did, s.uri, s.cid, 'reply', a.uri, s.sort_at
+             FROM ancestor a
+             JOIN seeds s ON s.uri = a.seed_uri
+             WHERE a.height >= 1 AND split_part(a.uri, '/', 3) <> s.did
+             ORDER BY 1, 3
+             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+            &[&dids, &uris, &cids, &sort_ats],
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -167,7 +319,7 @@ pub async fn copy_insert_records(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_record (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -175,13 +327,10 @@ pub async fn copy_insert_records(
                 json text,
                 rev text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_record",
         )
         .await?;
-
-    // Truncate in case of reuse
-    client.execute("TRUNCATE _bulk_record", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data into temp table
@@ -279,15 +428,13 @@ pub async fn copy_ensure_actors(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_actor (
                 did text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_actor",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_actor", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY dids
@@ -356,7 +503,7 @@ pub async fn copy_insert_posts(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -370,12 +517,10 @@ pub async fn copy_insert_posts(
                 indexed_at text NOT NULL,
                 langs text[],
                 tags text[]
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_post", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data. text is NOT NULL so empty string is preserved; reply_*/langs/tags
@@ -445,7 +590,7 @@ pub async fn copy_insert_posts(
             }
         }
         if compute_agg {
-            let (dids, deltas): (Vec<String>, Vec<i64>) = counts.into_iter().unzip();
+            let (dids, deltas) = sorted_deltas(counts);
             client
                 .execute(
                     "INSERT INTO profile_agg (did, \"postsCount\")
@@ -493,7 +638,7 @@ pub async fn copy_insert_feed_items(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_feed_item (
                 type text NOT NULL,
                 uri text NOT NULL,
@@ -501,12 +646,10 @@ pub async fn copy_insert_feed_items(
                 post_uri text NOT NULL,
                 originator_did text NOT NULL,
                 sort_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_feed_item",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_feed_item", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -569,7 +712,7 @@ pub async fn copy_insert_feed_items(
 /// Bulk insert likes using `COPY` protocol.
 pub async fn copy_insert_likes(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
+    data: &[SubjectRecordRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -583,7 +726,7 @@ pub async fn copy_insert_likes(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_like (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -591,36 +734,38 @@ pub async fn copy_insert_likes(
                 subject text NOT NULL,
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
-            )",
-            &[],
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
+            );
+            TRUNCATE _bulk_like",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_like", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
-    for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject = escape_copy_field(subject);
-        let subject_cid = escape_copy_field(subject_cid);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject = escape_copy_field(&row.subject);
+        let subject_cid = escape_copy_field(&row.subject_cid);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
+        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -634,8 +779,8 @@ pub async fn copy_insert_likes(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
+            "INSERT INTO \"like\" (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid
              FROM _bulk_like
              ON CONFLICT DO NOTHING
              RETURNING uri, subject",
@@ -676,7 +821,7 @@ pub async fn copy_insert_likes(
 /// Bulk insert follows using `COPY` protocol.
 pub async fn copy_insert_follows(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String)], // uri, cid, creator, subject_did, created_at, indexed_at
+    data: &[FollowCopyRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -690,42 +835,44 @@ pub async fn copy_insert_follows(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_follow (
                 uri text NOT NULL,
                 cid text NOT NULL,
                 creator text NOT NULL,
                 subject_did text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
-            )",
-            &[],
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
+            );
+            TRUNCATE _bulk_follow",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_follow", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_follow (uri, cid, creator, subject_did, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
+        .copy_in("COPY _bulk_follow (uri, cid, creator, subject_did, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 200);
-    for (uri, cid, creator, subject_did, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject_did = escape_copy_field(subject_did);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject_did = escape_copy_field(&row.subject_did);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_opt(row.via.as_deref());
+        let via_cid = escape_copy_opt(row.via_cid.as_deref());
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject_did}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -739,8 +886,8 @@ pub async fn copy_insert_follows(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject_did, created_at, indexed_at
+            "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject_did, created_at, indexed_at, via, via_cid
              FROM _bulk_follow
              ON CONFLICT DO NOTHING
              RETURNING uri, creator, \"subjectDid\"",
@@ -765,7 +912,7 @@ pub async fn copy_insert_follows(
             *follows.entry(row.get::<_, String>(1)).or_insert(0) += 1;
             *followers.entry(row.get::<_, String>(2)).or_insert(0) += 1;
         }
-        let (f_dids, f_deltas): (Vec<String>, Vec<i64>) = follows.into_iter().unzip();
+        let (f_dids, f_deltas) = sorted_deltas(follows);
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followsCount\")
@@ -775,7 +922,7 @@ pub async fn copy_insert_follows(
                 &[&f_dids, &f_deltas],
             )
             .await?;
-        let (s_dids, s_deltas): (Vec<String>, Vec<i64>) = followers.into_iter().unzip();
+        let (s_dids, s_deltas) = sorted_deltas(followers);
         client
             .execute(
                 "INSERT INTO profile_agg (did, \"followersCount\")
@@ -808,7 +955,7 @@ pub async fn copy_insert_follows(
 /// Bulk insert reposts using `COPY` protocol.
 pub async fn copy_insert_reposts(
     client: &deadpool_postgres::Client,
-    data: &[(String, String, String, String, String, String, String)], // uri, cid, creator, subject, subject_cid, created_at, indexed_at
+    data: &[SubjectRecordRow],
     compute_agg: bool, // false for the bulk CAR load (aggregates recomputed in one pass after)
 ) -> Result<std::collections::HashSet<String>, WintermuteError> {
     use std::time::Instant;
@@ -822,7 +969,7 @@ pub async fn copy_insert_reposts(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_repost (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -830,36 +977,38 @@ pub async fn copy_insert_reposts(
                 subject text NOT NULL,
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
-                indexed_at text NOT NULL
-            )",
-            &[],
+                indexed_at text NOT NULL,
+                via text,
+                via_cid text
+            );
+            TRUNCATE _bulk_repost",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_repost", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
         .await?;
 
     let sink = copy_stmt;
     pin_mut!(sink);
 
     let mut buffer = Vec::with_capacity(data.len() * 250);
-    for (uri, cid, creator, subject, subject_cid, created_at, indexed_at) in data {
-        let uri = escape_copy_field(uri);
-        let cid = escape_copy_field(cid);
-        let creator = escape_copy_field(creator);
-        let subject = escape_copy_field(subject);
-        let subject_cid = escape_copy_field(subject_cid);
-        let created_at = escape_copy_field(created_at);
-        let indexed_at = escape_copy_field(indexed_at);
+    for row in data {
+        let uri = escape_copy_field(&row.uri);
+        let cid = escape_copy_field(&row.cid);
+        let creator = escape_copy_field(&row.creator);
+        let subject = escape_copy_field(&row.subject);
+        let subject_cid = escape_copy_field(&row.subject_cid);
+        let created_at = escape_copy_field(&row.created_at);
+        let indexed_at = escape_copy_field(&row.indexed_at);
+        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
+        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
         writeln!(
             buffer,
-            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}"
+            "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
         )
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
@@ -873,8 +1022,8 @@ pub async fn copy_insert_reposts(
     let insert_start = Instant::now();
     let inserted = client
         .query(
-            "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\")
-             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at
+            "INSERT INTO repost (uri, cid, creator, subject, \"subjectCid\", \"createdAt\", \"indexedAt\", via, \"viaCid\")
+             SELECT uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid
              FROM _bulk_repost
              ON CONFLICT DO NOTHING
              RETURNING uri, subject",
@@ -928,7 +1077,7 @@ pub async fn copy_insert_quotes(
 
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_quote (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -936,12 +1085,10 @@ pub async fn copy_insert_quotes(
                 subject_cid text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_quote",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_quote", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     let copy_start = Instant::now();
@@ -1027,7 +1174,7 @@ pub async fn copy_insert_blocks(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_block (
                 uri text NOT NULL,
                 cid text NOT NULL,
@@ -1035,12 +1182,10 @@ pub async fn copy_insert_blocks(
                 subject text NOT NULL,
                 created_at text NOT NULL,
                 indexed_at text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_block",
         )
         .await?;
-
-    client.execute("TRUNCATE _bulk_block", &[]).await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
     // Phase 2: COPY data
@@ -1116,19 +1261,15 @@ pub async fn copy_insert_post_embed_images(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_image (
                 post_uri text NOT NULL,
                 position text NOT NULL,
                 image_cid text NOT NULL,
                 alt text NOT NULL
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post_embed_image",
         )
-        .await?;
-
-    client
-        .execute("TRUNCATE _bulk_post_embed_image", &[])
         .await?;
     let setup_ms = setup_start.elapsed().as_millis();
 
@@ -1200,18 +1341,14 @@ pub async fn copy_insert_post_embed_videos(
     // Phase 1: Table setup
     let setup_start = Instant::now();
     client
-        .execute(
+        .batch_execute(
             "CREATE TEMP TABLE IF NOT EXISTS _bulk_post_embed_video (
                 post_uri text NOT NULL,
                 video_cid text NOT NULL,
                 alt text
-            )",
-            &[],
+            );
+            TRUNCATE _bulk_post_embed_video",
         )
-        .await?;
-
-    client
-        .execute("TRUNCATE _bulk_post_embed_video", &[])
         .await?;
     let setup_ms = setup_start.elapsed().as_millis();
 

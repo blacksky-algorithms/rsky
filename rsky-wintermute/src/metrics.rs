@@ -135,6 +135,14 @@ pub static INGESTER_EVENTS_IN_MEMORY: LazyLock<IntGauge> = LazyLock::new(|| {
     .unwrap()
 });
 
+pub static INGESTER_OPS_FILTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "ingester_ops_filtered_total",
+        "Total firehose ops dropped by the collection allowlist before enqueue"
+    )
+    .unwrap()
+});
+
 /// Errors
 pub static INGESTER_ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
