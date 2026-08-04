@@ -208,6 +208,25 @@ pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(32) // Default: 32 connections for backfiller (matches worker count)
 });
 
+/// Stop writing like/follow/repost/block rows to the record table once the
+/// dataplane synthesizes those records from the typed tables.
+pub static RECORD_SKIP_BOILERPLATE: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("RECORD_SKIP_BOILERPLATE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+});
+
+#[must_use]
+pub fn boilerplate_collection(collection: &str) -> bool {
+    matches!(
+        collection,
+        "app.bsky.feed.like"
+            | "app.bsky.feed.repost"
+            | "app.bsky.graph.follow"
+            | "app.bsky.graph.block"
+    )
+}
+
 // Comma-separated NSID prefixes (e.g. "app.bsky.,chat.bsky.,site.standard.") allowed in the record store. Empty = unset.
 pub static RECORD_COLLECTION_ALLOWLIST: LazyLock<Vec<String>> = LazyLock::new(|| {
     std::env::var("RECORD_COLLECTION_ALLOWLIST")

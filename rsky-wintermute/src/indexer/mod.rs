@@ -474,12 +474,17 @@ impl IndexerManager {
         shard_batches: &[Vec<(Vec<u8>, IndexJob)>],
         bulk_mode: bool,
     ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
-        futures::future::join_all(
-            shard_batches
-                .iter()
-                .filter(|shard| !shard.is_empty())
-                .map(|shard| Box::pin(Self::process_jobs_batch(pool, shard, bulk_mode))),
-        )
+        let skip_boilerplate = *crate::config::RECORD_SKIP_BOILERPLATE;
+        futures::future::join_all(shard_batches.iter().filter(|shard| !shard.is_empty()).map(
+            |shard| {
+                Box::pin(Self::process_jobs_batch(
+                    pool,
+                    shard,
+                    bulk_mode,
+                    skip_boilerplate,
+                ))
+            },
+        ))
         .await
         .into_iter()
         .flat_map(|(results, _batch_failed)| results)
@@ -618,7 +623,13 @@ impl IndexerManager {
             // Process the entire batch with batch INSERT statements
             let process_start = Instant::now();
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
-            let (results, _batch_failed) = Self::process_jobs_batch(&pool, &jobs, bulk_mode).await;
+            let (results, _batch_failed) = Self::process_jobs_batch(
+                &pool,
+                &jobs,
+                bulk_mode,
+                *crate::config::RECORD_SKIP_BOILERPLATE,
+            )
+            .await;
             let process_ms = process_start.elapsed().as_millis();
 
             // Handle results - remove jobs from queue
@@ -863,7 +874,8 @@ impl IndexerManager {
             let pool = self.pool_backfill.clone();
 
             let task = tokio::spawn(async move {
-                let result = Self::process_job(&pool, &job).await;
+                let result =
+                    Self::process_job(&pool, &job, *crate::config::RECORD_SKIP_BOILERPLATE).await;
                 drop(permit);
                 (key, source, result)
             });
@@ -1131,7 +1143,11 @@ impl IndexerManager {
         Ok(result.is_some())
     }
 
-    pub async fn process_job(pool: &Pool, job: &IndexJob) -> Result<(), WintermuteError> {
+    pub async fn process_job(
+        pool: &Pool,
+        job: &IndexJob,
+        skip_boilerplate: bool,
+    ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
         tracing::debug!(
@@ -1177,16 +1193,23 @@ impl IndexerManager {
                     WintermuteError::Other("missing record for create/update".into())
                 })?;
 
-                let applied = Self::insert_generic_record(
-                    &client,
-                    &job.uri,
-                    &job.cid,
-                    did.as_str(),
-                    record_json,
-                    &job.rev,
-                    &job.indexed_at,
-                )
-                .await?;
+                // Boilerplate collections skip the record table once the
+                // dataplane synthesizes them; typed ON CONFLICT absorbs replays.
+                let applied =
+                    if skip_boilerplate && crate::config::boilerplate_collection(&collection) {
+                        true
+                    } else {
+                        Self::insert_generic_record(
+                            &client,
+                            &job.uri,
+                            &job.cid,
+                            did.as_str(),
+                            record_json,
+                            &job.rev,
+                            &job.indexed_at,
+                        )
+                        .await?
+                    };
 
                 if !applied {
                     metrics::INDEXER_STALE_WRITES_SKIPPED_TOTAL.inc();
@@ -1417,7 +1440,15 @@ impl IndexerManager {
                 }
             }
             WriteAction::Delete => {
-                let applied = Self::delete_generic_record(&client, &job.uri, &job.rev).await?;
+                // Boilerplate deletes bypass the record gate: the typed
+                // delete is idempotent when the row is already absent.
+                let applied =
+                    if skip_boilerplate && crate::config::boilerplate_collection(&collection) {
+                        drop(Self::delete_generic_record(&client, &job.uri, &job.rev).await);
+                        true
+                    } else {
+                        Self::delete_generic_record(&client, &job.uri, &job.rev).await?
+                    };
 
                 if !applied {
                     return Ok(());
@@ -1497,6 +1528,7 @@ impl IndexerManager {
         pool: &Pool,
         jobs: &[(Vec<u8>, IndexJob)],
         bulk_load: bool,
+        skip_boilerplate: bool,
     ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         if jobs.is_empty() {
             return (Vec::new(), false);
@@ -1562,7 +1594,10 @@ impl IndexerManager {
                     Box::pin(async move {
                         let mut out = Vec::with_capacity(group.len());
                         for (key, job) in group {
-                            out.push((key.clone(), Box::pin(Self::process_job(pool, job)).await));
+                            out.push((
+                                key.clone(),
+                                Box::pin(Self::process_job(pool, job, skip_boilerplate)).await,
+                            ));
                         }
                         out
                     })
@@ -1590,16 +1625,26 @@ impl IndexerManager {
         // phase split must clear the old row first, or the new record is
         // silently dropped on its (subject, creator)-style unique conflict.
         if !deletes.is_empty() {
-            let (delete_results, bf) =
-                Box::pin(Self::batch_delete_records(pool, &deletes, bulk_load)).await;
+            let (delete_results, bf) = Box::pin(Self::batch_delete_records(
+                pool,
+                &deletes,
+                bulk_load,
+                skip_boilerplate,
+            ))
+            .await;
             batch_failed |= bf;
             results.extend(delete_results);
         }
 
         // Process creates in batch (uses parallel COPY for different collection types)
         if !creates.is_empty() {
-            let (batch_results, bf) =
-                Box::pin(Self::batch_insert_records(pool, &creates, bulk_load)).await;
+            let (batch_results, bf) = Box::pin(Self::batch_insert_records(
+                pool,
+                &creates,
+                bulk_load,
+                skip_boilerplate,
+            ))
+            .await;
             batch_failed |= bf;
             results.extend(batch_results);
         }
@@ -1613,6 +1658,7 @@ impl IndexerManager {
         pool: &Pool,
         jobs: &[&(Vec<u8>, IndexJob)],
         bulk_load: bool,
+        skip_boilerplate: bool,
     ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         use crate::metrics;
         use std::collections::{BTreeMap, HashSet};
@@ -1679,7 +1725,7 @@ impl IndexerManager {
         let revs: Vec<String> = parsed.iter().map(|p| p.job.rev.clone()).collect();
 
         // Rev-gated generic record delete; only applied uris get collection cleanup
-        let applied: HashSet<String> = match client
+        let mut applied: HashSet<String> = match client
             .query(
                 "DELETE FROM record r
                  USING unnest($1::text[], $2::text[]) AS d(uri, rev)
@@ -1699,6 +1745,15 @@ impl IndexerManager {
                 return (results, false);
             }
         };
+        // Boilerplate deletes bypass the record gate once their rows stop
+        // being written there: the typed DELETE is idempotent on absent rows.
+        if skip_boilerplate {
+            for p in &parsed {
+                if crate::config::boilerplate_collection(&p.collection) {
+                    applied.insert(p.uri.clone());
+                }
+            }
+        }
 
         if let Err(e) = client
             .execute("DELETE FROM duplicate_record WHERE uri = ANY($1)", &[&uris])
@@ -1898,6 +1953,7 @@ impl IndexerManager {
         pool: &Pool,
         jobs: &[&(Vec<u8>, IndexJob)],
         bulk_load: bool,
+        skip_boilerplate: bool,
     ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         use crate::metrics;
         use std::time::Instant;
@@ -1978,11 +2034,20 @@ impl IndexerManager {
         }
         let actors_ms = actors_start.elapsed().as_millis();
 
-        // Batch 2: Insert all records into the record table using COPY
+        // Batch 2: Insert records into the record table using COPY. When the
+        // boilerplate skip is on, like/follow/repost/block jobs bypass the
+        // record table entirely: their typed inserts' ON CONFLICT DO NOTHING
+        // absorbs replays, so they count as applied unconditionally.
         let records_start = Instant::now();
+        let record_gated: Vec<bool> = parsed_jobs
+            .iter()
+            .map(|pj| !(skip_boilerplate && crate::config::boilerplate_collection(&pj.collection)))
+            .collect();
         let record_data: Vec<_> = parsed_jobs
             .iter()
-            .map(|pj| {
+            .zip(&record_gated)
+            .filter(|(_, gated)| **gated)
+            .map(|(pj, _)| {
                 (
                     pj.job.uri.clone(),
                     pj.job.cid.clone(),
@@ -2016,11 +2081,18 @@ impl IndexerManager {
         };
         let records_ms = records_start.elapsed().as_millis();
 
-        // Track which jobs were applied (not stale)
+        // Track which jobs were applied (not stale); gated jobs consume the
+        // record results in order, ungated boilerplate is always applied.
         let mut applied_jobs: Vec<&ParsedJob<'_>> = Vec::new();
-        for (i, applied) in record_results.iter().enumerate() {
-            if *applied {
-                applied_jobs.push(&parsed_jobs[i]);
+        let mut gated_results = record_results.iter();
+        for (i, pj) in parsed_jobs.iter().enumerate() {
+            let applied = if record_gated[i] {
+                *gated_results.next().unwrap_or(&false)
+            } else {
+                true
+            };
+            if applied {
+                applied_jobs.push(pj);
             } else {
                 metrics::INDEXER_STALE_WRITES_SKIPPED_TOTAL.inc();
             }

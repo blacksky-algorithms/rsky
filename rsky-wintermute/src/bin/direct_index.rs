@@ -217,7 +217,13 @@ async fn process_did(
             };
 
             // Index directly to PostgreSQL
-            if let Err(e) = IndexerManager::process_job(pool, &job).await {
+            if let Err(e) = IndexerManager::process_job(
+                pool,
+                &job,
+                *rsky_wintermute::config::RECORD_SKIP_BOILERPLATE,
+            )
+            .await
+            {
                 eprintln!("  Warning: failed to index {}: {}", job.uri, e);
             } else {
                 indexed_count += 1;

@@ -158,7 +158,8 @@ mod indexer_tests {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
                         let result =
-                            IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
+                            IndexerManager::process_job(&indexer.pool_backfill, &index_job, false)
+                                .await;
 
                         match result {
                             Ok(()) => {
@@ -401,7 +402,8 @@ mod indexer_tests {
                 match indexer.storage.dequeue_firehose_backfill() {
                     Ok(Some((key, index_job))) => {
                         let result =
-                            IndexerManager::process_job(&indexer.pool_backfill, &index_job).await;
+                            IndexerManager::process_job(&indexer.pool_backfill, &index_job, false)
+                                .await;
 
                         if result.is_ok() {
                             drop(indexer.storage.remove_firehose_backfill(&key));
@@ -446,7 +448,7 @@ mod indexer_tests {
             rev: "test".to_owned(),
         };
 
-        let result = IndexerManager::process_job(&pool, &valid_job).await;
+        let result = IndexerManager::process_job(&pool, &valid_job, false).await;
         assert!(
             result.is_ok(),
             "expected valid URI to succeed: {:?}",
@@ -1330,7 +1332,7 @@ mod indexer_tests {
             );
 
             // Process the job through indexer
-            match IndexerManager::process_job(&pool, &job_with_record).await {
+            match IndexerManager::process_job(&pool, &job_with_record, false).await {
                 Ok(()) => tracing::info!("successfully processed job {}", job_with_record.uri),
                 Err(e) => {
                     tracing::error!("failed to process job {}: {}", job_with_record.uri, e);
@@ -1399,7 +1401,7 @@ mod indexer_tests {
             rev: "test".to_owned(),
         };
 
-        let result = IndexerManager::process_job(&pool, &job).await;
+        let result = IndexerManager::process_job(&pool, &job, false).await;
 
         // Should fail with missing record error
         assert!(result.is_err());
@@ -1431,7 +1433,7 @@ mod indexer_tests {
             rev: "rev1".to_owned(),
         };
 
-        IndexerManager::process_job(&pool, &create_job)
+        IndexerManager::process_job(&pool, &create_job, false)
             .await
             .unwrap();
 
@@ -1454,7 +1456,7 @@ mod indexer_tests {
             rev: "rev2".to_owned(),
         };
 
-        IndexerManager::process_job(&pool, &delete_job)
+        IndexerManager::process_job(&pool, &delete_job, false)
             .await
             .unwrap();
 
@@ -1491,7 +1493,7 @@ mod indexer_tests {
             rev: "rev2".to_owned(),
         };
 
-        IndexerManager::process_job(&pool, &initial_job)
+        IndexerManager::process_job(&pool, &initial_job, false)
             .await
             .unwrap();
 
@@ -1509,7 +1511,7 @@ mod indexer_tests {
         };
 
         // Should succeed but skip the stale write
-        IndexerManager::process_job(&pool, &stale_job)
+        IndexerManager::process_job(&pool, &stale_job, false)
             .await
             .unwrap();
 
@@ -1766,7 +1768,7 @@ mod indexer_tests {
                 indexed_at: indexed_at.clone(),
             };
 
-            let result = IndexerManager::process_job(&pool, &create_job).await;
+            let result = IndexerManager::process_job(&pool, &create_job, false).await;
             assert!(
                 result.is_ok(),
                 "Failed to create {collection}: {:?}",
@@ -1783,7 +1785,7 @@ mod indexer_tests {
                 indexed_at: indexed_at.clone(),
             };
 
-            let result = IndexerManager::process_job(&pool, &delete_job).await;
+            let result = IndexerManager::process_job(&pool, &delete_job, false).await;
             assert!(
                 result.is_ok(),
                 "Failed to delete {collection}: {:?}",
@@ -1863,7 +1865,7 @@ mod indexer_tests {
                 record: Some(record.clone()),
                 indexed_at: indexed_at.clone(),
             };
-            let result = IndexerManager::process_job(&pool, &create_job).await;
+            let result = IndexerManager::process_job(&pool, &create_job, false).await;
             assert!(
                 result.is_ok(),
                 "Failed to create {collection}: {:?}",
@@ -1879,7 +1881,7 @@ mod indexer_tests {
                 record: None,
                 indexed_at: indexed_at.clone(),
             };
-            let result = IndexerManager::process_job(&pool, &delete_job).await;
+            let result = IndexerManager::process_job(&pool, &delete_job, false).await;
             assert!(
                 result.is_ok(),
                 "Failed to delete {collection}: {:?}",
@@ -2368,7 +2370,8 @@ mod indexer_tests {
                 job("toggle2", WriteAction::Create, "3c", true),
             ),
         ];
-        let (results, batch_failed) = IndexerManager::process_jobs_batch(&pool, &jobs, false).await;
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &jobs, false, false).await;
         assert!(!batch_failed);
         assert_eq!(results.len(), 3);
         for (_, r) in &results {
@@ -2413,7 +2416,7 @@ mod indexer_tests {
             ),
         ];
         let (results, batch_failed) =
-            IndexerManager::process_jobs_batch(&pool, &cross_jobs, false).await;
+            IndexerManager::process_jobs_batch(&pool, &cross_jobs, false, false).await;
         assert!(!batch_failed);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
 
@@ -2449,7 +2452,7 @@ mod indexer_tests {
             job("toggle3", WriteAction::Delete, "3f", false),
         )];
         let (results, batch_failed) =
-            IndexerManager::process_jobs_batch(&pool, &delete_jobs, false).await;
+            IndexerManager::process_jobs_batch(&pool, &delete_jobs, false, false).await;
         assert!(!batch_failed);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
 
@@ -2495,7 +2498,7 @@ mod indexer_tests {
             },
         )];
         let (results, batch_failed) =
-            IndexerManager::process_jobs_batch(&pool, &reply_jobs, false).await;
+            IndexerManager::process_jobs_batch(&pool, &reply_jobs, false, false).await;
         assert!(!batch_failed);
         assert!(results.iter().all(|(_, r)| r.is_ok()));
 
@@ -2882,7 +2885,8 @@ mod indexer_tests {
                 ),
             ),
         ];
-        let (results, batch_failed) = IndexerManager::process_jobs_batch(&pool, &jobs, false).await;
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &jobs, false, false).await;
         assert!(!batch_failed);
         for (_, r) in &results {
             assert!(r.is_ok(), "job failed: {r:?}");
@@ -2915,6 +2919,174 @@ mod indexer_tests {
         drop(client);
 
         for did in [author, actor] {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_boilerplate_omits_record_rows_with_exact_effects() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let author = "did:plc:wintermute-test-skip-author";
+        let liker = "did:plc:wintermute-test-skip-liker";
+        for did in [author, liker] {
+            cleanup_test_data(&pool, did).await;
+        }
+        let client = pool.get().await.unwrap();
+        for did in [author, liker] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+        drop(client);
+
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let ts = "2026-08-04T00:00:00.000Z";
+        let post_uri = format!("at://{author}/app.bsky.feed.post/skippost");
+        let like_uri = format!("at://{liker}/app.bsky.feed.like/skiplike");
+
+        let jobs = vec![
+            (
+                b"s1".to_vec(),
+                IndexJob {
+                    uri: post_uri.clone(),
+                    cid: cid.to_owned(),
+                    action: WriteAction::Create,
+                    record: Some(serde_json::json!({
+                        "$type": "app.bsky.feed.post", "text": "skip test", "createdAt": ts
+                    })),
+                    indexed_at: ts.to_owned(),
+                    rev: "3a".to_owned(),
+                },
+            ),
+            (
+                b"s2".to_vec(),
+                IndexJob {
+                    uri: like_uri.clone(),
+                    cid: cid.to_owned(),
+                    action: WriteAction::Create,
+                    record: Some(serde_json::json!({
+                        "$type": "app.bsky.feed.like",
+                        "subject": {"uri": post_uri, "cid": cid},
+                        "createdAt": ts
+                    })),
+                    indexed_at: ts.to_owned(),
+                    rev: "3a".to_owned(),
+                },
+            ),
+        ];
+
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &jobs, false, true).await;
+        assert!(!batch_failed);
+        for (_, r) in &results {
+            assert!(r.is_ok(), "job failed: {r:?}");
+        }
+
+        let client = pool.get().await.unwrap();
+        let record_rows: i64 = client
+            .query_one(
+                "SELECT count(*) FROM record WHERE uri = ANY($1)",
+                &[&vec![post_uri.clone(), like_uri.clone()]],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(record_rows, 1, "only the post belongs in the record table");
+        let post_record: i64 = client
+            .query_one("SELECT count(*) FROM record WHERE uri = $1", &[&post_uri])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(post_record, 1);
+        let like_row: i64 = client
+            .query_one("SELECT count(*) FROM \"like\" WHERE uri = $1", &[&like_uri])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(like_row, 1, "typed like row must exist without record row");
+        let like_count: i64 = client
+            .query_one(
+                "SELECT COALESCE((SELECT \"likeCount\" FROM post_agg WHERE uri = $1), 0)",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(like_count, 1);
+        let notif: i64 = client
+            .query_one(
+                "SELECT count(*) FROM notification WHERE did = $1 AND \"recordUri\" = $2",
+                &[&author, &like_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(notif, 1, "like notification must exist");
+        drop(client);
+
+        // Replay: idempotent without the record gate.
+        let (replay_results, replay_failed) =
+            IndexerManager::process_jobs_batch(&pool, &jobs, false, true).await;
+        assert!(!replay_failed);
+        for (_, r) in &replay_results {
+            assert!(r.is_ok());
+        }
+        let client = pool.get().await.unwrap();
+        let like_count: i64 = client
+            .query_one(
+                "SELECT COALESCE((SELECT \"likeCount\" FROM post_agg WHERE uri = $1), 0)",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(like_count, 1, "replay must not double count");
+        drop(client);
+
+        // Delete the like with the flag on: typed row gone, count exact.
+        let delete_jobs = vec![(
+            b"s3".to_vec(),
+            IndexJob {
+                uri: like_uri.clone(),
+                cid: String::new(),
+                action: WriteAction::Delete,
+                record: None,
+                indexed_at: ts.to_owned(),
+                rev: "3b".to_owned(),
+            },
+        )];
+        let (del_results, del_failed) =
+            IndexerManager::process_jobs_batch(&pool, &delete_jobs, false, true).await;
+        assert!(!del_failed);
+        for (_, r) in &del_results {
+            assert!(r.is_ok());
+        }
+        let client = pool.get().await.unwrap();
+        let like_row: i64 = client
+            .query_one("SELECT count(*) FROM \"like\" WHERE uri = $1", &[&like_uri])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(like_row, 0, "typed like row must be deleted");
+        let like_count: i64 = client
+            .query_one(
+                "SELECT COALESCE((SELECT \"likeCount\" FROM post_agg WHERE uri = $1), 0)",
+                &[&post_uri],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(like_count, 0, "likeCount must return to zero");
+        drop(client);
+
+        for did in [author, liker] {
             cleanup_test_data(&pool, did).await;
         }
     }
