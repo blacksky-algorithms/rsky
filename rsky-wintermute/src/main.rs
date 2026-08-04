@@ -246,12 +246,14 @@ fn start_metrics_server(port: u16) -> Result<()> {
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_secs() as i64)
                                     .unwrap_or(0);
-                                // gauge at 0 = no event since boot; lag is unknown, not now-0
-                                let lag = (last_event > 0).then(|| now - last_event);
+                                // gauge at 0 = no event since boot; lag is unknown, not now-0.
+                                // clamped: event times are source-declared and can be skewed
+                                let lag = (last_event > 0).then(|| (now - last_event).max(0));
                                 let body = serde_json::json!({
                                     "status": "ok",
                                     "ingestLagSeconds": lag,
-                                    "indexerQueueLength": metrics::INDEXER_QUEUE_LENGTH.get(),
+                                    "indexerQueueLength":
+                                        metrics::INGESTER_FIREHOSE_LIVE_LENGTH.get(),
                                 });
                                 Ok(Response::builder()
                                     .status(200)
