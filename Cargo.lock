@@ -8278,7 +8278,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-relay"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -8509,6 +8509,7 @@ dependencies = [
 [[package]]
 name = "rsky-wintermute"
 version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
