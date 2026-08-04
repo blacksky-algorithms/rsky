@@ -51,7 +51,12 @@ impl Connection {
     pub fn connect(
         addr: SocketAddr, stream: MaybeTlsStream<TcpStream>, cursor: Cursor,
     ) -> Result<Self, ConnectionError> {
-        let client = tungstenite::accept(stream)?;
+        // Without a cap the write buffer default is unbounded, so one
+        // subscriber catching up from an old cursor queues its whole backlog
+        // in memory; WriteBufferFull backpressure only exists below a cap.
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_write_buffer_size(crate::config::PUBLISHER_MAX_WRITE_BUFFER);
+        let client = tungstenite::accept_with_config(stream, Some(config))?;
         match client.get_ref() {
             MaybeTlsStream::Rustls(stream) => {
                 stream.get_ref().set_nonblocking(true)?;

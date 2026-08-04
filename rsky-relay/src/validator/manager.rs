@@ -203,6 +203,7 @@ impl<R: IdentityResolver> Manager<R> {
             };
 
             let host = &msg.hostname;
+            crate::types::intake_bytes_sub(msg.data.len());
             let span = tracing::info_span!("msg_recv", %host, len = %msg.data.len());
             let _enter = span.enter();
             let event = match SubscribeReposEvent::parse(&msg.data) {
@@ -292,7 +293,9 @@ impl<R: IdentityResolver> Manager<R> {
                         continue;
                     }
                     self.resolver.request_direct(did);
-                    tracing::warn!(%did, "resolver pending; publishing under lenient mode");
+                    // debug: floods of pending DIDs otherwise churn the whole
+                    // journal in minutes; the metrics counter is the signal
+                    tracing::debug!(%did, "resolver pending; publishing under lenient mode");
                     metrics::record_validator_passed_with_warning("resolver_pending");
                     (None, None)
                 };

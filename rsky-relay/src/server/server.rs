@@ -79,6 +79,7 @@ pub fn fetch_page_with_retry<F: HostListFetcher + ?Sized>(
 }
 
 const SLEEP: Duration = Duration::from_millis(10);
+const ACCEPTS_PER_TICK: usize = 64;
 
 #[cfg(not(feature = "labeler"))]
 const PATH_LIST_HOSTS: &str = "/xrpc/com.atproto.sync.listHosts";
@@ -261,27 +262,35 @@ impl Server {
             self.last = Instant::now();
         }
 
-        match self.listener.accept() {
-            Ok((mut stream, addr)) => {
-                tracing::trace!(%addr, "received request");
-                let stream = if let Some(tls_config) = self.tls_config.clone() {
-                    let mut conn = ServerConnection::new(tls_config)?;
-                    if let Err(err) = conn.complete_io(&mut stream) {
-                        tracing::info!(%addr, %err, "tls handshake error");
+        // Drain the accept backlog each tick: one accept per sleep caps intake
+        // at ~100/s, which overflows the listen queue whenever every
+        // subscriber reconnects at once.
+        let mut accepted = 0;
+        loop {
+            match self.listener.accept() {
+                Ok((mut stream, addr)) => {
+                    tracing::trace!(%addr, "received request");
+                    let stream = if let Some(tls_config) = self.tls_config.clone() {
+                        let mut conn = ServerConnection::new(tls_config)?;
+                        if let Err(err) = conn.complete_io(&mut stream) {
+                            tracing::info!(%addr, %err, "tls handshake error");
+                        }
+                        let stream = StreamOwned::new(conn, stream);
+                        MaybeTlsStream::Rustls(stream)
+                    } else {
+                        MaybeTlsStream::Plain(stream)
+                    };
+                    if let Err(err) = self.handle_stream(ErrorOnDropTcpStream(Some(stream)), addr) {
+                        tracing::info!(%addr, %err, "invalid request");
                     }
-                    let stream = StreamOwned::new(conn, stream);
-                    MaybeTlsStream::Rustls(stream)
-                } else {
-                    MaybeTlsStream::Plain(stream)
-                };
-                if let Err(err) = self.handle_stream(ErrorOnDropTcpStream(Some(stream)), addr) {
-                    tracing::info!(%addr, %err, "invalid request");
+                    accepted += 1;
+                    if accepted >= ACCEPTS_PER_TICK {
+                        break;
+                    }
                 }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => Err(e)?,
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                return Ok(true);
-            }
-            Err(e) => Err(e)?,
         }
 
         Ok(true)
