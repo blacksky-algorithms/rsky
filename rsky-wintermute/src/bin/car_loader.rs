@@ -444,7 +444,13 @@ async fn write_batch(
 
     let n = batch_jobs.len() as u64;
     // bulk_load = true: skip inline aggregates + the like-insert semaphore.
-    let (_results, batch_failed) = IndexerManager::process_jobs_batch(pool, batch_jobs, true).await;
+    let (_results, batch_failed) = IndexerManager::process_jobs_batch(
+        pool,
+        batch_jobs,
+        true,
+        *rsky_wintermute::config::RECORD_SKIP_BOILERPLATE,
+    )
+    .await;
     batch_jobs.clear();
 
     if batch_failed {
@@ -812,7 +818,13 @@ async fn load_single_repo(args: &Args, pool: &Pool, did: &str) -> Result<()> {
         .into_iter()
         .map(|j| (j.uri.clone().into_bytes(), j))
         .collect();
-    let (results, batch_failed) = IndexerManager::process_jobs_batch(pool, &jobs, true).await;
+    let (results, batch_failed) = IndexerManager::process_jobs_batch(
+        pool,
+        &jobs,
+        true,
+        *rsky_wintermute::config::RECORD_SKIP_BOILERPLATE,
+    )
+    .await;
     let errs = results.iter().filter(|(_, r)| r.is_err()).count();
     jobs.clear();
     tracing::info!(

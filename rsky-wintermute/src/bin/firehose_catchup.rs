@@ -171,7 +171,13 @@ async fn main() -> Result<()> {
                         let pool_clone = Arc::clone(&pool);
                         let processed_clone = Arc::clone(&processed);
                         tokio::spawn(async move {
-                            if let Err(e) = IndexerManager::process_job(&pool_clone, &job).await {
+                            if let Err(e) = IndexerManager::process_job(
+                                &pool_clone,
+                                &job,
+                                *rsky_wintermute::config::RECORD_SKIP_BOILERPLATE,
+                            )
+                            .await
+                            {
                                 tracing::debug!("indexing failed for {}: {e}", job.uri);
                             }
                             processed_clone.fetch_add(1, Ordering::Relaxed);
