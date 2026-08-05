@@ -8,9 +8,11 @@ use crate::auth_verifier::OptionalAccessOrAdminToken;
 use crate::exports::{BlobBody, ExportGuard, Exports};
 use anyhow::Result;
 use aws_sdk_s3::operation::get_object::GetObjectError;
+use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rocket::State;
 use std::str::FromStr;
+use tokio_util::io::StreamReader;
 
 async fn inner_get_blob(
     did: String,
@@ -35,7 +37,7 @@ async fn inner_get_blob(
 
     let found = actor_store.blob.get_blob(cid).await?;
     Ok(BlobBody::new(
-        found.stream.into_async_read(),
+        StreamReader::new(found.stream.map_err(std::io::Error::other)),
         found.size as usize,
         found.mime_type,
         guard,

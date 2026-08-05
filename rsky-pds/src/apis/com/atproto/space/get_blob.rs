@@ -7,7 +7,8 @@ use crate::apis::com::atproto::space::{
 use crate::apis::ApiError;
 use crate::space_auth::{authorize_space_read, SpaceReadAuth};
 use crate::space_scope::SpaceRequest;
-use aws_sdk_s3::primitives::AggregatedBytes;
+use bytes::Bytes;
+use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rocket::http::Header;
 use rocket::{Responder, State};
@@ -62,12 +63,12 @@ pub async fn space_get_blob(
         Cid::from_str(&cid).map_err(|_| ApiError::InvalidRequest(format!("invalid cid: {cid}")))?;
     match reader.blob.get_blob(parsed_cid).await {
         Ok(found) => {
-            let bytes: AggregatedBytes = found
+            let chunks: Vec<Bytes> = found
                 .stream
-                .collect()
+                .try_collect()
                 .await
                 .map_err(internal_error("blob read failed"))?;
-            let bytes = bytes.to_vec();
+            let bytes: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
             Ok(SpaceBlobResponder(
                 bytes.clone(),
                 Header::new("content-length", bytes.len().to_string()),

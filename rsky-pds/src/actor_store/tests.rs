@@ -538,7 +538,8 @@ impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
     fn get_stream(
         &self,
         _cid: Cid,
-    ) -> futures::future::BoxFuture<'_, Result<aws_sdk_s3::primitives::ByteStream>> {
+    ) -> futures::future::BoxFuture<'_, Result<crate::actor_store::blobstore::BoxedBlobStream>>
+    {
         Box::pin(async { bail!("blobstore unavailable") })
     }
     fn has_temp(&self, _key: String) -> futures::future::BoxFuture<'_, Result<bool>> {

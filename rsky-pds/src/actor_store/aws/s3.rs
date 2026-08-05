@@ -1,5 +1,5 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
-use crate::actor_store::blobstore::{BlobStore, DeleteError, ObjectKind};
+use crate::actor_store::blobstore::{BlobStore, BoxedBlobStream, DeleteError, ObjectKind};
 use crate::blob_attempts::{AttemptJournal, AttemptOutcome};
 use anyhow::Result;
 use aws_config::retry::RetryConfig;
@@ -10,6 +10,8 @@ use aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use futures::future::BoxFuture;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rsky_common::get_random_str;
 
@@ -491,8 +493,14 @@ impl BlobStore for S3BlobStore {
         Box::pin(S3BlobStore::get_bytes(self, cid))
     }
 
-    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
-        Box::pin(S3BlobStore::get_stream(self, cid))
+    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<BoxedBlobStream>> {
+        Box::pin(async move {
+            let body = S3BlobStore::get_stream(self, cid).await?.into_async_read();
+            Ok(tokio_util::io::ReaderStream::new(body)
+                .map_ok(bytes::Bytes::from)
+                .map_err(anyhow::Error::from)
+                .boxed())
+        })
     }
 
     fn has_temp(&self, key: String) -> BoxFuture<'_, Result<bool>> {

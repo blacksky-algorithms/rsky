@@ -1,0 +1,20 @@
+[package]
+name = "rsky-blobstore"
+version = "0.1.0"
+edition = "2021"
+publish = true
+description = "Storage abstraction for atproto PDS blobs."
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+futures = "0.3"
+thiserror = "1"
+tokio = { version = "1", features = ["fs"] }
+lexicon_cid = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+sha2 = { workspace = true }
+tempfile = "3"

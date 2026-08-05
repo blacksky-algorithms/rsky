@@ -1733,7 +1733,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2296,7 +2296,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d162beedaa69905488a8da94f5ac3edb4dd4788b732fadb7bd120b2625c1976"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.106",
 ]
 
 [[package]]
@@ -8181,6 +8181,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-blobstore"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "cid",
+ "futures",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "rsky-common"
 version = "0.1.4"
 dependencies = [
@@ -8446,6 +8460,7 @@ dependencies = [
  "base64 0.22.1",
  "base64-url",
  "base64ct",
+ "bytes",
  "chrono",
  "cid",
  "data-encoding",
@@ -8478,6 +8493,7 @@ dependencies = [
  "reqwest 0.12.23",
  "rocket",
  "rocket_ws",
+ "rsky-blobstore",
  "rsky-common",
  "rsky-crypto",
  "rsky-identity",
@@ -8503,6 +8519,7 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-opentelemetry",
@@ -11376,7 +11393,7 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0978bf7171b3d90bac376700cb56d606feb40f251a475a5d6634613564460b22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

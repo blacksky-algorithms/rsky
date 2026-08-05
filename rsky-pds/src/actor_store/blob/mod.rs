@@ -1,10 +1,9 @@
-use crate::actor_store::blobstore::BlobStore;
+use crate::actor_store::blobstore::{BlobStore, BoxedBlobStream};
 use crate::actor_store::db::{ActorDb, Blob as BlobRow};
 use crate::actor_store::repo::sql_repo::placeholders;
 use crate::background::BackgroundQueue;
 use crate::image;
 use anyhow::{bail, Result};
-use aws_sdk_s3::primitives::ByteStream;
 use futures::try_join;
 use lexicon_cid::Cid;
 use rsky_common::ipld::sha256_to_cid;
@@ -433,7 +432,7 @@ pub struct ListBlobsOpts {
 pub struct GetBlobOutput {
     pub size: i64,
     pub mime_type: Option<String>,
-    pub stream: ByteStream,
+    pub stream: BoxedBlobStream,
 }
 
 pub struct GetBlobMetadataOutput {
@@ -1237,6 +1236,7 @@ mod tests {
     use super::*;
     use crate::actor_store::blobstore::MemoryBlobStore;
     use crate::actor_store::db::get_migrated_db;
+    use futures::TryStreamExt;
     use rsky_repo::types::{BlobConstraint, PreparedCreateOrUpdate, PreparedDelete, WriteOpAction};
 
     struct TestBlobReader {
@@ -1328,10 +1328,9 @@ mod tests {
         assert_eq!(metadata.size, 15);
         assert_eq!(metadata.mime_type.as_deref(), Some("text/plain"));
         let output = t.reader.get_blob(cid).await.unwrap();
-        assert_eq!(
-            output.stream.collect().await.unwrap().to_vec(),
-            b"some blob bytes"
-        );
+        let chunks: Vec<bytes::Bytes> = output.stream.try_collect().await.unwrap();
+        let bytes: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
+        assert_eq!(bytes, b"some blob bytes");
         // promoting again is a no-op
         t.reader
             .verify_blob_and_make_permanent(prepared_ref(&blob))
