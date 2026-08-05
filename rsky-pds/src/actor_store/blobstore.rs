@@ -1,9 +1,5 @@
 #[cfg(feature = "aws-s3")]
 use crate::actor_store::aws::s3::S3BlobStore;
-#[cfg(feature = "disk")]
-use crate::actor_store::disk_blobstore::DiskBlobStore;
-#[cfg(feature = "opendal")]
-use crate::actor_store::opendal_blobstore::OpendalBlobStore;
 use crate::config::BlobstoreConfig;
 #[cfg(feature = "aws-s3")]
 use crate::config::S3Config;
@@ -18,6 +14,10 @@ use lexicon_cid::Cid;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "disk")]
+pub use rsky_blobstore::backends::disk::DiskBlobStore;
+#[cfg(feature = "opendal")]
+pub use rsky_blobstore::backends::opendal::OpendalBlobStore;
 pub use rsky_blobstore::{
     unavailable, BlobNotFoundError, BlobStore, BlobUnavailableError, BoxedBlobStream, DeleteError,
     MemoryBlobStore, ObjectKind,
@@ -168,7 +168,7 @@ impl BlobstoreFactory {
                 operator_kind,
                 bucket,
             } => {
-                let operator = crate::actor_store::opendal_blobstore::build_operator(
+                let operator = rsky_blobstore::backends::opendal::build_operator(
                     operator_kind,
                     bucket,
                 )

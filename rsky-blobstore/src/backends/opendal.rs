@@ -1,8 +1,8 @@
 // Blobstore implementation backed by opendal so the same code can drive any
 // opendal-supported backend (S3, GCS, Azure, local fs, sftp, ...) without
 // pulling in each service's SDK directly.
-use crate::actor_store::blobstore::{
-    BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError, ObjectKind,
+use crate::blobstore::{
+    generation_name, BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError, ObjectKind,
 };
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -10,7 +10,6 @@ use futures::future::BoxFuture;
 use futures::stream::StreamExt;
 use lexicon_cid::Cid;
 use opendal::{services, Operator};
-use rsky_blobstore::generation_name;
 use std::io::ErrorKind;
 
 #[derive(Debug, Clone)]
@@ -23,21 +22,6 @@ impl OpendalBlobStore {
     pub fn new(op: Operator, did: String) -> Self {
         OpendalBlobStore { op, did }
     }
-
-    #[allow(dead_code)]
-    fn block_path(&self, cid: Cid) -> String {
-        format!("blocks/{}/{}", self.did, cid)
-    }
-
-    #[allow(dead_code)]
-    fn tmp_path(&self, key: &str) -> String {
-        format!("tmp/{}/{}", self.did, key)
-    }
-
-    #[allow(dead_code)]
-    fn quarantine_path(&self, cid: Cid) -> String {
-        format!("quarantine/{}/{}", self.did, cid)
-    }
 }
 
 /// Build an [`Operator`] for one of the supported opendal schemes. New schemes
@@ -49,6 +33,13 @@ pub fn build_operator(kind: &str, bucket: &str) -> Result<Operator> {
         other => bail!("unsupported opendal operator kind: {other}"),
     };
     Ok(op)
+}
+
+/// Convenience constructor: build an [`OpendalBlobStore`] in one call. Useful
+/// for callers (e.g. rsky-pds's `BlobstoreFactory`) that don't already hold an
+/// [`Operator`].
+pub fn new_blobstore(kind: &str, bucket: &str, did: String) -> Result<OpendalBlobStore> {
+    Ok(OpendalBlobStore::new(build_operator(kind, bucket)?, did))
 }
 
 fn translate_err(err: opendal::Error) -> anyhow::Error {
@@ -308,13 +299,18 @@ impl BlobStore for OpendalBlobStore {
 mod tests {
     use super::*;
     use futures::TryStreamExt;
-    use rsky_common::ipld::sha256_to_cid;
     use sha2::{Digest, Sha256};
 
+    const SHA2_256: u64 = 0x12;
+    const RAWCODEC: u64 = 0x55;
     const DID: &str = "did:example:alice";
 
     fn cid_for(bytes: &[u8]) -> Cid {
-        sha256_to_cid(Sha256::digest(bytes).to_vec())
+        let hash = Sha256::digest(bytes).to_vec();
+        Cid::new_v1(
+            RAWCODEC,
+            lexicon_cid::multihash::Multihash::<64>::wrap(SHA2_256, &hash).unwrap(),
+        )
     }
 
     fn temp_store() -> OpendalBlobStore {

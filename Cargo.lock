@@ -8317,11 +8317,16 @@ dependencies = [
  "anyhow",
  "bytes",
  "cid",
+ "data-encoding",
  "futures",
+ "opendal",
+ "rand 0.8.5",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -8612,7 +8617,6 @@ dependencies = [
  "lru 0.14.0",
  "mailchecker",
  "mailgun-rs",
- "opendal",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
