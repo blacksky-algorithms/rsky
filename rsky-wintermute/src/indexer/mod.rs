@@ -142,7 +142,7 @@ impl IndexerManager {
         pg_config.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
-        pg_config.pool = Some(deadpool_postgres::PoolConfig::new(size));
+        pg_config.pool = Some(crate::config::pg_pool_config(size));
 
         pg_config
             .create_pool(Some(Runtime::Tokio1), NoTls)

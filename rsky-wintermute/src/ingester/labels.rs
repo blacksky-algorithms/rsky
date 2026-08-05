@@ -26,7 +26,7 @@ pub async fn subscribe_labels(
     pg_config.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
-    pg_config.pool = Some(deadpool_postgres::PoolConfig::new(pool_size));
+    pg_config.pool = Some(crate::config::pg_pool_config(pool_size));
 
     let pool = Arc::new(
         pg_config

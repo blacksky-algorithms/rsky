@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     pg_config.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
-    pg_config.pool = Some(deadpool_postgres::PoolConfig::new(16));
+    pg_config.pool = Some(rsky_wintermute::config::pg_pool_config(16));
 
     let pool = Arc::new(
         pg_config
