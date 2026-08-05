@@ -183,14 +183,83 @@ pub static INLINE_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(100) // Default: 100 concurrent inline indexing tasks (5x pool size)
 });
 
-// Database pool size per component (firehose, labels, indexer, backfiller each get a pool)
-// With 4 pools, default 20 each = 80 connections, leaving headroom under Postgres default 100
+// Database pool size, applied PER POOL -- and pools are created per relay host and per
+// labeler host, not once globally. The real ceiling is therefore
+//   DB_POOL_SIZE * (relay hosts + labeler hosts)          -- ingester + labels
+//   + max(DB_POOL_SIZE/4, FIREHOSE_LIVE_SHARDS * 8)       -- indexer live
+//   + max(DB_POOL_SIZE/2, 10) + max(DB_POOL_SIZE/4, 5)    -- indexer backfill + labels
+// With 3 relays, 3 labelers, DB_POOL_SIZE=36 and 6 live shards that is 291 connections,
+// which will exhaust a server running the Postgres default max_connections. Size it
+// against the host lists, not against the number of components.
 pub static DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("DB_POOL_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(20) // Default: 20 connections per pool (80 total across 4 pools)
+        .unwrap_or(20) // Default: 20 connections per pool
 });
+
+// Pool timeouts. deadpool leaves all three unset by default, which means a caller that
+// cannot get a connection waits *forever* instead of failing: an exhausted pool surfaces
+// as silently stalled indexing rather than an error, and a connection the server closed
+// underneath the pool is never noticed (every pool here uses RecyclingMethod::Fast, which
+// runs no validation query on checkout). Bound all three so starvation is observable.
+//
+// Set any of these to 0 to disable that individual timeout and restore the old
+// unbounded behaviour.
+const DEFAULT_DB_WAIT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_DB_CREATE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_DB_RECYCLE_TIMEOUT_SECS: u64 = 10;
+
+/// Parse a timeout given in whole seconds. An absent or unparseable value falls back to
+/// `default_secs`; an explicit `0` means "no timeout" and maps to [`None`].
+#[must_use]
+fn parse_timeout_secs(raw: Option<&str>, default_secs: u64) -> Option<Duration> {
+    let secs = raw
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(default_secs);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
+fn timeout_from_env(var: &str, default_secs: u64) -> Option<Duration> {
+    parse_timeout_secs(std::env::var(var).ok().as_deref(), default_secs)
+}
+
+/// How long to wait for a free slot before giving up.
+pub static DB_WAIT_TIMEOUT: LazyLock<Option<Duration>> =
+    LazyLock::new(|| timeout_from_env("DB_WAIT_TIMEOUT_SECS", DEFAULT_DB_WAIT_TIMEOUT_SECS));
+
+/// How long to wait for a brand-new connection to be established.
+pub static DB_CREATE_TIMEOUT: LazyLock<Option<Duration>> =
+    LazyLock::new(|| timeout_from_env("DB_CREATE_TIMEOUT_SECS", DEFAULT_DB_CREATE_TIMEOUT_SECS));
+
+/// How long to wait for an existing connection to be recycled for reuse.
+pub static DB_RECYCLE_TIMEOUT: LazyLock<Option<Duration>> =
+    LazyLock::new(|| timeout_from_env("DB_RECYCLE_TIMEOUT_SECS", DEFAULT_DB_RECYCLE_TIMEOUT_SECS));
+
+/// Build the [`Timeouts`] every pool in this crate shares.
+#[must_use]
+pub fn pg_pool_timeouts() -> deadpool_postgres::Timeouts {
+    deadpool_postgres::Timeouts {
+        wait: *DB_WAIT_TIMEOUT,
+        create: *DB_CREATE_TIMEOUT,
+        recycle: *DB_RECYCLE_TIMEOUT,
+    }
+}
+
+/// The single place a Postgres pool is configured. Use this instead of
+/// `PoolConfig::new(size)`, which leaves every timeout unset.
+#[must_use]
+pub fn pg_pool_config(max_size: usize) -> deadpool_postgres::PoolConfig {
+    deadpool_postgres::PoolConfig {
+        max_size,
+        timeouts: pg_pool_timeouts(),
+        ..Default::default()
+    }
+}
 
 // Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
 // This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
@@ -316,5 +385,91 @@ mod tests {
         assert!(record_collection_allowed("com.whtwnd.blog.entry"));
         assert!(ingest_collection_allowed("app.bsky.feed.post"));
         assert!(!ingest_collection_allowed("com.whtwnd.blog.entry"));
+    }
+
+    #[test]
+    fn timeout_absent_uses_default() {
+        assert_eq!(parse_timeout_secs(None, 30), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn timeout_parses_explicit_value() {
+        assert_eq!(
+            parse_timeout_secs(Some("45"), 30),
+            Some(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn timeout_zero_disables() {
+        // 0 is the documented escape hatch back to deadpool's unbounded behaviour.
+        assert_eq!(parse_timeout_secs(Some("0"), 30), None);
+    }
+
+    #[test]
+    fn timeout_unparseable_falls_back_to_default() {
+        assert_eq!(
+            parse_timeout_secs(Some("banana"), 30),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_timeout_secs(Some(""), 7),
+            Some(Duration::from_secs(7))
+        );
+        // Negative values do not parse as u64, so they fall back rather than wrapping.
+        assert_eq!(
+            parse_timeout_secs(Some("-5"), 7),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn timeout_trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_timeout_secs(Some("  12\n"), 30),
+            Some(Duration::from_secs(12))
+        );
+    }
+
+    #[test]
+    fn timeout_default_of_zero_stays_disabled() {
+        assert_eq!(parse_timeout_secs(None, 0), None);
+    }
+
+    #[test]
+    fn timeout_from_env_reads_the_named_var() {
+        // Unset in the test process, so this exercises the fallback path.
+        assert_eq!(
+            timeout_from_env("RSKY_WINTERMUTE_TIMEOUT_VAR_THAT_IS_NOT_SET", 11),
+            Some(Duration::from_secs(11))
+        );
+    }
+
+    #[test]
+    fn pool_timeouts_bound_all_three_by_default() {
+        // The whole point of the helper: none of these may be None by default, or a
+        // starved pool waits forever instead of erroring.
+        let t = pg_pool_timeouts();
+        assert_eq!(
+            t.wait,
+            Some(Duration::from_secs(DEFAULT_DB_WAIT_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            t.create,
+            Some(Duration::from_secs(DEFAULT_DB_CREATE_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            t.recycle,
+            Some(Duration::from_secs(DEFAULT_DB_RECYCLE_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
+    fn pool_config_carries_size_and_timeouts() {
+        let cfg = pg_pool_config(12);
+        assert_eq!(cfg.max_size, 12);
+        assert_eq!(cfg.timeouts.wait, pg_pool_timeouts().wait);
+        assert_eq!(cfg.timeouts.create, pg_pool_timeouts().create);
+        assert_eq!(cfg.timeouts.recycle, pg_pool_timeouts().recycle);
     }
 }

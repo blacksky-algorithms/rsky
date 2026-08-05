@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
 fn build_pg_pool(args: &Args) -> Result<Pool> {
     let mut cfg = Config::new();
     cfg.url = Some(args.database_url.clone());
-    cfg.pool = Some(deadpool_postgres::PoolConfig::new(args.db_pool_size));
+    cfg.pool = Some(rsky_wintermute::config::pg_pool_config(args.db_pool_size));
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
