@@ -1,13 +1,20 @@
+#[cfg(feature = "aws-s3")]
 use crate::actor_store::aws::s3::S3BlobStore;
+#[cfg(feature = "disk")]
 use crate::actor_store::disk_blobstore::DiskBlobStore;
+#[cfg(feature = "opendal")]
+use crate::actor_store::opendal_blobstore::OpendalBlobStore;
 use crate::config::BlobstoreConfig;
+#[cfg(feature = "aws-s3")]
 use crate::config::S3Config;
 use anyhow::Result;
+#[cfg(feature = "aws-s3")]
 use aws_config::SdkConfig;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::StreamExt;
 use lexicon_cid::Cid;
+#[cfg(feature = "disk")]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,12 +26,14 @@ pub use rsky_blobstore::{
 /// Builds the configured blobstore implementation for a given actor.
 pub struct BlobstoreFactory {
     cfg: BlobstoreConfig,
+    #[cfg(feature = "aws-s3")]
     aws_cfg: SdkConfig,
     attempts: Option<crate::blob_attempts::AttemptJournal>,
     generations: Option<crate::blob_generations::Generations>,
 }
 
 impl BlobstoreFactory {
+    #[cfg(feature = "aws-s3")]
     pub fn new(cfg: BlobstoreConfig, aws_cfg: SdkConfig) -> Self {
         BlobstoreFactory {
             cfg,
@@ -34,15 +43,31 @@ impl BlobstoreFactory {
         }
     }
 
+    #[cfg(not(feature = "aws-s3"))]
+    pub fn new(cfg: BlobstoreConfig) -> Self {
+        BlobstoreFactory {
+            cfg,
+            attempts: None,
+            generations: None,
+        }
+    }
+
     /// Builds the factory for the configured store, deriving the S3 client
     /// settings from the `PDS_BLOBSTORE_S3_*` configuration over whatever
     /// the AWS environment provides.
     pub async fn from_config(cfg: BlobstoreConfig) -> Self {
-        let s3 = match &cfg {
-            BlobstoreConfig::S3(s3) => s3.clone(),
-            _ => S3Config::default(),
-        };
-        Self::new(cfg, sdk_config_for(&s3).await)
+        #[cfg(feature = "aws-s3")]
+        {
+            let s3 = match &cfg {
+                BlobstoreConfig::S3(s3) => s3.clone(),
+                _ => S3Config::default(),
+            };
+            Self::new(cfg, sdk_config_for(&s3).await)
+        }
+        #[cfg(not(feature = "aws-s3"))]
+        {
+            Self::new(cfg)
+        }
     }
     /// Journals every physical write the S3 stores make.
     pub fn with_attempts(mut self, attempts: crate::blob_attempts::AttemptJournal) -> Self {
@@ -60,11 +85,18 @@ impl BlobstoreFactory {
         self.generations.as_ref()
     }
 
+    #[cfg(feature = "aws-s3")]
     pub fn clone_config(&self) -> (BlobstoreConfig, SdkConfig) {
         (self.cfg.clone(), self.aws_cfg.clone())
     }
 
+    #[cfg(not(feature = "aws-s3"))]
+    pub fn clone_config(&self) -> BlobstoreConfig {
+        self.cfg.clone()
+    }
+
     /// A factory over the same store and journal.
+    #[cfg(feature = "aws-s3")]
     pub fn from_attempts(
         (cfg, aws_cfg): (BlobstoreConfig, SdkConfig),
         attempts: Option<crate::blob_attempts::AttemptJournal>,
@@ -72,6 +104,19 @@ impl BlobstoreFactory {
         BlobstoreFactory {
             cfg,
             aws_cfg,
+            attempts,
+            generations: None,
+        }
+    }
+
+    /// A factory over the same store and journal.
+    #[cfg(not(feature = "aws-s3"))]
+    pub fn from_attempts(
+        cfg: BlobstoreConfig,
+        attempts: Option<crate::blob_attempts::AttemptJournal>,
+    ) -> Self {
+        BlobstoreFactory {
+            cfg,
             attempts,
             generations: None,
         }
@@ -95,6 +140,7 @@ impl BlobstoreFactory {
     }
     pub fn blobstore(&self, did: String) -> Arc<dyn BlobStore> {
         let inner: Arc<dyn BlobStore> = match &self.cfg {
+            #[cfg(feature = "disk")]
             BlobstoreConfig::Disk {
                 location,
                 tmp_location,
@@ -104,6 +150,7 @@ impl BlobstoreFactory {
                 tmp_location.as_deref().map(Path::new),
                 None,
             )),
+            #[cfg(feature = "aws-s3")]
             BlobstoreConfig::S3(s3) => {
                 let store = S3BlobStore::new(
                     did.clone(),
@@ -116,6 +163,22 @@ impl BlobstoreFactory {
                     None => store,
                 })
             }
+            #[cfg(feature = "opendal")]
+            BlobstoreConfig::Opendal {
+                operator_kind,
+                bucket,
+            } => {
+                let operator = crate::actor_store::opendal_blobstore::build_operator(
+                    operator_kind,
+                    bucket,
+                )
+                .expect("opendal blobstore construction failed");
+                Arc::new(OpendalBlobStore::new(operator, did.clone()))
+            }
+            #[allow(unreachable_patterns)]
+            other => panic!(
+                "blobstore backend for {other:?} is not enabled in this build; enable `disk`, `aws-s3`, or `opendal`"
+            ),
         };
         self.generation_aware(did, inner)
     }
@@ -123,6 +186,7 @@ impl BlobstoreFactory {
 
 /// The SDK configuration for an S3 store: the environment's defaults with
 /// the reference PDS settings layered on top.
+#[cfg(feature = "aws-s3")]
 pub async fn sdk_config_for(s3: &S3Config) -> SdkConfig {
     let mut loader = aws_config::from_env();
     if let Some(region) = &s3.region {
@@ -147,7 +211,14 @@ pub async fn sdk_config_for(s3: &S3Config) -> SdkConfig {
 /// production backend's credentials.
 #[cfg(test)]
 pub(crate) fn test_factory(cfg: BlobstoreConfig) -> BlobstoreFactory {
-    BlobstoreFactory::new(cfg, SdkConfig::builder().build())
+    #[cfg(feature = "aws-s3")]
+    {
+        BlobstoreFactory::new(cfg, SdkConfig::builder().build())
+    }
+    #[cfg(not(feature = "aws-s3"))]
+    {
+        BlobstoreFactory::new(cfg)
+    }
 }
 
 /// A store whose permanent objects live at the generation the registry
@@ -531,6 +602,7 @@ mod tests {
         assert_eq!(unjournaled.get_bytes(cid).await.unwrap(), bytes);
     }
 
+    #[cfg(feature = "disk")]
     #[tokio::test]
     async fn factory_builds_disk_store_from_disk_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -549,6 +621,7 @@ mod tests {
         assert!(store.delete_all().is_some());
     }
 
+    #[cfg(feature = "disk")]
     #[tokio::test]
     async fn factory_builds_disk_store_with_custom_tmp_location() {
         let dir = tempfile::tempdir().unwrap();
@@ -563,6 +636,7 @@ mod tests {
         assert!(tmp_location.join("did:example:alice").join(&key).is_file());
     }
 
+    #[cfg(feature = "aws-s3")]
     #[tokio::test]
     async fn factory_derives_the_sdk_config_from_the_s3_settings() {
         let s3 = S3Config {
@@ -602,6 +676,7 @@ mod tests {
             .is_some());
     }
 
+    #[cfg(feature = "aws-s3")]
     #[tokio::test]
     async fn factory_builds_s3_store_from_s3_config() {
         let aws_cfg = SdkConfig::builder()

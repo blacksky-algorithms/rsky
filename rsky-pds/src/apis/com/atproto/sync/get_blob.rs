@@ -7,6 +7,7 @@ use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
 use crate::exports::{BlobBody, ExportGuard, Exports};
 use anyhow::Result;
+#[cfg(feature = "aws-s3")]
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use futures::TryStreamExt;
 use lexicon_cid::Cid;
@@ -72,9 +73,12 @@ pub async fn get_blob(
         Ok(body) => Ok(body),
         Err(error) => {
             tracing::error!("Error: {}", error);
-            if error.downcast_ref::<BlobNotFoundError>().is_some()
-                || matches!(error.downcast_ref(), Some(GetObjectError::NoSuchKey(_)))
-            {
+            #[cfg(feature = "aws-s3")]
+            let is_blob_not_found = error.downcast_ref::<BlobNotFoundError>().is_some()
+                || matches!(error.downcast_ref(), Some(GetObjectError::NoSuchKey(_)));
+            #[cfg(not(feature = "aws-s3"))]
+            let is_blob_not_found = error.downcast_ref::<BlobNotFoundError>().is_some();
+            if is_blob_not_found {
                 Err(ApiError::BlobNotFound)
             } else {
                 Err(ApiError::from(error))

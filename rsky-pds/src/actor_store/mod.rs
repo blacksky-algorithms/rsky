@@ -43,11 +43,15 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
+#[cfg(feature = "aws-s3")]
 pub mod aws;
 pub mod blob;
 pub mod blobstore;
 pub mod db;
+#[cfg(feature = "disk")]
 pub mod disk_blobstore;
+#[cfg(feature = "opendal")]
+pub mod opendal_blobstore;
 pub mod preference;
 pub mod record;
 pub mod repo;

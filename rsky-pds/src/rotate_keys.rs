@@ -175,5 +175,5 @@ pub async fn rotate_one(
     Ok(RotationOutcome::Rotated)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "disk"))]
 mod tests;
