@@ -2,7 +2,7 @@ use prometheus::{
     Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_int_counter,
     register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 // =============================================================================
 // INGESTER METRICS
@@ -400,11 +400,136 @@ pub static INDEXER_QUEUE_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
 });
 
 // =============================================================================
+// DATABASE POOL METRICS
+// =============================================================================
+//
+// Every Postgres pool in this process is bounded by DB_POOL_SIZE, but that is a
+// PER-POOL limit and pools are created per relay host AND per labeler host, plus
+// three more inside the indexer. config.rs:186-193 works the ceiling out to 291
+// connections for a plausible configuration — past a default max_connections of
+// 100. Until now nothing reported actual usage: `pool.status()` was never called
+// anywhere in the crate, and the only pool observability was a single line at
+// indexer startup logging the CONFIGURED sizes of three of the pools.
+//
+// That gap matters more since the wait/create/recycle timeouts were bounded.
+// Before, an exhausted pool blocked forever and showed up as silently stalled
+// indexing. Now it returns an error after DB_WAIT_TIMEOUT_SECS — visible in
+// ingester_errors_total, but indistinguishable there from any other failure.
+// These four gauges are what make the difference legible: a pool sitting at
+// available=0 with waiting>0 is starvation, and nothing else looks like that.
+
+pub static DB_POOL_MAX_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "db_pool_max_size",
+        "Configured maximum connections for this pool",
+        &["pool"]
+    )
+    .unwrap()
+});
+
+pub static DB_POOL_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "db_pool_size",
+        "Connections currently held by this pool, idle or checked out",
+        &["pool"]
+    )
+    .unwrap()
+});
+
+pub static DB_POOL_AVAILABLE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "db_pool_available",
+        "Idle connections available for immediate checkout",
+        &["pool"]
+    )
+    .unwrap()
+});
+
+pub static DB_POOL_WAITING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "db_pool_waiting",
+        "Callers blocked waiting for a connection. Sustained non-zero means \
+         starvation, and each waiter fails once DB_WAIT_TIMEOUT_SECS elapses",
+        &["pool"]
+    )
+    .unwrap()
+});
+
+/// Pools registered for sampling, keyed by a stable name.
+///
+/// A `Pool` is a handle around an `Arc`, so holding one here neither keeps the
+/// underlying connections alive nor costs anything to clone.
+static POOLS: LazyLock<Mutex<Vec<(String, deadpool_postgres::Pool)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Register a pool under `name`, replacing any pool already registered under it.
+///
+/// Replacing rather than appending is deliberate. The ingester builds a fresh
+/// pool each time it re-establishes a firehose connection, so appending would
+/// grow this list without bound across a long-lived process and report stale
+/// gauges for pools that no longer exist. Keying on name means the registry is
+/// bounded by the number of distinct pools, which is what the label set already
+/// assumes.
+pub fn register_pool(name: impl Into<String>, pool: &deadpool_postgres::Pool) {
+    let name = name.into();
+    // A panicking holder must not take pool observability down with it; the data
+    // behind this lock is a plain Vec that cannot be left half-updated.
+    let mut pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(slot) = pools.iter_mut().find(|(n, _)| *n == name) {
+        slot.1 = pool.clone();
+    } else {
+        pools.push((name, pool.clone()));
+    }
+}
+
+/// Refresh every pool gauge from `Pool::status()`.
+///
+/// Called from the /metrics handler rather than on a timer: the values are read
+/// straight out of the pool's own atomics, so sampling costs nothing measurable,
+/// and doing it at scrape time means what is exported is what was true when
+/// Prometheus asked rather than up to a tick earlier.
+pub fn sample_pools() {
+    let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (name, pool) in pools.iter() {
+        let s = pool.status();
+        let labels = &[name.as_str()];
+        DB_POOL_MAX_SIZE
+            .with_label_values(labels)
+            .set(i64::try_from(s.max_size).unwrap_or(i64::MAX));
+        DB_POOL_SIZE
+            .with_label_values(labels)
+            .set(i64::try_from(s.size).unwrap_or(i64::MAX));
+        DB_POOL_AVAILABLE
+            .with_label_values(labels)
+            .set(i64::try_from(s.available).unwrap_or(i64::MAX));
+        DB_POOL_WAITING
+            .with_label_values(labels)
+            .set(i64::try_from(s.waiting).unwrap_or(i64::MAX));
+    }
+}
+
+/// How many registry entries carry `name`. Exposed for tests, which run in
+/// parallel against this shared registry and so cannot assert on its total size.
+#[must_use]
+pub fn count_pools_named(name: &str) -> usize {
+    POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|(n, _)| n == name)
+        .count()
+}
+
+// =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
 /// Encode all metrics in Prometheus text format
 pub fn encode_metrics() -> Result<String, prometheus::Error> {
+    // Pool gauges are pull-based: nothing else writes them, so they have to be
+    // refreshed here or they would export whatever was true at registration.
+    sample_pools();
+
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
@@ -420,4 +545,69 @@ pub fn initialize_metrics() {
     INGESTER_BACKFILL_COMPLETE.set(0);
     INGESTER_EVENTS_IN_MEMORY.set(0);
     BACKFILLER_REPOS_RUNNING.set(0);
+}
+
+#[cfg(test)]
+mod pool_metric_tests {
+    use super::*;
+    use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
+    use tokio_postgres::NoTls;
+
+    fn a_pool(size: usize) -> deadpool_postgres::Pool {
+        let mut cfg = Config::new();
+        cfg.url = Some("postgres://nobody@127.0.0.1:1/none".to_owned());
+        cfg.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        cfg.pool = Some(crate::config::pg_pool_config(size));
+        // deadpool connects lazily, so this never touches the network.
+        cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap()
+    }
+
+    /// The ingester rebuilds its pool on every firehose reconnect. Appending
+    /// would grow the registry without bound over a long-lived process and keep
+    /// reporting gauges for pools that no longer exist.
+    #[test]
+    fn registering_the_same_name_replaces_rather_than_appends() {
+        register_pool("test:replace", &a_pool(7));
+        assert_eq!(count_pools_named("test:replace"), 1);
+
+        register_pool("test:replace", &a_pool(9));
+        assert_eq!(
+            count_pools_named("test:replace"),
+            1,
+            "re-registering an existing name must not add a second entry"
+        );
+
+        sample_pools();
+        assert_eq!(
+            DB_POOL_MAX_SIZE.with_label_values(&["test:replace"]).get(),
+            9,
+            "the gauge should reflect the pool registered most recently"
+        );
+    }
+
+    #[test]
+    fn distinct_names_are_tracked_separately() {
+        register_pool("test:distinct_a", &a_pool(3));
+        register_pool("test:distinct_b", &a_pool(4));
+        sample_pools();
+
+        assert_eq!(DB_POOL_MAX_SIZE.with_label_values(&["test:distinct_a"]).get(), 3);
+        assert_eq!(DB_POOL_MAX_SIZE.with_label_values(&["test:distinct_b"]).get(), 4);
+    }
+
+    /// A fresh pool holds nothing and nobody is blocked on it. The point of the
+    /// assertion is the pairing: available=0 alone is normal, available=0 WITH
+    /// waiting>0 is starvation, and that is the distinction the gauges exist to
+    /// make visible.
+    #[test]
+    fn a_fresh_pool_is_empty_and_uncontended() {
+        register_pool("test:fresh", &a_pool(5));
+        sample_pools();
+
+        assert_eq!(DB_POOL_SIZE.with_label_values(&["test:fresh"]).get(), 0);
+        assert_eq!(DB_POOL_AVAILABLE.with_label_values(&["test:fresh"]).get(), 0);
+        assert_eq!(DB_POOL_WAITING.with_label_values(&["test:fresh"]).get(), 0);
+    }
 }

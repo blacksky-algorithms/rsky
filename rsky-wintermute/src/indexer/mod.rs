@@ -116,6 +116,10 @@ impl IndexerManager {
         let pool_backfill = Self::create_pool(database_url, backfill_pool_size.max(10))?;
         let pool_labels = Self::create_pool(database_url, labels_pool_size.max(5))?;
 
+        crate::metrics::register_pool("indexer_live", &pool_live);
+        crate::metrics::register_pool("indexer_backfill", &pool_backfill);
+        crate::metrics::register_pool("indexer_labels", &pool_labels);
+
         let id_resolver = IdResolver::new(IdentityResolverOpts {
             timeout: Some(IDENTITY_RESOLVER_TIMEOUT),
             plc_url: None,
