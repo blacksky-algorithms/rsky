@@ -88,6 +88,13 @@ struct ParsedJob<'a> {
     rkey: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordDeletion {
+    Deleted,
+    Absent,
+    StaleRev,
+}
+
 impl IndexerManager {
     pub fn new(storage: Arc<Storage>, database_url: &str) -> Result<Self, WintermuteError> {
         let pool_size = *DB_POOL_SIZE;
@@ -1127,7 +1134,7 @@ impl IndexerManager {
         client: &deadpool_postgres::Client,
         uri: &str,
         rev: &str,
-    ) -> Result<bool, WintermuteError> {
+    ) -> Result<RecordDeletion, WintermuteError> {
         // Delete the record from the record table (matching TypeScript dataplane behavior)
         // Only delete if the record's rev is <= the delete operation's rev
         let result = client
@@ -1144,7 +1151,22 @@ impl IndexerManager {
             .execute("DELETE FROM duplicate_record WHERE uri = $1", &[&uri])
             .await?;
 
-        Ok(result.is_some())
+        if result.is_some() {
+            return Ok(RecordDeletion::Deleted);
+        }
+
+        // An absent record row is not a stale delete: it may never have been
+        // written, or already been removed. Only a surviving newer rev means
+        // this delete lost a race and must not cascade.
+        let survivor = client
+            .query_opt("SELECT rev FROM record WHERE uri = $1", &[&uri])
+            .await?;
+
+        Ok(if survivor.is_some() {
+            RecordDeletion::StaleRev
+        } else {
+            RecordDeletion::Absent
+        })
     }
 
     // listNotifications gates on the subject's existence, never on the notified
@@ -1460,17 +1482,14 @@ impl IndexerManager {
                 }
             }
             WriteAction::Delete => {
-                // Boilerplate deletes bypass the record gate: the typed
-                // delete is idempotent when the row is already absent.
-                let applied =
-                    if skip_boilerplate && crate::config::boilerplate_collection(&collection) {
-                        drop(Self::delete_generic_record(&client, &job.uri, &job.rev).await);
-                        true
-                    } else {
-                        Self::delete_generic_record(&client, &job.uri, &job.rev).await?
-                    };
+                // An absent record row must still cascade — under the boilerplate
+                // skip there is never a record row to gate on — but a surviving
+                // newer rev means this delete lost a race and must not.
+                let outcome = Self::delete_generic_record(&client, &job.uri, &job.rev).await?;
 
-                if !applied {
+                if outcome == RecordDeletion::StaleRev {
+                    metrics::INDEXER_STALE_WRITES_SKIPPED_TOTAL.inc();
+                    tracing::debug!("skipping stale delete for {}", job.uri);
                     return Ok(());
                 }
 

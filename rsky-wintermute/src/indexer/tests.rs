@@ -1533,6 +1533,144 @@ mod indexer_tests {
     }
 
     const NOTIF_BY_RECORD: &str = "SELECT COUNT(*) FROM notification WHERE \"recordUri\" = $1";
+    const LIKE_BY_URI: &str = "SELECT COUNT(*) FROM \"like\" WHERE uri = $1";
+
+    #[tokio::test]
+    async fn test_delete_cascades_without_boilerplate_skip_when_record_absent() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:cascadenoskip";
+        let subject_did = "did:plc:cascadenoskipsubject";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.like/cn1");
+        let subject_uri = format!("at://{subject_did}/app.bsky.feed.post/sub1");
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike3".to_owned(),
+                action: WriteAction::Create,
+                record: Some(subject_record(&subject_uri)),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "rev1".to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let client = pool.get().await.unwrap();
+        // Drop only the record row, leaving the typed row: the state a prune or a
+        // create that predates the record write leaves behind.
+        client
+            .execute("DELETE FROM record WHERE uri = $1", &[&test_uri])
+            .await
+            .unwrap();
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike3".to_owned(),
+                action: WriteAction::Delete,
+                record: None,
+                indexed_at: "2024-01-01T01:00:00Z".to_owned(),
+                rev: "rev2".to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            count_one(&client, LIKE_BY_URI, &test_uri).await,
+            0,
+            "an absent record row must still cascade to the typed table"
+        );
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            0,
+            "notification should be retracted"
+        );
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+    }
+
+    #[tokio::test]
+    async fn test_stale_delete_does_not_cascade_under_boilerplate_skip() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:staleskipdelete";
+        let subject_did = "did:plc:staleskipdeletesubject";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.like/sk1");
+        let subject_uri = format!("at://{subject_did}/app.bsky.feed.post/sub1");
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+
+        // Created without the skip so a record row exists at rev2 to gate on.
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike4".to_owned(),
+                action: WriteAction::Create,
+                record: Some(subject_record(&subject_uri)),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "rev2".to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        // A delete carrying an older rev lost a race against that record.
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike4".to_owned(),
+                action: WriteAction::Delete,
+                record: None,
+                indexed_at: "2024-01-01T01:00:00Z".to_owned(),
+                rev: "rev1".to_owned(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        let client = pool.get().await.unwrap();
+        assert_eq!(
+            count_one(&client, LIKE_BY_URI, &test_uri).await,
+            1,
+            "a stale delete must not cascade even under the boilerplate skip"
+        );
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            1,
+            "notification should survive a stale delete"
+        );
+        assert_eq!(
+            count_one(
+                &client,
+                "SELECT COUNT(*) FROM record WHERE uri = $1",
+                &test_uri
+            )
+            .await,
+            1,
+            "record row should survive a stale delete"
+        );
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+    }
 
     fn subject_record(subject_uri: &str) -> serde_json::Value {
         serde_json::json!({
