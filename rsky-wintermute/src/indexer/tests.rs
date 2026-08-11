@@ -1528,6 +1528,179 @@ mod indexer_tests {
         cleanup_test_data(&pool, test_did).await;
     }
 
+    async fn count_one(client: &deadpool_postgres::Client, sql: &str, uri: &str) -> i64 {
+        client.query_one(sql, &[&uri]).await.unwrap().get(0)
+    }
+
+    const NOTIF_BY_RECORD: &str = "SELECT COUNT(*) FROM notification WHERE \"recordUri\" = $1";
+
+    fn subject_record(subject_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "subject": {"uri": subject_uri, "cid": "bafysubject1"},
+            "createdAt": "2024-01-01T00:00:00Z"
+        })
+    }
+
+    #[tokio::test]
+    async fn test_delete_like_retracts_notification() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:likenotifretract";
+        let subject_did = "did:plc:likenotifretractsubject";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.like/ln1");
+        let subject_uri = format!("at://{subject_did}/app.bsky.feed.post/sub1");
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike1".to_owned(),
+                action: WriteAction::Create,
+                record: Some(subject_record(&subject_uri)),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "rev1".to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let client = pool.get().await.unwrap();
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            1,
+            "like notification should exist before delete"
+        );
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafylike1".to_owned(),
+                action: WriteAction::Delete,
+                record: None,
+                indexed_at: "2024-01-01T01:00:00Z".to_owned(),
+                rev: "rev2".to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            count_one(
+                &client,
+                "SELECT COUNT(*) FROM \"like\" WHERE uri = $1",
+                &test_uri
+            )
+            .await,
+            0,
+            "like row should be deleted"
+        );
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            0,
+            "like notification should be retracted"
+        );
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_repost_retracts_notification_with_boilerplate_skip() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:repostnotifretract";
+        let subject_did = "did:plc:repostnotifretractsubject";
+        let test_uri = format!("at://{test_did}/app.bsky.feed.repost/rn1");
+        let subject_uri = format!("at://{subject_did}/app.bsky.feed.post/sub1");
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafyrepost1".to_owned(),
+                action: WriteAction::Create,
+                record: Some(subject_record(&subject_uri)),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "rev1".to_owned(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        let client = pool.get().await.unwrap();
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            1,
+            "repost notification should exist before delete"
+        );
+        assert_eq!(
+            count_one(
+                &client,
+                "SELECT COUNT(*) FROM record WHERE uri = $1",
+                &test_uri
+            )
+            .await,
+            0,
+            "boilerplate skip should leave no record row to gate on"
+        );
+
+        IndexerManager::process_job(
+            &pool,
+            &IndexJob {
+                uri: test_uri.clone(),
+                cid: "bafyrepost1".to_owned(),
+                action: WriteAction::Delete,
+                record: None,
+                indexed_at: "2024-01-01T01:00:00Z".to_owned(),
+                rev: "rev2".to_owned(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            count_one(
+                &client,
+                "SELECT COUNT(*) FROM repost WHERE uri = $1",
+                &test_uri
+            )
+            .await,
+            0,
+            "repost row should be deleted"
+        );
+        assert_eq!(
+            count_one(
+                &client,
+                "SELECT COUNT(*) FROM feed_item WHERE uri = $1",
+                &test_uri
+            )
+            .await,
+            0,
+            "feed_item row should be deleted"
+        );
+        assert_eq!(
+            count_one(&client, NOTIF_BY_RECORD, &test_uri).await,
+            0,
+            "repost notification should be retracted"
+        );
+
+        cleanup_test_data(&pool, test_did).await;
+        cleanup_test_data(&pool, subject_did).await;
+    }
+
     // Tests for new helper functions
 
     #[tokio::test]

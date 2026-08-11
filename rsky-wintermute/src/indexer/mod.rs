@@ -1147,6 +1147,22 @@ impl IndexerManager {
         Ok(result.is_some())
     }
 
+    // listNotifications gates on the subject's existence, never on the notified
+    // record's, so a notification outlives the like or repost that caused it
+    // while the unread count (which does gate on it) stops counting it.
+    async fn delete_notifications_for_record(
+        client: &deadpool_postgres::Client,
+        uri: &str,
+    ) -> Result<u64, WintermuteError> {
+        let deleted = client
+            .execute("DELETE FROM notification WHERE \"recordUri\" = $1", &[&uri])
+            .await?;
+        if deleted > 0 {
+            tracing::debug!("retracted {deleted} notification(s) for {uri}");
+        }
+        Ok(deleted)
+    }
+
     pub async fn process_job(
         pool: &Pool,
         job: &IndexJob,
@@ -1457,6 +1473,8 @@ impl IndexerManager {
                 if !applied {
                     return Ok(());
                 }
+
+                Self::delete_notifications_for_record(&client, &job.uri).await?;
 
                 match collection.as_str() {
                     "app.bsky.feed.post" => {
