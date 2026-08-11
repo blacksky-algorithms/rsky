@@ -144,6 +144,11 @@ impl IngesterManager {
             }
         };
 
+        // One pool per relay host, so the label carries the host. This is the
+        // multiplier that makes the connection ceiling config-derived rather
+        // than equal to DB_POOL_SIZE.
+        crate::metrics::register_pool(format!("ingester:{hostname}"), &pool);
+
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s max
         let max_backoff_secs = 60u64;
         let mut backoff_secs = 1u64;
