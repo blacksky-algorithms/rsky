@@ -45,7 +45,7 @@ pub async fn space_notify_write(
     blobstore_factory: &State<BlobstoreFactory>,
     id_resolver: &State<SharedIdResolver>,
 ) -> Result<(), ApiError> {
-    let NotifyWriteInput { space, did, rev } = body.into_inner();
+    let NotifyWriteInput { space, repo, rev } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     let claims = verify_space_service_token(actor_store, id_resolver, &token.0, NOTIFY_WRITE_LXM)
         .await
@@ -54,13 +54,13 @@ pub async fn space_notify_write(
             ApiError::InvalidToken
         })?;
     // The notification must come from the account whose repo advanced.
-    if claims.iss != did {
+    if claims.iss != repo {
         return Err(ApiError::InvalidToken);
     }
     let (_, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
     space_store
-        .upsert_writer(&space_id.uri(), &did, &rev, None)
+        .upsert_writer(&space_id.uri(), &repo, &rev, None)
         .await
         .map_err(space_error)?;
     let endpoints = space_store
@@ -69,7 +69,7 @@ pub async fn space_notify_write(
         .map_err(space_error)?;
     if !endpoints.is_empty() {
         let authority = space_id.authority.clone();
-        let body = serde_json::json!({ "space": space_id.uri(), "did": did, "rev": rev });
+        let body = serde_json::json!({ "space": space_id.uri(), "repo": repo, "rev": rev });
         actor_store.background_queue.add(async move {
             deliver_notifications(
                 &keypair,

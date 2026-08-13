@@ -1,7 +1,9 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::{apply_space_writes, commit_meta, parse_space_uri};
+use crate::apis::com::atproto::space::{
+    apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject,
+};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::config::ServerConfig;
@@ -26,6 +28,7 @@ pub async fn space_delete_record(
 ) -> Result<Json<DeleteRecordOutput>, ApiError> {
     let DeleteRecordInput {
         space,
+        repo,
         collection,
         rkey,
         swap_record,
@@ -33,6 +36,7 @@ pub async fn space_delete_record(
     let space_id = parse_space_uri(&space)?;
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
+    require_repo_matches_subject(&repo, &did)?;
     if !session_permits(
         &credentials,
         &did,

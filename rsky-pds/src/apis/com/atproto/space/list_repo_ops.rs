@@ -17,12 +17,12 @@ use rsky_lexicon::com::atproto::space::{ListRepoOpsOutput, RepoOp};
 /// (spec §Incremental sync).
 #[tracing::instrument(skip_all)]
 #[rocket::get(
-    "/xrpc/com.atproto.space.listRepoOps?<space>&<did>&<since>&<cursor>&<limit>&<excludeValues>"
+    "/xrpc/com.atproto.space.listRepoOps?<space>&<repo>&<since>&<cursor>&<limit>&<excludeValues>"
 )]
 #[allow(clippy::too_many_arguments, non_snake_case)]
 pub async fn space_list_repo_ops(
     space: String,
-    did: String,
+    repo: String,
     since: Option<String>,
     cursor: Option<String>,
     limit: Option<i64>,
@@ -36,7 +36,7 @@ pub async fn space_list_repo_ops(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf { collection: None },
     )?;
     let limit = limit.unwrap_or(100).clamp(1, 1000) as usize;
@@ -53,7 +53,7 @@ pub async fn space_list_repo_ops(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;

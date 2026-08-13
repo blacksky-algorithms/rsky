@@ -2,7 +2,8 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{
-    apply_space_writes, commit_meta, parse_space_uri, valid_key_part, valid_nsid,
+    apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
+    valid_nsid,
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
@@ -29,6 +30,7 @@ pub async fn space_create_record(
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     let CreateRecordInput {
         space,
+        repo,
         collection,
         rkey,
         validate: _,
@@ -37,6 +39,7 @@ pub async fn space_create_record(
     let space_id = parse_space_uri(&space)?;
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
+    require_repo_matches_subject(&repo, &did)?;
     if !valid_nsid(&collection) {
         return Err(ApiError::InvalidRequest(format!(
             "invalid collection: {collection}"

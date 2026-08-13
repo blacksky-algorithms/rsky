@@ -251,7 +251,7 @@ async fn notify_write(
     let claims = service_jwt::claims(jwt)?;
     // The repo host signs with the member's own key, so a notification may only
     // announce the issuer's own repo.
-    if claims.iss != input.did {
+    if claims.iss != input.repo {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "InvalidToken",
@@ -272,7 +272,7 @@ async fn notify_write(
     let now = (state.now)();
     state
         .writers
-        .upsert_writer(&input.space, &input.did, &input.rev, None, now)
+        .upsert_writer(&input.space, &input.repo, &input.rev, None, now)
         .await?;
     let endpoints = state.registrations.endpoints(&input.space, now).await?;
     fan_out_write(state.notifier.clone(), endpoints, input);
@@ -683,7 +683,7 @@ mod tests {
         let path = "/xrpc/com.atproto.space.notifyWrite";
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
 
@@ -702,7 +702,7 @@ mod tests {
 
         let (endpoint, forwarded) = f.writes.recv().await.unwrap();
         assert_eq!(endpoint, "https://syncer.example");
-        assert_eq!(forwarded.did, MEMBER);
+        assert_eq!(forwarded.repo, MEMBER);
     }
 
     #[tokio::test]
@@ -712,7 +712,7 @@ mod tests {
         let authority_did = f.state.authority.authority_did().to_string();
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
 
@@ -725,7 +725,7 @@ mod tests {
         let token = member_service_jwt(&authority_did, NOTIFY_WRITE_LXM);
         let other = serde_json::json!({
             "space": space_uri(),
-            "did": "did:plc:someoneelse",
+            "repo": "did:plc:someoneelse",
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), other)).await;
@@ -742,7 +742,7 @@ mod tests {
         let token = member_service_jwt(&authority_did, NOTIFY_WRITE_LXM);
         let wrong_space = serde_json::json!({
             "space": "at://did:plc:other/space/community.blacksky.feed/main",
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), wrong_space)).await;
@@ -763,7 +763,7 @@ mod tests {
         .unwrap();
         let unknown = serde_json::json!({
             "space": space_uri(),
-            "did": "did:plc:unknown",
+            "repo": "did:plc:unknown",
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), unknown)).await;
@@ -782,7 +782,7 @@ mod tests {
         );
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(

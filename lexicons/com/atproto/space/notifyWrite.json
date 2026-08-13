@@ -9,16 +9,20 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["space", "did", "rev"],
+          "required": [
+            "space",
+            "repo",
+            "rev"
+          ],
           "properties": {
             "space": {
               "type": "string",
               "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
             },
-            "did": {
+            "repo": {
               "type": "string",
               "format": "did",
-              "description": "The DID of the repo that advanced."
+              "description": "The DID of the repo's author."
             },
             "rev": {
               "type": "string",

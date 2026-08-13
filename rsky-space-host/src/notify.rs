@@ -159,7 +159,7 @@ mod tests {
     fn write_input() -> NotifyWriteInput {
         NotifyWriteInput {
             space: SPACE.to_string(),
-            did: "did:plc:writer".to_string(),
+            repo: "did:plc:writer".to_string(),
             rev: "3jzfcijpj2z2c".to_string(),
         }
     }
@@ -171,7 +171,7 @@ mod tests {
             .and(path(format!("/xrpc/{NOTIFY_WRITE_LXM}")))
             .and(body_json(serde_json::json!({
                 "space": SPACE,
-                "did": "did:plc:writer",
+                "repo": "did:plc:writer",
                 "rev": "3jzfcijpj2z2c",
             })))
             .respond_with(ResponseTemplate::new(200))

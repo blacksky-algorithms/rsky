@@ -2,7 +2,8 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{
-    apply_space_writes, commit_meta, parse_space_uri, valid_key_part, valid_nsid,
+    apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
+    valid_nsid,
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
@@ -36,12 +37,14 @@ pub async fn space_apply_writes(
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
     let ApplyWritesInput {
         space,
+        repo,
         validate: _,
         writes,
     } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
+    require_repo_matches_subject(&repo, &did)?;
     if writes.len() > MAX_WRITES {
         return Err(ApiError::InvalidRequest(format!(
             "too many writes. max: {MAX_WRITES}"

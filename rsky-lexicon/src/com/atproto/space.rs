@@ -96,7 +96,7 @@ pub struct ListReposOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetRecordParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +115,7 @@ pub struct GetRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct ListRecordsParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,14 +144,14 @@ pub struct ListRecordsOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetBlobParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub cid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetLatestCommitParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,14 +162,14 @@ pub struct GetLatestCommitOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetRepoParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRepoOpsParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,6 +204,7 @@ pub struct GetDelegationTokenOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
@@ -224,6 +225,7 @@ pub struct CreateRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct PutRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +247,7 @@ pub struct PutRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,6 +263,7 @@ pub struct DeleteRecordOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyWritesInput {
     pub space: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate: Option<bool>,
     pub writes: Vec<ApplyWritesWrite>,
@@ -363,7 +367,7 @@ pub struct RegisterNotifyOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyWriteInput {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub rev: String,
 }
 
@@ -560,12 +564,12 @@ mod tests {
         roundtrip(
             &GetRecordParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 cid: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
         );
         roundtrip(
             &GetRecordOutput {
@@ -582,13 +586,13 @@ mod tests {
         roundtrip(
             &ListRecordsParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: None,
                 limit: Some(50),
                 cursor: None,
                 exclude_values: Some(true),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","limit":50,"excludeValues":true}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","limit":50,"excludeValues":true}"#,
         );
         roundtrip(
             &ListRecordsOutput {
@@ -608,17 +612,17 @@ mod tests {
         roundtrip(
             &GetBlobParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 cid: "bafkreiblob".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","cid":"bafkreiblob"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","cid":"bafkreiblob"}"#,
         );
         roundtrip(
             &GetRepoParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer"}"#,
         );
     }
 
@@ -627,9 +631,9 @@ mod tests {
         roundtrip(
             &GetLatestCommitParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer"}"#,
         );
         roundtrip(
             &GetLatestCommitOutput {
@@ -644,13 +648,13 @@ mod tests {
         roundtrip(
             &ListRepoOpsParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 since: Some("3jzfcijpj2z2a".to_string()),
                 cursor: None,
                 limit: Some(500),
                 exclude_values: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","since":"3jzfcijpj2z2a","limit":500}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","since":"3jzfcijpj2z2a","limit":500}"#,
         );
         roundtrip(
             &ListRepoOpsOutput {
@@ -690,12 +694,13 @@ mod tests {
         roundtrip(
             &CreateRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: None,
                 validate: Some(true),
                 record: json!({"text": "hi"}),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","validate":true,"record":{"text":"hi"}}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","validate":true,"record":{"text":"hi"}}"#,
         );
         roundtrip(
             &CreateRecordOutput {
@@ -715,13 +720,14 @@ mod tests {
         roundtrip(
             &PutRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 validate: None,
                 record: json!({"text": "hi"}),
                 swap_record: Some("bafyreiaold".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","rkey":"3jzfcijpj2z2b","record":{"text":"hi"},"swapRecord":"bafyreiaold"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b","record":{"text":"hi"},"swapRecord":"bafyreiaold"}"#,
         );
         roundtrip(
             &PutRecordOutput {
@@ -738,11 +744,12 @@ mod tests {
         roundtrip(
             &DeleteRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 swap_record: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
         );
         roundtrip(
             &DeleteRecordOutput {
@@ -760,6 +767,7 @@ mod tests {
         roundtrip(
             &ApplyWritesInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 validate: None,
                 writes: vec![
                     ApplyWritesWrite::Create(WriteCreate {
@@ -778,7 +786,7 @@ mod tests {
                     }),
                 ],
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","writes":[{"$type":"com.atproto.space.applyWrites#create","collection":"com.example.post","value":{"text":"hi"}},{"$type":"com.atproto.space.applyWrites#update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"$type":"com.atproto.space.applyWrites#delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","writes":[{"$type":"com.atproto.space.applyWrites#create","collection":"com.example.post","value":{"text":"hi"}},{"$type":"com.atproto.space.applyWrites#update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"$type":"com.atproto.space.applyWrites#delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
         );
         roundtrip(
             &ApplyWritesOutput {
@@ -843,10 +851,10 @@ mod tests {
         roundtrip(
             &NotifyWriteInput {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 rev: "3jzfcijpj2z2c".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
         );
         roundtrip(
             &NotifySpaceDeletedInput {

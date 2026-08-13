@@ -14,12 +14,12 @@ use rsky_lexicon::com::atproto::space::{ListRecordsOutput, Record};
 
 #[tracing::instrument(skip_all)]
 #[rocket::get(
-    "/xrpc/com.atproto.space.listRecords?<space>&<did>&<collection>&<limit>&<cursor>&<excludeValues>"
+    "/xrpc/com.atproto.space.listRecords?<space>&<repo>&<collection>&<limit>&<cursor>&<excludeValues>"
 )]
 #[allow(clippy::too_many_arguments, non_snake_case)]
 pub async fn space_list_records(
     space: String,
-    did: String,
+    repo: String,
     collection: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
@@ -33,7 +33,7 @@ pub async fn space_list_records(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf {
             collection: collection.clone(),
         },
@@ -44,7 +44,7 @@ pub async fn space_list_records(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;
@@ -76,7 +76,7 @@ pub async fn space_list_records(
                 )
             };
             Ok(Record {
-                uri: space_id.record_uri(&did, &row.collection, &row.rkey),
+                uri: space_id.record_uri(&repo, &row.collection, &row.rkey),
                 cid: row.cid,
                 value,
             })

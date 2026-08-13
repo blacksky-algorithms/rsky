@@ -10,10 +10,10 @@ use rocket::State;
 use rsky_lexicon::com::atproto::space::GetLatestCommitOutput;
 
 #[tracing::instrument(skip_all)]
-#[rocket::get("/xrpc/com.atproto.space.getLatestCommit?<space>&<did>")]
+#[rocket::get("/xrpc/com.atproto.space.getLatestCommit?<space>&<repo>")]
 pub async fn space_get_latest_commit(
     space: String,
-    did: String,
+    repo: String,
     auth: SpaceReadAuth,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
@@ -23,14 +23,14 @@ pub async fn space_get_latest_commit(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf { collection: None },
     )?;
     let reader = open_local_repo(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;

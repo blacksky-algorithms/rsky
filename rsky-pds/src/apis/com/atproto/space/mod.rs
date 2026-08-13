@@ -88,6 +88,18 @@ pub fn space_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+/// A write names the repo it targets, which must be the authenticated one:
+/// there is no delegated writing into someone else's permissioned repo.
+pub fn require_repo_matches_subject(repo: &str, subject: &str) -> Result<(), ApiError> {
+    if repo == subject {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidRequest(
+            "repo must equal the authenticated subject".to_string(),
+        ))
+    }
+}
+
 /// Open a read handle on a locally hosted, available repo.
 pub async fn open_local_repo(
     actor_store: &State<ActorStore>,
@@ -433,4 +445,16 @@ pub fn valid_nsid(s: &str) -> bool {
         && s.split('.').all(|seg| {
             !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_must_be_the_authenticated_subject() {
+        assert!(require_repo_matches_subject("did:plc:a", "did:plc:a").is_ok());
+        let error = require_repo_matches_subject("did:plc:b", "did:plc:a").unwrap_err();
+        assert!(matches!(error, ApiError::InvalidRequest(_)));
+    }
 }
