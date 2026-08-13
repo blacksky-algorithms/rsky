@@ -839,14 +839,22 @@ pub fn validate_bearer_token(
 /// mirroring the upstream transition-scope semantics: `transition:generic`
 /// is app-password-equivalent access and `transition:chat.bsky` raises it
 /// to privileged app-password access.
+///
+/// A session granted permission-set scopes (`repo:`, `blob:`, `rpc:`,
+/// `include:`, `space:`) carries no `transition:` grant, so it maps to the
+/// same app-password level rather than being refused. That level is a
+/// ceiling, not the grant itself: what those scopes actually permit is
+/// decided at the resource, which is where the collection, blob and space
+/// constraints live. Refusing here would reject every client built against
+/// the permission-set model before it ever reached that check.
 pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
-    let has = |scope: &str| scopes.iter().any(|granted| granted == scope);
-    if !has("atproto") {
+    let granted = crate::oauth_scope::GrantedScopes::parse(scopes);
+    if !granted.has_atproto() {
         bail!("Bad token scope")
     }
-    if has("transition:chat.bsky") {
+    if granted.has_transition("chat.bsky") {
         Ok(AuthScope::AppPassPrivileged)
-    } else if has("transition:generic") {
+    } else if granted.has_transition("generic") || granted.has_permission_grant() {
         Ok(AuthScope::AppPass)
     } else {
         bail!("Bad token scope")
@@ -1221,6 +1229,49 @@ mod tests {
         // missing the mandatory atproto scope is rejected outright
         assert!(oauth_scopes_to_auth_scope(&scopes(&["transition:generic"])).is_err());
         assert!(oauth_scopes_to_auth_scope(&[]).is_err());
+    }
+
+    #[test]
+    fn oauth_scope_mapping_accepts_permission_set_sessions() {
+        let scopes = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        // The exact base scope a permission-set client declares: no
+        // transition grant, so this was refused before the modern forms
+        // were recognised.
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "include:app.bulleted.authFull",
+                "blob:image/*"
+            ]))
+            .unwrap(),
+            AuthScope::AppPass
+        );
+        // each permission-grant form on its own is sufficient
+        for grant in [
+            "repo:app.bsky.feed.post",
+            "blob:image/*",
+            "rpc:com.example.method",
+            "include:app.example.set",
+            "space:app.bulleted.space?action=read",
+        ] {
+            assert_eq!(
+                oauth_scopes_to_auth_scope(&scopes(&["atproto", grant])).unwrap(),
+                AuthScope::AppPass,
+                "{grant} should map to app-password level"
+            );
+        }
+        // a chat transition still wins over a permission grant
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "include:app.bulleted.authFull",
+                "transition:chat.bsky"
+            ]))
+            .unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // an unrecognised token is not a permission grant
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto", "nonsense"])).is_err());
     }
 
     fn assert_admin(parsed: Option<BasicAuth>) {
