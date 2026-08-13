@@ -26,6 +26,7 @@ pub mod get_delegation_token;
 pub mod get_latest_commit;
 pub mod get_record;
 pub mod get_repo;
+pub mod get_repo_state;
 pub mod get_space;
 pub mod get_space_credential;
 pub mod host;

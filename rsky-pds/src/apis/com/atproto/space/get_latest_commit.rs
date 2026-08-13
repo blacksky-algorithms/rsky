@@ -9,9 +9,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::space::GetLatestCommitOutput;
 
-#[tracing::instrument(skip_all)]
-#[rocket::get("/xrpc/com.atproto.space.getLatestCommit?<space>&<repo>")]
-pub async fn space_get_latest_commit(
+pub async fn serve_latest_commit(
     space: String,
     repo: String,
     auth: SpaceReadAuth,
@@ -36,4 +34,25 @@ pub async fn space_get_latest_commit(
     .await?;
     let commit = serve_commit(&reader, &space_id.uri()).await?;
     Ok(Json(GetLatestCommitOutput { commit }))
+}
+
+#[tracing::instrument(skip_all)]
+#[rocket::get("/xrpc/com.atproto.space.getLatestCommit?<space>&<repo>")]
+pub async fn space_get_latest_commit(
+    space: String,
+    repo: String,
+    auth: SpaceReadAuth,
+    actor_store: &State<ActorStore>,
+    blobstore_factory: &State<BlobstoreFactory>,
+    account_manager: AccountManager,
+) -> Result<Json<GetLatestCommitOutput>, ApiError> {
+    serve_latest_commit(
+        space,
+        repo,
+        auth,
+        actor_store,
+        blobstore_factory,
+        account_manager,
+    )
+    .await
 }

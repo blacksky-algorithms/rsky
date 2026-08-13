@@ -645,6 +645,20 @@ async fn record_write_and_read_flow() {
     assert_eq!(status, Status::Ok);
     verify_lexicon_commit(&body["commit"], &author_key, &s.space, AUTHOR_DID);
 
+    // getRepoState is the same answer under the older name
+    let (status, alias) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getRepoState?space={}&repo={AUTHOR_DID}",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    verify_lexicon_commit(&alias["commit"], &author_key, &s.space, AUTHOR_DID);
+    assert_eq!(alias["commit"]["rev"], body["commit"]["rev"]);
+
     // listSpaces shows the author's repo
     let (status, body) = get_json(
         &s.client,
