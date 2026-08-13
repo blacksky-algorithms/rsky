@@ -73,7 +73,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::parse();
     let space = SpaceId::parse(&cfg.space_uri)?;
-    let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url));
+    // One proof-of-possession key for the process: the credential it mints is
+    // bound to it, and every host it is presented to checks that binding.
+    let dpop = Arc::new(rsky_daemon::dpop::DpopSigner::generate()?);
+    let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
     let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new());
 
     let index: Arc<dyn SpaceIndex> = if cfg.index_db_path.is_empty() {
@@ -137,7 +140,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         opts,
         host,
         creds,
-        Box::new(move |credential| Arc::new(HttpRepoHost::new(repo_host_base.clone(), credential))),
+        Box::new(move |credential| {
+            Arc::new(HttpRepoHost::new(
+                repo_host_base.clone(),
+                credential,
+                dpop.clone(),
+            ))
+        }),
         index,
         keys,
         notify_rx,

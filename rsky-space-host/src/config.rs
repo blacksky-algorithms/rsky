@@ -64,6 +64,15 @@ pub struct Config {
     /// Bind address for the HTTP host.
     #[arg(long, env = "SPACEHOST_BIND", default_value = "0.0.0.0:3600")]
     pub bind: String,
+
+    /// Public origin this host is reached at. DPoP proofs bind to it, so a
+    /// value that does not match what clients call fails every proof.
+    #[arg(
+        long,
+        env = "SPACEHOST_PUBLIC_URL",
+        default_value = "http://localhost:3600"
+    )]
+    pub public_url: String,
 }
 
 impl Config {
@@ -88,6 +97,9 @@ impl Config {
             return Err(
                 "managing-app policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
             );
+        }
+        if self.public_url.trim_end_matches('/').is_empty() {
+            return Err("SPACEHOST_PUBLIC_URL must be an absolute origin".to_string());
         }
         Ok(())
     }

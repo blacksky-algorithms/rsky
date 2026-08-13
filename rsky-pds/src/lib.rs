@@ -452,5 +452,6 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(app_view_agent)
         .manage(account_manager)
         .manage(shared_oauth_provider)
+        .manage(crate::space_auth::SharedSpaceDpop::default())
         .manage(actor_store)
 }

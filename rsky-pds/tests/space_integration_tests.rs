@@ -95,21 +95,90 @@ fn bearer(token: &str) -> Header<'static> {
     Header::new("Authorization", format!("Bearer {token}"))
 }
 
+const TEST_DPOP_KEY: [u8; 32] = [0x42u8; 32];
+static PROOF_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn dpop_key() -> rsky_oauth::jwk::Jwk {
+    rsky_oauth::jwk::Jwk::from_private_key_bytes(rsky_oauth::jwk::EcCurve::P256, &TEST_DPOP_KEY)
+        .unwrap()
+}
+
+fn dpop_proof(method: &str, url: &str, access_token: Option<&str>) -> Header<'static> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let key = dpop_key();
+    let mut header = rsky_oauth::jwt::JwtHeader::new("ES256");
+    header.typ = Some("dpop+jwt".to_string());
+    header.jwk = Some(key.to_public());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut claims = rsky_oauth::jwt::JwtClaims {
+        iat: Some(now),
+        jti: Some(format!(
+            "proof-{}",
+            PROOF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )),
+        ..Default::default()
+    };
+    claims.extra.insert("htm".to_string(), method.into());
+    claims.extra.insert("htu".to_string(), url.into());
+    if let Some(token) = access_token {
+        let ath = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(token.as_bytes()));
+        claims.extra.insert("ath".to_string(), ath.into());
+    }
+    Header::new(
+        "DPoP",
+        rsky_oauth::jwt::sign(&header, &claims, &key).unwrap(),
+    )
+}
+
+fn public_url(client: &Client) -> String {
+    client
+        .rocket()
+        .state::<ServerConfig>()
+        .unwrap()
+        .service
+        .public_url
+        .clone()
+}
+
+/// Present the credential the way the server demands it: a space credential
+/// under `DPoP` with a matching proof, a delegation token as a `Bearer` grant
+/// with a proof carrying no `ath`, anything else as a plain bearer token.
+fn auth_headers(client: &Client, method: &str, path: &str, token: &str) -> Vec<Header<'static>> {
+    let url = format!("{}{path}", public_url(client));
+    match rsky_space::credential::decode(token).map(|d| d.header.typ) {
+        Ok(typ) if typ == rsky_space::credential::CREDENTIAL_TYP => vec![
+            Header::new("Authorization", format!("DPoP {token}")),
+            dpop_proof(method, &url, Some(token)),
+        ],
+        Ok(typ) if typ == rsky_space::credential::DELEGATION_TYP => {
+            vec![bearer(token), dpop_proof(method, &url, None)]
+        }
+        _ => vec![bearer(token)],
+    }
+}
+
 async fn post_json(client: &Client, path: &str, token: &str, body: Value) -> (Status, Value) {
-    let response = client
-        .post(path)
-        .header(ContentType::JSON)
-        .header(bearer(token))
-        .body(body.to_string())
-        .dispatch()
-        .await;
+    let mut request = client.post(path).header(ContentType::JSON);
+    for header in auth_headers(client, "POST", path, token) {
+        request = request.header(header);
+    }
+    let response = request.body(body.to_string()).dispatch().await;
     let status = response.status();
     let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
     (status, body)
 }
 
 async fn get_json(client: &Client, path: &str, token: &str) -> (Status, Value) {
-    let response = client.get(path).header(bearer(token)).dispatch().await;
+    let mut request = client.get(path);
+    for header in auth_headers(client, "GET", path, token) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     let status = response.status();
     let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
     (status, body)
@@ -189,11 +258,13 @@ async fn mint_credential(setup: &Setup) -> String {
     .await;
     assert_eq!(status, Status::Ok, "{body}");
     let delegation = body["token"].as_str().unwrap().to_string();
+    // The delegation token is the request's bearer credential, and the DPoP
+    // proof beside it is what the minted credential binds to.
     let (status, body) = post_json(
         &setup.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &setup.member_token,
-        json!({"space": setup.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": setup.space }),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -366,8 +437,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -377,8 +448,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -401,8 +472,8 @@ async fn credential_mint_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &stranger_token,
-        json!({"space": s.space, "delegationToken": stranger_delegation}),
+        &stranger_delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -411,8 +482,8 @@ async fn credential_mint_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": "not.a.jwt"}),
+        "not.a.jwt",
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -421,11 +492,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({
-            "space": "at://did:plc:elsewhere/space/com.example.forum/main",
-            "delegationToken": delegation
-        }),
+        &delegation,
+        json!({ "space": "at://did:plc:elsewhere/space/com.example.forum/main" }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -461,8 +529,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -678,15 +746,15 @@ async fn car_export_validates() {
     create_post(&s, "3kfirst", "hello space").await;
     create_post(&s, "3ksecond", "more").await;
 
-    let response = s
-        .client
-        .get(format!(
-            "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
-            s.space
-        ))
-        .header(bearer(&credential))
-        .dispatch()
-        .await;
+    let path = format!(
+        "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
+        s.space
+    );
+    let mut request = s.client.get(&path);
+    for header in auth_headers(&s.client, "GET", &path, &credential) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response.headers().get_one("content-type"),
@@ -884,6 +952,28 @@ async fn host_methods_and_notifications() {
     )
     .await;
     assert_ne!(status, Status::Ok);
+
+    // a credential offered as a bearer token is refused even with a valid
+    // proof beside it: the scheme is not an opt-out from the binding
+    let path = format!("/xrpc/com.atproto.space.getSpace?space={}", s.space);
+    let url = format!("{}{path}", public_url(&s.client));
+    let response = s
+        .client
+        .get(&path)
+        .header(bearer(&credential))
+        .header(dpop_proof("GET", &url, Some(&credential)))
+        .dispatch()
+        .await;
+    assert_ne!(response.status(), Status::Ok);
+
+    // nor without any proof at all
+    let response = s
+        .client
+        .get(&path)
+        .header(bearer(&credential))
+        .dispatch()
+        .await;
+    assert_ne!(response.status(), Status::Ok);
     // a credential for one space does not open another
     let (status, _) = get_json(
         &s.client,
@@ -1049,8 +1139,8 @@ async fn delete_space_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1298,15 +1388,15 @@ async fn blob_upload_and_space_get_blob() {
     assert_eq!(status, Status::Ok, "{body}");
 
     // the member fetches the blob through the space credential
-    let response = s
-        .client
-        .get(format!(
-            "/xrpc/com.atproto.space.getBlob?space={}&repo={AUTHOR_DID}&cid={blob_cid}",
-            s.space
-        ))
-        .header(bearer(&credential))
-        .dispatch()
-        .await;
+    let path = format!(
+        "/xrpc/com.atproto.space.getBlob?space={}&repo={AUTHOR_DID}&cid={blob_cid}",
+        s.space
+    );
+    let mut request = s.client.get(&path);
+    for header in auth_headers(&s.client, "GET", &path, &credential) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response.into_bytes().await.unwrap(),
@@ -1355,6 +1445,9 @@ fn craft_credential_jwt(iss: &str, sub: &str, keypair: Option<&secp256k1::Keypai
         iat: now,
         exp: now + 3600,
         jti: "crafted".to_string(),
+        cnf: Some(rsky_space::credential::Confirmation {
+            jkt: dpop_key().thumbprint(),
+        }),
     };
     encode(&header, &claims, |input| match keypair {
         Some(keypair) => rsky_pds::space_auth::sign_with_keypair(keypair, input),
@@ -1431,11 +1524,8 @@ async fn credential_edge_cases() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({
-            "space": format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/nonexistent"),
-            "delegationToken": delegation
-        }),
+        &delegation,
+        json!({ "space": format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/nonexistent") }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -1463,8 +1553,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": parts.join(".")}),
+        &parts.join("."),
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1490,6 +1580,7 @@ async fn credential_edge_cases() {
             iat: now,
             exp: now + 60,
             jti: "foreign".to_string(),
+            cnf: None,
         };
         encode(&header, &claims, |input| {
             rsky_pds::space_auth::sign_with_keypair(&member_keypair, input)
@@ -1499,8 +1590,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": foreign}),
+        &foreign,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1539,8 +1630,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1816,8 +1907,8 @@ async fn missing_key_material_is_an_internal_error() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::InternalServerError);

@@ -67,7 +67,6 @@ pub struct GetSpaceOutput {
 #[serde(rename_all = "camelCase")]
 pub struct GetSpaceCredentialInput {
     pub space: String,
-    pub delegation_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_attestation: Option<String>,
 }
@@ -523,10 +522,9 @@ mod tests {
         roundtrip(
             &GetSpaceCredentialInput {
                 space: SPACE.to_string(),
-                delegation_token: "dt.jwt".to_string(),
                 client_attestation: Some("ca.jwt".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","delegationToken":"dt.jwt","clientAttestation":"ca.jwt"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","clientAttestation":"ca.jwt"}"#,
         );
         roundtrip(
             &GetSpaceCredentialOutput {

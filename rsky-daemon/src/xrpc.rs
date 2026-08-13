@@ -9,7 +9,9 @@ use rsky_lexicon::com::atproto::space::{
 };
 use serde::Deserialize;
 
+use crate::dpop::DpopSigner;
 use crate::error::{DaemonError, Result};
+use std::sync::Arc;
 
 pub const XRPC_TIMEOUT_SECS: u64 = 30;
 
@@ -82,13 +84,15 @@ pub trait SpaceHostClient: Send + Sync {
 pub struct HttpSpaceHost {
     base_url: String,
     http: reqwest::Client,
+    dpop: Arc<DpopSigner>,
 }
 
 impl HttpSpaceHost {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: http_client(),
+            dpop,
         }
     }
 
@@ -107,12 +111,17 @@ impl SpaceHostClient for HttpSpaceHost {
     ) -> Result<String> {
         let input = GetSpaceCredentialInput {
             space: space.to_string(),
-            delegation_token: delegation_token.to_string(),
             client_attestation: client_attestation.map(str::to_string),
         };
+        // The delegation token is the request's bearer credential; the proof
+        // beside it carries the key the minted credential binds to, and no
+        // `ath`, because a grant is not a bound token.
+        let url = self.url("com.atproto.space.getSpaceCredential");
         let resp = self
             .http
-            .post(self.url("com.atproto.space.getSpaceCredential"))
+            .post(&url)
+            .bearer_auth(delegation_token)
+            .header("DPoP", self.dpop.proof("POST", &url, None)?)
             .json(&input)
             .send()
             .await
@@ -135,10 +144,12 @@ impl SpaceHostClient for HttpSpaceHost {
         if let Some(cursor) = cursor {
             query.push(("cursor", cursor.to_string()));
         }
+        let url = self.url("com.atproto.space.listRepos");
         let resp = self
             .http
-            .get(self.url("com.atproto.space.listRepos"))
-            .bearer_auth(credential)
+            .get(&url)
+            .header("Authorization", format!("DPoP {credential}"))
+            .header("DPoP", self.dpop.proof("GET", &url, Some(credential))?)
             .query(&query)
             .send()
             .await
@@ -157,10 +168,12 @@ impl SpaceHostClient for HttpSpaceHost {
             endpoint: endpoint.to_string(),
             repo: None,
         };
+        let url = self.url("com.atproto.space.registerNotify");
         let resp = self
             .http
-            .post(self.url("com.atproto.space.registerNotify"))
-            .bearer_auth(credential)
+            .post(&url)
+            .header("Authorization", format!("DPoP {credential}"))
+            .header("DPoP", self.dpop.proof("POST", &url, Some(credential))?)
             .json(&input)
             .send()
             .await
@@ -173,7 +186,11 @@ impl SpaceHostClient for HttpSpaceHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json_string, header, method, path, query_param};
+
+    fn test_dpop() -> Arc<DpopSigner> {
+        Arc::new(DpopSigner::generate().unwrap())
+    }
+    use wiremock::matchers::{body_json_string, header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
@@ -183,8 +200,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/xrpc/com.atproto.space.getSpaceCredential"))
+            .and(header("authorization", "Bearer dt.jwt"))
+            .and(header_exists("dpop"))
             .and(body_json_string(format!(
-                r#"{{"space":"{SPACE}","delegationToken":"dt.jwt","clientAttestation":"ca.jwt"}}"#
+                r#"{{"space":"{SPACE}","clientAttestation":"ca.jwt"}}"#
             )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "credential": "sc.jwt"
@@ -192,7 +211,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpSpaceHost::new(format!("{}/", server.uri()));
+        let host = HttpSpaceHost::new(format!("{}/", server.uri()), test_dpop());
         let credential = host
             .get_space_credential(SPACE, "dt.jwt", Some("ca.jwt"))
             .await
@@ -207,7 +226,8 @@ mod tests {
             .and(path("/xrpc/com.atproto.space.listRepos"))
             .and(query_param("space", SPACE))
             .and(query_param("limit", "2"))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .and(query_param("cursor", "c1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "repos": [{"did": "did:plc:b", "rev": "3kb"}]
@@ -217,7 +237,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/xrpc/com.atproto.space.listRepos"))
             .and(query_param("space", SPACE))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "cursor": "c1",
                 "repos": [{"did": "did:plc:a", "rev": "3ka", "hash": "ab12"}]
@@ -225,7 +246,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpSpaceHost::new(server.uri());
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
         let first = host.list_repos(SPACE, "sc.jwt", None, None).await.unwrap();
         assert_eq!(first.cursor.as_deref(), Some("c1"));
         assert_eq!(first.repos[0].did, "did:plc:a");
@@ -244,7 +265,8 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/xrpc/com.atproto.space.registerNotify"))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .and(body_json_string(format!(
                 r#"{{"space":"{SPACE}","endpoint":"https://syncer.example"}}"#
             )))
@@ -254,7 +276,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpSpaceHost::new(server.uri());
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
         let expiry = host
             .register_notify(SPACE, "sc.jwt", "https://syncer.example")
             .await
@@ -274,7 +296,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpSpaceHost::new(server.uri());
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
         let err = host
             .list_repos(SPACE, "sc.jwt", None, None)
             .await
@@ -291,7 +313,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpSpaceHost::new(server.uri());
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
         let err = host
             .get_space_credential(SPACE, "dt.jwt", None)
             .await
@@ -301,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_failure_maps_to_xrpc_variant() {
-        let host = HttpSpaceHost::new("http://127.0.0.1:1");
+        let host = HttpSpaceHost::new("http://127.0.0.1:1", test_dpop());
         let err = host
             .register_notify(SPACE, "sc.jwt", "https://syncer.example")
             .await

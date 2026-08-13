@@ -17,7 +17,9 @@
 
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{bearer_token_from_req, validate_access_token, AuthScope, Credentials};
+use crate::auth_verifier::{
+    bearer_token_from_req, dpop_token_from_req, validate_access_token, AuthScope, Credentials,
+};
 use crate::space_scope::{self, SpaceRequest, SpaceScope};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -30,6 +32,7 @@ use rsky_common::get_random_str;
 use rsky_common::get_verification_material;
 use rsky_crypto::utils::encode_did_key;
 use rsky_identity::did::atproto_data::get_did_key_from_multibase;
+use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::credential::{
     self, JwtHeader, SpaceClaims, CREDENTIAL_TYP, DELEGATION_TTL_SECS, DELEGATION_TYP,
 };
@@ -38,6 +41,79 @@ use secp256k1::{Keypair, Message};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
+
+/// DPoP verification for the space surface.
+///
+/// Its own manager rather than the OAuth provider's: space credentials are not
+/// OAuth tokens, and issuance does not challenge with nonces, so a proof
+/// arrives without one. The replay store is what makes a proof single-use.
+pub struct SharedSpaceDpop {
+    pub dpop: DpopManager,
+}
+
+impl Default for SharedSpaceDpop {
+    fn default() -> Self {
+        Self {
+            dpop: DpopManager::new(None, Box::new(InMemoryReplayStore::default())),
+        }
+    }
+}
+
+fn dpop_request_uri(req: &Request) -> Result<String> {
+    let Some(cfg) = req.rocket().state::<crate::config::ServerConfig>() else {
+        bail!("server config is not available")
+    };
+    Ok(format!("{}{}", cfg.service.public_url, req.uri()))
+}
+
+async fn check_space_proof(
+    req: &Request<'_>,
+    access_token: Option<&str>,
+) -> Result<rsky_oauth::dpop::DpopProof> {
+    let shared = req
+        .guard::<&State<SharedSpaceDpop>>()
+        .await
+        .expect("SharedSpaceDpop managed");
+    let uri = dpop_request_uri(req)?;
+    let headers: Vec<String> = req.headers().get("dpop").map(String::from).collect();
+    let refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let proof = shared
+        .dpop
+        .check_proof(
+            &rsky_oauth::dpop::DpopRequest {
+                method: req.method().as_str(),
+                uri: &uri,
+                dpop_headers: &refs,
+                access_token,
+            },
+            now_secs(),
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    proof.ok_or_else(|| anyhow::anyhow!("missing DPoP proof"))
+}
+
+/// The thumbprint a credential minted for this request must be bound to.
+///
+/// Taken from the verified proof's own key, never from a request field: a
+/// field is an assertion anyone holding a delegation token can make about a
+/// key someone else controls. The proof carries no `ath`, because a delegation
+/// token is a grant rather than an access token.
+pub async fn verify_issuance_proof(req: &Request<'_>) -> Result<String> {
+    Ok(check_space_proof(req, None).await?.jkt)
+}
+
+/// Confirm the presenter holds the key the credential is bound to.
+pub async fn verify_bound_proof(
+    req: &Request<'_>,
+    credential: &str,
+    bound_jkt: &str,
+) -> Result<()> {
+    let proof = check_space_proof(req, Some(credential)).await?;
+    if proof.jkt != bound_jkt {
+        bail!("DPoP key thumbprint does not match the credential binding");
+    }
+    Ok(())
+}
 
 pub const NOTIFY_WRITE_LXM: &str = "com.atproto.space.notifyWrite";
 pub const NOTIFY_SPACE_DELETED_LXM: &str = "com.atproto.space.notifySpaceDeleted";
@@ -113,6 +189,12 @@ async fn verify_space_credential_token(
     req: &Request<'_>,
     token: &str,
 ) -> Result<SpaceCredentialAuth> {
+    // Scheme discipline: a credential reads every repo in its space, so
+    // presenting one as a bearer token makes it a shared secret. `Bearer` is
+    // refused even with a valid proof beside it.
+    if dpop_token_from_req(req).as_deref() != Some(token) {
+        bail!("space credentials must be presented under the DPoP scheme");
+    }
     let decoded = credential::decode(token).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if decoded.header.typ != CREDENTIAL_TYP {
         bail!("not a space credential");
@@ -133,8 +215,10 @@ async fn verify_space_credential_token(
         .expect("SharedIdResolver managed");
     let did_key =
         resolve_signing_did_key(actor_store, id_resolver, &authority, SPACE_KEY_IDS).await?;
-    credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let bound_jkt =
+        credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    verify_bound_proof(req, token, &bound_jkt).await?;
     Ok(SpaceCredentialAuth {
         space_uri,
         authority,
@@ -146,9 +230,9 @@ impl<'r> FromRequest<'r> for SpaceCredentialAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match bearer_token_from_req(req) {
-            Ok(Some(token)) => token,
-            _ => {
+        let token = match dpop_token_from_req(req) {
+            Some(token) => token,
+            None => {
                 let error = ApiError::AuthRequiredError("space credential required".to_string());
                 req.local_cache(|| Some(error.clone()));
                 return Outcome::Error((Status::Unauthorized, error));
@@ -181,9 +265,9 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match bearer_token_from_req(req) {
-            Ok(Some(token)) => token,
-            _ => {
+        let token = match dpop_token_from_req(req).or(bearer_token_from_req(req).ok().flatten()) {
+            Some(token) => token,
+            None => {
                 let error = ApiError::AuthRequiredError("authentication required".to_string());
                 req.local_cache(|| Some(error.clone()));
                 return Outcome::Error((Status::Unauthorized, error));
@@ -305,6 +389,7 @@ pub fn mint_delegation_token(keypair: &Keypair, user_did: &str, space: &SpaceId)
         iat: now,
         exp: now + DELEGATION_TTL_SECS,
         jti: get_random_str(),
+        cnf: None,
     };
     credential::encode(&header, &claims, |input| sign_with_keypair(keypair, input))
         .map_err(|e| anyhow::anyhow!(e.to_string()))

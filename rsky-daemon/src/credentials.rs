@@ -149,6 +149,7 @@ mod tests {
             iat,
             exp: iat + CREDENTIAL_TTL_SECS,
             jti: format!("jti-{iat}"),
+            cnf: None,
         };
         encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap()
     }

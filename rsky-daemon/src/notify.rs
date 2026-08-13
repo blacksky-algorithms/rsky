@@ -149,8 +149,8 @@ async fn notify_write(
             error_body("InvalidRequest", "space is not synced by this daemon"),
         );
     }
-    tracing::debug!(space = %input.space, did = %input.did, rev = %input.rev, "write notice");
-    if state.tx.send((input.space, input.did)).await.is_err() {
+    tracing::debug!(space = %input.space, repo = %input.repo, rev = %input.rev, "write notice");
+    if state.tx.send((input.space, input.repo)).await.is_err() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             error_body("ShuttingDown", "notify queue closed"),
@@ -264,7 +264,7 @@ mod tests {
     }
 
     fn write_body(did: &str) -> Value {
-        json!({ "space": SPACE, "did": did, "rev": "3krev" })
+        json!({ "space": SPACE, "repo": did, "rev": "3krev" })
     }
 
     #[tokio::test]
@@ -332,7 +332,7 @@ mod tests {
             .oneshot(request(
                 "/xrpc/com.atproto.space.notifyWrite",
                 Some(&jwt),
-                json!({ "space": "at://x/space/y/z", "did": "did:plc:w", "rev": "3k" }),
+                json!({ "space": "at://x/space/y/z", "repo": "did:plc:w", "rev": "3k" }),
             ))
             .await
             .unwrap();

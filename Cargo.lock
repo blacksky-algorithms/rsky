@@ -8005,7 +8005,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -8014,11 +8014,13 @@ dependencies = [
  "cid",
  "clap",
  "hex",
+ "rand 0.8.5",
  "reqwest 0.12.23",
  "rsky-common",
  "rsky-crypto",
  "rsky-identity",
  "rsky-lexicon",
+ "rsky-oauth",
  "rsky-space",
  "rsky-syntax",
  "rusqlite",
@@ -8168,7 +8170,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-lexicon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8209,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8392,7 +8394,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-space"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -8418,7 +8420,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-space-host"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -8434,6 +8436,7 @@ dependencies = [
  "rsky-crypto",
  "rsky-identity",
  "rsky-lexicon",
+ "rsky-oauth",
  "rsky-space",
  "rsky-syntax",
  "rusqlite",
