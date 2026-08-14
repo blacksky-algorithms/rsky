@@ -2,7 +2,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::space_error;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::space::ListSpacesOutput;
@@ -13,7 +13,7 @@ use rsky_lexicon::com::atproto::space::ListSpacesOutput;
 pub async fn space_list_spaces(
     limit: Option<i64>,
     cursor: Option<String>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<Json<ListSpacesOutput>, ApiError> {

@@ -3,7 +3,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::simplespace::{require_manage, space_error};
 use crate::apis::com::atproto::space::parse_space_uri;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -17,7 +17,7 @@ use rsky_lexicon::com::atproto::simplespace::RemoveMemberInput;
 )]
 pub async fn simplespace_remove_member(
     body: Json<RemoveMemberInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<(), ApiError> {

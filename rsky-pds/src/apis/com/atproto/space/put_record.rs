@@ -6,7 +6,7 @@ use crate::apis::com::atproto::space::{
     valid_key_part, valid_nsid,
 };
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;
 use crate::space_scope::{SpaceAction, SpaceRequest};
@@ -19,7 +19,7 @@ use rsky_lexicon::com::atproto::space::{PutRecordInput, PutRecordOutput};
 #[rocket::post("/xrpc/com.atproto.space.putRecord", format = "json", data = "<body>")]
 pub async fn space_put_record(
     body: Json<PutRecordInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,

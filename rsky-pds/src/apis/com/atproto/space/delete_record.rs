@@ -5,7 +5,7 @@ use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject,
 };
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;
 use crate::space_scope::{SpaceAction, SpaceRequest};
@@ -21,7 +21,7 @@ use rsky_lexicon::com::atproto::space::{DeleteRecordInput, DeleteRecordOutput};
 )]
 pub async fn space_delete_record(
     body: Json<DeleteRecordInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,

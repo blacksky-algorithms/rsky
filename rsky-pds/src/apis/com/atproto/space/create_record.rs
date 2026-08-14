@@ -6,7 +6,7 @@ use crate::apis::com::atproto::space::{
     valid_nsid,
 };
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;
 use crate::space_scope::{SpaceAction, SpaceRequest};
@@ -23,7 +23,7 @@ use rsky_lexicon::com::atproto::space::{CreateRecordInput, CreateRecordOutput};
 )]
 pub async fn space_create_record(
     body: Json<CreateRecordInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,

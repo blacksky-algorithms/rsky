@@ -295,6 +295,59 @@ impl<'r> FromRequest<'r> for AccessFullImport {
     }
 }
 
+/// Auth for the permissioned-space session surface.
+///
+/// A full session passes. So does an OAuth session that speaks the granular
+/// scope grammar -- its `space:` grants (inline or resolved from an
+/// `include:` permission set) are the actual authority, enforced per-request
+/// by `space_auth::session_permits`. An app-password session is refused: the
+/// space methods are OAuth-gated per the proposal, and an app password can
+/// carry no grant to evaluate.
+pub struct AccessSpace {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessSpace {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let outcome = access_check(
+            req,
+            vec![
+                AuthScope::Access,
+                AuthScope::AppPass,
+                AuthScope::AppPassPrivileged,
+            ],
+            None,
+        )
+        .await;
+        match outcome {
+            Outcome::Success(access) => {
+                let credentials = access.credentials.as_ref();
+                let is_full =
+                    credentials.and_then(|c| c.scope.as_ref()) == Some(&AuthScope::Access);
+                let speaks_grammar = credentials
+                    .map(|c| c.granted_scopes.is_some())
+                    .unwrap_or(false);
+                if is_full || speaks_grammar {
+                    Outcome::Success(AccessSpace { access })
+                } else {
+                    let error =
+                        AuthError::BadJwt("space methods require an OAuth session".to_string());
+                    req.local_cache(|| Some(ApiError::from(&error)));
+                    Outcome::Error((Status::BadRequest, error))
+                }
+            }
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::from(&error.1)));
+                Outcome::Error(error)
+            }
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+        }
+    }
+}
+
 pub struct AccessFull {
     pub access: AccessOutput,
 }
