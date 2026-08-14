@@ -57,14 +57,15 @@ pub fn parse_payload(b64: &str) -> Result<JwtPayload> {
 /// used for that method: without this check a token minted to call one
 /// endpoint can be replayed against every other endpoint this service serves,
 /// which is the whole point of the claim.
-pub async fn verify_jwt<G>(
+pub async fn verify_jwt<G, Fut>(
     jwt_str: String,
     own_did: Option<String>, // None indicates to skip the audience check
     lxm: Option<&str>,
     get_signing_key: G,
 ) -> Result<ServiceJwtPayload>
 where
-    G: Fn(String, bool) -> Result<String>,
+    G: Fn(String, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
 {
     let parts = jwt_str.split(".").collect::<Vec<&str>>();
     match (parts.first(), parts.get(1), parts.get(2)) {
@@ -111,7 +112,7 @@ where
                 )
             };
 
-            let signing_key = get_signing_key(payload.iss.clone(), false)?;
+            let signing_key = get_signing_key(payload.iss.clone(), false).await?;
 
             let mut valid_sig: bool = match verify_signature_with_key(signing_key.clone()) {
                 Ok(is_valid) => is_valid,
@@ -123,7 +124,7 @@ where
 
             if !valid_sig {
                 // get fresh signing key in case it failed due to a recent rotation
-                let fresh_signing_key = get_signing_key(payload.iss.clone(), true)?;
+                let fresh_signing_key = get_signing_key(payload.iss.clone(), true).await?;
                 valid_sig = if fresh_signing_key != signing_key {
                     match verify_signature_with_key(fresh_signing_key) {
                         Ok(is_valid) => is_valid,
@@ -184,7 +185,10 @@ mod tests {
             jwt,
             Some("did:web:service".to_string()),
             Some("com.atproto.server.createAccount"),
-            move |_iss, _refresh| Ok(did_key.clone()),
+            move |_iss, _refresh| {
+                let did_key = did_key.clone();
+                async move { Ok(did_key) }
+            },
         )
         .await
         .unwrap();
@@ -208,7 +212,7 @@ mod tests {
         format!("{header}.{payload}.{sig}")
     }
 
-    fn no_key(_iss: String, _refresh: bool) -> Result<String> {
+    async fn no_key(_iss: String, _refresh: bool) -> Result<String> {
         bail!("the lexicon-method check must decide before a key is fetched")
     }
 

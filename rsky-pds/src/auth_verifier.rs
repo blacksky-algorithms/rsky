@@ -1142,37 +1142,41 @@ pub async fn verify_service_jwt(
     id_resolver: &State<SharedIdResolver>,
     opts: ServiceJwtOpts,
 ) -> Result<VerifiedServiceJwt> {
-    let get_signing_key = |iss: String, force_refresh: bool| -> Result<String> {
-        match &opts.iss {
-            Some(opts_iss) if opts_iss.contains(&iss) => bail!("UntrustedIss: Untrusted issuer"),
-            _ => (),
-        }
-        // `iss` is a bare DID for ordinary service tokens; only labelers
-        // suffix a service fragment.
-        let mut parts = iss.splitn(2, '#');
-        if let Some(did) = parts.next().filter(|did| !did.is_empty()) {
-            let did = did.to_string();
-            let key_id = if parts.next() == Some("atproto_labeler") {
-                "atproto_label"
-            } else {
-                "atproto"
-            };
-            let lock = futures::executor::block_on(id_resolver.id_resolver.write());
-            let did_doc: Result<DidDocument> =
-                futures::executor::block_on(lock.did.ensure_resolve(&did, Some(force_refresh)));
-            let did_doc: DidDocument = match did_doc {
-                Err(err) => bail!("could not resolve iss did: `{err}`"),
-                Ok(res) => res,
-            };
-            match get_verification_material(&did_doc, key_id) {
-                None => bail!("missing or bad key in did doc"),
-                Some(parsed_key) => match get_did_key_from_multibase(parsed_key)? {
-                    None => bail!("missing or bad key in did doc"),
-                    Some(did_key) => Ok(did_key),
-                },
+    let get_signing_key = |iss: String, force_refresh: bool| {
+        let opts_iss = opts.iss.clone();
+        async move {
+            match &opts_iss {
+                Some(opts_iss) if opts_iss.contains(&iss) => {
+                    bail!("UntrustedIss: Untrusted issuer")
+                }
+                _ => (),
             }
-        } else {
-            bail!("could not resolve iss did")
+            // `iss` is a bare DID for ordinary service tokens; only labelers
+            // suffix a service fragment.
+            let mut parts = iss.splitn(2, '#');
+            if let Some(did) = parts.next().filter(|did| !did.is_empty()) {
+                let did = did.to_string();
+                let key_id = if parts.next() == Some("atproto_labeler") {
+                    "atproto_label"
+                } else {
+                    "atproto"
+                };
+                let lock = id_resolver.id_resolver.write().await;
+                let did_doc: DidDocument =
+                    match lock.did.ensure_resolve(&did, Some(force_refresh)).await {
+                        Err(err) => bail!("could not resolve iss did: `{err}`"),
+                        Ok(res) => res,
+                    };
+                match get_verification_material(&did_doc, key_id) {
+                    None => bail!("missing or bad key in did doc"),
+                    Some(parsed_key) => match get_did_key_from_multibase(parsed_key)? {
+                        None => bail!("missing or bad key in did doc"),
+                        Some(did_key) => Ok(did_key),
+                    },
+                }
+            } else {
+                bail!("could not resolve iss did")
+            }
         }
     };
 
