@@ -76,7 +76,8 @@ pub async fn space_list_records(
                 )
             };
             Ok(Record {
-                uri: space_id.record_uri(&repo, &row.collection, &row.rkey),
+                collection: row.collection,
+                rkey: row.rkey,
                 cid: row.cid,
                 value,
             })

@@ -1970,10 +1970,7 @@ async fn read_guard_scope_boundaries() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert!(body["records"][0]["uri"]
-        .as_str()
-        .unwrap()
-        .ends_with("/3kb"));
+    assert_eq!(body["records"][0]["rkey"].as_str().unwrap(), "3kb");
 
     // a write after notify registrations fans out deliveries (one endpoint
     // resolvable through the mock, one unresolvable)

@@ -127,7 +127,8 @@ pub struct ListRecordsParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
-    pub uri: String,
+    pub collection: String,
+    pub rkey: String,
     pub cid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
@@ -631,16 +632,19 @@ mod tests {
             },
             r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","limit":50,"excludeValues":true}"#,
         );
+        // Row shape per the reference's `listRecords#record`: {collection,
+        // rkey, cid, value?} — consumers key on collection/rkey, not a uri.
         roundtrip(
             &ListRecordsOutput {
                 cursor: None,
                 records: vec![Record {
-                    uri: format!("{SPACE}/did:plc:writer/com.example.post/3jzfcijpj2z2b"),
+                    collection: "com.example.post".to_string(),
+                    rkey: "3jzfcijpj2z2b".to_string(),
                     cid: "bafyreianew".to_string(),
                     value: None,
                 }],
             },
-            r#"{"records":[{"uri":"at://did:plc:auth/space/com.example.forum/self/did:plc:writer/com.example.post/3jzfcijpj2z2b","cid":"bafyreianew"}]}"#,
+            r#"{"records":[{"collection":"com.example.post","rkey":"3jzfcijpj2z2b","cid":"bafyreianew"}]}"#,
         );
     }
 

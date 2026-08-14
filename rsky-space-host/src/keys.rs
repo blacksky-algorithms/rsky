@@ -34,7 +34,7 @@ impl ResolverDocSource {
 #[async_trait]
 impl DocSource for ResolverDocSource {
     async fn did_document(&self, did: &str) -> Result<DidDocument> {
-        let mut resolver = self.resolver.lock().await;
+        let resolver = self.resolver.lock().await;
         resolver
             .ensure_resolve(&did.to_string(), None)
             .await
