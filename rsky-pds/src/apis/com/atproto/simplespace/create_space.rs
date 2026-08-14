@@ -69,5 +69,12 @@ pub async fn simplespace_create_space(
         .create_space_def(def)
         .await
         .map_err(space_error)?;
+    // The creator is the first member, as the reference seeds it: the
+    // authority must pass their own member-list policy for whole-space reads.
+    reader
+        .space
+        .add_member(&space.uri(), &did)
+        .await
+        .map_err(space_error)?;
     Ok(Json(CreateSpaceOutput { uri: space.uri() }))
 }

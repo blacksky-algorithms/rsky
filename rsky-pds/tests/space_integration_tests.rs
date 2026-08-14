@@ -362,12 +362,20 @@ async fn simplespace_management() {
     )
     .await;
     assert_eq!(status, Status::Ok);
+    // The creator is seeded as the first member at create, so the list is
+    // the author plus the enrolled member, ordered by did.
     let members = body["members"].as_array().unwrap();
-    assert_eq!(members.len(), 1);
-    assert_eq!(members[0]["did"], MEMBER_DID);
+    assert_eq!(members.len(), 2, "{body}");
+    let dids: Vec<&str> = members.iter().map(|m| m["did"].as_str().unwrap()).collect();
+    assert!(
+        dids.contains(&AUTHOR_DID) && dids.contains(&MEMBER_DID),
+        "{body}"
+    );
     // The metadata clients render: when added, and at what rev.
-    assert!(!members[0]["memberRev"].as_str().unwrap().is_empty());
-    assert!(!members[0]["addedAt"].as_str().unwrap().is_empty());
+    for m in members {
+        assert!(!m["memberRev"].as_str().unwrap().is_empty());
+        assert!(!m["addedAt"].as_str().unwrap().is_empty());
+    }
 
     // removeMember empties the list
     let (status, _) = post_json(
@@ -387,7 +395,10 @@ async fn simplespace_management() {
         &s.author_token,
     )
     .await;
-    assert_eq!(body["members"], json!([]));
+    // removing the enrolled member leaves the seeded creator
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1, "{body}");
+    assert_eq!(members[0]["did"], AUTHOR_DID);
 
     // managing-app policy requires a managingApp
     let (status, _) = post_json(
