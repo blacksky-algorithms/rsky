@@ -906,11 +906,11 @@ async fn put_and_apply_writes() {
             "space": s.space,
             "repo": AUTHOR_DID,
             "writes": [
-                {"$type": "com.atproto.space.applyWrites#create",
+                {"action": "create",
                  "collection": COLLECTION, "rkey": "3kbatch1", "value": {"text": "b1"}},
-                {"$type": "com.atproto.space.applyWrites#update",
+                {"action": "update",
                  "collection": COLLECTION, "rkey": "3kput", "value": {"text": "v3"}},
-                {"$type": "com.atproto.space.applyWrites#delete",
+                {"action": "delete",
                  "collection": COLLECTION, "rkey": "3kbatch1"}
             ]
         }),
@@ -940,7 +940,7 @@ async fn put_and_apply_writes() {
             "space": s.space,
             "repo": AUTHOR_DID,
             "writes": [
-                {"$type": "com.atproto.space.applyWrites#create",
+                {"action": "create",
                  "collection": COLLECTION, "value": {"text": "auto"}}
             ]
         }),

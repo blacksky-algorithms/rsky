@@ -293,39 +293,25 @@ pub struct ApplyWritesInput {
     pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate: Option<bool>,
-    pub writes: Vec<ApplyWritesWrite>,
+    pub writes: Vec<ApplyWritesOp>,
 }
 
+/// One operation in a space `applyWrites` batch.
+///
+/// The space plane's writes are tagged by an `action` string, not the repo
+/// plane's `$type` union -- the two planes' applyWrites deliberately take
+/// different shapes, and the reference and its clients send `action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "$type")]
-pub enum ApplyWritesWrite {
-    #[serde(rename = "com.atproto.space.applyWrites#create")]
-    Create(WriteCreate),
-    #[serde(rename = "com.atproto.space.applyWrites#update")]
-    Update(WriteUpdate),
-    #[serde(rename = "com.atproto.space.applyWrites#delete")]
-    Delete(WriteDelete),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WriteCreate {
+pub struct ApplyWritesOp {
+    /// `"create"` | `"update"` | `"delete"`.
+    pub action: String,
     pub collection: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Empty or omitted on create means auto-TID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WriteUpdate {
-    pub collection: String,
-    pub rkey: String,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriteDelete {
-    pub collection: String,
-    pub rkey: String,
+    /// The record value; omitted for delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -821,24 +807,36 @@ mod tests {
                 repo: "did:plc:writer".to_string(),
                 validate: None,
                 writes: vec![
-                    ApplyWritesWrite::Create(WriteCreate {
+                    ApplyWritesOp {
+                        action: "create".to_string(),
                         collection: "com.example.post".to_string(),
                         rkey: None,
-                        value: json!({"text": "hi"}),
-                    }),
-                    ApplyWritesWrite::Update(WriteUpdate {
+                        value: Some(json!({"text": "hi"})),
+                    },
+                    ApplyWritesOp {
+                        action: "update".to_string(),
                         collection: "com.example.post".to_string(),
-                        rkey: "3jzfcijpj2z2b".to_string(),
-                        value: json!({"text": "hello"}),
-                    }),
-                    ApplyWritesWrite::Delete(WriteDelete {
+                        rkey: Some("3jzfcijpj2z2b".to_string()),
+                        value: Some(json!({"text": "hello"})),
+                    },
+                    ApplyWritesOp {
+                        action: "delete".to_string(),
                         collection: "com.example.post".to_string(),
-                        rkey: "3jzfcijpj2z2d".to_string(),
-                    }),
+                        rkey: Some("3jzfcijpj2z2d".to_string()),
+                        value: None,
+                    },
                 ],
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","writes":[{"$type":"com.atproto.space.applyWrites#create","collection":"com.example.post","value":{"text":"hi"}},{"$type":"com.atproto.space.applyWrites#update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"$type":"com.atproto.space.applyWrites#delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","writes":[{"action":"create","collection":"com.example.post","value":{"text":"hi"}},{"action":"update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"action":"delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
         );
+        // The exact body bulleted's writer sent (from the PDS log of the run
+        // this shape bug blocked). It must parse; a `$type` union here refuses
+        // it with `missing field $type`.
+        let bulleted: ApplyWritesInput = serde_json::from_str(
+            r#"{"repo":"did:plc:ajbz7fsdsj3d5nfrspm7tco3","space":"at://did:plc:ajbz7fsdsj3d5nfrspm7tco3/space/app.bulleted.space/interop","writes":[{"action":"create","collection":"app.bulleted.node","rkey":"3mt2hejeu2lr3","value":{"$type":"app.bulleted.node","createdAt":"2026-08-14T15:18:25.406992798Z","layout":"bullet","sortKey":"a0","text":"rt2-1507-b"}}]}"#,
+        )
+        .expect("bulleted's captured applyWrites body must parse");
+        assert_eq!(bulleted.writes[0].action, "create");
         roundtrip(
             &ApplyWritesOutput {
                 commit: Some(CommitMeta {
