@@ -228,7 +228,13 @@ async fn notify_after_write(
     space: &SpaceId,
     commit: &SpaceCommitResult,
 ) {
-    let mut endpoints: Vec<Subscriber> = Vec::new();
+    // Two legs with different issuers: registrations held by the authority
+    // (syncers) get leg 2 signed by the authority; registrations held by the
+    // writing repo (the auto-registered space host) get leg 1 signed by the
+    // writer.
+    let mut host_subscribers: Vec<Subscriber> = Vec::new();
+    let mut repo_subscribers: Vec<Subscriber> = Vec::new();
+    let mut authority_keypair: Option<Keypair> = None;
     let now = rsky_common::now();
     // The authority's view of the space: writer set + registered syncers.
     if actor_store.exists(&space.authority).await.unwrap_or(false) {
@@ -257,8 +263,12 @@ async fn notify_after_write(
                     .host_notify_endpoints(&space.uri(), &now)
                     .await
                 {
-                    Ok(host_endpoints) => endpoints.extend(host_endpoints),
+                    Ok(host_endpoints) => host_subscribers.extend(host_endpoints),
                     Err(error) => tracing::warn!(%error, "failed to load host registrations"),
+                }
+                match authority_reader.keypair().await {
+                    Ok(kp) => authority_keypair = Some(kp),
+                    Err(error) => tracing::warn!(%error, "missing authority keypair"),
                 }
             }
             Err(error) => tracing::warn!(%error, "failed to open authority store"),
@@ -268,21 +278,26 @@ async fn notify_after_write(
         .repo_notify_endpoints(&space.uri(), &now)
         .await
     {
-        Ok(repo_endpoints) => endpoints.extend(repo_endpoints),
+        Ok(repo_endpoints) => repo_subscribers.extend(repo_endpoints),
         Err(error) => tracing::warn!(%error, "failed to load repo notify registrations"),
     }
-    endpoints.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
-    endpoints.dedup_by(|a, b| a.endpoint == b.endpoint);
+    host_subscribers.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    host_subscribers.dedup_by(|a, b| a.endpoint == b.endpoint);
+    repo_subscribers.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    repo_subscribers.dedup_by(|a, b| a.endpoint == b.endpoint);
+    repo_subscribers.retain(|s| !host_subscribers.iter().any(|h| h.endpoint == s.endpoint));
 
     let remote_authority =
         space.authority != did && !actor_store.exists(&space.authority).await.unwrap_or(false);
     let ctx = NotifyWriteTask {
         keypair,
+        authority_keypair,
         own_space_store,
         did: did.to_string(),
         space: space.clone(),
         rev: commit.rev.clone(),
-        endpoints,
+        host_subscribers,
+        repo_subscribers,
         plc_url: server_config.identity.plc_url.clone(),
         auto_register_authority: remote_authority,
     };
@@ -293,11 +308,13 @@ async fn notify_after_write(
 
 struct NotifyWriteTask {
     keypair: Keypair,
+    authority_keypair: Option<Keypair>,
     own_space_store: SpaceStore,
     did: String,
     space: SpaceId,
     rev: String,
-    endpoints: Vec<Subscriber>,
+    host_subscribers: Vec<Subscriber>,
+    repo_subscribers: Vec<Subscriber>,
     plc_url: String,
     auto_register_authority: bool,
 }
@@ -322,11 +339,11 @@ impl NotifyWriteTask {
                         tracing::warn!(%error, "failed to auto-register space host");
                     }
                     if !self
-                        .endpoints
+                        .repo_subscribers
                         .iter()
                         .any(|s| s.endpoint == subscriber.endpoint)
                     {
-                        self.endpoints.push(subscriber);
+                        self.repo_subscribers.push(subscriber);
                     }
                 }
                 Err(error) => {
@@ -343,15 +360,35 @@ impl NotifyWriteTask {
             rev: self.rev.clone(),
         })
         .expect("NotifyWriteInput serializes");
+        // Leg 1: the writing repo's host tells the space host the repo
+        // advanced, issued by the writer.
         deliver_notifications(
             &self.keypair,
             &self.did,
             &self.space.authority,
             NOTIFY_WRITE_LXM,
-            &self.endpoints,
+            &self.repo_subscribers,
             &body,
         )
         .await;
+        // Leg 2: the space host forwards to registered syncers, issued by the
+        // authority. Only populated when the authority is hosted here.
+        if !self.host_subscribers.is_empty() {
+            if let Some(authority_keypair) = &self.authority_keypair {
+                deliver_notifications(
+                    authority_keypair,
+                    &self.space.authority,
+                    &self.space.authority,
+                    NOTIFY_WRITE_LXM,
+                    &self.host_subscribers,
+                    &body,
+                )
+                .await;
+            } else {
+                tracing::warn!(space = %self.space.uri(),
+                    "leg-2 notifications skipped: no authority keypair");
+            }
+        }
         Ok(())
     }
 }

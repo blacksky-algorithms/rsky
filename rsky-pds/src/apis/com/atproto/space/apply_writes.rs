@@ -14,8 +14,8 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::tid::TID;
 use rsky_lexicon::com::atproto::space::{
-    ApplyWritesInput, ApplyWritesOp, ApplyWritesOutput, ApplyWritesResult, CreateResult,
-    DeleteResult, UpdateResult,
+    ApplyWritesInput, ApplyWritesOutput, ApplyWritesResult, CreateResult, DeleteResult,
+    UpdateResult,
 };
 
 const MAX_WRITES: usize = 200;
