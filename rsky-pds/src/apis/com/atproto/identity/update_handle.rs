@@ -49,11 +49,17 @@ async fn inner_update_handle(
         Some(account) if account.did != requester => bail!("Handle already taken: {handle}"),
         Some(_) => (),
         None => {
-            let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
-            let plc_client = plc::Client::new(plc_url);
-            plc_client
-                .update_handle(&requester, &PDS_PLC_ROTATION_KEYPAIR.secret_key(), &handle)
-                .await?;
+            // Only did:plc identities carry the handle in a directory this
+            // server can write; a did:web document's alsoKnownAs is edited by
+            // whoever hosts it.
+            if requester.starts_with("did:plc:") {
+                let plc_url =
+                    env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
+                let plc_client = plc::Client::new(plc_url);
+                plc_client
+                    .update_handle(&requester, &PDS_PLC_ROTATION_KEYPAIR.secret_key(), &handle)
+                    .await?;
+            }
             account_manager.update_handle(&requester, &handle).await?;
         }
     }
