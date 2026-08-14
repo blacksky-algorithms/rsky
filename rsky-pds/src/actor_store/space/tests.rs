@@ -670,6 +670,17 @@ async fn space_def_crud_and_members() {
         ),
         vec!["did:plc:m2"]
     );
+    // A row whose metadata predates the columns (empty strings) is filled in
+    // by an idempotent re-add; a populated row keeps its original values.
+    let before = store.list_members(&uri, 10, None).await.unwrap();
+    let (m1_rev, m1_at) = (before[0].1.clone(), before[0].2.clone());
+    store.add_member(&uri, "did:plc:m1").await.unwrap();
+    let after = store.list_members(&uri, 10, None).await.unwrap();
+    assert_eq!(
+        (after[0].1.clone(), after[0].2.clone()),
+        (m1_rev, m1_at),
+        "re-add must not rewrite existing metadata"
+    );
     store.remove_member(&uri, "did:plc:m1").await.unwrap();
     assert_eq!(
         dids(store.list_members(&uri, 10, None).await.unwrap()),

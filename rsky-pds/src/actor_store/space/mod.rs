@@ -806,8 +806,14 @@ impl SpaceStore {
         self.db
             .run(move |conn| {
                 conn.execute(
-                    "INSERT OR IGNORE INTO space_member (space_uri, did, member_rev, added_at) \
-                     VALUES (?1, ?2, ?3, ?4)",
+                    // Re-adding is idempotent and preserves the original
+                    // metadata -- except when the row predates the metadata
+                    // columns (empty strings), which a re-add fills in.
+                    "INSERT INTO space_member (space_uri, did, member_rev, added_at) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(space_uri, did) DO UPDATE SET \
+                     member_rev = excluded.member_rev, added_at = excluded.added_at \
+                     WHERE space_member.member_rev = ''",
                     params![space_uri, did, member_rev, added_at],
                 )?;
                 Ok(())
