@@ -85,6 +85,13 @@ pub struct ListMembersParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     pub did: String,
+    /// Rev (TID) at which this member was added. Empty for rows that predate
+    /// the column.
+    #[serde(rename = "memberRev")]
+    pub member_rev: String,
+    /// ISO-8601 add timestamp. Empty for rows that predate the column.
+    #[serde(rename = "addedAt")]
+    pub added_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,9 +255,11 @@ mod tests {
                 cursor: Some("c1".to_string()),
                 members: vec![Member {
                     did: "did:plc:member".to_string(),
+                    member_rev: "3jzfcijpj2z2a".to_string(),
+                    added_at: "2026-01-01T00:00:00.000Z".to_string(),
                 }],
             },
-            r#"{"cursor":"c1","members":[{"did":"did:plc:member"}]}"#,
+            r#"{"cursor":"c1","members":[{"did":"did:plc:member","memberRev":"3jzfcijpj2z2a","addedAt":"2026-01-01T00:00:00.000Z"}]}"#,
         );
     }
 

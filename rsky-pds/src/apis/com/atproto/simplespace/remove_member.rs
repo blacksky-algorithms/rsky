@@ -40,5 +40,15 @@ pub async fn simplespace_remove_member(
         .remove_member(&space_id.uri(), &member)
         .await
         .map_err(space_error)?;
+    if actor_store.exists(&member).await.unwrap_or(false) {
+        if let Ok(member_reader) = actor_store
+            .read(member.clone(), blobstore_factory.blobstore(member.clone()))
+            .await
+        {
+            if let Err(error) = member_reader.space.remove_joined(&space_id.uri()).await {
+                tracing::warn!(%error, "failed to unindex membership on the member's store");
+            }
+        }
+    }
     Ok(())
 }

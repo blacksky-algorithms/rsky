@@ -155,6 +155,22 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
     ALTER TABLE space_repo_notify ADD COLUMN service TEXT;\
     ALTER TABLE space_host_reg ADD COLUMN service TEXT;",
     },
+    // Member rows carry when and at what rev they were added, which clients
+    // surface; and each account keeps a local index of spaces it was enrolled
+    // in, because listSpaces is how a member discovers a shared space at all --
+    // a repo row only exists after the member's first write.
+    Migration {
+        name: "004",
+        sql: "\
+    ALTER TABLE space_member ADD COLUMN member_rev TEXT NOT NULL DEFAULT '';\
+    ALTER TABLE space_member ADD COLUMN added_at TEXT NOT NULL DEFAULT '';\
+    CREATE TABLE space_joined (\
+        space_uri TEXT PRIMARY KEY, \
+        authority TEXT NOT NULL, \
+        space_type TEXT NOT NULL, \
+        created_at TEXT NOT NULL\
+    );",
+    },
 ];
 
 pub fn get_db(location: impl AsRef<Path>) -> Result<ActorDb> {
@@ -265,6 +281,7 @@ mod tests {
                 "space_blob_ref",
                 "space_def",
                 "space_host_reg",
+                "space_joined",
                 "space_member",
                 "space_oplog",
                 "space_record",

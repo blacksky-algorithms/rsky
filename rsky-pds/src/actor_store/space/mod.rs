@@ -509,11 +509,26 @@ impl SpaceStore {
     ) -> Result<Vec<(String, String, String)>> {
         self.db
             .run(move |conn| {
+                // A space is listed when the caller holds a repo in it, when
+                // the caller anchors it, or when the caller was enrolled --
+                // membership must be discoverable before the first write.
                 let mut stmt = conn.prepare(
-                    "SELECT space_uri, authority, created_at FROM space_repo \
-                     WHERE deleted = 0 AND (?1 IS NULL OR space_uri > ?1) \
+                    "SELECT space_uri, authority, created_at FROM (\
+                       SELECT space_uri, authority, space_type, created_at \
+                         FROM space_repo WHERE deleted = 0 \
+                       UNION \
+                       SELECT d.space_uri, \
+                              substr(d.space_uri, 6, instr(substr(d.space_uri, 6), '/') - 1), \
+                              d.space_type, d.created_at \
+                         FROM space_def d WHERE d.deleted = 0 \
+                       UNION \
+                       SELECT space_uri, authority, space_type, created_at \
+                         FROM space_joined \
+                     ) \
+                     WHERE (?1 IS NULL OR space_uri > ?1) \
                      AND (?2 IS NULL OR space_type = ?2) \
                      AND (?3 IS NULL OR authority = ?3) \
+                     GROUP BY space_uri \
                      ORDER BY space_uri LIMIT ?4",
                 )?;
                 let rows = stmt
@@ -785,12 +800,15 @@ impl SpaceStore {
     }
 
     pub async fn add_member(&self, space_uri: &str, did: &str) -> Result<()> {
+        let member_rev = TID::next_str(None)?;
+        let added_at = rsky_common::now();
         let (space_uri, did) = (space_uri.to_string(), did.to_string());
         self.db
             .run(move |conn| {
                 conn.execute(
-                    "INSERT OR IGNORE INTO space_member (space_uri, did) VALUES (?1, ?2)",
-                    params![space_uri, did],
+                    "INSERT OR IGNORE INTO space_member (space_uri, did, member_rev, added_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![space_uri, did, member_rev, added_at],
                 )?;
                 Ok(())
             })
@@ -815,18 +833,54 @@ impl SpaceStore {
         space_uri: &str,
         limit: usize,
         cursor: Option<String>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, String, String)>> {
         let space_uri = space_uri.to_string();
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT did FROM space_member WHERE space_uri = ?1 \
+                    "SELECT did, member_rev, added_at FROM space_member WHERE space_uri = ?1 \
                      AND (?2 IS NULL OR did > ?2) ORDER BY did LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(params![space_uri, cursor, limit as i64], |row| row.get(0))?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                    .query_map(params![space_uri, cursor, limit as i64], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?
+                    .collect::<Result<Vec<(String, String, String)>, rusqlite::Error>>()?;
                 Ok(rows)
+            })
+            .await
+    }
+
+    /// Record that this account was enrolled in a space, so `listSpaces` can
+    /// surface it before the account's first write creates a repo row.
+    pub async fn record_joined(&self, space: &SpaceId) -> Result<()> {
+        let (space_uri, authority, space_type) = (
+            space.uri(),
+            space.authority.clone(),
+            space.space_type.clone(),
+        );
+        let created_at = rsky_common::now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO space_joined \
+                     (space_uri, authority, space_type, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![space_uri, authority, space_type, created_at],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn remove_joined(&self, space_uri: &str) -> Result<()> {
+        let space_uri = space_uri.to_string();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "DELETE FROM space_joined WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                Ok(())
             })
             .await
     }

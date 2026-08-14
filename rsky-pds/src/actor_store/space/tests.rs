@@ -650,22 +650,29 @@ async fn space_def_crud_and_members() {
     store.add_member(&uri, "did:plc:m2").await.unwrap();
     store.add_member(&uri, "did:plc:m1").await.unwrap();
     store.add_member(&uri, "did:plc:m1").await.unwrap(); // idempotent
-    assert_eq!(
-        store.list_members(&uri, 10, None).await.unwrap(),
-        vec!["did:plc:m1", "did:plc:m2"]
-    );
+                                                         // Rows carry (did, memberRev, addedAt); the metadata is non-empty.
+    let dids = |rows: Vec<(String, String, String)>| -> Vec<String> {
+        rows.into_iter().map(|(did, _, _)| did).collect()
+    };
+    let all = store.list_members(&uri, 10, None).await.unwrap();
+    assert!(all
+        .iter()
+        .all(|(_, rev, at)| !rev.is_empty() && !at.is_empty()));
+    assert_eq!(dids(all), vec!["did:plc:m1", "did:plc:m2"]);
     let page = store.list_members(&uri, 1, None).await.unwrap();
-    assert_eq!(page, vec!["did:plc:m1"]);
+    assert_eq!(dids(page.clone()), vec!["did:plc:m1"]);
     assert_eq!(
-        store
-            .list_members(&uri, 10, Some(page[0].clone()))
-            .await
-            .unwrap(),
+        dids(
+            store
+                .list_members(&uri, 10, Some(page[0].0.clone()))
+                .await
+                .unwrap()
+        ),
         vec!["did:plc:m2"]
     );
     store.remove_member(&uri, "did:plc:m1").await.unwrap();
     assert_eq!(
-        store.list_members(&uri, 10, None).await.unwrap(),
+        dids(store.list_members(&uri, 10, None).await.unwrap()),
         vec!["did:plc:m2"]
     );
 

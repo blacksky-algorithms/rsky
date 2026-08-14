@@ -8170,7 +8170,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-lexicon"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8211,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "argon2",

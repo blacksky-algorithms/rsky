@@ -39,12 +39,19 @@ pub async fn simplespace_list_members(
         .await
         .map_err(space_error)?;
     let cursor = if members.len() == limit {
-        members.last().cloned()
+        members.last().map(|(did, _, _)| did.clone())
     } else {
         None
     };
     Ok(Json(ListMembersOutput {
         cursor,
-        members: members.into_iter().map(|did| Member { did }).collect(),
+        members: members
+            .into_iter()
+            .map(|(did, member_rev, added_at)| Member {
+                did,
+                member_rev,
+                added_at,
+            })
+            .collect(),
     }))
 }

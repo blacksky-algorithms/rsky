@@ -362,7 +362,12 @@ async fn simplespace_management() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert_eq!(body["members"], json!([{"did": MEMBER_DID}]));
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["did"], MEMBER_DID);
+    // The metadata clients render: when added, and at what rev.
+    assert!(!members[0]["memberRev"].as_str().unwrap().is_empty());
+    assert!(!members[0]["addedAt"].as_str().unwrap().is_empty());
 
     // removeMember empties the list
     let (status, _) = post_json(
@@ -726,6 +731,24 @@ async fn record_write_and_read_flow() {
     assert_eq!(status, Status::Ok);
     verify_lexicon_commit(&alias["commit"], &author_key, &s.space, AUTHOR_DID);
     assert_eq!(alias["commit"]["rev"], body["commit"]["rev"]);
+
+    // enrollment alone makes the space discoverable to the member, before any
+    // write of theirs creates a repo row -- this is how a shared space is
+    // found at all
+    let (status, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces",
+        &s.member_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let member_spaces = body["spaces"].as_array().unwrap();
+    let entry = member_spaces
+        .iter()
+        .find(|sp| sp["uri"] == s.space)
+        .expect("member discovers the space via enrollment");
+    assert_eq!(entry["isOwner"], false);
+    assert_eq!(entry["isMember"], true);
 
     // listSpaces shows the author's repo
     let (status, body) = get_json(
