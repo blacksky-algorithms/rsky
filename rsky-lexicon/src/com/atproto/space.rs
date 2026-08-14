@@ -364,6 +364,10 @@ pub struct DeleteResult {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSpacesParams {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub space_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -861,10 +865,12 @@ mod tests {
     fn list_spaces_pair() {
         roundtrip(
             &ListSpacesParams {
+                space_type: Some("com.example.forum".to_string()),
+                did: Some("did:plc:auth".to_string()),
                 limit: None,
                 cursor: Some("c1".to_string()),
             },
-            r#"{"cursor":"c1"}"#,
+            r#"{"type":"com.example.forum","did":"did:plc:auth","cursor":"c1"}"#,
         );
         roundtrip(
             &ListSpacesOutput {

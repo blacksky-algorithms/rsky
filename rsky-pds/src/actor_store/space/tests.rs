@@ -509,35 +509,58 @@ async fn repo_lifecycle_flags_and_listing() {
         .apply_writes(&other, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
         .await
         .unwrap();
+    let remote = SpaceId::new("did:plc:remote", SPACE_TYPE, "third");
+    store
+        .apply_writes(&remote, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
+        .await
+        .unwrap();
 
     // list_spaces now returns (uri, authority, created_at) per row.
     let uris = |rows: Vec<(String, String, String)>| -> Vec<String> {
         rows.into_iter().map(|(u, _, _)| u).collect()
     };
-    let spaces = store.list_spaces(10, None, None).await.unwrap();
-    assert_eq!(uris(spaces), vec![other.uri(), uri.clone()]);
+    let spaces = store.list_spaces(10, None, None, None).await.unwrap();
+    assert_eq!(uris(spaces), vec![other.uri(), uri.clone(), remote.uri()]);
     // the type filter narrows, and a non-matching type yields nothing
     assert!(store
-        .list_spaces(10, None, Some("com.other.type".to_string()))
+        .list_spaces(10, None, Some("com.other.type".to_string()), None)
         .await
         .unwrap()
         .is_empty());
     assert_eq!(
         uris(
             store
-                .list_spaces(10, None, Some(SPACE_TYPE.to_string()))
+                .list_spaces(10, None, Some(SPACE_TYPE.to_string()), None)
+                .await
+                .unwrap()
+        ),
+        vec![other.uri(), uri.clone(), remote.uri()]
+    );
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, None, Some(AUTHORITY.to_string()))
                 .await
                 .unwrap()
         ),
         vec![other.uri(), uri.clone()]
     );
-    let page = store.list_spaces(1, None, None).await.unwrap();
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, None, Some("did:plc:remote".to_string()))
+                .await
+                .unwrap()
+        ),
+        vec![remote.uri()]
+    );
+    let page = store.list_spaces(1, None, None, None).await.unwrap();
     assert_eq!(uris(page.clone()), vec![other.uri()]);
     let rest = store
-        .list_spaces(10, Some(page[0].0.clone()), None)
+        .list_spaces(10, Some(page[0].0.clone()), None, None)
         .await
         .unwrap();
-    assert_eq!(uris(rest), vec![uri.clone()]);
+    assert_eq!(uris(rest), vec![uri.clone(), remote.uri()]);
 
     // deletion flags without erasing
     assert!(store.flag_repo_deleted(&uri).await.unwrap());
@@ -565,8 +588,8 @@ async fn repo_lifecycle_flags_and_listing() {
         .unwrap()
         .is_some());
     assert_eq!(
-        uris(store.list_spaces(10, None, None).await.unwrap()),
-        vec![other.uri()]
+        uris(store.list_spaces(10, None, None, None).await.unwrap()),
+        vec![other.uri(), remote.uri()]
     );
 }
 

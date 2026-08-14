@@ -741,6 +741,25 @@ async fn record_write_and_read_flow() {
     assert_eq!(spaces[0]["isOwner"], true);
     assert_eq!(spaces[0]["isMember"], true);
     assert!(spaces[0]["createdAt"].is_string());
+
+    for filter in [format!("?type={SPACE_TYPE}"), format!("?did={AUTHOR_DID}")] {
+        let (status, body) = get_json(
+            &s.client,
+            &format!("/xrpc/com.atproto.space.listSpaces{filter}"),
+            &s.author_token,
+        )
+        .await;
+        assert_eq!(status, Status::Ok, "{filter}: {body}");
+        assert_eq!(body["spaces"].as_array().unwrap().len(), 1, "{body}");
+    }
+    let (status, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces?did=did:plc:not-the-authority",
+        &s.author_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert!(body["spaces"].as_array().unwrap().is_empty(), "{body}");
 }
 
 #[tokio::test]

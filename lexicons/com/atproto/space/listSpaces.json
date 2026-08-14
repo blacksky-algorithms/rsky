@@ -13,11 +13,16 @@
             "format": "nsid",
             "description": "Filter to spaces of this type."
           },
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "Filter to spaces anchored by this authority DID."
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 1000,
-            "default": 500
+            "maximum": 100,
+            "default": 50
           },
           "cursor": {
             "type": "string"

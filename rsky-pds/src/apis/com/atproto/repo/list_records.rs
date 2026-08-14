@@ -36,18 +36,24 @@ async fn inner_list_records(
             .read(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
 
-        let records: Vec<Record> = actor_store
+        // Fetch one extra row to determine whether this page can be resumed.
+        // Returning a cursor after a short final page makes compliant clients
+        // issue a pointless empty request, and was observed in Bulleted.
+        let mut rows = actor_store
             .record
             .list_records_for_collection(
                 collection,
-                limit as i64,
+                i64::from(limit) + 1,
                 reverse,
                 cursor,
                 rkeyStart,
                 rkeyEnd,
                 None,
             )
-            .await?
+            .await?;
+        let has_more = rows.len() > usize::from(limit);
+        rows.truncate(usize::from(limit));
+        let records: Vec<Record> = rows
             .into_iter()
             .map(|record| {
                 Ok(Record {
@@ -61,14 +67,15 @@ async fn inner_list_records(
             })
             .collect::<Result<Vec<Record>>>()?;
 
-        let last_record = records.last();
-        let cursor: Option<String>;
-        if let Some(last_record) = last_record {
+        let cursor = if has_more {
+            let last_record = records
+                .last()
+                .expect("a page with another record has a last record");
             let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
-            cursor = Some(last_at_uri.get_rkey());
+            Some(last_at_uri.get_rkey())
         } else {
-            cursor = None;
-        }
+            None
+        };
         Ok(ListRecordsOutput { records, cursor })
     } else {
         bail!("Could not find repo: {repo}")

@@ -505,6 +505,7 @@ impl SpaceStore {
         limit: usize,
         cursor: Option<String>,
         space_type: Option<String>,
+        authority: Option<String>,
     ) -> Result<Vec<(String, String, String)>> {
         self.db
             .run(move |conn| {
@@ -512,12 +513,14 @@ impl SpaceStore {
                     "SELECT space_uri, authority, created_at FROM space_repo \
                      WHERE deleted = 0 AND (?1 IS NULL OR space_uri > ?1) \
                      AND (?2 IS NULL OR space_type = ?2) \
-                     ORDER BY space_uri LIMIT ?3",
+                     AND (?3 IS NULL OR authority = ?3) \
+                     ORDER BY space_uri LIMIT ?4",
                 )?;
                 let rows = stmt
-                    .query_map(params![cursor, space_type, limit as i64], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })?
+                    .query_map(
+                        params![cursor, space_type, authority, limit as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?
                     .collect::<Result<Vec<(String, String, String)>, rusqlite::Error>>()?;
                 Ok(rows)
             })

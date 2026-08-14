@@ -15,6 +15,7 @@ use rsky_space::space_id::SpaceId;
 pub struct ListSpacesQuery {
     #[field(name = "type")]
     pub space_type: Option<String>,
+    pub did: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
@@ -32,6 +33,7 @@ pub async fn space_list_spaces(
 ) -> Result<Json<ListSpacesOutput>, ApiError> {
     let ListSpacesQuery {
         space_type,
+        did: authority,
         limit,
         cursor,
     } = query;
@@ -41,14 +43,14 @@ pub async fn space_list_spaces(
         .expect("credentials populated")
         .did
         .expect("did populated");
-    let limit = limit.unwrap_or(100).clamp(1, 1000) as usize;
+    let limit = limit.unwrap_or(50).clamp(1, 100) as usize;
     let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
     let rows = reader
         .space
-        .list_spaces(limit, cursor, space_type)
+        .list_spaces(limit, cursor, space_type, authority)
         .await
         .map_err(space_error)?;
     let cursor = if rows.len() == limit {
