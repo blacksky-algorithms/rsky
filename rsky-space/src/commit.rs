@@ -46,8 +46,12 @@ pub fn build_ctx(space: &str, author: &str, rev: &str, ikm: &[u8]) -> Vec<u8> {
 }
 
 /// Compute `mac = HMAC-SHA256(HKDF-SHA256(ikm, ctx), hash)`.
+///
+/// HKDF is expand-only: `ikm` is used directly as the PRK, with no extract
+/// step and no salt. An extract step here produces a different key and a MAC
+/// no other implementation can reproduce.
 pub fn compute_mac(ikm: &[u8], ctx: &[u8], hash: &[u8]) -> Result<[u8; 32]> {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
+    let hk = Hkdf::<Sha256>::from_prk(ikm).map_err(|_| SpaceError::Hkdf)?;
     let mut okm = [0u8; 32];
     hk.expand(ctx, &mut okm).map_err(|_| SpaceError::Hkdf)?;
     let mut mac = <HmacSha256 as Mac>::new_from_slice(&okm).map_err(|_| SpaceError::Hkdf)?;
@@ -130,6 +134,19 @@ mod tests {
             verify_mac(&ikm, &ctx, &other, &mac),
             Err(SpaceError::BadMac)
         ));
+    }
+
+    #[test]
+    fn mac_matches_cross_implementation_vector() {
+        // Pinned expand-only HKDF vector, independently derived; catches an
+        // accidental extract step that a roundtrip test cannot.
+        let ikm = [7u8; 32];
+        let ctx = build_ctx("at://a/space/t/main", "did:plc:author", "3krev", &ikm);
+        let mac = compute_mac(&ikm, &ctx, &[42u8; 32]).unwrap();
+        assert_eq!(
+            hex::encode(mac),
+            "d1bd9b47b2e0ec67c390ce4ad16460b2bf37bdd3bec33f8119e19b4001cd64b2"
+        );
     }
 
     #[test]
