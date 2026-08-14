@@ -510,12 +510,34 @@ async fn repo_lifecycle_flags_and_listing() {
         .await
         .unwrap();
 
-    let spaces = store.list_spaces(10, None).await.unwrap();
-    assert_eq!(spaces, vec![other.uri(), uri.clone()]);
-    let page = store.list_spaces(1, None).await.unwrap();
-    assert_eq!(page, vec![other.uri()]);
-    let rest = store.list_spaces(10, Some(page[0].clone())).await.unwrap();
-    assert_eq!(rest, vec![uri.clone()]);
+    // list_spaces now returns (uri, authority, created_at) per row.
+    let uris = |rows: Vec<(String, String, String)>| -> Vec<String> {
+        rows.into_iter().map(|(u, _, _)| u).collect()
+    };
+    let spaces = store.list_spaces(10, None, None).await.unwrap();
+    assert_eq!(uris(spaces), vec![other.uri(), uri.clone()]);
+    // the type filter narrows, and a non-matching type yields nothing
+    assert!(store
+        .list_spaces(10, None, Some("com.other.type".to_string()))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, Some(SPACE_TYPE.to_string()))
+                .await
+                .unwrap()
+        ),
+        vec![other.uri(), uri.clone()]
+    );
+    let page = store.list_spaces(1, None, None).await.unwrap();
+    assert_eq!(uris(page.clone()), vec![other.uri()]);
+    let rest = store
+        .list_spaces(10, Some(page[0].0.clone()), None)
+        .await
+        .unwrap();
+    assert_eq!(uris(rest), vec![uri.clone()]);
 
     // deletion flags without erasing
     assert!(store.flag_repo_deleted(&uri).await.unwrap());
@@ -543,7 +565,7 @@ async fn repo_lifecycle_flags_and_listing() {
         .unwrap()
         .is_some());
     assert_eq!(
-        store.list_spaces(10, None).await.unwrap(),
+        uris(store.list_spaces(10, None, None).await.unwrap()),
         vec![other.uri()]
     );
 }

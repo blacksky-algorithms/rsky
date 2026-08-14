@@ -8,30 +8,68 @@
       "parameters": {
         "type": "params",
         "properties": {
+          "type": {
+            "type": "string",
+            "format": "nsid",
+            "description": "Filter to spaces of this type."
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,
             "maximum": 1000,
             "default": 500
           },
-          "cursor": { "type": "string" }
+          "cursor": {
+            "type": "string"
+          }
         }
       },
       "output": {
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["spaces"],
+          "required": [
+            "spaces"
+          ],
           "properties": {
-            "cursor": { "type": "string" },
+            "cursor": {
+              "type": "string"
+            },
             "spaces": {
               "type": "array",
               "items": {
-                "type": "string",
-                "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+                "type": "ref",
+                "ref": "#spaceInfo"
               }
             }
           }
+        }
+      }
+    },
+    "spaceInfo": {
+      "type": "object",
+      "required": [
+        "uri",
+        "isOwner",
+        "isMember",
+        "createdAt"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "description": "Permissioned space URI, at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+        },
+        "isOwner": {
+          "type": "boolean",
+          "description": "Whether the viewer anchors this space."
+        },
+        "isMember": {
+          "type": "boolean",
+          "description": "Whether the viewer holds a repo in this space."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
         }
       }
     }

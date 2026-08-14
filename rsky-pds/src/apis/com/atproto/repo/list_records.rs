@@ -53,7 +53,10 @@ async fn inner_list_records(
                 Ok(Record {
                     uri: record.uri.clone(),
                     cid: record.cid.clone(),
-                    value: serde_json::to_value(record)?,
+                    // The record body only. Serializing the whole row here
+                    // double-wraps it as {uri, cid, value}, which no atproto
+                    // client can read; getRecord serializes record.value too.
+                    value: serde_json::to_value(record.value)?,
                 })
             })
             .collect::<Result<Vec<Record>>>()?;

@@ -374,7 +374,19 @@ pub struct ListSpacesParams {
 pub struct ListSpacesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    pub spaces: Vec<String>,
+    pub spaces: Vec<SpaceInfo>,
+}
+
+/// One entry in `listSpaces`: the space and the viewer's relationship to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub uri: String,
+    #[serde(rename = "isOwner")]
+    pub is_owner: bool,
+    #[serde(rename = "isMember")]
+    pub is_member: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -857,9 +869,14 @@ mod tests {
         roundtrip(
             &ListSpacesOutput {
                 cursor: None,
-                spaces: vec![SPACE.to_string()],
+                spaces: vec![SpaceInfo {
+                    uri: SPACE.to_string(),
+                    is_owner: true,
+                    is_member: true,
+                    created_at: "2026-01-01T00:00:00.000Z".to_string(),
+                }],
             },
-            r#"{"spaces":["at://did:plc:auth/space/com.example.forum/self"]}"#,
+            r#"{"spaces":[{"uri":"at://did:plc:auth/space/com.example.forum/self","isOwner":true,"isMember":true,"createdAt":"2026-01-01T00:00:00.000Z"}]}"#,
         );
     }
 

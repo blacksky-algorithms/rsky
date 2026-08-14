@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "0.10.1"
+version = "0.11.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"
@@ -42,7 +42,7 @@ lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
 rand = { workspace = true }
-rsky-oauth = { path = "../rsky-oauth", version = "0.2.0" }
+rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
 rand_core = { workspace = true }
 regex = "1.10.3"
 reqwest = { version = "0.12.3", features = ["json", "blocking"] }

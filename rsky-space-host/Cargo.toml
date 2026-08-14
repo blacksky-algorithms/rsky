@@ -17,7 +17,7 @@ rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }
 rsky-identity = { workspace = true }
 rsky-lexicon = { workspace = true }
-rsky-oauth = { path = "../rsky-oauth", version = "0.2.0" }
+rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
 rsky-syntax = { workspace = true }
 secp256k1 = { workspace = true }
 sha2 = { workspace = true }

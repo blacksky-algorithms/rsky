@@ -735,7 +735,12 @@ async fn record_write_and_read_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert_eq!(body["spaces"], json!([s.space]));
+    let spaces = body["spaces"].as_array().unwrap();
+    assert_eq!(spaces.len(), 1, "{body}");
+    assert_eq!(spaces[0]["uri"], s.space);
+    assert_eq!(spaces[0]["isOwner"], true);
+    assert_eq!(spaces[0]["isMember"], true);
+    assert!(spaces[0]["createdAt"].is_string());
 }
 
 #[tokio::test]

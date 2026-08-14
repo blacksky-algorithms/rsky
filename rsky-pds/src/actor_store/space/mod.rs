@@ -497,16 +497,28 @@ impl SpaceStore {
     }
 
     /// Space URIs the actor holds a live repo in, ordered for pagination.
-    pub async fn list_spaces(&self, limit: usize, cursor: Option<String>) -> Result<Vec<String>> {
+    /// One page of the spaces the caller holds a repo in, each with its
+    /// authority and creation time so the handler can render the viewer's
+    /// relationship to it. Optionally narrowed to a single space type.
+    pub async fn list_spaces(
+        &self,
+        limit: usize,
+        cursor: Option<String>,
+        space_type: Option<String>,
+    ) -> Result<Vec<(String, String, String)>> {
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT space_uri FROM space_repo WHERE deleted = 0 \
-                     AND (?1 IS NULL OR space_uri > ?1) ORDER BY space_uri LIMIT ?2",
+                    "SELECT space_uri, authority, created_at FROM space_repo \
+                     WHERE deleted = 0 AND (?1 IS NULL OR space_uri > ?1) \
+                     AND (?2 IS NULL OR space_type = ?2) \
+                     ORDER BY space_uri LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(params![cursor, limit as i64], |row| row.get(0))?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                    .query_map(params![cursor, space_type, limit as i64], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?
+                    .collect::<Result<Vec<(String, String, String)>, rusqlite::Error>>()?;
                 Ok(rows)
             })
             .await

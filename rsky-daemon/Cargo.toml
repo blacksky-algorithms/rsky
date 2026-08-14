@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 rsky-space = { path = "../rsky-space", version = "0.4.0" }
-rsky-oauth = { path = "../rsky-oauth", version = "0.2.0" }
+rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
 rand = { workspace = true }
 rsky-lexicon = { workspace = true }
 rsky-common = { workspace = true }

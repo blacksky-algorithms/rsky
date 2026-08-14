@@ -9,7 +9,7 @@ use rsky_common::env::{env_list, env_str};
 use rsky_oauth::dpop::{DpopManager, DpopNonce, InMemoryReplayStore, DEFAULT_ROTATION_INTERVAL};
 use rsky_oauth::jwk::{EcCurve, Jwk};
 use rsky_oauth::store::DeviceData;
-use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig};
+use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig, ScopeExpander};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +19,28 @@ pub mod routes;
 pub mod templates;
 
 pub const DEVICE_COOKIE: &str = "device-id";
+
+/// Expands `include:` permission sets into a granted scope's effective grants,
+/// so the issued access token's `scope` claim carries the resolved `space:`
+/// grants a client reads to know the session's access (proposal 0011). The
+/// same resolver enforcement uses, cached, so issuance and enforcement agree.
+#[derive(Default)]
+pub struct IncludeExpander {
+    resolver: crate::permission_set::PermissionSetResolver,
+}
+
+#[rocket::async_trait]
+impl ScopeExpander for IncludeExpander {
+    async fn expand(&self, granted_scope: &str) -> String {
+        let granted: Vec<String> = granted_scope
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        crate::permission_set::expand_includes(&self.resolver, &granted)
+            .await
+            .join(" ")
+    }
+}
 
 /// Rocket-managed OAuth provider handle.
 pub struct SharedOAuthProvider {
@@ -51,6 +73,7 @@ impl SharedOAuthProvider {
             store: Arc::new(PdsOAuthStore::new(account_db)),
             dpop: DpopManager::new(Some(nonce), Box::new(InMemoryReplayStore::default())),
             trusted_clients: env_list("PDS_OAUTH_TRUSTED_CLIENTS"),
+            scope_expander: Some(Arc::new(IncludeExpander::default())),
         });
         Self {
             provider: Arc::new(provider),
