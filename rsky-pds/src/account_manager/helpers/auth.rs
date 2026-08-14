@@ -5,7 +5,6 @@ use crate::models;
 use anyhow::Result;
 use chrono::DateTime;
 use jwt_simple::prelude::*;
-use rsky_common::time::MINUTE;
 use rsky_common::{get_random_str, json_to_b64url, RFC3339_VARIANT};
 use rusqlite::{params, OptionalExtension};
 use secp256k1::Message;
@@ -146,13 +145,12 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
 
 pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
     let ServiceJwtParams { iss, aud, .. } = params;
+    // `exp` is seconds since the epoch (RFC 7519 §4.1.4).
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("timestamp in micros since UNIX epoch")
-        .as_micros() as usize;
-    let exp = params
-        .exp
-        .unwrap_or(((now + MINUTE as usize) / 1000) as u64);
+        .expect("timestamp since UNIX epoch")
+        .as_secs();
+    let exp = params.exp.unwrap_or(now + 60);
     let lxm = params.lxm;
     let jti = get_random_str();
     let header = ServiceJwtHeader {
