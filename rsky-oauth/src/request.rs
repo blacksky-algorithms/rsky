@@ -90,6 +90,7 @@ mod tests {
             code_challenge: "challenge".to_string(),
             code_challenge_method: CODE_CHALLENGE_METHOD_S256.to_string(),
             login_hint: None,
+            response_mode: None,
             prompt: None,
             dpop_jkt: None,
         }

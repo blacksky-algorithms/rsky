@@ -137,6 +137,7 @@ pub struct ParFormData {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub login_hint: Option<String>,
+    pub response_mode: Option<String>,
     pub prompt: Option<String>,
     pub client_assertion_type: Option<String>,
     pub client_assertion: Option<String>,
@@ -161,6 +162,7 @@ impl ParFormData {
             code_challenge: self.code_challenge.clone(),
             code_challenge_method: self.code_challenge_method.clone(),
             login_hint: self.login_hint.clone(),
+            response_mode: self.response_mode.clone(),
             prompt: self.prompt.clone(),
         }
     }

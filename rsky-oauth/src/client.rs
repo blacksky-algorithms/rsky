@@ -197,6 +197,15 @@ impl Client {
                 .login_hint
                 .as_deref()
                 .map(|hint| hint.to_ascii_lowercase()),
+            response_mode: match parameters.response_mode.as_deref() {
+                None | Some("query") => None,
+                Some("fragment") => Some("fragment".to_string()),
+                Some(other) => {
+                    return Err(OAuthError::InvalidRequest(format!(
+                        "unsupported response_mode: {other}"
+                    )))
+                }
+            },
             prompt,
             dpop_jkt: None,
         })
@@ -221,6 +230,8 @@ pub struct ParRequest {
     pub code_challenge_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 }
@@ -1105,6 +1116,7 @@ mod tests {
             code_challenge: Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".to_string()),
             code_challenge_method: Some(CODE_CHALLENGE_METHOD_S256.to_string()),
             login_hint: Some("Alice.Example.Com".to_string()),
+            response_mode: None,
             prompt: None,
         }
     }
