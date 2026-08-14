@@ -1147,10 +1147,12 @@ pub async fn verify_service_jwt(
             Some(opts_iss) if opts_iss.contains(&iss) => bail!("UntrustedIss: Untrusted issuer"),
             _ => (),
         }
-        let parts = iss.split("#").collect::<Vec<&str>>();
-        if let (Some(did), Some(service_id)) = (parts.first(), parts.get(1)) {
-            let (did, service_id) = (did.to_string(), *service_id);
-            let key_id = if service_id == "atproto_labeler" {
+        // `iss` is a bare DID for ordinary service tokens; only labelers
+        // suffix a service fragment.
+        let mut parts = iss.splitn(2, '#');
+        if let Some(did) = parts.next().filter(|did| !did.is_empty()) {
+            let did = did.to_string();
+            let key_id = if parts.next() == Some("atproto_labeler") {
                 "atproto_label"
             } else {
                 "atproto"
