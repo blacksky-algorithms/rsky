@@ -335,11 +335,14 @@ impl NotifyWriteTask {
                 }
             }
         }
-        let body = serde_json::json!({
-            "space": self.space.uri(),
-            "did": self.did,
-            "rev": self.rev,
-        });
+        // Serialize the typed input rather than hand-building the JSON, so the
+        // wire field names cannot drift from the lexicon (the field is `repo`).
+        let body = serde_json::to_value(rsky_lexicon::com::atproto::space::NotifyWriteInput {
+            space: self.space.uri(),
+            repo: self.did.clone(),
+            rev: self.rev.clone(),
+        })
+        .expect("NotifyWriteInput serializes");
         deliver_notifications(
             &self.keypair,
             &self.did,
