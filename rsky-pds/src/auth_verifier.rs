@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::permission_set::SharedPermissionSets;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -943,6 +944,16 @@ async fn validate_dpop_access_token(
         }
     };
     let scope = oauth_scopes_to_auth_scope(&verified.scopes)?;
+    // An `include:` names a permission set whose contents are the grants; a
+    // session carrying one and nothing else has no grants to evaluate until it
+    // is fetched. Expanding here means the resolved permissions are parsed by
+    // the same code as an inline `space:` scope.
+    let granted_scopes = match request.rocket().state::<SharedPermissionSets>() {
+        Some(shared) => {
+            crate::permission_set::expand_includes(&shared.resolver, &verified.scopes).await
+        }
+        None => verified.scopes.clone(),
+    };
     if !scopes.is_empty() && !scopes.contains(&scope) {
         bail!("Bad token scope")
     }
@@ -963,7 +974,7 @@ async fn validate_dpop_access_token(
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "oauth".to_string(),
-            granted_scopes: Some(verified.scopes.clone()),
+            granted_scopes: Some(granted_scopes),
             did: Some(verified.did),
             scope: Some(scope),
             audience: Some(env::var("PDS_SERVICE_DID")?),

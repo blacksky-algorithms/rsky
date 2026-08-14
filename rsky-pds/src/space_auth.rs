@@ -562,6 +562,104 @@ mod tests {
         ));
     }
 
+    /// Bulleted's production scope string, verbatim from
+    /// `https://bulleted.app/oauth-client-metadata.json`.
+    const BULLETED_SCOPE: &str = "atproto include:app.bulleted.authFull blob:image/* \
+         include:app.bulleted.spaceAccess \
+         space:app.bulleted.space?manage=create&manage=update&manage=delete&action=read_self";
+
+    /// What the inline `space:` grant confers on its own, before the permission
+    /// set beside it is resolved.
+    ///
+    /// This is the shape that shipped broken: `authority` defaults to `self`,
+    /// so the inline grant covers only spaces the user anchors, and every
+    /// operation on a shared space is denied. The fix is resolution, not a
+    /// looser default -- so this test pins the unresolved behaviour to prove
+    /// the resolution is doing the work.
+    #[test]
+    fn the_inline_grant_alone_does_not_reach_a_shared_space() {
+        let granted: Vec<&str> = BULLETED_SCOPE.split_ascii_whitespace().collect();
+        let creds = session(Some(&granted));
+        let shared = SpaceId::new("did:plc:someoneelse", "app.bulleted.space", "main");
+        for request in [
+            SpaceRequest::ReadSelf { collection: None },
+            SpaceRequest::Read,
+            SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "app.bulleted.node".to_string(),
+            },
+        ] {
+            assert!(
+                !session_permits(&creds, "did:plc:member", &shared, &request),
+                "{request:?} should need the permission set"
+            );
+        }
+        // Its own spaces it can manage, which is all the inline grant claims.
+        let own = SpaceId::new("did:plc:member", "app.bulleted.space", "main");
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &own,
+            &SpaceRequest::Manage(space_scope::ManageOp::Create)
+        ));
+    }
+
+    /// The same session once `include:app.bulleted.spaceAccess` is resolved.
+    ///
+    /// The expansion is what `permission_set::expand_includes` produces from
+    /// the published record; this test asserts the enforcement seam accepts it,
+    /// so the two halves cannot drift apart.
+    #[test]
+    fn the_resolved_permission_set_reaches_a_shared_space() {
+        let mut granted: Vec<String> = BULLETED_SCOPE
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
+        granted.push(
+            "space:app.bulleted.space?authority=*\
+             &collection=app.bulleted.node&collection=app.bulleted.note\
+             &collection=app.bulleted.outline&collection=app.bulleted.mirror\
+             &collection=app.bulleted.comment&collection=app.bulleted.commentPolicy\
+             &action=read&action=create&action=update&action=delete"
+                .to_string(),
+        );
+        let refs: Vec<&str> = granted.iter().map(String::as_str).collect();
+        let creds = session(Some(&refs));
+        let shared = SpaceId::new("did:plc:someoneelse", "app.bulleted.space", "main");
+
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Read
+        ));
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "app.bulleted.node".to_string(),
+            }
+        ));
+        // The set names its collections, so it does not confer others.
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "com.example.something".to_string(),
+            }
+        ));
+    }
+
     #[test]
     fn a_scoped_session_with_no_space_grant_is_denied() {
         // Including one whose space access would come from an `include:` set:

@@ -25,6 +25,7 @@ pub mod mailer;
 pub mod models;
 pub mod oauth;
 pub mod oauth_scope;
+pub mod permission_set;
 pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
@@ -456,5 +457,6 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(account_manager)
         .manage(shared_oauth_provider)
         .manage(crate::space_auth::SharedSpaceDpop::default())
+        .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
 }
