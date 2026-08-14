@@ -98,7 +98,11 @@ pub async fn simplespace_delete_space(
             let mut writer_endpoints = Vec::new();
             for writer in remote_writers {
                 match resolve_space_host_endpoint(&plc_url, &writer).await {
-                    Ok(endpoint) => writer_endpoints.push(endpoint),
+                    // A writer's own host is the audience for its notice.
+                    Ok(endpoint) => writer_endpoints.push(crate::actor_store::space::Subscriber {
+                        endpoint,
+                        service: Some(writer.clone()),
+                    }),
                     Err(error) => {
                         tracing::debug!(%error, %writer, "could not resolve writer host")
                     }
@@ -116,8 +120,8 @@ pub async fn simplespace_delete_space(
             Ok(())
         });
     }
-    endpoints.sort();
-    endpoints.dedup();
+    endpoints.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    endpoints.dedup_by(|a, b| a.endpoint == b.endpoint);
     queue_space_deleted_notifications(
         actor_store,
         keypair,

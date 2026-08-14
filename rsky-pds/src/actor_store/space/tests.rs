@@ -674,16 +674,33 @@ async fn writers_notify_registrations_and_jti() {
     assert_eq!(rest.len(), 1);
 
     // repo + host notify registrations honor expiry and upsert
+    let subscriber = |endpoint: &str, service: Option<&str>| Subscriber {
+        endpoint: endpoint.to_string(),
+        service: service.map(str::to_string),
+    };
     store
-        .register_repo_notify(&uri, "https://a.example", "2020-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://a.example", None),
+            "2020-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     store
-        .register_repo_notify(&uri, "https://b.example", "2999-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://b.example", Some("did:web:b#atproto_space_syncer")),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
+    // Re-registering extends the expiry and updates the identity.
     store
-        .register_repo_notify(&uri, "https://a.example", "2999-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://a.example", Some("did:web:a#atproto_space_syncer")),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -691,15 +708,26 @@ async fn writers_notify_registrations_and_jti() {
             .repo_notify_endpoints(&uri, &rsky_common::now())
             .await
             .unwrap(),
-        vec!["https://a.example", "https://b.example"]
+        vec![
+            subscriber("https://a.example", Some("did:web:a#atproto_space_syncer")),
+            subscriber("https://b.example", Some("did:web:b#atproto_space_syncer")),
+        ]
     );
 
     store
-        .register_host_notify(&uri, "https://sync.example", "2999-01-01T00:00:00.000Z")
+        .register_host_notify(
+            &uri,
+            &subscriber("https://sync.example", None),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     store
-        .register_host_notify(&uri, "https://old.example", "2020-01-01T00:00:00.000Z")
+        .register_host_notify(
+            &uri,
+            &subscriber("https://old.example", None),
+            "2020-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -707,7 +735,7 @@ async fn writers_notify_registrations_and_jti() {
             .host_notify_endpoints(&uri, &rsky_common::now())
             .await
             .unwrap(),
-        vec!["https://sync.example"]
+        vec![subscriber("https://sync.example", None)]
     );
 
     // jti: single-use, expired entries purged

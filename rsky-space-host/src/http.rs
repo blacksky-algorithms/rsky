@@ -20,11 +20,12 @@ use std::sync::Arc;
 use crate::attestation::{JtiStore, MetadataFetcher};
 use crate::authority::{Authority, KeyResolver};
 use crate::error::HostError;
+use crate::keys::DocSource;
 use crate::managing_app::require_https;
 use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
 use crate::policy::Policy;
 use crate::service_jwt;
-use crate::store::{RegistrationStore, WriterSetStore};
+use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
 
 pub const DEFAULT_REGISTRATION_TTL_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_LIST_LIMIT: i64 = 100;
@@ -39,6 +40,8 @@ pub struct AppState {
     pub jti_store: Arc<dyn JtiStore>,
     pub writers: Arc<dyn WriterSetStore>,
     pub registrations: Arc<dyn RegistrationStore>,
+    /// Resolves a subscriber's service identifier to its delivery endpoint.
+    pub docs: Arc<dyn DocSource>,
     pub notifier: Arc<dyn Notifier>,
     /// Verifies DPoP proofs on the credential-issuance and credential-presenting
     /// paths. Space issuance does not challenge with nonces, so this manager
@@ -229,6 +232,32 @@ fn require_space_credential(
     Ok(())
 }
 
+/// Resolve a `did:...#fragment` subscriber to its delivery endpoint. The
+/// fragment defaults to `#atproto_space_syncer`, the entry a subscriber
+/// publishes for this purpose.
+async fn resolve_service_endpoint(docs: &dyn DocSource, service: &str) -> Result<String, ApiError> {
+    let (did, fragment) = match service.split_once('#') {
+        Some((did, fragment)) => (did, fragment),
+        None => (service, "atproto_space_syncer"),
+    };
+    let doc = docs.did_document(did).await.map_err(|e| {
+        ApiError::invalid_request(format!("could not resolve service {service}: {e}"))
+    })?;
+    doc.service
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|entry| {
+            entry.id.rsplit_once('#').map(|(_, f)| f) == Some(fragment) || entry.id == fragment
+        })
+        .map(|entry| entry.service_endpoint.clone())
+        .ok_or_else(|| {
+            ApiError::invalid_request(format!(
+                "no {fragment} service in the DID document for {did}"
+            ))
+        })
+}
+
 fn require_this_space(state: &AppState, space: &str) -> Result<(), ApiError> {
     if space != state.authority.space_uri() {
         return Err(ApiError::invalid_request(format!(
@@ -313,12 +342,32 @@ async fn register_notify(
 ) -> Result<Json<RegisterNotifyOutput>, ApiError> {
     require_space_credential(&state, &headers, "POST", "com.atproto.space.registerNotify")?;
     require_this_space(&state, &input.space)?;
-    require_https(&input.endpoint)
-        .map_err(|_| ApiError::invalid_request("endpoint must be https"))?;
+    // `service` names the subscriber, which is both where to deliver and who
+    // the delivery is addressed to (proposals#100); `endpoint` is the
+    // pre-amendment shape and loses when both are sent.
+    let subscriber = match (&input.service, &input.endpoint) {
+        (Some(service), _) => Subscriber {
+            endpoint: resolve_service_endpoint(state.docs.as_ref(), service).await?,
+            service: Some(service.clone()),
+        },
+        (None, Some(endpoint)) => {
+            require_https(endpoint)
+                .map_err(|_| ApiError::invalid_request("endpoint must be https"))?;
+            Subscriber {
+                endpoint: endpoint.clone(),
+                service: None,
+            }
+        }
+        (None, None) => {
+            return Err(ApiError::invalid_request(
+                "registerNotify requires a service or an endpoint",
+            ))
+        }
+    };
     let expires_at = (state.now)() + state.registration_ttl_secs;
     state
         .registrations
-        .register(&input.space, &input.endpoint, expires_at)
+        .register(&input.space, &subscriber, expires_at)
         .await?;
     Ok(Json(RegisterNotifyOutput {
         expires_at: chrono::DateTime::from_timestamp(expires_at as i64, 0).unwrap_or_default(),
@@ -422,16 +471,28 @@ mod tests {
     }
     #[async_trait]
     impl Notifier for RecordingNotifier {
-        async fn notify_write(&self, endpoint: &str, input: &NotifyWriteInput) -> HostResult<()> {
-            self.tx.send((endpoint.to_string(), input.clone())).unwrap();
+        async fn notify_write(&self, to: &Subscriber, input: &NotifyWriteInput) -> HostResult<()> {
+            self.tx
+                .send((to.audience().to_string(), input.clone()))
+                .unwrap();
             Ok(())
         }
         async fn notify_space_deleted(
             &self,
-            _endpoint: &str,
+            _to: &Subscriber,
             _input: &NotifySpaceDeletedInput,
         ) -> HostResult<()> {
             Ok(())
+        }
+    }
+
+    /// The tests never register by service identifier, so nothing here should
+    /// reach DID resolution -- and a test that starts to will say so.
+    struct NoDocs;
+    #[async_trait]
+    impl crate::keys::DocSource for NoDocs {
+        async fn did_document(&self, did: &str) -> HostResult<rsky_identity::types::DidDocument> {
+            Err(HostError::Resolution(format!("no document for {did}")))
         }
     }
 
@@ -484,6 +545,7 @@ mod tests {
             jti_store: Arc::new(InMemoryJtiStore::default()),
             writers: Arc::new(InMemoryWriterSet::default()),
             registrations: Arc::new(InMemoryRegistrations::default()),
+            docs: Arc::new(NoDocs),
             notifier: Arc::new(RecordingNotifier { tx }),
             dpop: Arc::new(rsky_oauth::dpop::DpopManager::new(
                 None,
@@ -862,7 +924,13 @@ mod tests {
             .endpoints(&space_uri(), NOW)
             .await
             .unwrap();
-        assert_eq!(endpoints, vec!["https://syncer.example".to_string()]);
+        assert_eq!(
+            endpoints,
+            vec![Subscriber {
+                endpoint: "https://syncer.example".to_string(),
+                service: None,
+            }]
+        );
 
         // Non-https endpoints are rejected.
         let body = serde_json::json!({
@@ -879,7 +947,14 @@ mod tests {
         let mut f = fixture(AppAccess::Open, &[]);
         f.state
             .registrations
-            .register(&space_uri(), "https://syncer.example", NOW + 100)
+            .register(
+                &space_uri(),
+                &Subscriber {
+                    endpoint: "https://syncer.example".to_string(),
+                    service: None,
+                },
+                NOW + 100,
+            )
             .await
             .unwrap();
         let aud = format!("{}#atproto_space_host", f.state.authority.authority_did());
@@ -1049,7 +1124,10 @@ mod tests {
         let notifier = RecordingNotifier { tx };
         notifier
             .notify_space_deleted(
-                "https://syncer.example",
+                &Subscriber {
+                    endpoint: "https://syncer.example".to_string(),
+                    service: None,
+                },
                 &NotifySpaceDeletedInput { space: space_uri() },
             )
             .await

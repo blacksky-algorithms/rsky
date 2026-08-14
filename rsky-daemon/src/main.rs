@@ -134,6 +134,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         space_uri: cfg.space_uri.clone(),
         sweep_interval_secs: cfg.sweep_interval_secs,
         notify_endpoint: cfg.notify_endpoint(),
+        service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
     };
     let runner = tokio::spawn(run(

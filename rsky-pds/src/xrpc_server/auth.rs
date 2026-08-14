@@ -7,10 +7,13 @@ use rsky_crypto::types::VerifyOptions;
 use rsky_crypto::verify::verify_signature;
 use std::time::{Duration, SystemTime};
 
+#[derive(Debug)]
 pub struct ServiceJwtPayload {
     pub iss: String,
     pub aud: String,
     pub exp: Option<Duration>,
+    /// The single method this token was minted for, when it names one.
+    pub lxm: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -18,6 +21,10 @@ pub struct JwtPayload {
     pub iss: String,
     pub aud: String,
     pub exp: u64,
+    /// Method binding (atproto inter-service auth). Absent on tokens minted
+    /// before the claim existed, which stay as broad as they were issued.
+    #[serde(default)]
+    pub lxm: Option<String>,
 }
 
 pub async fn create_service_auth_headers(params: ServiceJwtParams) -> Result<HeaderMap> {
@@ -42,9 +49,16 @@ pub fn parse_payload(b64: &str) -> Result<JwtPayload> {
 }
 
 #[tracing::instrument(skip_all)]
+/// Verify an inbound service-auth JWT.
+///
+/// `lxm` is the method being called. A token that names a method may only be
+/// used for that method: without this check a token minted to call one
+/// endpoint can be replayed against every other endpoint this service serves,
+/// which is the whole point of the claim.
 pub async fn verify_jwt<G>(
     jwt_str: String,
     own_did: Option<String>, // None indicates to skip the audience check
+    lxm: Option<&str>,
     get_signing_key: G,
 ) -> Result<ServiceJwtPayload>
 where
@@ -65,6 +79,15 @@ where
             }
             if own_did.is_some() && payload.aud != own_did.unwrap() {
                 bail!("BadJwtAudience: jwt audience does not match service did")
+            }
+            match (&payload.lxm, lxm) {
+                (Some(bound), Some(called)) if bound != called => {
+                    bail!("BadJwtLexiconMethod: jwt was minted for {bound}, not {called}")
+                }
+                (Some(bound), None) => {
+                    bail!("BadJwtLexiconMethod: jwt was minted for {bound}")
+                }
+                _ => {}
             }
             let msg_bytes = parts[0..2].join(".").into_bytes();
             let sig_bytes = Base64::encode_string(sig.as_bytes())
@@ -115,8 +138,88 @@ where
                 iss: payload.iss,
                 aud: payload.aud,
                 exp: Some(Duration::from_micros(payload.exp)),
+                lxm: payload.lxm,
             })
         }
         _ => bail!("BadJwt: poorly formatted jwt"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `iat`/`exp` are microseconds here, matching `verify_jwt`.
+    fn token(lxm: Option<&str>) -> String {
+        let payload = serde_json::json!({
+            "iss": "did:plc:issuer",
+            "aud": "did:web:service",
+            "exp": u64::MAX,
+            "lxm": lxm,
+        });
+        let header = Base64::encode_string(br#"{"typ":"JWT","alg":"ES256K"}"#);
+        let payload = Base64::encode_string(serde_json::to_vec(&payload).unwrap().as_slice());
+        format!("{header}.{payload}.signature")
+    }
+
+    fn no_key(_iss: String, _refresh: bool) -> Result<String> {
+        bail!("the lexicon-method check must decide before a key is fetched")
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_is_refused_at_another_method() {
+        let error = verify_jwt(
+            token(Some("com.atproto.repo.createRecord")),
+            Some("did:web:service".to_string()),
+            Some("com.atproto.repo.deleteRecord"),
+            no_key,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("BadJwtLexiconMethod"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_is_refused_where_no_method_is_named() {
+        let error = verify_jwt(
+            token(Some("com.atproto.repo.createRecord")),
+            Some("did:web:service".to_string()),
+            None,
+            no_key,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("BadJwtLexiconMethod"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_matching_binding_passes_the_check() {
+        // Reaching the signature is the assertion: the method gate let it by.
+        let error = verify_jwt(
+            token(Some("com.atproto.repo.createRecord")),
+            Some("did:web:service".to_string()),
+            Some("com.atproto.repo.createRecord"),
+            no_key,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("key is fetched"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_unbound_token_stays_as_broad_as_it_was_issued() {
+        let error = verify_jwt(
+            token(None),
+            Some("did:web:service".to_string()),
+            Some("com.atproto.repo.createRecord"),
+            no_key,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("key is fetched"), "{error}");
     }
 }

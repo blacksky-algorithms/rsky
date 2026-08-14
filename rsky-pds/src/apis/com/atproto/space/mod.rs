@@ -6,6 +6,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::commit::{sign_commit, to_lexicon};
 use crate::actor_store::space::{
     blob_refs_in_record, oplog_window, SpaceCommitResult, SpaceStore, SpaceStoreError, SpaceWrite,
+    Subscriber,
 };
 use crate::actor_store::{ActorStore, ActorStoreReader};
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -30,6 +31,7 @@ pub mod get_repo_state;
 pub mod get_space;
 pub mod get_space_credential;
 pub mod host;
+pub mod list_blobs;
 pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
@@ -38,6 +40,7 @@ pub mod notify_space_deleted;
 pub mod notify_write;
 pub mod put_record;
 pub mod register_notify;
+pub mod unregister_notify;
 
 /// How long a notify registration (explicit or auto) stays live.
 pub const NOTIFY_REGISTRATION_TTL_SECS: i64 = 7 * 24 * 3600;
@@ -225,7 +228,7 @@ async fn notify_after_write(
     space: &SpaceId,
     commit: &SpaceCommitResult,
 ) {
-    let mut endpoints: Vec<String> = Vec::new();
+    let mut endpoints: Vec<Subscriber> = Vec::new();
     let now = rsky_common::now();
     // The authority's view of the space: writer set + registered syncers.
     if actor_store.exists(&space.authority).await.unwrap_or(false) {
@@ -268,8 +271,8 @@ async fn notify_after_write(
         Ok(repo_endpoints) => endpoints.extend(repo_endpoints),
         Err(error) => tracing::warn!(%error, "failed to load repo notify registrations"),
     }
-    endpoints.sort();
-    endpoints.dedup();
+    endpoints.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    endpoints.dedup_by(|a, b| a.endpoint == b.endpoint);
 
     let remote_authority =
         space.authority != did && !actor_store.exists(&space.authority).await.unwrap_or(false);
@@ -294,7 +297,7 @@ struct NotifyWriteTask {
     did: String,
     space: SpaceId,
     rev: String,
-    endpoints: Vec<String>,
+    endpoints: Vec<Subscriber>,
     plc_url: String,
     auto_register_authority: bool,
 }
@@ -304,16 +307,26 @@ impl NotifyWriteTask {
         if self.auto_register_authority {
             match resolve_space_host_endpoint(&self.plc_url, &self.space.authority).await {
                 Ok(endpoint) => {
+                    // The authority is the audience for leg 1, and it is the
+                    // one identity here that is known without being told.
+                    let subscriber = Subscriber {
+                        endpoint,
+                        service: Some(self.space.authority.clone()),
+                    };
                     let expires_at = format_expiry(&notify_expiry());
                     if let Err(error) = self
                         .own_space_store
-                        .register_repo_notify(&self.space.uri(), &endpoint, &expires_at)
+                        .register_repo_notify(&self.space.uri(), &subscriber, &expires_at)
                         .await
                     {
                         tracing::warn!(%error, "failed to auto-register space host");
                     }
-                    if !self.endpoints.contains(&endpoint) {
-                        self.endpoints.push(endpoint);
+                    if !self
+                        .endpoints
+                        .iter()
+                        .any(|s| s.endpoint == subscriber.endpoint)
+                    {
+                        self.endpoints.push(subscriber);
                     }
                 }
                 Err(error) => {
@@ -370,20 +383,26 @@ pub async fn resolve_space_host_endpoint(plc_url: &str, authority: &str) -> Resu
     anyhow::bail!("no space host endpoint in DID document for {authority}")
 }
 
-/// POST a signed, method-bound notification to each endpoint, best-effort.
+/// POST a signed, method-bound notification to each subscriber, best-effort.
+///
+/// Each delivery is addressed to the subscriber that registered
+/// (proposals#100), which is what lets the receiver verify the call was meant
+/// for it. `fallback_aud` covers subscribers registered before the amendment,
+/// which named an endpoint and no identity.
 pub async fn deliver_notifications(
     keypair: &Keypair,
     iss: &str,
-    aud: &str,
+    fallback_aud: &str,
     lxm: &str,
-    endpoints: &[String],
+    subscribers: &[Subscriber],
     body: &serde_json::Value,
 ) {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client");
-    for endpoint in endpoints {
+    for subscriber in subscribers {
+        let aud = subscriber.service.as_deref().unwrap_or(fallback_aud);
         let token = match mint_space_service_token(keypair, iss, aud, lxm) {
             Ok(token) => token,
             Err(error) => {
@@ -391,7 +410,7 @@ pub async fn deliver_notifications(
                 return;
             }
         };
-        let url = format!("{}/xrpc/{lxm}", endpoint.trim_end_matches('/'));
+        let url = format!("{}/xrpc/{lxm}", subscriber.endpoint.trim_end_matches('/'));
         match client.post(&url).bearer_auth(token).json(body).send().await {
             Ok(response) if response.status().is_success() => {
                 tracing::debug!(%url, "notification delivered");
@@ -412,7 +431,7 @@ pub fn queue_space_deleted_notifications(
     keypair: Keypair,
     authority: String,
     space_uri: String,
-    endpoints: Vec<String>,
+    endpoints: Vec<Subscriber>,
 ) {
     actor_store.background_queue.add(async move {
         let body = serde_json::json!({ "space": space_uri });

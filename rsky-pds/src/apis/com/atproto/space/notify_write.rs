@@ -53,7 +53,15 @@ pub async fn space_notify_write(
             tracing::debug!(%error, "notifyWrite auth rejected");
             ApiError::InvalidToken
         })?;
-    // The notification must come from the account whose repo advanced.
+    // Two legs carry this method. Leg 1 is a repo host telling the space host
+    // that one of its members advanced, signed by that member. Leg 2 is the
+    // space host forwarding that to a registered subscriber, signed by the
+    // authority -- accepted here so an rsky PDS can be a subscriber, and not
+    // forwarded again, which is what would make a loop.
+    if claims.iss == space_id.authority && claims.iss != repo {
+        tracing::debug!(space = %space, %repo, %rev, "forwarded write notice");
+        return Ok(());
+    }
     if claims.iss != repo {
         return Err(ApiError::InvalidToken);
     }

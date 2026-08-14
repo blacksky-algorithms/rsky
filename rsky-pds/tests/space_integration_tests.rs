@@ -1025,6 +1025,37 @@ async fn host_methods_and_notifications() {
     )
     .await;
     assert_eq!(status, Status::BadRequest);
+    // naming neither leaves nothing to deliver to
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({ "space": s.space }),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+    // a service that cannot be resolved is refused rather than registered
+    // against an endpoint nobody can name
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({"space": s.space, "service": "did:web:unresolvable.invalid#atproto_space_syncer"}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+
+    // unregisterNotify withdraws a registration, and is idempotent
+    for _ in 0..2 {
+        let (status, _) = post_json(
+            &s.client,
+            "/xrpc/com.atproto.space.unregisterNotify",
+            &credential,
+            json!({"space": s.space, "endpoint": "https://sync.example.invalid"}),
+        )
+        .await;
+        assert_eq!(status, Status::Ok);
+    }
 
     // inbound notifyWrite from a member's repo host
     let member_keypair = actor_keypair(&s.client, MEMBER_DID).await;
@@ -1386,6 +1417,54 @@ async fn blob_upload_and_space_get_blob() {
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
+
+    // listBlobs names what a syncer would have to mirror
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    // The record also carried a malformed ref, which is not listed: a syncer
+    // sent after it would find nothing there.
+    let cids = body["cids"].as_array().unwrap();
+    assert!(cids.contains(&json!(blob_cid)), "{body}");
+    assert!(!cids.iter().any(|cid| cid == "not-a-cid"), "{body}");
+    assert!(body.get("cursor").is_none(), "one page, so no cursor");
+    // a page that fills is followed by a cursor, and the next page is empty
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}&limit=1",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let cursor = body["cursor"].as_str().unwrap().to_string();
+    // Paging from the last CID of the previous page reaches the end.
+    let mut cursor = cursor;
+    for _ in 0..8 {
+        let (status, body) = get_json(
+            &s.client,
+            &format!(
+                "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}&limit=1&cursor={cursor}",
+                s.space
+            ),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, Status::Ok);
+        match body["cursor"].as_str() {
+            Some(next) => cursor = next.to_string(),
+            None => break,
+        }
+    }
 
     // the member fetches the blob through the space credential
     let path = format!(

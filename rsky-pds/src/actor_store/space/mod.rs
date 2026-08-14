@@ -146,6 +146,27 @@ pub struct SpaceDefRow {
     pub deleted: bool,
 }
 
+/// A registered write-notification subscriber.
+///
+/// `service` is the DID (with optional service fragment) a delivery is
+/// addressed to; a bare URL cannot be an `aud`, so a registration that names
+/// only an endpoint leaves its deliveries unverifiable by whoever receives
+/// them and is kept only for subscribers registered before proposals#100.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subscriber {
+    pub endpoint: String,
+    pub service: Option<String>,
+}
+
+impl Subscriber {
+    pub fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            endpoint: row.get(0)?,
+            service: row.get(1)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceWriterRow {
     pub did: String,
@@ -491,6 +512,30 @@ impl SpaceStore {
             .await
     }
 
+    /// One page of the CIDs of blobs referenced by records in a space,
+    /// ordered by CID so the cursor is the last one returned.
+    pub async fn list_space_blobs(
+        &self,
+        space_uri: &str,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let (space_uri, cursor) = (space_uri.to_string(), cursor.unwrap_or_default());
+        self.db
+            .run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT blob_cid FROM space_blob_ref \
+                     WHERE space_uri = ?1 AND blob_cid > ?2 \
+                     ORDER BY blob_cid LIMIT ?3",
+                )?;
+                let rows = stmt
+                    .query_map(params![space_uri, cursor, limit as i64], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
     /// Whether a blob is referenced by any record in the space.
     pub async fn space_references_blob(&self, space_uri: &str, blob_cid: &str) -> Result<bool> {
         let (space_uri, blob_cid) = (space_uri.to_string(), blob_cid.to_string());
@@ -526,39 +571,58 @@ impl SpaceStore {
     pub async fn register_repo_notify(
         &self,
         space_uri: &str,
-        endpoint: &str,
+        subscriber: &Subscriber,
         expires_at: &str,
     ) -> Result<()> {
-        let (space_uri, endpoint, expires_at) = (
+        let (space_uri, endpoint, service, expires_at) = (
             space_uri.to_string(),
-            endpoint.to_string(),
+            subscriber.endpoint.clone(),
+            subscriber.service.clone(),
             expires_at.to_string(),
         );
         self.db
             .run(move |conn| {
                 conn.execute(
-                    "INSERT INTO space_repo_notify (space_uri, endpoint, expires_at) \
-                     VALUES (?1, ?2, ?3) \
-                     ON CONFLICT (space_uri, endpoint) DO UPDATE SET expires_at = excluded.expires_at",
-                    params![space_uri, endpoint, expires_at],
+                    "INSERT INTO space_repo_notify (space_uri, endpoint, expires_at, service) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT (space_uri, endpoint) DO UPDATE SET \
+                     expires_at = excluded.expires_at, service = excluded.service",
+                    params![space_uri, endpoint, expires_at, service],
                 )?;
                 Ok(())
             })
             .await
     }
 
-    /// Unexpired repo-notify endpoints for a space.
-    pub async fn repo_notify_endpoints(&self, space_uri: &str, now: &str) -> Result<Vec<String>> {
+    pub async fn unregister_repo_notify(&self, space_uri: &str, endpoint: &str) -> Result<()> {
+        let (space_uri, endpoint) = (space_uri.to_string(), endpoint.to_string());
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "DELETE FROM space_repo_notify WHERE space_uri = ?1 AND endpoint = ?2",
+                    params![space_uri, endpoint],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Unexpired repo-notify subscribers for a space.
+    pub async fn repo_notify_endpoints(
+        &self,
+        space_uri: &str,
+        now: &str,
+    ) -> Result<Vec<Subscriber>> {
         let (space_uri, now) = (space_uri.to_string(), now.to_string());
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT endpoint FROM space_repo_notify \
+                    "SELECT endpoint, service FROM space_repo_notify \
                      WHERE space_uri = ?1 AND expires_at > ?2 ORDER BY endpoint",
                 )?;
                 let rows = stmt
-                    .query_map(params![space_uri, now], |row| row.get(0))?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                    .query_map(params![space_uri, now], Subscriber::from_row)?
+                    .collect::<Result<Vec<Subscriber>, rusqlite::Error>>()?;
                 Ok(rows)
             })
             .await
@@ -802,38 +866,57 @@ impl SpaceStore {
     pub async fn register_host_notify(
         &self,
         space_uri: &str,
-        endpoint: &str,
+        subscriber: &Subscriber,
         expires_at: &str,
     ) -> Result<()> {
-        let (space_uri, endpoint, expires_at) = (
+        let (space_uri, endpoint, service, expires_at) = (
             space_uri.to_string(),
-            endpoint.to_string(),
+            subscriber.endpoint.clone(),
+            subscriber.service.clone(),
             expires_at.to_string(),
         );
         self.db
             .run(move |conn| {
                 conn.execute(
-                    "INSERT INTO space_host_reg (space_uri, endpoint, expires_at) \
-                     VALUES (?1, ?2, ?3) \
-                     ON CONFLICT (space_uri, endpoint) DO UPDATE SET expires_at = excluded.expires_at",
-                    params![space_uri, endpoint, expires_at],
+                    "INSERT INTO space_host_reg (space_uri, endpoint, expires_at, service) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT (space_uri, endpoint) DO UPDATE SET \
+                     expires_at = excluded.expires_at, service = excluded.service",
+                    params![space_uri, endpoint, expires_at, service],
                 )?;
                 Ok(())
             })
             .await
     }
 
-    pub async fn host_notify_endpoints(&self, space_uri: &str, now: &str) -> Result<Vec<String>> {
+    pub async fn unregister_host_notify(&self, space_uri: &str, endpoint: &str) -> Result<()> {
+        let (space_uri, endpoint) = (space_uri.to_string(), endpoint.to_string());
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "DELETE FROM space_host_reg WHERE space_uri = ?1 AND endpoint = ?2",
+                    params![space_uri, endpoint],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn host_notify_endpoints(
+        &self,
+        space_uri: &str,
+        now: &str,
+    ) -> Result<Vec<Subscriber>> {
         let (space_uri, now) = (space_uri.to_string(), now.to_string());
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT endpoint FROM space_host_reg \
+                    "SELECT endpoint, service FROM space_host_reg \
                      WHERE space_uri = ?1 AND expires_at > ?2 ORDER BY endpoint",
                 )?;
                 let rows = stmt
-                    .query_map(params![space_uri, now], |row| row.get(0))?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+                    .query_map(params![space_uri, now], Subscriber::from_row)?
+                    .collect::<Result<Vec<Subscriber>, rusqlite::Error>>()?;
                 Ok(rows)
             })
             .await

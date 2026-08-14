@@ -309,17 +309,46 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
     }
 }
 
-/// A7 seam: the `space:` grants carried by a session, if any. Legacy sessions
-/// have no scope carrier, so this returns `None` and callers fall back to
-/// full-access semantics (see the module docs).
-pub fn session_space_scopes(_credentials: &Credentials) -> Option<Vec<SpaceScope>> {
-    None
+/// The `space:` grants a session carries, parsed.
+///
+/// `None` means the session has no scope grammar to evaluate at all: an app
+/// password or a legacy access token, which predate the model and are governed
+/// by route-level ownership checks alone. `Some(vec![])` is different -- a
+/// scoped session that was granted no space access, which is a denial.
+///
+/// A grant that arrives inside an `include:` permission set is not seen here:
+/// resolving a permission set means fetching its `com.atproto.lexicon.schema`
+/// record, which this function does not do. An unresolved set therefore
+/// confers nothing rather than everything, which is the safe direction to be
+/// wrong in.
+pub fn session_space_scopes(credentials: &Credentials) -> Option<Vec<SpaceScope>> {
+    let granted = credentials.granted_scopes.as_ref()?;
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    // A `transition:*` session is asking for the app-password model, so it is
+    // governed the way an app password is rather than by a scope grammar it
+    // never spoke.
+    if scopes.has_transition("generic") || scopes.has_transition("chat.bsky") {
+        return None;
+    }
+    Some(
+        scopes
+            .space_grants()
+            .iter()
+            .filter_map(|grant| match SpaceScope::parse(grant) {
+                Ok(scope) => Some(scope),
+                Err(error) => {
+                    tracing::debug!(%grant, %error, "ignoring unparseable space scope");
+                    None
+                }
+            })
+            .collect(),
+    )
 }
 
-/// Evaluate a session against a space request. When the session carries
-/// `space:` scopes they are authoritative; otherwise a full-access session is
-/// treated as holding the broadest grant (route-level ownership checks still
-/// apply).
+/// Evaluate a session against a space request. When the session speaks the
+/// scope grammar its `space:` grants are authoritative -- including when it
+/// has none, which denies. Sessions that predate the grammar fall back to
+/// full-access semantics, where route-level ownership checks still apply.
 pub fn session_permits(
     credentials: &Credentials,
     session_did: &str,
@@ -482,6 +511,77 @@ mod tests {
         SpaceId::new("did:plc:auth", "com.example.forum", "self")
     }
 
+    fn session(granted: Option<&[&str]>) -> Credentials {
+        Credentials {
+            r#type: "oauth".to_string(),
+            granted_scopes: granted.map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect()),
+            did: Some("did:plc:member".to_string()),
+            scope: Some(AuthScope::Access),
+            audience: None,
+            token_id: None,
+            aud: None,
+            iss: None,
+            is_privileged: None,
+        }
+    }
+
+    #[test]
+    fn a_session_that_never_spoke_the_grammar_is_not_narrowed_by_it() {
+        // App passwords and legacy access tokens: route-level ownership checks
+        // are what constrain them, as before.
+        assert!(session_space_scopes(&session(None)).is_none());
+        // So is an OAuth session that asked for the app-password model.
+        assert!(session_space_scopes(&session(Some(&["atproto", "transition:generic"]))).is_none());
+        assert!(session_permits(
+            &session(None),
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::Read
+        ));
+    }
+
+    #[test]
+    fn a_scoped_session_gets_exactly_the_space_access_it_asked_for() {
+        let creds = session(Some(&[
+            "atproto",
+            "space:com.example.forum?authority=did:plc:auth&skey=self&action=read_self",
+        ]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 1);
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+        // Reading the whole space is a different grant, and was not given.
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::Read
+        ));
+    }
+
+    #[test]
+    fn a_scoped_session_with_no_space_grant_is_denied() {
+        // Including one whose space access would come from an `include:` set:
+        // an unresolved permission set confers nothing, not everything.
+        let creds = session(Some(&["atproto", "include:app.example.spaceAccess"]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 0);
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+    }
+
+    #[test]
+    fn an_unparseable_space_grant_confers_nothing_rather_than_failing_the_session() {
+        let creds = session(Some(&["atproto", "space:not a space type?action=bogus"]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 0);
+    }
+
     #[test]
     fn delegation_token_verifies_against_the_account_key() {
         let keypair = keypair();
@@ -512,27 +612,6 @@ mod tests {
         let jwt = mint_space_service_token(&keypair(), "did:plc:a", "did:plc:b", NOTIFY_WRITE_LXM)
             .unwrap();
         assert_eq!(jwt_typ(&jwt).as_deref(), Some("JWT"));
-    }
-
-    #[test]
-    fn session_seam_defaults_to_full_access() {
-        let credentials = Credentials {
-            r#type: "access".to_string(),
-            did: Some("did:plc:user".to_string()),
-            scope: Some(AuthScope::Access),
-            audience: None,
-            token_id: None,
-            aud: None,
-            iss: None,
-            is_privileged: None,
-        };
-        assert!(session_space_scopes(&credentials).is_none());
-        assert!(session_permits(
-            &credentials,
-            "did:plc:user",
-            &space(),
-            &SpaceRequest::Read
-        ));
     }
 
     #[tokio::test]

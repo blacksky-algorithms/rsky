@@ -78,6 +78,7 @@ pub trait SpaceHostClient: Send + Sync {
         space: &str,
         credential: &str,
         endpoint: &str,
+        service: Option<&str>,
     ) -> Result<DateTime<Utc>>;
 }
 
@@ -162,10 +163,15 @@ impl SpaceHostClient for HttpSpaceHost {
         space: &str,
         credential: &str,
         endpoint: &str,
+        service: Option<&str>,
     ) -> Result<DateTime<Utc>> {
         let input = RegisterNotifyInput {
             space: space.to_string(),
-            endpoint: endpoint.to_string(),
+            // Naming ourselves is what makes each delivery addressable to us
+            // (proposals#100); the endpoint is sent either way, for a host
+            // that cannot resolve the identifier.
+            service: service.map(str::to_string),
+            endpoint: Some(endpoint.to_string()),
             repo: None,
         };
         let url = self.url("com.atproto.space.registerNotify");
@@ -268,7 +274,7 @@ mod tests {
             .and(header("authorization", "DPoP sc.jwt"))
             .and(header_exists("dpop"))
             .and(body_json_string(format!(
-                r#"{{"space":"{SPACE}","endpoint":"https://syncer.example"}}"#
+                r#"{{"space":"{SPACE}","service":"did:web:syncer.example#atproto_space_syncer","endpoint":"https://syncer.example"}}"#
             )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "expiresAt": "2030-01-01T00:00:00Z"
@@ -278,7 +284,12 @@ mod tests {
 
         let host = HttpSpaceHost::new(server.uri(), test_dpop());
         let expiry = host
-            .register_notify(SPACE, "sc.jwt", "https://syncer.example")
+            .register_notify(
+                SPACE,
+                "sc.jwt",
+                "https://syncer.example",
+                Some("did:web:syncer.example#atproto_space_syncer"),
+            )
             .await
             .unwrap();
         assert_eq!(expiry.to_rfc3339(), "2030-01-01T00:00:00+00:00");
@@ -325,7 +336,12 @@ mod tests {
     async fn connection_failure_maps_to_xrpc_variant() {
         let host = HttpSpaceHost::new("http://127.0.0.1:1", test_dpop());
         let err = host
-            .register_notify(SPACE, "sc.jwt", "https://syncer.example")
+            .register_notify(
+                SPACE,
+                "sc.jwt",
+                "https://syncer.example",
+                Some("did:web:syncer.example#atproto_space_syncer"),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));

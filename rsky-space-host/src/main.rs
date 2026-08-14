@@ -83,7 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         authority: Arc::new(authority),
         policy: Arc::new(policy),
-        keys: Arc::new(DocKeyResolver::new(docs)),
+        keys: Arc::new(DocKeyResolver::new(docs.clone())),
+        docs,
         metadata: Arc::new(HttpMetadataFetcher::new()),
         jti_store: store.clone(),
         writers: store.clone(),

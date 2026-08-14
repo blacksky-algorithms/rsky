@@ -551,3 +551,40 @@ async fn test_identity_resolution() {
     assert_eq!(body["did"], bar_did);
     assert_eq!(body["handle"], "handle.invalid");
 }
+
+/// An authorization server resolving an `include:` permission set reaches for
+/// this method, unauthenticated, and needs a proof either way: absence is
+/// answered with a CAR that proves it, not with an error. Its absence on a PDS
+/// surfaces two hops away as an opaque `invalid_scope`, naming neither the
+/// method nor the host.
+#[tokio::test]
+async fn test_sync_get_record_proves_presence_and_absence_anonymously() {
+    let (_dir, client) = common::get_client().await;
+    create_account(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+
+    for rkey in ["self", "nothing-was-ever-written-here"] {
+        let response = client
+            .get(format!(
+                "/xrpc/com.atproto.sync.getRecord?did={did}&collection=com.atproto.lexicon.schema&rkey={rkey}"
+            ))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok, "rkey {rkey}");
+        assert_eq!(
+            response.headers().get_one("Content-Type"),
+            Some("application/vnd.ipld.car")
+        );
+        assert!(
+            !response.into_bytes().await.unwrap().is_empty(),
+            "the CAR carries the blocks that prove the answer"
+        );
+    }
+}

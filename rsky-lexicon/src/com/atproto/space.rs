@@ -148,6 +148,34 @@ pub struct GetBlobParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListBlobsParams {
+    pub space: String,
+    pub repo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListBlobsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub cids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnregisterNotifyInput {
+    pub space: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetLatestCommitParams {
     pub space: String,
     pub repo: String,
@@ -352,7 +380,16 @@ pub struct ListSpacesOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterNotifyInput {
     pub space: String,
-    pub endpoint: String,
+    /// Service identifier of the subscriber: a DID with an optional service
+    /// fragment naming the entry in its DID document to deliver to. Supplies
+    /// both the audience and the endpoint; a bare URL cannot be an audience,
+    /// so a registration without this leaves its deliveries unverifiable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Pre-amendment shape, kept so a deployed subscriber keeps receiving
+    /// notifications. `service` wins when both are sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 }
@@ -831,10 +868,47 @@ mod tests {
         roundtrip(
             &RegisterNotifyInput {
                 space: SPACE.to_string(),
-                endpoint: "https://sync.example.com".to_string(),
+                service: Some("did:web:sync.example#atproto_space_syncer".to_string()),
+                endpoint: Some("https://sync.example.com".to_string()),
                 repo: Some("did:plc:writer".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","endpoint":"https://sync.example.com","repo":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","service":"did:web:sync.example#atproto_space_syncer","endpoint":"https://sync.example.com","repo":"did:plc:writer"}"#,
+        );
+        // The pre-amendment shape still parses, and a subscriber that names
+        // only an endpoint stays legible on the wire.
+        roundtrip(
+            &RegisterNotifyInput {
+                space: SPACE.to_string(),
+                service: None,
+                endpoint: Some("https://sync.example.com".to_string()),
+                repo: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","endpoint":"https://sync.example.com"}"#,
+        );
+        roundtrip(
+            &UnregisterNotifyInput {
+                space: SPACE.to_string(),
+                service: Some("did:web:sync.example#atproto_space_syncer".to_string()),
+                endpoint: None,
+                repo: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","service":"did:web:sync.example#atproto_space_syncer"}"#,
+        );
+        roundtrip(
+            &ListBlobsParams {
+                space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
+                limit: Some(500),
+                cursor: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","limit":500}"#,
+        );
+        roundtrip(
+            &ListBlobsOutput {
+                cursor: Some("bafkreiblob".to_string()),
+                cids: vec!["bafkreiblob".to_string()],
+            },
+            r#"{"cursor":"bafkreiblob","cids":["bafkreiblob"]}"#,
         );
         roundtrip(
             &RegisterNotifyOutput {

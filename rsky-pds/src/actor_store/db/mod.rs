@@ -145,6 +145,16 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         exp INTEGER NOT NULL\
     );",
     },
+    // A notification is delivered with service auth addressed to the
+    // subscriber, so a registration has to remember who the subscriber is.
+    // Rows written before this carry no service identifier and keep the
+    // pre-amendment behaviour (proposals#100).
+    Migration {
+        name: "003",
+        sql: "\
+    ALTER TABLE space_repo_notify ADD COLUMN service TEXT;\
+    ALTER TABLE space_host_reg ADD COLUMN service TEXT;",
+    },
 ];
 
 pub fn get_db(location: impl AsRef<Path>) -> Result<ActorDb> {
