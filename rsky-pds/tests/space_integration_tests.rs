@@ -222,11 +222,11 @@ async fn setup() -> Setup {
         &client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &author_token,
-        json!({"spaceType": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main"}),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
-    let space = body["space"].as_str().unwrap().to_string();
+    let space = body["uri"].as_str().unwrap().to_string();
     assert_eq!(space, format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/main"));
     let (status, _) = post_json(
         &client,
@@ -298,7 +298,7 @@ async fn simplespace_management() {
         &s.client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &s.author_token,
-        json!({"spaceType": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main"}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -306,8 +306,8 @@ async fn simplespace_management() {
 
     // invalid space type / skey are rejected
     for bad in [
-        json!({"spaceType": "notannsid"}),
-        json!({"spaceType": SPACE_TYPE, "skey": "bad/key"}),
+        json!({"type": "notannsid"}),
+        json!({"type": SPACE_TYPE, "skey": "bad/key"}),
     ] {
         let (status, _) = post_json(
             &s.client,
@@ -324,11 +324,11 @@ async fn simplespace_management() {
         &s.client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &s.author_token,
-        json!({"spaceType": "com.example.other"}),
+        json!({"type": "com.example.other"}),
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert!(body["space"]
+    assert!(body["uri"]
         .as_str()
         .unwrap()
         .starts_with(&format!("at://{AUTHOR_DID}/space/com.example.other/")));

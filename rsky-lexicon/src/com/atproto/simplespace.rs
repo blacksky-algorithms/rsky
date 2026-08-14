@@ -37,6 +37,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSpaceInput {
+    #[serde(rename = "type")]
     pub space_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skey: Option<String>,
@@ -46,7 +47,7 @@ pub struct CreateSpaceInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSpaceOutput {
-    pub space: String,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,13 +184,13 @@ mod tests {
                     managing_app: None,
                 }),
             },
-            r#"{"spaceType":"com.example.forum","skey":"self","config":{"policy":"public"}}"#,
+            r#"{"type":"com.example.forum","skey":"self","config":{"policy":"public"}}"#,
         );
         roundtrip(
             &CreateSpaceOutput {
-                space: SPACE.to_string(),
+                uri: SPACE.to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self"}"#,
+            r#"{"uri":"at://did:plc:auth/space/com.example.forum/self"}"#,
         );
     }
 

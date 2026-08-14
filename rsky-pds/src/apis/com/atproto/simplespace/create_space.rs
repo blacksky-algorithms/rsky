@@ -69,5 +69,5 @@ pub async fn simplespace_create_space(
         .create_space_def(def)
         .await
         .map_err(space_error)?;
-    Ok(Json(CreateSpaceOutput { space: space.uri() }))
+    Ok(Json(CreateSpaceOutput { uri: space.uri() }))
 }
