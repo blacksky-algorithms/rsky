@@ -17,7 +17,9 @@
 
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{bearer_token_from_req, validate_access_token, AuthScope, Credentials};
+use crate::auth_verifier::{
+    bearer_token_from_req, dpop_token_from_req, validate_access_token, AuthScope, Credentials,
+};
 use crate::space_scope::{self, SpaceRequest, SpaceScope};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -30,6 +32,7 @@ use rsky_common::get_random_str;
 use rsky_common::get_verification_material;
 use rsky_crypto::utils::encode_did_key;
 use rsky_identity::did::atproto_data::get_did_key_from_multibase;
+use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::credential::{
     self, JwtHeader, SpaceClaims, CREDENTIAL_TYP, DELEGATION_TTL_SECS, DELEGATION_TYP,
 };
@@ -38,6 +41,79 @@ use secp256k1::{Keypair, Message};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
+
+/// DPoP verification for the space surface.
+///
+/// Its own manager rather than the OAuth provider's: space credentials are not
+/// OAuth tokens, and issuance does not challenge with nonces, so a proof
+/// arrives without one. The replay store is what makes a proof single-use.
+pub struct SharedSpaceDpop {
+    pub dpop: DpopManager,
+}
+
+impl Default for SharedSpaceDpop {
+    fn default() -> Self {
+        Self {
+            dpop: DpopManager::new(None, Box::new(InMemoryReplayStore::default())),
+        }
+    }
+}
+
+fn dpop_request_uri(req: &Request) -> Result<String> {
+    let Some(cfg) = req.rocket().state::<crate::config::ServerConfig>() else {
+        bail!("server config is not available")
+    };
+    Ok(format!("{}{}", cfg.service.public_url, req.uri()))
+}
+
+async fn check_space_proof(
+    req: &Request<'_>,
+    access_token: Option<&str>,
+) -> Result<rsky_oauth::dpop::DpopProof> {
+    let shared = req
+        .guard::<&State<SharedSpaceDpop>>()
+        .await
+        .expect("SharedSpaceDpop managed");
+    let uri = dpop_request_uri(req)?;
+    let headers: Vec<String> = req.headers().get("dpop").map(String::from).collect();
+    let refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let proof = shared
+        .dpop
+        .check_proof(
+            &rsky_oauth::dpop::DpopRequest {
+                method: req.method().as_str(),
+                uri: &uri,
+                dpop_headers: &refs,
+                access_token,
+            },
+            now_secs(),
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    proof.ok_or_else(|| anyhow::anyhow!("missing DPoP proof"))
+}
+
+/// The thumbprint a credential minted for this request must be bound to.
+///
+/// Taken from the verified proof's own key, never from a request field: a
+/// field is an assertion anyone holding a delegation token can make about a
+/// key someone else controls. The proof carries no `ath`, because a delegation
+/// token is a grant rather than an access token.
+pub async fn verify_issuance_proof(req: &Request<'_>) -> Result<String> {
+    Ok(check_space_proof(req, None).await?.jkt)
+}
+
+/// Confirm the presenter holds the key the credential is bound to.
+pub async fn verify_bound_proof(
+    req: &Request<'_>,
+    credential: &str,
+    bound_jkt: &str,
+) -> Result<()> {
+    let proof = check_space_proof(req, Some(credential)).await?;
+    if proof.jkt != bound_jkt {
+        bail!("DPoP key thumbprint does not match the credential binding");
+    }
+    Ok(())
+}
 
 pub const NOTIFY_WRITE_LXM: &str = "com.atproto.space.notifyWrite";
 pub const NOTIFY_SPACE_DELETED_LXM: &str = "com.atproto.space.notifySpaceDeleted";
@@ -113,6 +189,12 @@ async fn verify_space_credential_token(
     req: &Request<'_>,
     token: &str,
 ) -> Result<SpaceCredentialAuth> {
+    // Scheme discipline: a credential reads every repo in its space, so
+    // presenting one as a bearer token makes it a shared secret. `Bearer` is
+    // refused even with a valid proof beside it.
+    if dpop_token_from_req(req).as_deref() != Some(token) {
+        bail!("space credentials must be presented under the DPoP scheme");
+    }
     let decoded = credential::decode(token).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if decoded.header.typ != CREDENTIAL_TYP {
         bail!("not a space credential");
@@ -133,8 +215,10 @@ async fn verify_space_credential_token(
         .expect("SharedIdResolver managed");
     let did_key =
         resolve_signing_did_key(actor_store, id_resolver, &authority, SPACE_KEY_IDS).await?;
-    credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let bound_jkt =
+        credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    verify_bound_proof(req, token, &bound_jkt).await?;
     Ok(SpaceCredentialAuth {
         space_uri,
         authority,
@@ -146,9 +230,9 @@ impl<'r> FromRequest<'r> for SpaceCredentialAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match bearer_token_from_req(req) {
-            Ok(Some(token)) => token,
-            _ => {
+        let token = match dpop_token_from_req(req) {
+            Some(token) => token,
+            None => {
                 let error = ApiError::AuthRequiredError("space credential required".to_string());
                 req.local_cache(|| Some(error.clone()));
                 return Outcome::Error((Status::Unauthorized, error));
@@ -181,9 +265,9 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match bearer_token_from_req(req) {
-            Ok(Some(token)) => token,
-            _ => {
+        let token = match dpop_token_from_req(req).or(bearer_token_from_req(req).ok().flatten()) {
+            Some(token) => token,
+            None => {
                 let error = ApiError::AuthRequiredError("authentication required".to_string());
                 req.local_cache(|| Some(error.clone()));
                 return Outcome::Error((Status::Unauthorized, error));
@@ -225,17 +309,46 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
     }
 }
 
-/// A7 seam: the `space:` grants carried by a session, if any. Legacy sessions
-/// have no scope carrier, so this returns `None` and callers fall back to
-/// full-access semantics (see the module docs).
-pub fn session_space_scopes(_credentials: &Credentials) -> Option<Vec<SpaceScope>> {
-    None
+/// The `space:` grants a session carries, parsed.
+///
+/// `None` means the session has no scope grammar to evaluate at all: an app
+/// password or a legacy access token, which predate the model and are governed
+/// by route-level ownership checks alone. `Some(vec![])` is different -- a
+/// scoped session that was granted no space access, which is a denial.
+///
+/// A grant that arrives inside an `include:` permission set is not seen here:
+/// resolving a permission set means fetching its `com.atproto.lexicon.schema`
+/// record, which this function does not do. An unresolved set therefore
+/// confers nothing rather than everything, which is the safe direction to be
+/// wrong in.
+pub fn session_space_scopes(credentials: &Credentials) -> Option<Vec<SpaceScope>> {
+    let granted = credentials.granted_scopes.as_ref()?;
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    // A `transition:*` session is asking for the app-password model, so it is
+    // governed the way an app password is rather than by a scope grammar it
+    // never spoke.
+    if scopes.has_transition("generic") || scopes.has_transition("chat.bsky") {
+        return None;
+    }
+    Some(
+        scopes
+            .space_grants()
+            .iter()
+            .filter_map(|grant| match SpaceScope::parse(grant) {
+                Ok(scope) => Some(scope),
+                Err(error) => {
+                    tracing::debug!(%grant, %error, "ignoring unparseable space scope");
+                    None
+                }
+            })
+            .collect(),
+    )
 }
 
-/// Evaluate a session against a space request. When the session carries
-/// `space:` scopes they are authoritative; otherwise a full-access session is
-/// treated as holding the broadest grant (route-level ownership checks still
-/// apply).
+/// Evaluate a session against a space request. When the session speaks the
+/// scope grammar its `space:` grants are authoritative -- including when it
+/// has none, which denies. Sessions that predate the grammar fall back to
+/// full-access semantics, where route-level ownership checks still apply.
 pub fn session_permits(
     credentials: &Credentials,
     session_did: &str,
@@ -305,6 +418,7 @@ pub fn mint_delegation_token(keypair: &Keypair, user_did: &str, space: &SpaceId)
         iat: now,
         exp: now + DELEGATION_TTL_SECS,
         jti: get_random_str(),
+        cnf: None,
     };
     credential::encode(&header, &claims, |input| sign_with_keypair(keypair, input))
         .map_err(|e| anyhow::anyhow!(e.to_string()))
@@ -397,6 +511,175 @@ mod tests {
         SpaceId::new("did:plc:auth", "com.example.forum", "self")
     }
 
+    fn session(granted: Option<&[&str]>) -> Credentials {
+        Credentials {
+            r#type: "oauth".to_string(),
+            granted_scopes: granted.map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect()),
+            did: Some("did:plc:member".to_string()),
+            scope: Some(AuthScope::Access),
+            audience: None,
+            token_id: None,
+            aud: None,
+            iss: None,
+            is_privileged: None,
+        }
+    }
+
+    #[test]
+    fn a_session_that_never_spoke_the_grammar_is_not_narrowed_by_it() {
+        // App passwords and legacy access tokens: route-level ownership checks
+        // are what constrain them, as before.
+        assert!(session_space_scopes(&session(None)).is_none());
+        // So is an OAuth session that asked for the app-password model.
+        assert!(session_space_scopes(&session(Some(&["atproto", "transition:generic"]))).is_none());
+        assert!(session_permits(
+            &session(None),
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::Read
+        ));
+    }
+
+    #[test]
+    fn a_scoped_session_gets_exactly_the_space_access_it_asked_for() {
+        let creds = session(Some(&[
+            "atproto",
+            "space:com.example.forum?authority=did:plc:auth&skey=self&action=read_self",
+        ]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 1);
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+        // Reading the whole space is a different grant, and was not given.
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::Read
+        ));
+    }
+
+    /// Bulleted's production scope string, verbatim from
+    /// `https://bulleted.app/oauth-client-metadata.json`.
+    const BULLETED_SCOPE: &str = "atproto include:app.bulleted.authFull blob:image/* \
+         include:app.bulleted.spaceAccess \
+         space:app.bulleted.space?manage=create&manage=update&manage=delete&action=read_self";
+
+    /// What the inline `space:` grant confers on its own, before the permission
+    /// set beside it is resolved.
+    ///
+    /// This is the shape that shipped broken: `authority` defaults to `self`,
+    /// so the inline grant covers only spaces the user anchors, and every
+    /// operation on a shared space is denied. The fix is resolution, not a
+    /// looser default -- so this test pins the unresolved behaviour to prove
+    /// the resolution is doing the work.
+    #[test]
+    fn the_inline_grant_alone_does_not_reach_a_shared_space() {
+        let granted: Vec<&str> = BULLETED_SCOPE.split_ascii_whitespace().collect();
+        let creds = session(Some(&granted));
+        let shared = SpaceId::new("did:plc:someoneelse", "app.bulleted.space", "main");
+        for request in [
+            SpaceRequest::ReadSelf { collection: None },
+            SpaceRequest::Read,
+            SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "app.bulleted.node".to_string(),
+            },
+        ] {
+            assert!(
+                !session_permits(&creds, "did:plc:member", &shared, &request),
+                "{request:?} should need the permission set"
+            );
+        }
+        // Its own spaces it can manage, which is all the inline grant claims.
+        let own = SpaceId::new("did:plc:member", "app.bulleted.space", "main");
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &own,
+            &SpaceRequest::Manage(space_scope::ManageOp::Create)
+        ));
+    }
+
+    /// The same session once `include:app.bulleted.spaceAccess` is resolved.
+    ///
+    /// The expansion is what `permission_set::expand_includes` produces from
+    /// the published record; this test asserts the enforcement seam accepts it,
+    /// so the two halves cannot drift apart.
+    #[test]
+    fn the_resolved_permission_set_reaches_a_shared_space() {
+        let mut granted: Vec<String> = BULLETED_SCOPE
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
+        granted.push(
+            "space:app.bulleted.space?authority=*\
+             &collection=app.bulleted.node&collection=app.bulleted.note\
+             &collection=app.bulleted.outline&collection=app.bulleted.mirror\
+             &collection=app.bulleted.comment&collection=app.bulleted.commentPolicy\
+             &action=read&action=create&action=update&action=delete"
+                .to_string(),
+        );
+        let refs: Vec<&str> = granted.iter().map(String::as_str).collect();
+        let creds = session(Some(&refs));
+        let shared = SpaceId::new("did:plc:someoneelse", "app.bulleted.space", "main");
+
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Read
+        ));
+        assert!(session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "app.bulleted.node".to_string(),
+            }
+        ));
+        // The set names its collections, so it does not confer others.
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &shared,
+            &SpaceRequest::Write {
+                action: space_scope::SpaceAction::Create,
+                collection: "com.example.something".to_string(),
+            }
+        ));
+    }
+
+    #[test]
+    fn a_scoped_session_with_no_space_grant_is_denied() {
+        // Including one whose space access would come from an `include:` set:
+        // an unresolved permission set confers nothing, not everything.
+        let creds = session(Some(&["atproto", "include:app.example.spaceAccess"]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 0);
+        assert!(!session_permits(
+            &creds,
+            "did:plc:member",
+            &space(),
+            &SpaceRequest::ReadSelf { collection: None }
+        ));
+    }
+
+    #[test]
+    fn an_unparseable_space_grant_confers_nothing_rather_than_failing_the_session() {
+        let creds = session(Some(&["atproto", "space:not a space type?action=bogus"]));
+        assert_eq!(session_space_scopes(&creds).unwrap().len(), 0);
+    }
+
     #[test]
     fn delegation_token_verifies_against_the_account_key() {
         let keypair = keypair();
@@ -427,27 +710,6 @@ mod tests {
         let jwt = mint_space_service_token(&keypair(), "did:plc:a", "did:plc:b", NOTIFY_WRITE_LXM)
             .unwrap();
         assert_eq!(jwt_typ(&jwt).as_deref(), Some("JWT"));
-    }
-
-    #[test]
-    fn session_seam_defaults_to_full_access() {
-        let credentials = Credentials {
-            r#type: "access".to_string(),
-            did: Some("did:plc:user".to_string()),
-            scope: Some(AuthScope::Access),
-            audience: None,
-            token_id: None,
-            aud: None,
-            iss: None,
-            is_privileged: None,
-        };
-        assert!(session_space_scopes(&credentials).is_none());
-        assert!(session_permits(
-            &credentials,
-            "did:plc:user",
-            &space(),
-            &SpaceRequest::Read
-        ));
     }
 
     #[tokio::test]

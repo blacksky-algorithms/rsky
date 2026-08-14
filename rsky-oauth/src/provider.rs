@@ -18,6 +18,15 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use url::Url;
 
+/// Resolves permission-set `include:` scopes into the effective grants they
+/// confer, so the issued access token's `scope` claim reflects what the session
+/// can actually do rather than the unresolved reference. Async because
+/// resolution reaches the network; a no-op returns the scope unchanged.
+#[async_trait::async_trait]
+pub trait ScopeExpander: Send + Sync {
+    async fn expand(&self, granted_scope: &str) -> String;
+}
+
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
 
 /// Client identification material submitted with PAR/token/revoke calls.
@@ -82,6 +91,9 @@ pub struct OAuthProviderConfig {
     pub dpop: DpopManager,
     /// client_ids treated as trusted (first-party) for UI purposes.
     pub trusted_clients: Vec<String>,
+    /// Expands `include:` permission sets into the token's effective scope.
+    /// `None` leaves the granted scope unexpanded.
+    pub scope_expander: Option<Arc<dyn ScopeExpander>>,
 }
 
 pub struct OAuthProvider {
@@ -92,6 +104,7 @@ pub struct OAuthProvider {
     store: Arc<dyn OAuthStore>,
     dpop: DpopManager,
     trusted_clients: Vec<String>,
+    scope_expander: Option<Arc<dyn ScopeExpander>>,
 }
 
 impl OAuthProvider {
@@ -104,6 +117,7 @@ impl OAuthProvider {
             store: config.store,
             dpop: config.dpop,
             trusted_clients: config.trusted_clients,
+            scope_expander: config.scope_expander,
         }
     }
 
@@ -472,6 +486,13 @@ impl OAuthProvider {
             .then(generate_refresh_token);
         let mut parameters = data.parameters.clone();
         parameters.dpop_jkt = Some(jkt.clone());
+        // The client metadata was validated against the literal granted scope
+        // (with `include:`); the token carries the expanded scope, so a
+        // resource server or client reading the token sees the effective
+        // grants. Stored on the token so refreshes stay consistent.
+        if let Some(expander) = &self.scope_expander {
+            parameters.scope = expander.expand(&parameters.scope).await;
+        }
         let token_data = TokenData {
             created_at: now,
             updated_at: now,
@@ -935,6 +956,7 @@ mod tests {
             store: store.clone(),
             dpop: DpopManager::new(nonce, Box::new(InMemoryReplayStore::default())),
             trusted_clients: vec![],
+            scope_expander: None,
         });
         Setup { provider, store }
     }

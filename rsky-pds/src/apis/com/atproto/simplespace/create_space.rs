@@ -5,7 +5,7 @@ use crate::apis::com::atproto::simplespace::{merge_config, require_manage, space
 use crate::apis::com::atproto::space::host::{APP_ACCESS_OPEN, POLICY_MEMBER_LIST};
 use crate::apis::com::atproto::space::{valid_key_part, valid_nsid};
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -23,7 +23,7 @@ use rsky_space::space_id::SpaceId;
 )]
 pub async fn simplespace_create_space(
     body: Json<CreateSpaceInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<Json<CreateSpaceOutput>, ApiError> {
@@ -69,5 +69,12 @@ pub async fn simplespace_create_space(
         .create_space_def(def)
         .await
         .map_err(space_error)?;
-    Ok(Json(CreateSpaceOutput { space: space.uri() }))
+    // The creator is the first member, as the reference seeds it: the
+    // authority must pass their own member-list policy for whole-space reads.
+    reader
+        .space
+        .add_member(&space.uri(), &did)
+        .await
+        .map_err(space_error)?;
+    Ok(Json(CreateSpaceOutput { uri: space.uri() }))
 }

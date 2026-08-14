@@ -193,7 +193,11 @@ impl ActorStore {
         if !tokio::fs::try_exists(&location.db_location).await? {
             bail!("Repo not found: {did}")
         }
-        let db = ActorDb::open(&location.db_location)?;
+        // Migrate on open, not only on create: an account created before a
+        // migration existed would otherwise never receive it, and the first
+        // query against the missing table turns into a runtime 500. Idempotent
+        // and cheap once applied (a single lookup in the migrations table).
+        let db = get_migrated_db(&location.db_location).await?;
         // ensure the db is ready (not in wal recovery mode)
         db.run(|conn| {
             let _: Option<String> = conn

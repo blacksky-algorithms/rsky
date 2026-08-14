@@ -9,12 +9,17 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["space", "collection", "rkey", "record"],
+          "required": ["space", "repo", "collection", "rkey", "record"],
           "nullable": ["swapRecord"],
           "properties": {
             "space": {
               "type": "string",
               "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "repo": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID of the repo to write to. Must be the authenticated account."
             },
             "collection": {
               "type": "string",

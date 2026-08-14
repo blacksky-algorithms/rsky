@@ -9,11 +9,20 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["space", "writes"],
+          "required": [
+            "space",
+            "repo",
+            "writes"
+          ],
           "properties": {
             "space": {
               "type": "string",
               "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "repo": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID of the repo to write to. Must be the authenticated account."
             },
             "validate": {
               "type": "boolean",
@@ -21,10 +30,10 @@
             },
             "writes": {
               "type": "array",
+              "description": "The batch of write operations, applied atomically under one commit.",
               "items": {
-                "type": "union",
-                "refs": ["#create", "#update", "#delete"],
-                "closed": true
+                "type": "ref",
+                "ref": "#writeOp"
               }
             }
           }
@@ -44,74 +53,93 @@
               "type": "array",
               "items": {
                 "type": "union",
-                "refs": ["#createResult", "#updateResult", "#deleteResult"],
+                "refs": [
+                  "#createResult",
+                  "#updateResult",
+                  "#deleteResult"
+                ],
                 "closed": true
               }
             }
           }
         }
       },
-      "errors": [{ "name": "SpaceNotFound" }]
-    },
-    "create": {
-      "type": "object",
-      "description": "Operation which creates a new record.",
-      "required": ["collection", "value"],
-      "properties": {
-        "collection": { "type": "string", "format": "nsid" },
-        "rkey": {
-          "type": "string",
-          "format": "record-key",
-          "maxLength": 512
-        },
-        "value": { "type": "unknown" }
-      }
-    },
-    "update": {
-      "type": "object",
-      "description": "Operation which updates an existing record.",
-      "required": ["collection", "rkey", "value"],
-      "properties": {
-        "collection": { "type": "string", "format": "nsid" },
-        "rkey": { "type": "string", "format": "record-key" },
-        "value": { "type": "unknown" }
-      }
-    },
-    "delete": {
-      "type": "object",
-      "description": "Operation which deletes an existing record.",
-      "required": ["collection", "rkey"],
-      "properties": {
-        "collection": { "type": "string", "format": "nsid" },
-        "rkey": { "type": "string", "format": "record-key" }
-      }
+      "errors": [
+        {
+          "name": "SpaceNotFound"
+        }
+      ]
     },
     "createResult": {
       "type": "object",
-      "required": ["uri", "cid"],
+      "required": [
+        "uri",
+        "cid"
+      ],
       "properties": {
         "uri": {
           "type": "string",
           "description": "Permissioned record URI, in the form at://{authority}/space/{spaceType}/{skey}/{authorDid}/{collection}/{rkey}. Not a standard at-uri."
         },
-        "cid": { "type": "string", "format": "cid" }
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        }
       }
     },
     "updateResult": {
       "type": "object",
-      "required": ["uri", "cid"],
+      "required": [
+        "uri",
+        "cid"
+      ],
       "properties": {
         "uri": {
           "type": "string",
           "description": "Permissioned record URI, in the form at://{authority}/space/{spaceType}/{skey}/{authorDid}/{collection}/{rkey}. Not a standard at-uri."
         },
-        "cid": { "type": "string", "format": "cid" }
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        }
       }
     },
     "deleteResult": {
       "type": "object",
       "required": [],
       "properties": {}
+    },
+    "writeOp": {
+      "type": "object",
+      "required": [
+        "action",
+        "collection"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "create",
+            "update",
+            "delete"
+          ],
+          "description": "The operation kind."
+        },
+        "collection": {
+          "type": "string",
+          "format": "nsid"
+        },
+        "rkey": {
+          "type": "string",
+          "format": "record-key",
+          "maxLength": 512,
+          "description": "Required for update and delete; auto-TID for create when omitted."
+        },
+        "value": {
+          "type": "unknown",
+          "description": "The record. Omitted for delete."
+        }
+      }
     }
   }
 }

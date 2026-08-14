@@ -4,6 +4,7 @@
 use clap::Parser;
 use rsky_identity::did::did_resolver::DidResolver;
 use rsky_identity::types::{DidResolverOpts, MemoryCache};
+use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::space_id::SpaceId;
 use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::HttpMetadataFetcher;
@@ -82,7 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         authority: Arc::new(authority),
         policy: Arc::new(policy),
-        keys: Arc::new(DocKeyResolver::new(docs)),
+        keys: Arc::new(DocKeyResolver::new(docs.clone())),
+        docs,
         metadata: Arc::new(HttpMetadataFetcher::new()),
         jti_store: store.clone(),
         writers: store.clone(),
@@ -93,6 +95,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             now.clone(),
             jti.clone(),
         )),
+        dpop: Arc::new(DpopManager::new(
+            None,
+            Box::new(InMemoryReplayStore::default()),
+        )),
+        public_url: cfg.public_url.clone(),
         now,
         jti,
         registration_ttl_secs: DEFAULT_REGISTRATION_TTL_SECS,

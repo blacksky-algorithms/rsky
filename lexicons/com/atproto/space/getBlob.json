@@ -7,16 +7,20 @@
       "description": "Get a blob referenced by a record in a permissioned repo. Returns the full blob as originally uploaded. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
       "parameters": {
         "type": "params",
-        "required": ["space", "did", "cid"],
+        "required": [
+          "space",
+          "repo",
+          "cid"
+        ],
         "properties": {
           "space": {
             "type": "string",
             "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
           },
-          "did": {
+          "repo": {
             "type": "string",
             "format": "did",
-            "description": "The DID of the account that authored the blob's referencing record."
+            "description": "The DID of the repo's author."
           },
           "cid": {
             "type": "string",
@@ -28,7 +32,14 @@
       "output": {
         "encoding": "*/*"
       },
-      "errors": [{ "name": "BlobNotFound" }, { "name": "RepoNotFound" }]
+      "errors": [
+        {
+          "name": "BlobNotFound"
+        },
+        {
+          "name": "RepoNotFound"
+        }
+      ]
     }
   }
 }

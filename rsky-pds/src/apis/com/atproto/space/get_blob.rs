@@ -20,10 +20,10 @@ pub struct SpaceBlobResponder(Vec<u8>, Header<'static>, Header<'static>, Header<
 /// Fetch a blob referenced by a record in the space. Authorization requires
 /// the blob to be referenced from the space (space_blob_ref).
 #[tracing::instrument(skip_all)]
-#[rocket::get("/xrpc/com.atproto.space.getBlob?<space>&<did>&<cid>")]
+#[rocket::get("/xrpc/com.atproto.space.getBlob?<space>&<repo>&<cid>")]
 pub async fn space_get_blob(
     space: String,
-    did: String,
+    repo: String,
     cid: String,
     auth: SpaceReadAuth,
     actor_store: &State<ActorStore>,
@@ -34,14 +34,14 @@ pub async fn space_get_blob(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf { collection: None },
     )?;
     let reader = open_local_repo(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;

@@ -24,6 +24,8 @@ pub mod lexicon;
 pub mod mailer;
 pub mod models;
 pub mod oauth;
+pub mod oauth_scope;
+pub mod permission_set;
 pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
@@ -75,7 +77,7 @@ lazy_static! {
 }
 
 extern crate rocket;
-use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, ApiError};
+use crate::apis::{app, bsky_api_get_forwarder, bsky_api_post_forwarder, com, community, ApiError};
 use atrium_api::client::AtpServiceClient;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use dotenvy::dotenv;
@@ -388,8 +390,10 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::space::get_latest_commit::space_get_latest_commit,
                 com::atproto::space::get_record::space_get_record,
                 com::atproto::space::get_repo::space_get_repo,
+                com::atproto::space::get_repo_state::space_get_repo_state,
                 com::atproto::space::get_space::space_get_space,
                 com::atproto::space::get_space_credential::space_get_space_credential,
+                com::atproto::space::list_blobs::space_list_blobs,
                 com::atproto::space::list_records::space_list_records,
                 com::atproto::space::list_repo_ops::space_list_repo_ops,
                 com::atproto::space::list_repos::space_list_repos,
@@ -398,6 +402,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::space::notify_write::space_notify_write,
                 com::atproto::space::put_record::space_put_record,
                 com::atproto::space::register_notify::space_register_notify,
+                com::atproto::space::unregister_notify::space_unregister_notify,
                 com::atproto::sync::get_blob::get_blob,
                 com::atproto::sync::get_blocks::get_blocks,
                 com::atproto::sync::get_checkout::get_checkout,
@@ -423,6 +428,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 app::bsky::notification::unregister_push::unregister_push,
                 bsky_api_get_forwarder,
                 bsky_api_post_forwarder,
+                community::lexicon::service::describe::service_describe,
                 well_known::well_known,
                 oauth::routes::oauth_par,
                 oauth::routes::oauth_token,
@@ -450,5 +456,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(app_view_agent)
         .manage(account_manager)
         .manage(shared_oauth_provider)
+        .manage(crate::space_auth::SharedSpaceDpop::default())
+        .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
 }

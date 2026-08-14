@@ -13,11 +13,11 @@ use rocket::State;
 use rsky_lexicon::com::atproto::space::GetRecordOutput;
 
 #[tracing::instrument(skip_all)]
-#[rocket::get("/xrpc/com.atproto.space.getRecord?<space>&<did>&<collection>&<rkey>&<cid>")]
+#[rocket::get("/xrpc/com.atproto.space.getRecord?<space>&<repo>&<collection>&<rkey>&<cid>")]
 #[allow(clippy::too_many_arguments)]
 pub async fn space_get_record(
     space: String,
-    did: String,
+    repo: String,
     collection: String,
     rkey: String,
     cid: Option<String>,
@@ -30,7 +30,7 @@ pub async fn space_get_record(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf {
             collection: Some(collection.clone()),
         },
@@ -39,7 +39,7 @@ pub async fn space_get_record(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;
@@ -62,7 +62,7 @@ pub async fn space_get_record(
     let value =
         decode_record(&record.value).map_err(internal_error("stored record failed to decode"))?;
     Ok(Json(GetRecordOutput {
-        uri: space_id.record_uri(&did, &collection, &rkey),
+        uri: space_id.record_uri(&repo, &collection, &rkey),
         cid: Some(record.cid),
         value,
     }))

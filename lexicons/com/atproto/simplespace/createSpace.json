@@ -9,9 +9,11 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["spaceType"],
+          "required": [
+            "type"
+          ],
           "properties": {
-            "spaceType": {
+            "type": {
               "type": "string",
               "format": "nsid",
               "description": "The space type NSID, which resolves to a space type declaration."
@@ -33,16 +35,22 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["space"],
+          "required": [
+            "uri"
+          ],
           "properties": {
-            "space": {
+            "uri": {
               "type": "string",
               "description": "Permissioned space URI of the created space, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
             }
           }
         }
       },
-      "errors": [{ "name": "SpaceAlreadyExists" }]
+      "errors": [
+        {
+          "name": "SpaceAlreadyExists"
+        }
+      ]
     }
   }
 }

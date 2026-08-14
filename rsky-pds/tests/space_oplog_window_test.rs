@@ -88,6 +88,7 @@ async fn compacted_history_is_unavailable_over_the_wire() {
             .body(
                 json!({
                     "space": space,
+                    "repo": DID,
                     "collection": COLLECTION,
                     "rkey": format!("3k{i}"),
                     "record": {"text": format!("post {i}")}
@@ -104,7 +105,7 @@ async fn compacted_history_is_unavailable_over_the_wire() {
     // full-history requests fail once compaction has dropped revisions
     let response = client
         .get(format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={space}&did={DID}"
+            "/xrpc/com.atproto.space.listRepoOps?space={space}&repo={DID}"
         ))
         .header(auth.clone())
         .dispatch()
@@ -116,7 +117,7 @@ async fn compacted_history_is_unavailable_over_the_wire() {
     // requests below the floor fail too
     let response = client
         .get(format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={space}&did={DID}&since={}",
+            "/xrpc/com.atproto.space.listRepoOps?space={space}&repo={DID}&since={}",
             revs[0]
         ))
         .header(auth.clone())
@@ -127,7 +128,7 @@ async fn compacted_history_is_unavailable_over_the_wire() {
     // requests at or after the floor are served with the current commit
     let response = client
         .get(format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={space}&did={DID}&since={}",
+            "/xrpc/com.atproto.space.listRepoOps?space={space}&repo={DID}&since={}",
             revs[3]
         ))
         .header(auth)

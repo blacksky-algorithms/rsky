@@ -42,6 +42,13 @@ pub struct JwtHeader {
     pub kid: Option<String>,
 }
 
+/// RFC 9449 confirmation claim: the thumbprint of the key the credential is
+/// bound to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Confirmation {
+    pub jkt: String,
+}
+
 /// Claims common to delegation tokens and space credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpaceClaims {
@@ -55,6 +62,10 @@ pub struct SpaceClaims {
     pub iat: u64,
     pub exp: u64,
     pub jti: String,
+    /// DPoP binding — present on credentials, absent on delegation tokens,
+    /// which are grants rather than tokens a holder presents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Confirmation>,
 }
 
 /// A decoded, not-yet-signature-verified JWT.
@@ -168,13 +179,18 @@ pub fn verify_delegation_token(
 /// - `iss` is the authority DID
 /// - not expired
 /// - signature verifies against the authority's space `did:key`
+///
+/// Returns the `cnf.jkt` the credential is bound to. A credential reads every
+/// repo in its space and is presented to each host in turn, so an unbound one
+/// is a shared secret any of those hosts could replay against the others: the
+/// binding is required, not optional (proposals#99).
 pub fn verify_space_credential(
     jwt: &str,
     space_uri: &str,
     authority_did: &str,
     authority_space_key: &str,
     now: u64,
-) -> Result<()> {
+) -> Result<String> {
     let decoded = decode(jwt)?;
     if decoded.header.typ != CREDENTIAL_TYP {
         return Err(SpaceError::InvalidClaim("wrong typ".into()));
@@ -188,7 +204,16 @@ pub fn verify_space_credential(
     if now >= decoded.claims.exp {
         return Err(SpaceError::Expired);
     }
-    verify_signature(&decoded, authority_space_key)
+    let jkt = match &decoded.claims.cnf {
+        Some(cnf) if !cnf.jkt.is_empty() => cnf.jkt.clone(),
+        _ => {
+            return Err(SpaceError::InvalidClaim(
+                "credential is not DPoP-bound".into(),
+            ))
+        }
+    };
+    verify_signature(&decoded, authority_space_key)?;
+    Ok(jkt)
 }
 
 fn b64(s: &str) -> Result<Vec<u8>> {
@@ -200,6 +225,32 @@ fn b64(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unbound_credential_does_not_verify() {
+        let header = JwtHeader {
+            typ: CREDENTIAL_TYP.to_string(),
+            alg: "ES256K".to_string(),
+            kid: Some("#atproto_space".to_string()),
+        };
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let claims = SpaceClaims {
+            iss: "did:plc:authority".to_string(),
+            sub: space.to_string(),
+            aud: None,
+            iat: 1000,
+            exp: 8200,
+            jti: "unbound".to_string(),
+            cnf: None,
+        };
+        let jwt = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
+        // Refused before the signature is even consulted: a credential
+        // nothing is bound to is a shared secret.
+        assert!(matches!(
+            verify_space_credential(&jwt, space, "did:plc:authority", "did:key:x", 1000),
+            Err(SpaceError::InvalidClaim(_))
+        ));
+    }
 
     #[test]
     fn encode_decode_roundtrip() {
@@ -215,6 +266,9 @@ mod tests {
             iat: 1000,
             exp: 8200,
             jti: "nonce123".to_string(),
+            cnf: Some(Confirmation {
+                jkt: "test-jkt".to_string(),
+            }),
         };
         // Deterministic fake signer: 64 zero bytes.
         let jwt = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
@@ -253,6 +307,7 @@ mod tests {
             iat: 1000,
             exp: 1060,
             jti: "es256-nonce".to_string(),
+            cnf: None,
         };
         let jwt = encode(&header, &claims, |input| {
             let digest = sha2::Sha256::digest(input);
@@ -298,6 +353,9 @@ mod tests {
             iat: 1000,
             exp: 1000 + CREDENTIAL_TTL_SECS,
             jti: "k256-nonce".to_string(),
+            cnf: Some(Confirmation {
+                jkt: "test-jkt".to_string(),
+            }),
         };
         let jwt = encode(&header, &claims, |input| {
             let digest = sha2::Sha256::digest(input);
@@ -333,6 +391,9 @@ mod tests {
                 iat: 1000,
                 exp: 9000,
                 jti: "n".to_string(),
+                cnf: Some(Confirmation {
+                    jkt: "test-jkt".to_string(),
+                }),
             };
             encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap()
         };
@@ -386,6 +447,7 @@ mod tests {
             iat: 1000,
             exp: 1060,
             jti: "n".to_string(),
+            cnf: None,
         };
         let wrong_typ = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
         assert!(matches!(
@@ -425,6 +487,7 @@ mod tests {
             iat: 1000,
             exp: 1060,
             jti: "n".to_string(),
+            cnf: None,
         };
         let jwt = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
 

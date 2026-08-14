@@ -149,6 +149,7 @@ mod tests {
             iat,
             exp: iat + CREDENTIAL_TTL_SECS,
             jti: format!("jti-{iat}"),
+            cnf: None,
         };
         encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap()
     }
@@ -198,6 +199,7 @@ mod tests {
             _space: &str,
             _credential: &str,
             _endpoint: &str,
+            _service: Option<&str>,
         ) -> Result<DateTime<Utc>> {
             Ok(Utc::now())
         }
@@ -250,6 +252,7 @@ mod tests {
             _space: &str,
             _credential: &str,
             _endpoint: &str,
+            _service: Option<&str>,
         ) -> Result<DateTime<Utc>> {
             Ok(Utc::now())
         }
@@ -267,7 +270,7 @@ mod tests {
         // GarbageHost's unused trait methods, for completeness.
         let host = GarbageHost;
         assert!(host.list_repos(SPACE, "c", None, None).await.is_ok());
-        assert!(host.register_notify(SPACE, "c", "e").await.is_ok());
+        assert!(host.register_notify(SPACE, "c", "e", None).await.is_ok());
     }
 
     #[tokio::test]
@@ -322,6 +325,6 @@ mod tests {
             iats: vec![],
         };
         assert!(host.list_repos(SPACE, "c", None, None).await.is_ok());
-        assert!(host.register_notify(SPACE, "c", "e").await.is_ok());
+        assert!(host.register_notify(SPACE, "c", "e", None).await.is_ok());
     }
 }

@@ -31,7 +31,7 @@ pub use jwk::{EcCurve, Jwk, JwkSet};
 pub use jwt::{DecodedJwt, JwtClaims, JwtHeader};
 pub use provider::{
     AuthorizePageData, ClientCredentials, OAuthProvider, OAuthProviderConfig, ParResponse,
-    TokenRequest, VerifiedAccess,
+    ScopeExpander, TokenRequest, VerifiedAccess,
 };
 pub use store::{AccountInfo, DeviceData, MemoryOAuthStore, OAuthStore};
 pub use types::{AuthorizationRequestParameters, ClientAuth, OAuthClientMetadata, TokenResponse};

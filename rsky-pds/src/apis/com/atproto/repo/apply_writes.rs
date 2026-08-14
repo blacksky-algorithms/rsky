@@ -14,7 +14,10 @@ use futures::stream::{self, StreamExt};
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::repo::{ApplyWritesInput, ApplyWritesInputRefWrite};
+use rsky_lexicon::com::atproto::repo::{
+    ApplyWritesInput, ApplyWritesInputRefWrite, ApplyWritesOutput, ApplyWritesOutputResult,
+    ApplyWritesResultCreate, ApplyWritesResultDelete, ApplyWritesResultUpdate, CommitMeta,
+};
 use rsky_repo::types::PreparedWrite;
 use std::str::FromStr;
 
@@ -25,7 +28,7 @@ async fn inner_apply_writes(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<()> {
+) -> Result<ApplyWritesOutput> {
     let tx: ApplyWritesInput = body.into_inner();
     let ApplyWritesInput {
         repo,
@@ -109,6 +112,8 @@ async fn inner_apply_writes(
             .process_writes(writes.clone(), swap_commit_cid)
             .await?;
 
+        let commit_cid = commit.commit_data.cid.to_string();
+        let commit_rev = commit.commit_data.rev.clone();
         let mut lock = sequencer.sequencer.write().await;
         lock.sequence_commit(did.clone(), commit.clone()).await?;
         account_manager
@@ -118,7 +123,38 @@ async fn inner_apply_writes(
                 commit.commit_data.rev,
             )
             .await?;
-        Ok(())
+        // The lexicon declares a JSON object output; returning an empty body
+        // instead makes a client that requires JSON treat a successful write as
+        // failed and retry it, duplicating records.
+        let results = writes
+            .iter()
+            .map(|write| match write {
+                PreparedWrite::Create(w) => {
+                    ApplyWritesOutputResult::Create(ApplyWritesResultCreate {
+                        uri: w.uri.clone(),
+                        cid: w.cid.to_string(),
+                        validation_status: None,
+                    })
+                }
+                PreparedWrite::Update(w) => {
+                    ApplyWritesOutputResult::Update(ApplyWritesResultUpdate {
+                        uri: w.uri.clone(),
+                        cid: w.cid.to_string(),
+                        validation_status: None,
+                    })
+                }
+                PreparedWrite::Delete(_) => {
+                    ApplyWritesOutputResult::Delete(ApplyWritesResultDelete {})
+                }
+            })
+            .collect();
+        Ok(ApplyWritesOutput {
+            commit: Some(CommitMeta {
+                cid: commit_cid,
+                rev: commit_rev,
+            }),
+            results: Some(results),
+        })
     } else {
         bail!("Could not find repo: `{repo}`")
     }
@@ -133,7 +169,7 @@ pub async fn apply_writes(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<(), ApiError> {
+) -> Result<Json<ApplyWritesOutput>, ApiError> {
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
     match inner_apply_writes(
         body,
@@ -145,7 +181,7 @@ pub async fn apply_writes(
     )
     .await
     {
-        Ok(()) => Ok(()),
+        Ok(output) => Ok(Json(output)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)

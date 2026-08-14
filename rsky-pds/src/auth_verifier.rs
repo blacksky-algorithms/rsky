@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::helpers::auth::CustomClaimObj;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::permission_set::SharedPermissionSets;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
@@ -92,6 +93,11 @@ pub struct Credentials {
     pub r#type: String,
     pub did: Option<String>,
     pub scope: Option<AuthScope>,
+    /// The scope strings the session was actually granted, when it came from
+    /// the OAuth provider. `None` for sessions that predate the scope model
+    /// (app passwords, legacy access tokens), which carry no scope grammar to
+    /// evaluate.
+    pub granted_scopes: Option<Vec<String>>,
     pub audience: Option<String>,
     pub token_id: Option<String>,
     pub aud: Option<String>,
@@ -225,6 +231,7 @@ impl<'r> FromRequest<'r> for Refresh {
             access: AccessOutput {
                 credentials: Some(Credentials {
                     r#type: "refresh".to_string(),
+                    granted_scopes: None,
                     did: Some(did),
                     scope: Some(scope),
                     audience,
@@ -283,6 +290,59 @@ impl<'r> FromRequest<'r> for AccessFullImport {
         match access_check(req, vec![AuthScope::Access], Some(opts)).await {
             Outcome::Success(access) => Outcome::Success(AccessFullImport { access }),
             Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+        }
+    }
+}
+
+/// Auth for the permissioned-space session surface.
+///
+/// A full session passes. So does an OAuth session that speaks the granular
+/// scope grammar -- its `space:` grants (inline or resolved from an
+/// `include:` permission set) are the actual authority, enforced per-request
+/// by `space_auth::session_permits`. An app-password session is refused: the
+/// space methods are OAuth-gated per the proposal, and an app password can
+/// carry no grant to evaluate.
+pub struct AccessSpace {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessSpace {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let outcome = access_check(
+            req,
+            vec![
+                AuthScope::Access,
+                AuthScope::AppPass,
+                AuthScope::AppPassPrivileged,
+            ],
+            None,
+        )
+        .await;
+        match outcome {
+            Outcome::Success(access) => {
+                let credentials = access.credentials.as_ref();
+                let is_full =
+                    credentials.and_then(|c| c.scope.as_ref()) == Some(&AuthScope::Access);
+                let speaks_grammar = credentials
+                    .map(|c| c.granted_scopes.is_some())
+                    .unwrap_or(false);
+                if is_full || speaks_grammar {
+                    Outcome::Success(AccessSpace { access })
+                } else {
+                    let error =
+                        AuthError::BadJwt("space methods require an OAuth session".to_string());
+                    req.local_cache(|| Some(ApiError::from(&error)));
+                    Outcome::Error((Status::BadRequest, error))
+                }
+            }
+            Outcome::Error(error) => {
+                req.local_cache(|| Some(ApiError::from(&error.1)));
+                Outcome::Error(error)
+            }
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
@@ -525,6 +585,7 @@ impl<'r> FromRequest<'r> for UserDidAuth {
                 access: AccessOutput {
                     credentials: Some(Credentials {
                         r#type: "user_did".to_string(),
+                        granted_scopes: None,
                         did: None,
                         scope: None,
                         audience: None,
@@ -613,6 +674,7 @@ impl<'r> FromRequest<'r> for ModService {
                     access: AccessOutput {
                         credentials: Some(Credentials {
                             r#type: "mod_service".to_string(),
+                            granted_scopes: None,
                             did: None,
                             scope: None,
                             audience: None,
@@ -706,6 +768,7 @@ impl<'r> FromRequest<'r> for AdminToken {
                         access: AccessOutput {
                             credentials: Some(Credentials {
                                 r#type: "admin_token".to_string(),
+                                granted_scopes: None,
                                 did: None,
                                 scope: None,
                                 audience: None,
@@ -781,6 +844,7 @@ pub async fn validate_bearer_access_token(
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
+            granted_scopes: None,
             did: Some(did),
             scope: Some(scope),
             audience,
@@ -839,14 +903,22 @@ pub fn validate_bearer_token(
 /// mirroring the upstream transition-scope semantics: `transition:generic`
 /// is app-password-equivalent access and `transition:chat.bsky` raises it
 /// to privileged app-password access.
+///
+/// A session granted permission-set scopes (`repo:`, `blob:`, `rpc:`,
+/// `include:`, `space:`) carries no `transition:` grant, so it maps to the
+/// same app-password level rather than being refused. That level is a
+/// ceiling, not the grant itself: what those scopes actually permit is
+/// decided at the resource, which is where the collection, blob and space
+/// constraints live. Refusing here would reject every client built against
+/// the permission-set model before it ever reached that check.
 pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
-    let has = |scope: &str| scopes.iter().any(|granted| granted == scope);
-    if !has("atproto") {
+    let granted = crate::oauth_scope::GrantedScopes::parse(scopes);
+    if !granted.has_atproto() {
         bail!("Bad token scope")
     }
-    if has("transition:chat.bsky") {
+    if granted.has_transition("chat.bsky") {
         Ok(AuthScope::AppPassPrivileged)
-    } else if has("transition:generic") {
+    } else if granted.has_transition("generic") || granted.has_permission_grant() {
         Ok(AuthScope::AppPass)
     } else {
         bail!("Bad token scope")
@@ -925,6 +997,16 @@ async fn validate_dpop_access_token(
         }
     };
     let scope = oauth_scopes_to_auth_scope(&verified.scopes)?;
+    // An `include:` names a permission set whose contents are the grants; a
+    // session carrying one and nothing else has no grants to evaluate until it
+    // is fetched. Expanding here means the resolved permissions are parsed by
+    // the same code as an inline `space:` scope.
+    let granted_scopes = match request.rocket().state::<SharedPermissionSets>() {
+        Some(shared) => {
+            crate::permission_set::expand_includes(&shared.resolver, &verified.scopes).await
+        }
+        None => verified.scopes.clone(),
+    };
     if !scopes.is_empty() && !scopes.contains(&scope) {
         bail!("Bad token scope")
     }
@@ -945,6 +1027,7 @@ async fn validate_dpop_access_token(
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "oauth".to_string(),
+            granted_scopes: Some(granted_scopes),
             did: Some(verified.did),
             scope: Some(scope),
             audience: Some(env::var("PDS_SERVICE_DID")?),
@@ -1041,6 +1124,7 @@ pub async fn validate_access_token(
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
+            granted_scopes: None,
             did: Some(did),
             scope: Some(scope),
             audience,
@@ -1090,11 +1174,20 @@ pub async fn verify_service_jwt(
         }
     };
 
+    // The method being called, so a token bound to one cannot be spent on
+    // another.
+    let lxm = request
+        .uri()
+        .path()
+        .as_str()
+        .strip_prefix("/xrpc/")
+        .map(str::to_string);
     match bearer_token_from_req(request)? {
         None => bail!("MissingJwt: missing jwt"),
         Some(jwt_str) => {
             let payload: ServiceJwtPayload =
-                verify_service_jwt_server(jwt_str, opts.aud, get_signing_key).await?;
+                verify_service_jwt_server(jwt_str, opts.aud, lxm.as_deref(), get_signing_key)
+                    .await?;
             Ok(VerifiedServiceJwt {
                 iss: payload.iss,
                 aud: payload.aud,
@@ -1221,6 +1314,49 @@ mod tests {
         // missing the mandatory atproto scope is rejected outright
         assert!(oauth_scopes_to_auth_scope(&scopes(&["transition:generic"])).is_err());
         assert!(oauth_scopes_to_auth_scope(&[]).is_err());
+    }
+
+    #[test]
+    fn oauth_scope_mapping_accepts_permission_set_sessions() {
+        let scopes = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        // The exact base scope a permission-set client declares: no
+        // transition grant, so this was refused before the modern forms
+        // were recognised.
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "include:app.bulleted.authFull",
+                "blob:image/*"
+            ]))
+            .unwrap(),
+            AuthScope::AppPass
+        );
+        // each permission-grant form on its own is sufficient
+        for grant in [
+            "repo:app.bsky.feed.post",
+            "blob:image/*",
+            "rpc:com.example.method",
+            "include:app.example.set",
+            "space:app.bulleted.space?action=read",
+        ] {
+            assert_eq!(
+                oauth_scopes_to_auth_scope(&scopes(&["atproto", grant])).unwrap(),
+                AuthScope::AppPass,
+                "{grant} should map to app-password level"
+            );
+        }
+        // a chat transition still wins over a permission grant
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&[
+                "atproto",
+                "include:app.bulleted.authFull",
+                "transition:chat.bsky"
+            ]))
+            .unwrap(),
+            AuthScope::AppPassPrivileged
+        );
+        // an unrecognised token is not a permission grant
+        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto", "nonsense"])).is_err());
     }
 
     fn assert_admin(parsed: Option<BasicAuth>) {

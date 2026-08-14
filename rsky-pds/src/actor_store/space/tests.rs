@@ -509,13 +509,58 @@ async fn repo_lifecycle_flags_and_listing() {
         .apply_writes(&other, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
         .await
         .unwrap();
+    let remote = SpaceId::new("did:plc:remote", SPACE_TYPE, "third");
+    store
+        .apply_writes(&remote, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
+        .await
+        .unwrap();
 
-    let spaces = store.list_spaces(10, None).await.unwrap();
-    assert_eq!(spaces, vec![other.uri(), uri.clone()]);
-    let page = store.list_spaces(1, None).await.unwrap();
-    assert_eq!(page, vec![other.uri()]);
-    let rest = store.list_spaces(10, Some(page[0].clone())).await.unwrap();
-    assert_eq!(rest, vec![uri.clone()]);
+    // list_spaces now returns (uri, authority, created_at) per row.
+    let uris = |rows: Vec<(String, String, String)>| -> Vec<String> {
+        rows.into_iter().map(|(u, _, _)| u).collect()
+    };
+    let spaces = store.list_spaces(10, None, None, None).await.unwrap();
+    assert_eq!(uris(spaces), vec![other.uri(), uri.clone(), remote.uri()]);
+    // the type filter narrows, and a non-matching type yields nothing
+    assert!(store
+        .list_spaces(10, None, Some("com.other.type".to_string()), None)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, Some(SPACE_TYPE.to_string()), None)
+                .await
+                .unwrap()
+        ),
+        vec![other.uri(), uri.clone(), remote.uri()]
+    );
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, None, Some(AUTHORITY.to_string()))
+                .await
+                .unwrap()
+        ),
+        vec![other.uri(), uri.clone()]
+    );
+    assert_eq!(
+        uris(
+            store
+                .list_spaces(10, None, None, Some("did:plc:remote".to_string()))
+                .await
+                .unwrap()
+        ),
+        vec![remote.uri()]
+    );
+    let page = store.list_spaces(1, None, None, None).await.unwrap();
+    assert_eq!(uris(page.clone()), vec![other.uri()]);
+    let rest = store
+        .list_spaces(10, Some(page[0].0.clone()), None, None)
+        .await
+        .unwrap();
+    assert_eq!(uris(rest), vec![uri.clone(), remote.uri()]);
 
     // deletion flags without erasing
     assert!(store.flag_repo_deleted(&uri).await.unwrap());
@@ -543,8 +588,8 @@ async fn repo_lifecycle_flags_and_listing() {
         .unwrap()
         .is_some());
     assert_eq!(
-        store.list_spaces(10, None).await.unwrap(),
-        vec![other.uri()]
+        uris(store.list_spaces(10, None, None, None).await.unwrap()),
+        vec![other.uri(), remote.uri()]
     );
 }
 
@@ -605,22 +650,40 @@ async fn space_def_crud_and_members() {
     store.add_member(&uri, "did:plc:m2").await.unwrap();
     store.add_member(&uri, "did:plc:m1").await.unwrap();
     store.add_member(&uri, "did:plc:m1").await.unwrap(); // idempotent
-    assert_eq!(
-        store.list_members(&uri, 10, None).await.unwrap(),
-        vec!["did:plc:m1", "did:plc:m2"]
-    );
+                                                         // Rows carry (did, memberRev, addedAt); the metadata is non-empty.
+    let dids = |rows: Vec<(String, String, String)>| -> Vec<String> {
+        rows.into_iter().map(|(did, _, _)| did).collect()
+    };
+    let all = store.list_members(&uri, 10, None).await.unwrap();
+    assert!(all
+        .iter()
+        .all(|(_, rev, at)| !rev.is_empty() && !at.is_empty()));
+    assert_eq!(dids(all), vec!["did:plc:m1", "did:plc:m2"]);
     let page = store.list_members(&uri, 1, None).await.unwrap();
-    assert_eq!(page, vec!["did:plc:m1"]);
+    assert_eq!(dids(page.clone()), vec!["did:plc:m1"]);
     assert_eq!(
-        store
-            .list_members(&uri, 10, Some(page[0].clone()))
-            .await
-            .unwrap(),
+        dids(
+            store
+                .list_members(&uri, 10, Some(page[0].0.clone()))
+                .await
+                .unwrap()
+        ),
         vec!["did:plc:m2"]
+    );
+    // A row whose metadata predates the columns (empty strings) is filled in
+    // by an idempotent re-add; a populated row keeps its original values.
+    let before = store.list_members(&uri, 10, None).await.unwrap();
+    let (m1_rev, m1_at) = (before[0].1.clone(), before[0].2.clone());
+    store.add_member(&uri, "did:plc:m1").await.unwrap();
+    let after = store.list_members(&uri, 10, None).await.unwrap();
+    assert_eq!(
+        (after[0].1.clone(), after[0].2.clone()),
+        (m1_rev, m1_at),
+        "re-add must not rewrite existing metadata"
     );
     store.remove_member(&uri, "did:plc:m1").await.unwrap();
     assert_eq!(
-        store.list_members(&uri, 10, None).await.unwrap(),
+        dids(store.list_members(&uri, 10, None).await.unwrap()),
         vec!["did:plc:m2"]
     );
 
@@ -674,16 +737,33 @@ async fn writers_notify_registrations_and_jti() {
     assert_eq!(rest.len(), 1);
 
     // repo + host notify registrations honor expiry and upsert
+    let subscriber = |endpoint: &str, service: Option<&str>| Subscriber {
+        endpoint: endpoint.to_string(),
+        service: service.map(str::to_string),
+    };
     store
-        .register_repo_notify(&uri, "https://a.example", "2020-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://a.example", None),
+            "2020-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     store
-        .register_repo_notify(&uri, "https://b.example", "2999-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://b.example", Some("did:web:b#atproto_space_syncer")),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
+    // Re-registering extends the expiry and updates the identity.
     store
-        .register_repo_notify(&uri, "https://a.example", "2999-01-01T00:00:00.000Z")
+        .register_repo_notify(
+            &uri,
+            &subscriber("https://a.example", Some("did:web:a#atproto_space_syncer")),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -691,15 +771,26 @@ async fn writers_notify_registrations_and_jti() {
             .repo_notify_endpoints(&uri, &rsky_common::now())
             .await
             .unwrap(),
-        vec!["https://a.example", "https://b.example"]
+        vec![
+            subscriber("https://a.example", Some("did:web:a#atproto_space_syncer")),
+            subscriber("https://b.example", Some("did:web:b#atproto_space_syncer")),
+        ]
     );
 
     store
-        .register_host_notify(&uri, "https://sync.example", "2999-01-01T00:00:00.000Z")
+        .register_host_notify(
+            &uri,
+            &subscriber("https://sync.example", None),
+            "2999-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     store
-        .register_host_notify(&uri, "https://old.example", "2020-01-01T00:00:00.000Z")
+        .register_host_notify(
+            &uri,
+            &subscriber("https://old.example", None),
+            "2020-01-01T00:00:00.000Z",
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -707,7 +798,7 @@ async fn writers_notify_registrations_and_jti() {
             .host_notify_endpoints(&uri, &rsky_common::now())
             .await
             .unwrap(),
-        vec!["https://sync.example"]
+        vec![subscriber("https://sync.example", None)]
     );
 
     // jti: single-use, expired entries purged

@@ -267,6 +267,7 @@ mod tests {
                 iat: self.iat,
                 exp: self.exp,
                 jti: self.jti,
+                cnf: None,
             };
             encode(&header, &claims, |input| {
                 let digest = Sha256::digest(input);

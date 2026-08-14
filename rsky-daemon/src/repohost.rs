@@ -7,8 +7,10 @@ use rsky_lexicon::com::atproto::space as wire;
 use rsky_space::types::{RepoOp, SignedCommit};
 use serde_bytes::ByteBuf;
 
+use crate::dpop::DpopSigner;
 use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err};
+use std::sync::Arc;
 
 /// A page of the operation log, plus the current signed commit when the page
 /// reaches the repo head (proposal §Incremental sync).
@@ -72,14 +74,20 @@ pub struct HttpRepoHost {
     base_url: String,
     credential: String,
     http: reqwest::Client,
+    dpop: Arc<DpopSigner>,
 }
 
 impl HttpRepoHost {
-    pub fn new(base_url: impl Into<String>, credential: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             credential: credential.into(),
             http: http_client(),
+            dpop,
         }
     }
 
@@ -88,10 +96,15 @@ impl HttpRepoHost {
     }
 
     async fn get(&self, nsid: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
+        let url = self.url(nsid);
         let resp = self
             .http
-            .get(self.url(nsid))
-            .bearer_auth(&self.credential)
+            .get(&url)
+            .header("Authorization", format!("DPoP {}", self.credential))
+            .header(
+                "DPoP",
+                self.dpop.proof("GET", &url, Some(&self.credential))?,
+            )
             .query(query)
             .send()
             .await
@@ -156,8 +169,12 @@ impl RepoHostClient for HttpRepoHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_dpop() -> Arc<DpopSigner> {
+        Arc::new(DpopSigner::generate().unwrap())
+    }
     use crate::error::DaemonError;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
@@ -194,7 +211,8 @@ mod tests {
             .and(query_param("did", AUTHOR))
             .and(query_param("since", "3ka"))
             .and(query_param("cursor", "c1"))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ops": [{
                     "rev": "3krev",
@@ -209,7 +227,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/xrpc/com.atproto.space.listRepoOps"))
             .and(query_param("since", "3ka"))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "cursor": "c1",
                 "ops": [{
@@ -223,7 +242,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(format!("{}/", server.uri()), "sc.jwt");
+        let host = HttpRepoHost::new(format!("{}/", server.uri()), "sc.jwt", test_dpop());
         let first = host
             .list_repo_ops(SPACE, AUTHOR, Some("3ka"), None)
             .await
@@ -258,7 +277,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(server.uri(), "sc.jwt");
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host
             .list_repo_ops(SPACE, AUTHOR, Some("3ka"), None)
             .await
@@ -278,7 +297,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(server.uri(), "sc.jwt");
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host
             .list_repo_ops(SPACE, AUTHOR, None, None)
             .await
@@ -293,12 +312,13 @@ mod tests {
             .and(path("/xrpc/com.atproto.space.getRepo"))
             .and(query_param("space", SPACE))
             .and(query_param("did", AUTHOR))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xCAu8, 0x11]))
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(server.uri(), "sc.jwt");
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let car = host.get_repo_car(SPACE, AUTHOR).await.unwrap();
         assert_eq!(car, vec![0xCAu8, 0x11]);
     }
@@ -310,7 +330,8 @@ mod tests {
             .and(path("/xrpc/com.atproto.space.getLatestCommit"))
             .and(query_param("space", SPACE))
             .and(query_param("did", AUTHOR))
-            .and(header("authorization", "Bearer sc.jwt"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .and(header_exists("dpop"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({"commit": wire_commit_json()})),
@@ -318,7 +339,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(server.uri(), "sc.jwt");
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let commit = host.get_latest_commit(SPACE, AUTHOR).await.unwrap();
         assert_eq!(commit, expected_commit());
     }
@@ -332,7 +353,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let host = HttpRepoHost::new(server.uri(), "sc.jwt");
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host.get_latest_commit(SPACE, AUTHOR).await.unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
     }

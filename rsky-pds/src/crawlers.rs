@@ -43,26 +43,33 @@ impl Crawlers {
             return Ok(());
         }
         let record = self.crawl_request();
-        let _ = stream::iter(self.crawlers.clone())
-            .then(|service: String| {
+        // Crawl notification is best-effort: a relay that is down or slow
+        // catches up from its saved cursor, so an unreachable crawler must not
+        // fail the write that triggered the notify. Each failure is logged and
+        // swallowed rather than propagated.
+        stream::iter(self.crawlers.clone())
+            .for_each_concurrent(None, |service: String| {
                 let record = record.clone();
                 async move {
-                    let client = reqwest::Client::builder()
-                        .user_agent(APP_USER_AGENT)
-                        .build()?;
-                    Ok::<reqwest::Response, anyhow::Error>(
+                    let result = async {
+                        let client = reqwest::Client::builder()
+                            .user_agent(APP_USER_AGENT)
+                            .build()?;
                         client
                             .post(format!("{}/xrpc/com.atproto.sync.requestCrawl", service))
                             .json(&record)
                             .send()
-                            .await?,
-                    )
+                            .await?
+                            .error_for_status()?;
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        tracing::debug!(%service, %error, "requestCrawl notification failed");
+                    }
                 }
             })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+            .await;
 
         self.last_notified = now;
         Ok(())

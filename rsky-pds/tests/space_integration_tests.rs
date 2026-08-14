@@ -95,21 +95,90 @@ fn bearer(token: &str) -> Header<'static> {
     Header::new("Authorization", format!("Bearer {token}"))
 }
 
+const TEST_DPOP_KEY: [u8; 32] = [0x42u8; 32];
+static PROOF_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn dpop_key() -> rsky_oauth::jwk::Jwk {
+    rsky_oauth::jwk::Jwk::from_private_key_bytes(rsky_oauth::jwk::EcCurve::P256, &TEST_DPOP_KEY)
+        .unwrap()
+}
+
+fn dpop_proof(method: &str, url: &str, access_token: Option<&str>) -> Header<'static> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let key = dpop_key();
+    let mut header = rsky_oauth::jwt::JwtHeader::new("ES256");
+    header.typ = Some("dpop+jwt".to_string());
+    header.jwk = Some(key.to_public());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut claims = rsky_oauth::jwt::JwtClaims {
+        iat: Some(now),
+        jti: Some(format!(
+            "proof-{}",
+            PROOF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )),
+        ..Default::default()
+    };
+    claims.extra.insert("htm".to_string(), method.into());
+    claims.extra.insert("htu".to_string(), url.into());
+    if let Some(token) = access_token {
+        let ath = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(token.as_bytes()));
+        claims.extra.insert("ath".to_string(), ath.into());
+    }
+    Header::new(
+        "DPoP",
+        rsky_oauth::jwt::sign(&header, &claims, &key).unwrap(),
+    )
+}
+
+fn public_url(client: &Client) -> String {
+    client
+        .rocket()
+        .state::<ServerConfig>()
+        .unwrap()
+        .service
+        .public_url
+        .clone()
+}
+
+/// Present the credential the way the server demands it: a space credential
+/// under `DPoP` with a matching proof, a delegation token as a `Bearer` grant
+/// with a proof carrying no `ath`, anything else as a plain bearer token.
+fn auth_headers(client: &Client, method: &str, path: &str, token: &str) -> Vec<Header<'static>> {
+    let url = format!("{}{path}", public_url(client));
+    match rsky_space::credential::decode(token).map(|d| d.header.typ) {
+        Ok(typ) if typ == rsky_space::credential::CREDENTIAL_TYP => vec![
+            Header::new("Authorization", format!("DPoP {token}")),
+            dpop_proof(method, &url, Some(token)),
+        ],
+        Ok(typ) if typ == rsky_space::credential::DELEGATION_TYP => {
+            vec![bearer(token), dpop_proof(method, &url, None)]
+        }
+        _ => vec![bearer(token)],
+    }
+}
+
 async fn post_json(client: &Client, path: &str, token: &str, body: Value) -> (Status, Value) {
-    let response = client
-        .post(path)
-        .header(ContentType::JSON)
-        .header(bearer(token))
-        .body(body.to_string())
-        .dispatch()
-        .await;
+    let mut request = client.post(path).header(ContentType::JSON);
+    for header in auth_headers(client, "POST", path, token) {
+        request = request.header(header);
+    }
+    let response = request.body(body.to_string()).dispatch().await;
     let status = response.status();
     let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
     (status, body)
 }
 
 async fn get_json(client: &Client, path: &str, token: &str) -> (Status, Value) {
-    let response = client.get(path).header(bearer(token)).dispatch().await;
+    let mut request = client.get(path);
+    for header in auth_headers(client, "GET", path, token) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     let status = response.status();
     let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
     (status, body)
@@ -153,11 +222,11 @@ async fn setup() -> Setup {
         &client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &author_token,
-        json!({"spaceType": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main"}),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
-    let space = body["space"].as_str().unwrap().to_string();
+    let space = body["uri"].as_str().unwrap().to_string();
     assert_eq!(space, format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/main"));
     let (status, _) = post_json(
         &client,
@@ -189,11 +258,13 @@ async fn mint_credential(setup: &Setup) -> String {
     .await;
     assert_eq!(status, Status::Ok, "{body}");
     let delegation = body["token"].as_str().unwrap().to_string();
+    // The delegation token is the request's bearer credential, and the DPoP
+    // proof beside it is what the minted credential binds to.
     let (status, body) = post_json(
         &setup.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &setup.member_token,
-        json!({"space": setup.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": setup.space }),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -207,6 +278,7 @@ async fn create_post(setup: &Setup, rkey: &str, text: &str) -> Value {
         &setup.author_token,
         json!({
             "space": setup.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": rkey,
             "record": {"text": text}
@@ -226,7 +298,7 @@ async fn simplespace_management() {
         &s.client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &s.author_token,
-        json!({"spaceType": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main"}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -234,8 +306,8 @@ async fn simplespace_management() {
 
     // invalid space type / skey are rejected
     for bad in [
-        json!({"spaceType": "notannsid"}),
-        json!({"spaceType": SPACE_TYPE, "skey": "bad/key"}),
+        json!({"type": "notannsid"}),
+        json!({"type": SPACE_TYPE, "skey": "bad/key"}),
     ] {
         let (status, _) = post_json(
             &s.client,
@@ -252,11 +324,11 @@ async fn simplespace_management() {
         &s.client,
         "/xrpc/com.atproto.simplespace.createSpace",
         &s.author_token,
-        json!({"spaceType": "com.example.other"}),
+        json!({"type": "com.example.other"}),
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert!(body["space"]
+    assert!(body["uri"]
         .as_str()
         .unwrap()
         .starts_with(&format!("at://{AUTHOR_DID}/space/com.example.other/")));
@@ -290,7 +362,20 @@ async fn simplespace_management() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert_eq!(body["members"], json!([{"did": MEMBER_DID}]));
+    // The creator is seeded as the first member at create, so the list is
+    // the author plus the enrolled member, ordered by did.
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "{body}");
+    let dids: Vec<&str> = members.iter().map(|m| m["did"].as_str().unwrap()).collect();
+    assert!(
+        dids.contains(&AUTHOR_DID) && dids.contains(&MEMBER_DID),
+        "{body}"
+    );
+    // The metadata clients render: when added, and at what rev.
+    for m in members {
+        assert!(!m["memberRev"].as_str().unwrap().is_empty());
+        assert!(!m["addedAt"].as_str().unwrap().is_empty());
+    }
 
     // removeMember empties the list
     let (status, _) = post_json(
@@ -310,7 +395,10 @@ async fn simplespace_management() {
         &s.author_token,
     )
     .await;
-    assert_eq!(body["members"], json!([]));
+    // removing the enrolled member leaves the seeded creator
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1, "{body}");
+    assert_eq!(members[0]["did"], AUTHOR_DID);
 
     // managing-app policy requires a managingApp
     let (status, _) = post_json(
@@ -365,8 +453,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -376,8 +464,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -400,8 +488,8 @@ async fn credential_mint_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &stranger_token,
-        json!({"space": s.space, "delegationToken": stranger_delegation}),
+        &stranger_delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -410,8 +498,8 @@ async fn credential_mint_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": "not.a.jwt"}),
+        "not.a.jwt",
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -420,11 +508,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({
-            "space": "at://did:plc:elsewhere/space/com.example.forum/main",
-            "delegationToken": delegation
-        }),
+        &delegation,
+        json!({ "space": "at://did:plc:elsewhere/space/com.example.forum/main" }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -460,8 +545,8 @@ async fn credential_mint_flow() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -486,7 +571,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getRecord?space={}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
+            "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
             s.space
         ),
         &credential,
@@ -506,7 +591,7 @@ async fn record_write_and_read_flow() {
         let (status, _) = get_json(
             &s.client,
             &format!(
-                "/xrpc/com.atproto.space.getRecord?space={}&did={AUTHOR_DID}&collection={COLLECTION}&rkey={rkey}{suffix}",
+                "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey={rkey}{suffix}",
                 s.space
             ),
             &credential,
@@ -519,7 +604,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}&excludeValues=true",
+            "/xrpc/com.atproto.space.listRecords?space={}&repo={AUTHOR_DID}&excludeValues=true",
             s.space
         ),
         &credential,
@@ -533,7 +618,7 @@ async fn record_write_and_read_flow() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getRecord?space={}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
+            "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
             s.space
         ),
         &s.author_token,
@@ -544,7 +629,7 @@ async fn record_write_and_read_flow() {
         let (status, _) = get_json(
             &s.client,
             &format!(
-                "/xrpc/com.atproto.space.getRecord?space={}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
+                "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
                 s.space
             ),
             bad_token,
@@ -559,7 +644,7 @@ async fn record_write_and_read_flow() {
         &s.client,
         "/xrpc/com.atproto.space.deleteRecord",
         &s.author_token,
-        json!({"space": s.space, "collection": COLLECTION, "rkey": "3ksecond"}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "collection": COLLECTION, "rkey": "3ksecond"}),
     )
     .await;
     assert_eq!(status, Status::Ok);
@@ -569,7 +654,7 @@ async fn record_write_and_read_flow() {
         &s.client,
         "/xrpc/com.atproto.space.deleteRecord",
         &s.author_token,
-        json!({"space": s.space, "collection": COLLECTION, "rkey": "3ksecond"}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "collection": COLLECTION, "rkey": "3ksecond"}),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -578,7 +663,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={}&did={AUTHOR_DID}",
+            "/xrpc/com.atproto.space.listRepoOps?space={}&repo={AUTHOR_DID}",
             s.space
         ),
         &credential,
@@ -599,7 +684,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={}&did={AUTHOR_DID}&limit=2",
+            "/xrpc/com.atproto.space.listRepoOps?space={}&repo={AUTHOR_DID}&limit=2",
             s.space
         ),
         &credential,
@@ -611,7 +696,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={}&did={AUTHOR_DID}&cursor={cursor}",
+            "/xrpc/com.atproto.space.listRepoOps?space={}&repo={AUTHOR_DID}&cursor={cursor}",
             s.space
         ),
         &credential,
@@ -623,7 +708,7 @@ async fn record_write_and_read_flow() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRepoOps?space={}&did={AUTHOR_DID}&cursor=nope",
+            "/xrpc/com.atproto.space.listRepoOps?space={}&repo={AUTHOR_DID}&cursor=nope",
             s.space
         ),
         &credential,
@@ -635,7 +720,7 @@ async fn record_write_and_read_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getLatestCommit?space={}&did={AUTHOR_DID}",
+            "/xrpc/com.atproto.space.getLatestCommit?space={}&repo={AUTHOR_DID}",
             s.space
         ),
         &credential,
@@ -643,6 +728,38 @@ async fn record_write_and_read_flow() {
     .await;
     assert_eq!(status, Status::Ok);
     verify_lexicon_commit(&body["commit"], &author_key, &s.space, AUTHOR_DID);
+
+    // getRepoState is the same answer under the older name
+    let (status, alias) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getRepoState?space={}&repo={AUTHOR_DID}",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    verify_lexicon_commit(&alias["commit"], &author_key, &s.space, AUTHOR_DID);
+    assert_eq!(alias["commit"]["rev"], body["commit"]["rev"]);
+
+    // enrollment alone makes the space discoverable to the member, before any
+    // write of theirs creates a repo row -- this is how a shared space is
+    // found at all
+    let (status, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces",
+        &s.member_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let member_spaces = body["spaces"].as_array().unwrap();
+    let entry = member_spaces
+        .iter()
+        .find(|sp| sp["uri"] == s.space)
+        .expect("member discovers the space via enrollment");
+    assert_eq!(entry["isOwner"], false);
+    assert_eq!(entry["isMember"], true);
 
     // listSpaces shows the author's repo
     let (status, body) = get_json(
@@ -652,7 +769,31 @@ async fn record_write_and_read_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert_eq!(body["spaces"], json!([s.space]));
+    let spaces = body["spaces"].as_array().unwrap();
+    assert_eq!(spaces.len(), 1, "{body}");
+    assert_eq!(spaces[0]["uri"], s.space);
+    assert_eq!(spaces[0]["isOwner"], true);
+    assert_eq!(spaces[0]["isMember"], true);
+    assert!(spaces[0]["createdAt"].is_string());
+
+    for filter in [format!("?type={SPACE_TYPE}"), format!("?did={AUTHOR_DID}")] {
+        let (status, body) = get_json(
+            &s.client,
+            &format!("/xrpc/com.atproto.space.listSpaces{filter}"),
+            &s.author_token,
+        )
+        .await;
+        assert_eq!(status, Status::Ok, "{filter}: {body}");
+        assert_eq!(body["spaces"].as_array().unwrap().len(), 1, "{body}");
+    }
+    let (status, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces?did=did:plc:not-the-authority",
+        &s.author_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert!(body["spaces"].as_array().unwrap().is_empty(), "{body}");
 }
 
 #[tokio::test]
@@ -663,15 +804,15 @@ async fn car_export_validates() {
     create_post(&s, "3kfirst", "hello space").await;
     create_post(&s, "3ksecond", "more").await;
 
-    let response = s
-        .client
-        .get(format!(
-            "/xrpc/com.atproto.space.getRepo?space={}&did={AUTHOR_DID}",
-            s.space
-        ))
-        .header(bearer(&credential))
-        .dispatch()
-        .await;
+    let path = format!(
+        "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
+        s.space
+    );
+    let mut request = s.client.get(&path);
+    for header in auth_headers(&s.client, "GET", &path, &credential) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response.headers().get_one("content-type"),
@@ -699,7 +840,7 @@ async fn car_export_validates() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getRepo?space={}&did={MEMBER_DID}",
+            "/xrpc/com.atproto.space.getRepo?space={}&repo={MEMBER_DID}",
             s.space
         ),
         &credential,
@@ -719,6 +860,7 @@ async fn put_and_apply_writes() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kput",
             "record": {"text": "v1"}
@@ -733,6 +875,7 @@ async fn put_and_apply_writes() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kput",
             "record": {"text": "v2"},
@@ -749,6 +892,7 @@ async fn put_and_apply_writes() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kput",
             "record": {"text": "v3"},
@@ -759,12 +903,22 @@ async fn put_and_apply_writes() {
     assert_eq!(status, Status::BadRequest);
     assert_eq!(body["error"], "InvalidSwap");
 
+    // a write naming someone else's repo is refused
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.createRecord",
+        &s.author_token,
+        json!({"space": s.space, "repo": MEMBER_DID, "collection": COLLECTION, "record": {"text": "x"}}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+
     // invalid collection / rkey
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.putRecord",
         &s.author_token,
-        json!({"space": s.space, "collection": "nodots", "rkey": "x", "record": {}}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "collection": "nodots", "rkey": "x", "record": {}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -772,7 +926,7 @@ async fn put_and_apply_writes() {
         &s.client,
         "/xrpc/com.atproto.space.createRecord",
         &s.author_token,
-        json!({"space": s.space, "collection": COLLECTION, "rkey": "bad/rkey", "record": {}}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "collection": COLLECTION, "rkey": "bad/rkey", "record": {}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -784,12 +938,13 @@ async fn put_and_apply_writes() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "writes": [
-                {"$type": "com.atproto.space.applyWrites#create",
+                {"action": "create",
                  "collection": COLLECTION, "rkey": "3kbatch1", "value": {"text": "b1"}},
-                {"$type": "com.atproto.space.applyWrites#update",
+                {"action": "update",
                  "collection": COLLECTION, "rkey": "3kput", "value": {"text": "v3"}},
-                {"$type": "com.atproto.space.applyWrites#delete",
+                {"action": "delete",
                  "collection": COLLECTION, "rkey": "3kbatch1"}
             ]
         }),
@@ -817,8 +972,9 @@ async fn put_and_apply_writes() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "writes": [
-                {"$type": "com.atproto.space.applyWrites#create",
+                {"action": "create",
                  "collection": COLLECTION, "value": {"text": "auto"}}
             ]
         }),
@@ -854,6 +1010,28 @@ async fn host_methods_and_notifications() {
     )
     .await;
     assert_ne!(status, Status::Ok);
+
+    // a credential offered as a bearer token is refused even with a valid
+    // proof beside it: the scheme is not an opt-out from the binding
+    let path = format!("/xrpc/com.atproto.space.getSpace?space={}", s.space);
+    let url = format!("{}{path}", public_url(&s.client));
+    let response = s
+        .client
+        .get(&path)
+        .header(bearer(&credential))
+        .header(dpop_proof("GET", &url, Some(&credential)))
+        .dispatch()
+        .await;
+    assert_ne!(response.status(), Status::Ok);
+
+    // nor without any proof at all
+    let response = s
+        .client
+        .get(&path)
+        .header(bearer(&credential))
+        .dispatch()
+        .await;
+    assert_ne!(response.status(), Status::Ok);
     // a credential for one space does not open another
     let (status, _) = get_json(
         &s.client,
@@ -905,6 +1083,37 @@ async fn host_methods_and_notifications() {
     )
     .await;
     assert_eq!(status, Status::BadRequest);
+    // naming neither leaves nothing to deliver to
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({ "space": s.space }),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+    // a service that cannot be resolved is refused rather than registered
+    // against an endpoint nobody can name
+    let (status, _) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.registerNotify",
+        &credential,
+        json!({"space": s.space, "service": "did:web:unresolvable.invalid#atproto_space_syncer"}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest);
+
+    // unregisterNotify withdraws a registration, and is idempotent
+    for _ in 0..2 {
+        let (status, _) = post_json(
+            &s.client,
+            "/xrpc/com.atproto.space.unregisterNotify",
+            &credential,
+            json!({"space": s.space, "endpoint": "https://sync.example.invalid"}),
+        )
+        .await;
+        assert_eq!(status, Status::Ok);
+    }
 
     // inbound notifyWrite from a member's repo host
     let member_keypair = actor_keypair(&s.client, MEMBER_DID).await;
@@ -919,7 +1128,7 @@ async fn host_methods_and_notifications() {
         &s.client,
         "/xrpc/com.atproto.space.notifyWrite",
         &service_token,
-        json!({"space": s.space, "did": MEMBER_DID, "rev": "3kmemberrev"}),
+        json!({"space": s.space, "repo": MEMBER_DID, "rev": "3kmemberrev"}),
     )
     .await;
     assert_eq!(status, Status::Ok);
@@ -939,7 +1148,7 @@ async fn host_methods_and_notifications() {
         &s.client,
         "/xrpc/com.atproto.space.notifyWrite",
         &bad_token,
-        json!({"space": s.space, "did": AUTHOR_DID, "rev": "3kforged"}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "rev": "3kforged"}),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -948,7 +1157,7 @@ async fn host_methods_and_notifications() {
         .client
         .post("/xrpc/com.atproto.space.notifyWrite")
         .header(ContentType::JSON)
-        .body(json!({"space": s.space, "did": MEMBER_DID, "rev": "3k"}).to_string())
+        .body(json!({"space": s.space, "repo": MEMBER_DID, "rev": "3k"}).to_string())
         .dispatch()
         .await;
     assert_ne!(response.status(), Status::Ok);
@@ -1019,8 +1228,8 @@ async fn delete_space_flow() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1029,7 +1238,7 @@ async fn delete_space_flow() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getRecord?space={}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
+            "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3kfirst",
             s.space
         ),
         &credential,
@@ -1044,6 +1253,7 @@ async fn delete_space_flow() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kafter",
             "record": {"text": "no"}
@@ -1092,6 +1302,7 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
         &author_token,
         json!({
             "space": remote_space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "record": {"text": "in a remote space"}
         }),
@@ -1115,6 +1326,7 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
         &author_token,
         json!({
             "space": local_space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "record": {"text": "personal"}
         }),
@@ -1147,7 +1359,7 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
     // the repo is flagged
     let (status, body) = get_json(
         &client,
-        &format!("/xrpc/com.atproto.space.listRepoOps?space={local_space}&did={AUTHOR_DID}"),
+        &format!("/xrpc/com.atproto.space.listRepoOps?space={local_space}&repo={AUTHOR_DID}"),
         &author_token,
     )
     .await;
@@ -1173,7 +1385,7 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
     // the remote-space repo is untouched
     let (status, _) = get_json(
         &client,
-        &format!("/xrpc/com.atproto.space.listRepoOps?space={remote_space}&did={AUTHOR_DID}"),
+        &format!("/xrpc/com.atproto.space.listRepoOps?space={remote_space}&repo={AUTHOR_DID}"),
         &author_token,
     )
     .await;
@@ -1231,6 +1443,7 @@ async fn blob_upload_and_space_get_blob() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kmissingblob",
             "record": {
@@ -1250,6 +1463,7 @@ async fn blob_upload_and_space_get_blob() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "collection": COLLECTION,
             "rkey": "3kwithblob",
             "record": {
@@ -1262,16 +1476,64 @@ async fn blob_upload_and_space_get_blob() {
     .await;
     assert_eq!(status, Status::Ok, "{body}");
 
-    // the member fetches the blob through the space credential
-    let response = s
-        .client
-        .get(format!(
-            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid={blob_cid}",
+    // listBlobs names what a syncer would have to mirror
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}",
             s.space
-        ))
-        .header(bearer(&credential))
-        .dispatch()
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    // The record also carried a malformed ref, which is not listed: a syncer
+    // sent after it would find nothing there.
+    let cids = body["cids"].as_array().unwrap();
+    assert!(cids.contains(&json!(blob_cid)), "{body}");
+    assert!(!cids.iter().any(|cid| cid == "not-a-cid"), "{body}");
+    assert!(body.get("cursor").is_none(), "one page, so no cursor");
+    // a page that fills is followed by a cursor, and the next page is empty
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}&limit=1",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let cursor = body["cursor"].as_str().unwrap().to_string();
+    // Paging from the last CID of the previous page reaches the end.
+    let mut cursor = cursor;
+    for _ in 0..8 {
+        let (status, body) = get_json(
+            &s.client,
+            &format!(
+                "/xrpc/com.atproto.space.listBlobs?space={}&repo={AUTHOR_DID}&limit=1&cursor={cursor}",
+                s.space
+            ),
+            &credential,
+        )
         .await;
+        assert_eq!(status, Status::Ok);
+        match body["cursor"].as_str() {
+            Some(next) => cursor = next.to_string(),
+            None => break,
+        }
+    }
+
+    // the member fetches the blob through the space credential
+    let path = format!(
+        "/xrpc/com.atproto.space.getBlob?space={}&repo={AUTHOR_DID}&cid={blob_cid}",
+        s.space
+    );
+    let mut request = s.client.get(&path);
+    for header in auth_headers(&s.client, "GET", &path, &credential) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response.into_bytes().await.unwrap(),
@@ -1282,7 +1544,7 @@ async fn blob_upload_and_space_get_blob() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid=bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            "/xrpc/com.atproto.space.getBlob?space={}&repo={AUTHOR_DID}&cid=bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
             s.space
         ),
         &credential,
@@ -1293,7 +1555,7 @@ async fn blob_upload_and_space_get_blob() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getBlob?space={}&did={AUTHOR_DID}&cid=not-a-cid",
+            "/xrpc/com.atproto.space.getBlob?space={}&repo={AUTHOR_DID}&cid=not-a-cid",
             s.space
         ),
         &credential,
@@ -1320,6 +1582,9 @@ fn craft_credential_jwt(iss: &str, sub: &str, keypair: Option<&secp256k1::Keypai
         iat: now,
         exp: now + 3600,
         jti: "crafted".to_string(),
+        cnf: Some(rsky_space::credential::Confirmation {
+            jkt: dpop_key().thumbprint(),
+        }),
     };
     encode(&header, &claims, |input| match keypair {
         Some(keypair) => rsky_pds::space_auth::sign_with_keypair(keypair, input),
@@ -1356,7 +1621,7 @@ async fn crafted_credentials_are_rejected() {
         let (status, _) = get_json(
             &s.client,
             &format!(
-                "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}",
+                "/xrpc/com.atproto.space.listRecords?space={}&repo={AUTHOR_DID}",
                 s.space
             ),
             &token,
@@ -1376,7 +1641,7 @@ async fn credential_edge_cases() {
         &s.client,
         "/xrpc/com.atproto.space.createRecord",
         &s.author_token,
-        json!({"space": s.space, "collection": COLLECTION, "rkey": "3kdup", "record": {"text": "two"}}),
+        json!({"space": s.space, "repo": AUTHOR_DID, "collection": COLLECTION, "rkey": "3kdup", "record": {"text": "two"}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -1396,11 +1661,8 @@ async fn credential_edge_cases() {
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({
-            "space": format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/nonexistent"),
-            "delegationToken": delegation
-        }),
+        &delegation,
+        json!({ "space": format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/nonexistent") }),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -1428,8 +1690,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": parts.join(".")}),
+        &parts.join("."),
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1455,6 +1717,7 @@ async fn credential_edge_cases() {
             iat: now,
             exp: now + 60,
             jti: "foreign".to_string(),
+            cnf: None,
         };
         encode(&header, &claims, |input| {
             rsky_pds::space_auth::sign_with_keypair(&member_keypair, input)
@@ -1464,8 +1727,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": foreign}),
+        &foreign,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1504,8 +1767,8 @@ async fn credential_edge_cases() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1532,7 +1795,7 @@ async fn notify_edges_and_allowlist_view() {
         &s.client,
         "/xrpc/com.atproto.space.notifyWrite",
         "garbage",
-        json!({"space": s.space, "did": MEMBER_DID, "rev": "3k"}),
+        json!({"space": s.space, "repo": MEMBER_DID, "rev": "3k"}),
     )
     .await;
     assert_ne!(status, Status::Ok);
@@ -1562,6 +1825,7 @@ async fn notify_edges_and_allowlist_view() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "config": {
                 "appAccess": {
                     "$type": "com.atproto.simplespace.defs#appAccessAllowList",
@@ -1590,6 +1854,7 @@ async fn notify_edges_and_allowlist_view() {
         &s.author_token,
         json!({
             "space": s.space,
+            "repo": AUTHOR_DID,
             "config": {"appAccess": {"$type": "com.atproto.simplespace.defs#appAccessOpen"}}
         }),
     )
@@ -1656,7 +1921,7 @@ async fn read_guard_scope_boundaries() {
     let (status, _) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.getRecord?space={other_space}&did={AUTHOR_DID}&collection={COLLECTION}&rkey=3ka"
+            "/xrpc/com.atproto.space.getRecord?space={other_space}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3ka"
         ),
         &credential,
     )
@@ -1686,7 +1951,7 @@ async fn read_guard_scope_boundaries() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}&limit=1",
+            "/xrpc/com.atproto.space.listRecords?space={}&repo={AUTHOR_DID}&limit=1",
             s.space
         ),
         &credential,
@@ -1698,17 +1963,14 @@ async fn read_guard_scope_boundaries() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.space.listRecords?space={}&did={AUTHOR_DID}&limit=1&cursor={cursor}",
+            "/xrpc/com.atproto.space.listRecords?space={}&repo={AUTHOR_DID}&limit=1&cursor={cursor}",
             s.space
         ),
         &credential,
     )
     .await;
     assert_eq!(status, Status::Ok);
-    assert!(body["records"][0]["uri"]
-        .as_str()
-        .unwrap()
-        .ends_with("/3kb"));
+    assert_eq!(body["records"][0]["rkey"].as_str().unwrap(), "3kb");
 
     // a write after notify registrations fans out deliveries (one endpoint
     // resolvable through the mock, one unresolvable)
@@ -1760,11 +2022,11 @@ async fn missing_key_material_is_an_internal_error() {
     // serve-time signing paths surface a 500, never a bogus commit
     for path in [
         format!(
-            "/xrpc/com.atproto.space.getLatestCommit?space={}&did={AUTHOR_DID}",
+            "/xrpc/com.atproto.space.getLatestCommit?space={}&repo={AUTHOR_DID}",
             s.space
         ),
         format!(
-            "/xrpc/com.atproto.space.getRepo?space={}&did={AUTHOR_DID}",
+            "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
             s.space
         ),
         format!(
@@ -1779,8 +2041,8 @@ async fn missing_key_material_is_an_internal_error() {
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.getSpaceCredential",
-        &s.member_token,
-        json!({"space": s.space, "delegationToken": delegation}),
+        &delegation,
+        json!({ "space": s.space }),
     )
     .await;
     assert_eq!(status, Status::InternalServerError);
