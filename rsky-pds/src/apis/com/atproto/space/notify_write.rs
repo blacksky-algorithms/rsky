@@ -47,12 +47,18 @@ pub async fn space_notify_write(
 ) -> Result<(), ApiError> {
     let NotifyWriteInput { space, repo, rev } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
-    let claims = verify_space_service_token(actor_store, id_resolver, &token.0, NOTIFY_WRITE_LXM)
-        .await
-        .map_err(|error| {
-            tracing::debug!(%error, "notifyWrite auth rejected");
-            ApiError::InvalidToken
-        })?;
+    let claims = verify_space_service_token(
+        actor_store,
+        id_resolver,
+        &token.0,
+        NOTIFY_WRITE_LXM,
+        &space_id.authority,
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(%error, "notifyWrite auth rejected");
+        ApiError::InvalidToken
+    })?;
     // Two legs carry this method. Leg 1 is a repo host telling the space host
     // that one of its members advanced, signed by that member. Leg 2 is the
     // space host forwarding that to a registered subscriber, signed by the
@@ -67,6 +73,17 @@ pub async fn space_notify_write(
     }
     let (_, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
+    let fresh = space_store
+        .consume_jti(
+            &claims.jti,
+            claims.exp as i64,
+            crate::space_auth::now_secs() as i64,
+        )
+        .await
+        .map_err(space_error)?;
+    if !fresh {
+        return Err(ApiError::InvalidToken);
+    }
     space_store
         .upsert_writer(&space_id.uri(), &repo, &rev, None)
         .await

@@ -125,6 +125,11 @@ pub async fn create_record(
     account_manager: AccountManager,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug create_record {body:#?}");
+    crate::apis::assert_repo_scope(
+        &auth.access.credentials,
+        &body.collection,
+        crate::oauth_scope::RepoAction::Create,
+    )?;
     match inner_create_record(
         body,
         auth,

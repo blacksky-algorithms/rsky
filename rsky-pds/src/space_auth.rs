@@ -118,6 +118,9 @@ pub async fn verify_bound_proof(
 pub const NOTIFY_WRITE_LXM: &str = "com.atproto.space.notifyWrite";
 pub const NOTIFY_SPACE_DELETED_LXM: &str = "com.atproto.space.notifySpaceDeleted";
 pub const SPACE_SERVICE_TOKEN_TTL_SECS: u64 = 60;
+/// Allowance for clock drift between the issuer and this PDS when checking
+/// `iat`/`exp` on inbound service tokens.
+pub const SPACE_SERVICE_CLOCK_SKEW_SECS: u64 = 30;
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -431,6 +434,7 @@ pub fn mint_delegation_token(keypair: &Keypair, user_did: &str, space: &SpaceId)
 pub struct SpaceServiceClaims {
     pub iss: String,
     pub aud: String,
+    pub iat: u64,
     pub exp: u64,
     pub lxm: String,
     pub jti: String,
@@ -445,10 +449,12 @@ pub fn mint_space_service_token(
 ) -> Result<String> {
     let header =
         serde_json::json!({"typ": "JWT", "alg": rsky_crypto::constants::SECP256K1_JWT_ALG});
+    let now = now_secs();
     let claims = SpaceServiceClaims {
         iss: iss.to_string(),
         aud: aud.to_string(),
-        exp: now_secs() + SPACE_SERVICE_TOKEN_TTL_SECS,
+        iat: now,
+        exp: now + SPACE_SERVICE_TOKEN_TTL_SECS,
         lxm: lxm.to_string(),
         jti: get_random_str(),
     };
@@ -471,14 +477,33 @@ pub async fn verify_space_service_token(
     id_resolver: &SharedIdResolver,
     token: &str,
     expected_lxm: &str,
+    expected_aud: &str,
 ) -> Result<SpaceServiceClaims> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         bail!("poorly formatted jwt");
     }
     let claims: SpaceServiceClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
-    if claims.exp <= now_secs() {
+    let now = now_secs();
+    if claims.exp <= now {
         bail!("jwt expired");
+    }
+    // iat must be present and recent: not from the future (small skew) and
+    // not older than the token's own lifetime (XRPC service-auth semantics).
+    if claims.iat > now + SPACE_SERVICE_CLOCK_SKEW_SECS {
+        bail!("jwt iat in the future");
+    }
+    if now.saturating_sub(claims.iat) > SPACE_SERVICE_TOKEN_TTL_SECS + SPACE_SERVICE_CLOCK_SKEW_SECS
+    {
+        bail!("jwt iat too old");
+    }
+    // aud must name the recipient (recipient audience validation): the bare
+    // DID of the token audience must be the recipient this PDS acts as, or
+    // any account this PDS hosts (broadcast notifications name a specific
+    // local subscriber rather than the caller's expected recipient).
+    let aud_did = claims.aud.split('#').next().unwrap_or(&claims.aud);
+    if aud_did != expected_aud && !actor_store.exists(aud_did).await.unwrap_or(false) {
+        bail!("bad jwt audience");
     }
     if claims.lxm != expected_lxm {
         bail!("bad lxm: expected {expected_lxm}");
@@ -746,10 +771,15 @@ mod tests {
             NOTIFY_WRITE_LXM,
         )
         .unwrap();
-        let claims =
-            verify_space_service_token(&actor_store, &id_resolver, &token, NOTIFY_WRITE_LXM)
-                .await
-                .unwrap();
+        let claims = verify_space_service_token(
+            &actor_store,
+            &id_resolver,
+            &token,
+            NOTIFY_WRITE_LXM,
+            "did:plc:auth",
+        )
+        .await
+        .unwrap();
         assert_eq!(claims.iss, "did:plc:writer");
         assert_eq!(claims.aud, "did:plc:auth#atproto_space_host");
 
@@ -759,22 +789,28 @@ mod tests {
             &id_resolver,
             &token,
             NOTIFY_SPACE_DELETED_LXM,
+            "did:plc:auth",
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("bad lxm"));
 
         // malformed
-        assert!(
-            verify_space_service_token(&actor_store, &id_resolver, "a.b", NOTIFY_WRITE_LXM)
-                .await
-                .is_err()
-        );
+        assert!(verify_space_service_token(
+            &actor_store,
+            &id_resolver,
+            "a.b",
+            NOTIFY_WRITE_LXM,
+            "did:plc:auth"
+        )
+        .await
+        .is_err());
 
         // expired
         let expired_claims = SpaceServiceClaims {
             iss: "did:plc:writer".to_string(),
             aud: "did:plc:auth".to_string(),
+            iat: 900,
             exp: 1000,
             lxm: NOTIFY_WRITE_LXM.to_string(),
             jti: "expired".to_string(),
@@ -787,10 +823,15 @@ mod tests {
         );
         let sig = sign_with_keypair(&keypair, signing_input.as_bytes()).unwrap();
         let expired = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig));
-        let err =
-            verify_space_service_token(&actor_store, &id_resolver, &expired, NOTIFY_WRITE_LXM)
-                .await
-                .unwrap_err();
+        let err = verify_space_service_token(
+            &actor_store,
+            &id_resolver,
+            &expired,
+            NOTIFY_WRITE_LXM,
+            "did:plc:auth",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("expired"));
 
         // tampered signature
@@ -802,7 +843,8 @@ mod tests {
             &actor_store,
             &id_resolver,
             &parts.join("."),
-            NOTIFY_WRITE_LXM
+            NOTIFY_WRITE_LXM,
+            "did:plc:auth",
         )
         .await
         .is_err());
@@ -815,11 +857,15 @@ mod tests {
             NOTIFY_WRITE_LXM,
         )
         .unwrap();
-        assert!(
-            verify_space_service_token(&actor_store, &id_resolver, &other, NOTIFY_WRITE_LXM)
-                .await
-                .is_err()
-        );
+        assert!(verify_space_service_token(
+            &actor_store,
+            &id_resolver,
+            &other,
+            NOTIFY_WRITE_LXM,
+            "did:plc:auth"
+        )
+        .await
+        .is_err());
 
         // local key resolution shortcut yields the account key
         let did_key =

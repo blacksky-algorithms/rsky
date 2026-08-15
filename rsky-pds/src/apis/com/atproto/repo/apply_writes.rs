@@ -171,6 +171,20 @@ pub async fn apply_writes(
     account_manager: AccountManager,
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
+    for write in &body.writes {
+        let (collection, action) = match write {
+            ApplyWritesInputRefWrite::Create(w) => {
+                (&w.collection, crate::oauth_scope::RepoAction::Create)
+            }
+            ApplyWritesInputRefWrite::Update(w) => {
+                (&w.collection, crate::oauth_scope::RepoAction::Update)
+            }
+            ApplyWritesInputRefWrite::Delete(w) => {
+                (&w.collection, crate::oauth_scope::RepoAction::Delete)
+            }
+        };
+        crate::apis::assert_repo_scope(&auth.access.credentials, collection, action)?;
+    }
     match inner_apply_writes(
         body,
         auth,

@@ -55,6 +55,35 @@ pub fn assert_valid_token_method(
     Ok(())
 }
 
+/// Enforce a granular OAuth session's `repo:` scope on a record write.
+///
+/// A session that carries `repo:` grants but no `transition:generic` is
+/// confined to the collections and actions those grants name (proposal 0016
+/// §Scopes). Legacy transition sessions and app passwords carry no `repo:`
+/// grant and are unaffected. Without this a token scoped to one collection
+/// can write any collection.
+pub fn assert_repo_scope(
+    credentials: &Option<Credentials>,
+    collection: &str,
+    action: crate::oauth_scope::RepoAction,
+) -> Result<(), ApiError> {
+    let Some(granted) = credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()) else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_repo_session() {
+        return Ok(());
+    }
+    if scopes.allows_repo(collection, action) {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "InvalidToken".to_string(),
+            format!("Token scope does not permit {action:?} on {collection}"),
+        ))
+    }
+}
+
 // Lower ranks have higher presidence
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
@@ -473,7 +502,9 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                     "json",
                     &[],
                 )));
-                res.set_status(Status { code: 404u16 });
+                // XRPC maps a named error like RecordNotFound to 400, not 404;
+                // 404 is reserved for an unknown route.
+                res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
         }

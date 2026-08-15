@@ -29,13 +29,18 @@ pub async fn space_notify_space_deleted(
 ) -> Result<(), ApiError> {
     let NotifySpaceDeletedInput { space } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
-    let claims =
-        verify_space_service_token(actor_store, id_resolver, &token.0, NOTIFY_SPACE_DELETED_LXM)
-            .await
-            .map_err(|error| {
-                tracing::debug!(%error, "notifySpaceDeleted auth rejected");
-                ApiError::InvalidToken
-            })?;
+    let claims = verify_space_service_token(
+        actor_store,
+        id_resolver,
+        &token.0,
+        NOTIFY_SPACE_DELETED_LXM,
+        &space_id.authority,
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(%error, "notifySpaceDeleted auth rejected");
+        ApiError::InvalidToken
+    })?;
     // Only the space authority may announce the space's deletion.
     let iss_did = claims.iss.split('#').next().unwrap_or(&claims.iss);
     if iss_did != space_id.authority {
