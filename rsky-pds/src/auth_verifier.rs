@@ -155,7 +155,7 @@ pub struct JwtPayload {
     pub jti: Option<String>,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum AuthError {
     #[error("ExpiredToken: `Token is expired`")]
     ExpiredToken,
@@ -398,28 +398,44 @@ pub struct AccessStandard {
     pub access: AccessOutput,
 }
 
+/// One access verification per request, shared between guards. The
+/// pipethrough guard and a handler's own `AccessStandard` both verify the
+/// same request; without this cache the second verification replays the
+/// DPoP proof into the jti guard and every doubled route 400s.
+struct CachedAccessStandard(Result<AccessOutput, (Status, AuthError)>);
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for AccessStandard {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match access_check(
-            req,
-            vec![
-                AuthScope::Access,
-                AuthScope::AppPass,
-                AuthScope::AppPassPrivileged,
-            ],
-            None,
-        )
-        .await
-        {
-            Outcome::Success(access) => Outcome::Success(AccessStandard { access }),
-            Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::from(&error.1)));
-                Outcome::Error(error)
+        let cached: &CachedAccessStandard = req
+            .local_cache_async(async {
+                match access_check(
+                    req,
+                    vec![
+                        AuthScope::Access,
+                        AuthScope::AppPass,
+                        AuthScope::AppPassPrivileged,
+                    ],
+                    None,
+                )
+                .await
+                {
+                    Outcome::Success(access) => CachedAccessStandard(Ok(access)),
+                    Outcome::Error(error) => CachedAccessStandard(Err(error)),
+                    Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+                }
+            })
+            .await;
+        match &cached.0 {
+            Ok(access) => Outcome::Success(AccessStandard {
+                access: access.clone(),
+            }),
+            Err((status, error)) => {
+                req.local_cache(|| Some(ApiError::from(error)));
+                Outcome::Error((*status, error.clone()))
             }
-            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
         }
     }
 }
