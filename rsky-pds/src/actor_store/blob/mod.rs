@@ -229,6 +229,7 @@ impl BlobReader {
     /// the association and moves on instead of failing the import; the
     /// upload promotes it (see `track_untethered_blob`).
     pub async fn process_import_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+        self.delete_dereferenced_blobs(writes.clone()).await?;
         for write in writes {
             let (blobs, uri) = match write {
                 PreparedWrite::Create(w) => (w.blobs, w.uri),
@@ -237,9 +238,16 @@ impl BlobReader {
             };
             for blob in blobs {
                 self.associate_blob(blob.clone(), uri.clone()).await?;
+                // Only a blob that has not been uploaded yet is tolerated
+                // (it arrives after the import); a present-but-invalid blob
+                // still fails the import.
                 if let Err(error) = self.verify_blob_and_make_permanent(blob.clone()).await {
-                    tracing::debug!(cid = %blob.cid, %error,
-                        "imported record references a blob not yet uploaded");
+                    if error.to_string().starts_with("Could not find blob") {
+                        tracing::debug!(cid = %blob.cid,
+                            "imported record references a blob not yet uploaded");
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }

@@ -58,9 +58,30 @@ pub fn lex_to_ipld(val: Lex) -> Ipld {
             }
             Ipld::Map(to_return)
         }
-        Lex::Blob(blob) => {
-            Ipld::Json(serde_json::to_value(blob.original).expect("Issue serializing blob"))
-        }
+        // A blob ref's `ref` must round-trip as a real IPLD link so DAG-CBOR
+        // writes CBOR tag 42; a JSON-shaped `$link` map produces a different
+        // block and a different CID than every other implementation.
+        Lex::Blob(blob) => match blob.original {
+            JsonBlobRef::Typed(typed) => match typed.r#ref.link.parse::<Cid>() {
+                Ok(cid) => Ipld::Map(BTreeMap::from([
+                    ("$type".to_string(), Ipld::String("blob".to_string())),
+                    ("ref".to_string(), Ipld::Link(cid)),
+                    ("mimeType".to_string(), Ipld::String(typed.mime_type)),
+                    (
+                        "size".to_string(),
+                        Ipld::Json(serde_json::Value::from(typed.size)),
+                    ),
+                ])),
+                Err(_) => Ipld::Json(
+                    serde_json::to_value(JsonBlobRef::Typed(typed))
+                        .expect("Issue serializing blob"),
+                ),
+            },
+            JsonBlobRef::Untyped(legacy) => Ipld::Map(BTreeMap::from([
+                ("cid".to_string(), Ipld::String(legacy.cid)),
+                ("mimeType".to_string(), Ipld::String(legacy.mime_type)),
+            ])),
+        },
         Lex::Ipld(ipld) => match ipld {
             Ipld::Json(json_val) => match serde_json::from_value::<Cid>(json_val.clone()) {
                 Ok(cid) => Ipld::Link(cid),
@@ -252,6 +273,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encode direction: a `Lex::Blob` written to DAG-CBOR must emit a
+    /// real tag-42 CID link and re-encode byte-for-byte to what a compliant
+    /// implementation produced, or native writes diverge from every other
+    /// PDS and imported records index under the wrong CID.
+    #[test]
+    fn blob_ref_encodes_as_tag42_and_round_trips() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let original = Ipld::Map(BTreeMap::from([
+            (
+                "$type".to_string(),
+                Ipld::String("app.bsky.actor.profile".to_string()),
+            ),
+            (
+                "avatar".to_string(),
+                Ipld::Map(BTreeMap::from([
+                    ("$type".to_string(), Ipld::String("blob".to_string())),
+                    ("ref".to_string(), Ipld::Link(cid)),
+                    (
+                        "mimeType".to_string(),
+                        Ipld::String("image/jpeg".to_string()),
+                    ),
+                    ("size".to_string(), Ipld::Json(JsonValue::from(924586))),
+                ])),
+            ),
+        ]));
+        let original_bytes = serde_ipld_dagcbor::to_vec(&original).unwrap();
+        // tag 42 present in the source encoding
+        assert!(original_bytes
+            .windows(2)
+            .any(|window| window == [0xd8, 0x2a]));
+        // decode -> Lex (Lex::Blob) -> re-encode must reproduce the bytes
+        let record = cbor_to_lex_record(original_bytes.clone()).unwrap();
+        assert!(matches!(record.get("avatar"), Some(Lex::Blob(_))));
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(record))).unwrap();
+        assert_eq!(reencoded, original_bytes);
+    }
 
     /// A blob ref decoded from real DAG-CBOR (map with a tag-42 link) must
     /// come out as `Lex::Blob`, or record-blob associations are silently
