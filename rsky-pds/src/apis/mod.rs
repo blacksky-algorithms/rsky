@@ -528,6 +528,13 @@ impl From<&AuthError> for ApiError {
     fn from(error: &AuthError) -> Self {
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
+            // A missing or revoked credential, or one from an untrusted
+            // issuer or for the wrong audience, is an authentication failure
+            // and surfaces as 401. A malformed token (`BadJwt`) stays a 400
+            // client error so the two remain distinguishable.
+            AuthError::AuthRequired(_)
+            | AuthError::BadJwtAudience(_)
+            | AuthError::UntrustedIss(_) => ApiError::AuthRequiredError(error.to_string()),
             other => ApiError::InvalidRequest(other.to_string()),
         }
     }
