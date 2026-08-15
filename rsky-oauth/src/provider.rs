@@ -369,7 +369,18 @@ impl OAuthProvider {
     ) -> Result<String, OAuthError> {
         let mut url = Url::parse(&parameters.redirect_uri)
             .map_err(|_| OAuthError::ServerError("stored redirect_uri is invalid".to_string()))?;
-        {
+        let fragment_mode = parameters.response_mode.as_deref() == Some("fragment");
+        if fragment_mode {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (key, value) in pairs {
+                serializer.append_pair(key, value);
+            }
+            if let Some(state) = &parameters.state {
+                serializer.append_pair("state", state);
+            }
+            serializer.append_pair("iss", &self.issuer);
+            url.set_fragment(Some(&serializer.finish()));
+        } else {
             let mut query = url.query_pairs_mut();
             for (key, value) in pairs {
                 query.append_pair(key, value);
@@ -771,7 +782,7 @@ impl OAuthProvider {
             ],
             "subject_types_supported": ["public"],
             "response_types_supported": [RESPONSE_TYPE_CODE],
-            "response_modes_supported": ["query"],
+            "response_modes_supported": ["query", "fragment"],
             "grant_types_supported": [GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN],
             "code_challenge_methods_supported": [CODE_CHALLENGE_METHOD_S256],
             "ui_locales_supported": ["en-US"],
@@ -1020,6 +1031,7 @@ mod tests {
             code_challenge: Some(PKCE_CHALLENGE.to_string()),
             code_challenge_method: Some(CODE_CHALLENGE_METHOD_S256.to_string()),
             login_hint: None,
+            response_mode: None,
             prompt: None,
         }
     }
@@ -1709,6 +1721,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fragment_response_mode_redirects_in_the_fragment() {
+        let setup = setup();
+        let key = dpop_key();
+        let htu = format!("{ISSUER}/oauth/par");
+        let proof = proof(&key, "POST", &htu, NOW, None, None);
+        let headers = [proof.as_str()];
+        let mut request = par_request(CLIENT_ID);
+        request.response_mode = Some("fragment".to_string());
+        let par = setup
+            .provider
+            .pushed_authorization_request(
+                &credentials(CLIENT_ID),
+                &request,
+                &DpopRequest {
+                    method: "POST",
+                    uri: &htu,
+                    dpop_headers: &headers,
+                    access_token: None,
+                },
+                NOW,
+            )
+            .await
+            .unwrap();
+        let redirect = setup
+            .provider
+            .reject(CLIENT_ID, &par.request_uri, DEVICE, NOW)
+            .await
+            .unwrap();
+        let url = Url::parse(&redirect).unwrap();
+        // Everything rides in the fragment; the query stays empty. A browser
+        // client reading only the fragment must find state and iss there.
+        assert!(url.query().is_none(), "query must be empty: {redirect}");
+        let fragment = url.fragment().expect("fragment present");
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(fragment.as_bytes())
+            .into_owned()
+            .collect();
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| key == "error" && value == "access_denied"));
+        assert!(pairs.iter().any(|(key, _)| key == "state"));
+        assert!(pairs.iter().any(|(key, _)| key == "iss"));
+    }
+
+    #[tokio::test]
     async fn token_grant_failures() {
         let setup = setup();
         let key = dpop_key();
@@ -2203,6 +2259,7 @@ mod tests {
                 code_challenge: PKCE_CHALLENGE.to_string(),
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256.to_string(),
                 login_hint: None,
+                response_mode: None,
                 prompt: None,
                 dpop_jkt: None,
             },
@@ -2325,6 +2382,7 @@ mod tests {
                 code_challenge: PKCE_CHALLENGE.to_string(),
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256.to_string(),
                 login_hint: None,
+                response_mode: None,
                 prompt: None,
                 dpop_jkt: Some(jkt),
             },

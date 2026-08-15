@@ -12,7 +12,7 @@ use rsky_common::now;
 use rsky_lexicon::blob_refs::BlobRef;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::repo::ListMissingBlobsRefRecordBlob;
-use rsky_repo::types::{PreparedBlobRef, PreparedWrite};
+use rsky_repo::types::{BlobConstraint, PreparedBlobRef, PreparedWrite};
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::str::FromStr;
@@ -194,7 +194,64 @@ impl BlobReader {
                 Ok(())
             })
             .await?;
+        // A blob uploaded after the record referencing it was imported is
+        // already associated; promote it now or it stays temp forever.
+        let cid_str = cid.to_string();
+        let associated: bool = self
+            .db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT 1 FROM record_blob WHERE \"blobCid\" = ?1 LIMIT 1",
+                        [cid_str.clone()],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some())
+            })
+            .await?;
+        if associated {
+            self.verify_blob_and_make_permanent(PreparedBlobRef {
+                cid,
+                mime_type: mime_type.clone(),
+                constraints: BlobConstraint {
+                    max_size: None,
+                    accept: None,
+                },
+            })
+            .await?;
+        }
         Ok(BlobRef::new(cid, mime_type, size, None))
+    }
+
+    /// Blob processing for CAR imports: the referenced blobs typically
+    /// arrive by uploadBlob *after* the import, so a missing blob records
+    /// the association and moves on instead of failing the import; the
+    /// upload promotes it (see `track_untethered_blob`).
+    pub async fn process_import_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
+        self.delete_dereferenced_blobs(writes.clone()).await?;
+        for write in writes {
+            let (blobs, uri) = match write {
+                PreparedWrite::Create(w) => (w.blobs, w.uri),
+                PreparedWrite::Update(w) => (w.blobs, w.uri),
+                _ => continue,
+            };
+            for blob in blobs {
+                self.associate_blob(blob.clone(), uri.clone()).await?;
+                // Only a blob that has not been uploaded yet is tolerated
+                // (it arrives after the import); a present-but-invalid blob
+                // still fails the import.
+                if let Err(error) = self.verify_blob_and_make_permanent(blob.clone()).await {
+                    if error.to_string().starts_with("Could not find blob") {
+                        tracing::debug!(cid = %blob.cid,
+                            "imported record references a blob not yet uploaded");
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {

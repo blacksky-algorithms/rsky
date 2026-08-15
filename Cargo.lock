@@ -8170,7 +8170,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-lexicon"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8192,7 +8192,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-oauth"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8211,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.13.5"
+version = "0.13.14"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8339,7 +8339,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-repo"
-version = "0.0.3"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-recursion",

@@ -23,7 +23,10 @@ impl<'a> FromParam<'a> for Nsid {
 
     fn from_param(param: &'a str) -> Result<Self, Self::Error> {
         // This is how we make sure we allowlist lexicons and what gets proxied
-        if param.starts_with("app.bsky.") || param.starts_with("chat.bsky") {
+        if param.starts_with("app.bsky.")
+            || param.starts_with("chat.bsky")
+            || param.starts_with("community.blacksky.")
+        {
             Ok(Nsid(param.to_string()))
         } else {
             Err(param)

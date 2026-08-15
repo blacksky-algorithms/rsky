@@ -129,6 +129,10 @@ pub struct AuthorizationRequestParameters {
     pub code_challenge_method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    /// `query` (default) or `fragment`. Browser clients default to
+    /// `fragment`; dropping this silently strands them at the callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// RFC 7638 thumbprint of the DPoP key used at PAR time, when present.

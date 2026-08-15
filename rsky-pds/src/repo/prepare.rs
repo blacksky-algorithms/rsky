@@ -10,7 +10,7 @@ use rsky_repo::types::{
     BlobConstraint, Ids, Lex, PreparedBlobRef, PreparedCreateOrUpdate, PreparedDelete, RepoRecord,
     WriteOpAction,
 };
-use rsky_repo::util::{cbor_to_lex, lex_to_ipld};
+use rsky_repo::util::{cbor_to_lex, lex_to_ipld, normalize_record_blob_refs};
 use rsky_syntax::aturi::AtUri;
 use serde_json::{json, Value as JsonValue};
 
@@ -51,22 +51,32 @@ pub fn blobs_for_write(record: RepoRecord, validate: bool) -> anyhow::Result<Vec
         Some(Lex::Ipld(Ipld::String(t))) => Some(t),
         _ => None,
     };
-    for r#ref in refs.clone() {
-        if matches!(r#ref.r#ref.original, JsonBlobRef::Untyped(_)) {
-            bail!("Legacy blob ref at `{}`", r#ref.path.join("/"))
+    if validate {
+        for r#ref in refs.clone() {
+            if matches!(r#ref.r#ref.original, JsonBlobRef::Untyped(_)) {
+                bail!("Legacy blob ref at `{}`", r#ref.path.join("/"))
+            }
         }
     }
     refs.into_iter()
         .map(|FoundBlobRef { r#ref, path }| {
             let constraints: BlobConstraint = match (validate, record_type) {
                 (true, Some(record_type)) => {
-                    let properties: crate::lexicon::lexicons::Image2 = serde_json::from_value(
+                    // Collections without a known constraint table (custom
+                    // lexicons) carry unconstrained blobs rather than failing
+                    // the write.
+                    match serde_json::from_value::<crate::lexicon::lexicons::Image2>(
                         crate::repo::prepare::CONSTRAINTS[record_type.as_str()][path.join("/")]
                             .clone(),
-                    )?;
-                    BlobConstraint {
-                        max_size: Some(properties.max_size as usize),
-                        accept: Some(properties.accept),
+                    ) {
+                        Ok(properties) => BlobConstraint {
+                            max_size: Some(properties.max_size as usize),
+                            accept: Some(properties.accept),
+                        },
+                        Err(_) => BlobConstraint {
+                            max_size: None,
+                            accept: None,
+                        },
                     }
                 }
                 (_, _) => BlobConstraint {
@@ -205,7 +215,8 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> anyhow::Result<PreparedC
     } = opts;
     let validate = validate.unwrap_or(true);
 
-    let record = set_collection_name(&collection, opts.record, validate)?;
+    let record =
+        normalize_record_blob_refs(set_collection_name(&collection, opts.record, validate)?);
     if validate {
         assert_valid_record(&record)?;
     }
@@ -235,7 +246,8 @@ pub async fn prepare_update(opts: PrepareUpdateOpts) -> anyhow::Result<PreparedC
     } = opts;
     let validate = validate.unwrap_or(true);
 
-    let record = set_collection_name(&collection, opts.record, validate)?;
+    let record =
+        normalize_record_blob_refs(set_collection_name(&collection, opts.record, validate)?);
     if validate {
         assert_valid_record(&record)?;
     }

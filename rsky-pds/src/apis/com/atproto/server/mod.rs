@@ -5,7 +5,9 @@ use rand::{distributions::Alphanumeric, Rng};
 use rocket::form::validate::Contains;
 use rocket::State;
 use rsky_common::env::{env_int, env_str};
+use rsky_common::get_verification_material;
 use rsky_crypto::utils::encode_did_key;
+use rsky_identity::did::atproto_data::get_did_key_from_multibase;
 use rsky_identity::types::DidDocument;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use std::env;
@@ -112,8 +114,31 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
             rotation_keys: Some(resolved.rotation_keys),
         })
         .await?;
+    } else if let Some(host) = did.strip_prefix("did:web:") {
+        // Bare-host did:web: the document lives at the well-known path. No
+        // rotation keys to assert; control of the host is the rotation story.
+        let host = host.replace("%3A", ":").replace("%3a", ":");
+        if host.contains(':') || host.contains('/') {
+            bail!("Unsupported did:web form for activation: {did}")
+        }
+        let url = format!("https://{host}/.well-known/did.json");
+        let doc: DidDocument = reqwest::get(&url).await?.error_for_status()?.json().await?;
+        let pds_endpoint = doc.service.as_deref().and_then(|services| {
+            services
+                .iter()
+                .find(|s| s.id.ends_with("atproto_pds"))
+                .map(|s| s.service_endpoint.clone())
+        });
+        let signing_key = get_verification_material(&doc, "atproto")
+            .and_then(|material| get_did_key_from_multibase(material).ok().flatten());
+        assert_valid_doc_contents(AssertionContents {
+            pds_endpoint,
+            signing_key,
+            rotation_keys: None,
+        })
+        .await?;
     } else {
-        bail!("Not yet supporting did:web")
+        bail!("Unsupported did method: {did}")
     }
     Ok(())
 }
