@@ -77,10 +77,9 @@ pub fn assert_repo_scope(
     if scopes.allows_repo(collection, action) {
         Ok(())
     } else {
-        Err(ApiError::BadRequest(
-            "InvalidToken".to_string(),
-            format!("Token scope does not permit {action:?} on {collection}"),
-        ))
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit {action:?} on {collection}"
+        )))
     }
 }
 
@@ -153,7 +152,11 @@ pub enum ApiError {
     InvalidRequest(String),
     ExpiredToken,
     InvalidToken,
+    /// A scope-limited token that does not cover the requested write.
+    InsufficientScope(String),
     RecordNotFound,
+    /// RecordNotFound carrying the requested at-uri in the message.
+    RecordNotFoundUri(String),
     InvalidHandle,
     InvalidEmail,
     InvalidPassword,
@@ -260,6 +263,36 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 let body = Json(ErrorBody {
                     error: "InvalidToken".to_string(),
                     message: "Token is invalid".to_string(),
+                });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 400u16 });
+                Ok(res)
+            }
+            ApiError::InsufficientScope(message) => {
+                let body = Json(ErrorBody {
+                    error: "InsufficientScope".to_string(),
+                    message: message.clone(),
+                });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 403u16 });
+                Ok(res)
+            }
+            ApiError::RecordNotFoundUri(message) => {
+                let body = Json(ErrorBody {
+                    error: "RecordNotFound".to_string(),
+                    message: message.clone(),
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
