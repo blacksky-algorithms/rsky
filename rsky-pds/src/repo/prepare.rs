@@ -10,7 +10,7 @@ use rsky_repo::types::{
     BlobConstraint, Ids, Lex, PreparedBlobRef, PreparedCreateOrUpdate, PreparedDelete, RepoRecord,
     WriteOpAction,
 };
-use rsky_repo::util::{cbor_to_lex, lex_to_ipld};
+use rsky_repo::util::{cbor_to_lex, lex_to_ipld, normalize_record_blob_refs};
 use rsky_syntax::aturi::AtUri;
 use serde_json::{json, Value as JsonValue};
 
@@ -215,7 +215,8 @@ pub async fn prepare_create(opts: PrepareCreateOpts) -> anyhow::Result<PreparedC
     } = opts;
     let validate = validate.unwrap_or(true);
 
-    let record = set_collection_name(&collection, opts.record, validate)?;
+    let record =
+        normalize_record_blob_refs(set_collection_name(&collection, opts.record, validate)?);
     if validate {
         assert_valid_record(&record)?;
     }
@@ -245,7 +246,8 @@ pub async fn prepare_update(opts: PrepareUpdateOpts) -> anyhow::Result<PreparedC
     } = opts;
     let validate = validate.unwrap_or(true);
 
-    let record = set_collection_name(&collection, opts.record, validate)?;
+    let record =
+        normalize_record_blob_refs(set_collection_name(&collection, opts.record, validate)?);
     if validate {
         assert_valid_record(&record)?;
     }

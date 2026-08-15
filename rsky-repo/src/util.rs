@@ -108,6 +108,11 @@ fn ipld_map_as_blob(map: &BTreeMap<String, Ipld>) -> Option<BlobRef> {
             Ipld::Link(cid) => serde_json::json!({ "$link": cid.to_string() }),
             Ipld::String(s) => JsonValue::String(s.clone()),
             Ipld::Json(value) => value.clone(),
+            // A JSON-born ref arrives as a one-key map, not a link.
+            Ipld::Map(inner) if inner.len() == 1 => match inner.get("$link") {
+                Some(Ipld::String(link)) => serde_json::json!({ "$link": link }),
+                _ => return None,
+            },
             _ => return None,
         };
         obj.insert(key.clone(), json);
@@ -138,6 +143,30 @@ pub fn ipld_to_lex(val: Ipld) -> Lex {
             Lex::Blob(serde_json::from_value(blob).expect("Issue deserializing blob"))
         }
         _ => Lex::Ipld(val),
+    }
+}
+
+/// Re-anchor blob refs in a record that was deserialized from JSON: untagged
+/// serde lands every JSON object on the generic Ipld map, so without this a
+/// blob ref never becomes `Lex::Blob` and its block encodes a `$link` map
+/// instead of a tag-42 link.
+pub fn normalize_record_blob_refs(record: RepoRecord) -> RepoRecord {
+    record
+        .into_iter()
+        .map(|(key, value)| (key, normalize_lex_blob_refs(value)))
+        .collect()
+}
+
+fn normalize_lex_blob_refs(val: Lex) -> Lex {
+    match val {
+        Lex::Ipld(ipld) => ipld_to_lex(ipld),
+        Lex::Map(map) => Lex::Map(
+            map.into_iter()
+                .map(|(key, value)| (key, normalize_lex_blob_refs(value)))
+                .collect(),
+        ),
+        Lex::List(list) => Lex::List(list.into_iter().map(normalize_lex_blob_refs).collect()),
+        blob => blob,
     }
 }
 
@@ -311,6 +340,31 @@ mod tests {
         assert!(matches!(record.get("avatar"), Some(Lex::Blob(_))));
         let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(record))).unwrap();
         assert_eq!(reencoded, original_bytes);
+    }
+
+    /// The JSON write path: a record parsed from an API body must normalize
+    /// its blob refs to `Lex::Blob` so its block encodes the same tag-42
+    /// bytes a CAR-imported copy carries.
+    #[test]
+    fn json_born_blob_ref_normalizes_and_encodes_tag42() {
+        let record: RepoRecord = serde_json::from_value(serde_json::json!({
+            "$type": "app.bsky.actor.profile",
+            "avatar": {
+                "$type": "blob",
+                "ref": { "$link": "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4" },
+                "mimeType": "image/jpeg",
+                "size": 924586
+            }
+        }))
+        .unwrap();
+        let normalized = normalize_record_blob_refs(record);
+        assert!(matches!(normalized.get("avatar"), Some(Lex::Blob(_))));
+        let bytes = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(normalized))).unwrap();
+        assert!(bytes.windows(2).any(|window| window == [0xd8, 0x2a]));
+        // and it must equal the CBOR-native encoding of the same record
+        let reparsed = cbor_to_lex_record(bytes.clone()).unwrap();
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(reparsed))).unwrap();
+        assert_eq!(reencoded, bytes);
     }
 
     /// A blob ref decoded from real DAG-CBOR (map with a tag-42 link) must
