@@ -9,6 +9,7 @@ use futures::{stream, Stream, StreamExt, TryStreamExt};
 use lexicon_cid::Cid;
 use rsky_common::sign::sign_without_indexmap;
 use rsky_common::tid::Ticker;
+use rsky_lexicon::blob_refs::{BlobRef, JsonBlobRef};
 use secp256k1::Keypair;
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -70,10 +71,38 @@ pub fn lex_to_ipld(val: Lex) -> Ipld {
     }
 }
 
+/// A DAG-CBOR blob reference decodes as an `Ipld::Map` whose `ref` is an
+/// `Ipld::Link`; recognize that shape here or every blob ref parsed from a
+/// CAR dissolves into a plain map and record-blob associations are lost.
+fn ipld_map_as_blob(map: &BTreeMap<String, Ipld>) -> Option<BlobRef> {
+    let typed = matches!(map.get("$type"), Some(Ipld::String(t)) if t == "blob");
+    let legacy = matches!(map.get("cid"), Some(Ipld::String(_)))
+        && matches!(map.get("mimeType"), Some(Ipld::String(_)));
+    if !typed && !legacy {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    for (key, value) in map {
+        let json = match value {
+            Ipld::Link(cid) => serde_json::json!({ "$link": cid.to_string() }),
+            Ipld::String(s) => JsonValue::String(s.clone()),
+            Ipld::Json(value) => value.clone(),
+            _ => return None,
+        };
+        obj.insert(key.clone(), json);
+    }
+    serde_json::from_value::<JsonBlobRef>(JsonValue::Object(obj))
+        .ok()
+        .map(|original| BlobRef { original })
+}
+
 pub fn ipld_to_lex(val: Ipld) -> Lex {
     match val {
         Ipld::List(list) => Lex::List(list.into_iter().map(ipld_to_lex).collect::<Vec<Lex>>()),
         Ipld::Map(map) => {
+            if let Some(blob) = ipld_map_as_blob(&map) {
+                return Lex::Blob(blob);
+            }
             let mut to_return: BTreeMap<String, Lex> = BTreeMap::new();
             for key in map.keys() {
                 to_return.insert(key.to_owned(), ipld_to_lex(map.get(key).unwrap().clone()));
@@ -218,4 +247,45 @@ where
         buffer.extend_from_slice(&chunk?);
     }
     Ok(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A blob ref decoded from real DAG-CBOR (map with a tag-42 link) must
+    /// come out as `Lex::Blob`, or record-blob associations are silently
+    /// lost on every CAR import.
+    #[test]
+    fn cbor_blob_ref_parses_as_lex_blob() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let record = Ipld::Map(BTreeMap::from([
+            (
+                "$type".to_string(),
+                Ipld::String("app.bsky.actor.profile".to_string()),
+            ),
+            (
+                "avatar".to_string(),
+                Ipld::Map(BTreeMap::from([
+                    ("$type".to_string(), Ipld::String("blob".to_string())),
+                    ("ref".to_string(), Ipld::Link(cid)),
+                    (
+                        "mimeType".to_string(),
+                        Ipld::String("image/jpeg".to_string()),
+                    ),
+                    ("size".to_string(), Ipld::Json(JsonValue::from(924586))),
+                ])),
+            ),
+        ]));
+        let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
+        let parsed = cbor_to_lex_record(bytes).unwrap();
+        match parsed.get("avatar") {
+            Some(Lex::Blob(blob)) => {
+                assert_eq!(blob.get_cid().unwrap(), cid);
+            }
+            other => panic!("avatar should parse as Lex::Blob, got {other:?}"),
+        }
+    }
 }

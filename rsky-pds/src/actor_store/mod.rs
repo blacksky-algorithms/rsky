@@ -491,7 +491,7 @@ impl ActorStoreTransactor {
             storage_guard.apply_commit(commit.clone(), None).await?;
         }
         // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        self.blob.process_import_blobs(writes).await?;
         Ok(())
     }
 

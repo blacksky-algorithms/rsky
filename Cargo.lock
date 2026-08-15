@@ -8211,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.13.11"
+version = "0.13.12"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8339,7 +8339,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-repo"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-recursion",
