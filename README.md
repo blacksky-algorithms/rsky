@@ -30,14 +30,17 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 
 **Rust Crates:**
 
-| Crate                                                      | Docs                                | crates.io                                                                                                                                                   |
-|------------------------------------------------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `rsky-crypto`: cryptographic signing and key serialization | [README](./rsky-crypto/README.md)   | [![Crate](https://img.shields.io/crates/v/rsky-crypto?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-crypto)     |
-| `rsky-identity`: DID and handle resolution                 | [README](./rsky-identity/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-identity?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-identity) |
-| `rsky-lexicon`: schema definition language                 | [README](./rsky-lexicon/README.md)  | [![Crate](https://img.shields.io/crates/v/rsky-lexicon?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-lexicon)   |
-| `rsky-syntax`: string parsers for identifiers              | [README](./rsky-syntax/README.md)   | [![Crate](https://img.shields.io/crates/v/rsky-syntax?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-syntax)     |
-| `rsky-common`: shared code                                 | [README](./rsky-common/README.md)   | [![Crate](https://img.shields.io/crates/v/rsky-common?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-common)     |
-| `rsky-repo`: data storage structure, including MST         | [README](./rsky-repo/README.md)     | [![Crate](https://img.shields.io/crates/v/rsky-repo?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-repo)         |
+| Crate                                                                      | Docs                                   | crates.io                                                                                                                                                            |
+|----------------------------------------------------------------------------|----------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `rsky-crypto`: cryptographic signing and key serialization                 | [README](./rsky-crypto/README.md)      | [![Crate](https://img.shields.io/crates/v/rsky-crypto?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-crypto)                 |
+| `rsky-identity`: DID and handle resolution                                 | [README](./rsky-identity/README.md)    | [![Crate](https://img.shields.io/crates/v/rsky-identity?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-identity)             |
+| `rsky-lexicon`: schema definition language                                 | [README](./rsky-lexicon/README.md)     | [![Crate](https://img.shields.io/crates/v/rsky-lexicon?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-lexicon)               |
+| `rsky-syntax`: string parsers for identifiers                              | [README](./rsky-syntax/README.md)      | [![Crate](https://img.shields.io/crates/v/rsky-syntax?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-syntax)                 |
+| `rsky-common`: shared code                                                 | [README](./rsky-common/README.md)      | [![Crate](https://img.shields.io/crates/v/rsky-common?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-common)                 |
+| `rsky-repo`: data storage structure, including MST                         | [README](./rsky-repo/README.md)        | [![Crate](https://img.shields.io/crates/v/rsky-repo?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-repo)                     |
+| `rsky-oauth`: OAuth 2.1 provider core (JOSE, JWK, DPoP) for atproto         | [README](./rsky-oauth/README.md)       | [![Crate](https://img.shields.io/crates/v/rsky-oauth?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-oauth)                   |
+| `rsky-space`: permissioned-data (spaces) primitives — LtHash commits, credentials | [README](./rsky-space/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-space?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-space)                   |
+| `rsky-space-host`: space authority/host — issues credentials, routes write notifications | [README](./rsky-space-host/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-space-host?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-space-host) |
 
 **Rust Services:**
 
@@ -48,7 +51,10 @@ rsky (/ˈrɪski/) is intended to be a full implementation of [AT Protocol](https
 - `rsky-jetstream-subscriber`: Firehose consumer for Jetstream.
 - `rsky-labeler`: Firehose consumer that labels content.
 - `rsky-satnav`: "Structured Archive Traversal, Navigation & Verification", a DASL CAR and AT Protocol repository explorer.
-- `rsky-wintermute`: Indexer for bsky app-view.
+- `rsky-wintermute`: Monolithic indexer for the bsky app-view, combining ingester, backfiller, and indexer.
+- `rsky-daemon`: Permissioned-data syncer daemon — pulls, verifies, and indexes permissioned repos from members' PDSes.
+- `rsky-video`: Video service — handles uploads, transcoding via Bunny Stream, and playback.
+- `palomar-sync`: Syncs `followersFuzzy` and PageRank from PostgreSQL to OpenSearch for Palomar search.
 
 ## About AT Protocol
 
