@@ -1,6 +1,6 @@
 [package]
 name = "rsky-oauth"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "OAuth provider core (JOSE, JWK, DPoP) for AT Protocol services"
 license = "Apache-2.0"

@@ -55,6 +55,34 @@ pub fn assert_valid_token_method(
     Ok(())
 }
 
+/// Enforce a granular OAuth session's `repo:` scope on a record write.
+///
+/// A session that carries `repo:` grants but no `transition:generic` is
+/// confined to the collections and actions those grants name (proposal 0016
+/// §Scopes). Legacy transition sessions and app passwords carry no `repo:`
+/// grant and are unaffected. Without this a token scoped to one collection
+/// can write any collection.
+pub fn assert_repo_scope(
+    credentials: &Option<Credentials>,
+    collection: &str,
+    action: crate::oauth_scope::RepoAction,
+) -> Result<(), ApiError> {
+    let Some(granted) = credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()) else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_repo_session() {
+        return Ok(());
+    }
+    if scopes.allows_repo(collection, action) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit {action:?} on {collection}"
+        )))
+    }
+}
+
 // Lower ranks have higher presidence
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
@@ -124,7 +152,11 @@ pub enum ApiError {
     InvalidRequest(String),
     ExpiredToken,
     InvalidToken,
+    /// A scope-limited token that does not cover the requested write.
+    InsufficientScope(String),
     RecordNotFound,
+    /// RecordNotFound carrying the requested at-uri in the message.
+    RecordNotFoundUri(String),
     InvalidHandle,
     InvalidEmail,
     InvalidPassword,
@@ -231,6 +263,36 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 let body = Json(ErrorBody {
                     error: "InvalidToken".to_string(),
                     message: "Token is invalid".to_string(),
+                });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 400u16 });
+                Ok(res)
+            }
+            ApiError::InsufficientScope(message) => {
+                let body = Json(ErrorBody {
+                    error: "InsufficientScope".to_string(),
+                    message: message.clone(),
+                });
+                let mut res =
+                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
+                res.set_header(ContentType(rocket::http::MediaType::const_new(
+                    "application",
+                    "json",
+                    &[],
+                )));
+                res.set_status(Status { code: 403u16 });
+                Ok(res)
+            }
+            ApiError::RecordNotFoundUri(message) => {
+                let body = Json(ErrorBody {
+                    error: "RecordNotFound".to_string(),
+                    message: message.clone(),
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
@@ -473,7 +535,9 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                     "json",
                     &[],
                 )));
-                res.set_status(Status { code: 404u16 });
+                // XRPC maps a named error like RecordNotFound to 400, not 404;
+                // 404 is reserved for an unknown route.
+                res.set_status(Status { code: 400u16 });
                 Ok(res)
             }
         }
@@ -497,6 +561,13 @@ impl From<&AuthError> for ApiError {
     fn from(error: &AuthError) -> Self {
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
+            // A missing or revoked credential, or one from an untrusted
+            // issuer or for the wrong audience, is an authentication failure
+            // and surfaces as 401. A malformed token (`BadJwt`) stays a 400
+            // client error so the two remain distinguishable.
+            AuthError::AuthRequired(_)
+            | AuthError::BadJwtAudience(_)
+            | AuthError::UntrustedIss(_) => ApiError::AuthRequiredError(error.to_string()),
             other => ApiError::InvalidRequest(other.to_string()),
         }
     }

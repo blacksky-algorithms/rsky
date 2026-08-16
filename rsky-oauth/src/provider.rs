@@ -764,9 +764,18 @@ impl OAuthProvider {
 
     /// The public JWK set served at /oauth/jwks.
     pub fn jwks(&self) -> JwkSet {
-        JwkSet {
-            keys: vec![self.signing_key.to_public()],
+        let mut key = self.signing_key.to_public();
+        // Advertise `alg` and a stable `kid` so a client can pin the key and
+        // survive rotation (RFC 7517 recommendations).
+        if key.alg.is_none() {
+            if let Ok(curve) = key.curve() {
+                key.alg = Some(curve.alg().to_string());
+            }
         }
+        if key.kid.is_none() {
+            key.kid = Some(key.thumbprint());
+        }
+        JwkSet { keys: vec![key] }
     }
 
     /// RFC 8414 authorization server metadata document.
@@ -2403,6 +2412,18 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn published_jwks_carries_kid_and_alg() {
+        let setup = setup();
+        let jwks = setup.provider.jwks();
+        let key = &jwks.keys[0];
+        assert!(key.d.is_none(), "private scalar must not be published");
+        assert!(key.kid.is_some(), "kid required for key rotation");
+        assert!(key.alg.is_some(), "alg recommended");
+        // kid is the RFC 7638 thumbprint of the public key.
+        assert_eq!(key.kid.as_deref(), Some(key.thumbprint().as_str()));
     }
 
     #[tokio::test]

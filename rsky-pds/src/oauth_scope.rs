@@ -47,11 +47,69 @@ pub enum OAuthScope {
     Unknown(String),
 }
 
+/// A repository write action named in a `repo:` scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoAction {
+    Create,
+    Update,
+    Delete,
+}
+
+/// Parse a `repo:` scope suffix into its collections and actions, applying
+/// the proposal's defaults (no collection = all, no action = all three).
+fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
+    let (positional, params) = match suffix.find('?') {
+        Some(pos) => (
+            Some(&suffix[..pos]).filter(|p| !p.is_empty()),
+            Some(&suffix[pos + 1..]),
+        ),
+        None => (Some(suffix).filter(|p| !p.is_empty()), None),
+    };
+    let mut collections: Vec<String> = Vec::new();
+    if let Some(nsid) = positional {
+        collections.push(nsid.to_string());
+    }
+    let mut actions: Vec<RepoAction> = Vec::new();
+    if let Some(params) = params {
+        for pair in params.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "collection" if !value.is_empty() => collections.push(value.to_string()),
+                "action" => match value {
+                    "create" => actions.push(RepoAction::Create),
+                    "update" => actions.push(RepoAction::Update),
+                    "delete" => actions.push(RepoAction::Delete),
+                    "*" => {
+                        actions.extend([RepoAction::Create, RepoAction::Update, RepoAction::Delete])
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    if collections.is_empty() {
+        collections.push("*".to_string());
+    }
+    if actions.is_empty() {
+        actions.extend([RepoAction::Create, RepoAction::Update, RepoAction::Delete]);
+    }
+    (collections, actions)
+}
+
 impl OAuthScope {
     #[must_use]
     pub fn parse(token: &str) -> Self {
         if token == SCOPE_ATPROTO {
             return OAuthScope::Atproto;
+        }
+        // `repo` accepts three surface forms: bare `repo`, `repo:<nsid>`
+        // shorthand, and `repo?<params>` query form.
+        if token == "repo" {
+            return OAuthScope::Repo(String::new());
+        }
+        if let Some(rest) = token.strip_prefix("repo?") {
+            return OAuthScope::Repo(format!("?{rest}"));
         }
         for (prefix, ctor) in [
             (
@@ -138,6 +196,35 @@ impl GrantedScopes {
     #[must_use]
     pub fn has_permission_grant(&self) -> bool {
         self.scopes.iter().any(OAuthScope::is_permission_grant)
+    }
+
+    /// Whether a granular OAuth session (one carrying `repo:`/permission
+    /// grants but no `transition:generic`) governs this write. Legacy
+    /// transition sessions and app passwords are `None` here and enforced by
+    /// the existing scope model instead.
+    #[must_use]
+    pub fn is_granular_repo_session(&self) -> bool {
+        !self.has_transition("generic")
+            && self.scopes.iter().any(|s| matches!(s, OAuthScope::Repo(_)))
+    }
+
+    /// Whether some granted `repo:` scope permits `action` on `collection`.
+    ///
+    /// `repo:<nsid>` is shorthand for `repo?collection=<nsid>`; a missing
+    /// collection means all collections, a missing action means all three
+    /// actions, and `*` is the wildcard in either position (proposal 0016
+    /// §Scopes, matching the reference `allows_repo`).
+    #[must_use]
+    pub fn allows_repo(&self, collection: &str, action: RepoAction) -> bool {
+        self.scopes.iter().any(|s| match s {
+            OAuthScope::Repo(suffix) => {
+                let (collections, actions) = parse_repo_scope(suffix);
+                let collection_ok = collections.iter().any(|c| c == "*" || c == collection);
+                let action_ok = actions.iter().any(|a| *a == action);
+                collection_ok && action_ok
+            }
+            _ => false,
+        })
     }
 
     /// The `space:` grant strings, for [`crate::space_scope`] to evaluate.
@@ -248,6 +335,42 @@ mod tests {
             scopes.space_grants(),
             vec!["space:app.bulleted.space?manage=create&action=read_self".to_string()]
         );
+    }
+
+    #[test]
+    fn repo_scope_confines_collections_and_actions() {
+        let post = "app.bsky.feed.post";
+        let like = "app.bsky.feed.like";
+
+        // A collection-limited grant permits only that collection.
+        let g = GrantedScopes::parse(&["atproto".into(), format!("repo:{post}")]);
+        assert!(g.is_granular_repo_session());
+        assert!(g.allows_repo(post, RepoAction::Create));
+        assert!(g.allows_repo(post, RepoAction::Delete));
+        assert!(!g.allows_repo(like, RepoAction::Create));
+
+        // An action-limited grant permits only that action.
+        let g = GrantedScopes::parse(&["atproto".into(), format!("repo:{post}?action=create")]);
+        assert!(g.allows_repo(post, RepoAction::Create));
+        assert!(!g.allows_repo(post, RepoAction::Delete));
+
+        // `repo:*` covers every collection.
+        let g = GrantedScopes::parse(&["atproto".into(), "repo:*".into()]);
+        assert!(g.allows_repo(like, RepoAction::Update));
+
+        // A legacy transition session is not a granular repo session and is
+        // enforced by the app-password model instead.
+        let g = GrantedScopes::parse(&["atproto".into(), "transition:generic".into()]);
+        assert!(!g.is_granular_repo_session());
+
+        // Multi-valued collections in query form.
+        let g = GrantedScopes::parse(&[
+            "atproto".into(),
+            format!("repo?collection={post}&collection={like}&action=create"),
+        ]);
+        assert!(g.allows_repo(post, RepoAction::Create));
+        assert!(g.allows_repo(like, RepoAction::Create));
+        assert!(!g.allows_repo("app.bsky.feed.repost", RepoAction::Create));
     }
 
     #[test]

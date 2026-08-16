@@ -1341,13 +1341,10 @@ async fn inbound_notify_space_deleted_flags_local_repos() {
         .keypair(AUTHOR_DID)
         .await
         .unwrap();
-    let token = mint_space_service_token(
-        &keypair,
-        AUTHOR_DID,
-        "did:web:somesyncer.example",
-        NOTIFY_SPACE_DELETED_LXM,
-    )
-    .unwrap();
+    // aud names the recipient (the local authority), per audience validation.
+    let token =
+        mint_space_service_token(&keypair, AUTHOR_DID, AUTHOR_DID, NOTIFY_SPACE_DELETED_LXM)
+            .unwrap();
     let (status, _) = post_json(
         &client,
         "/xrpc/com.atproto.space.notifySpaceDeleted",

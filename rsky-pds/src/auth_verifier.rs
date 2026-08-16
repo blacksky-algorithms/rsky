@@ -266,6 +266,10 @@ pub async fn access_check(
                 Status::BadRequest,
                 AuthError::AccountTakedown(error.to_string()),
             )),
+            Some(AuthError::AuthRequired(error)) => Outcome::Error((
+                Status::Unauthorized,
+                AuthError::AuthRequired(error.to_string()),
+            )),
             _ if is_expired_jwt(&error) => {
                 Outcome::Error((Status::BadRequest, AuthError::ExpiredToken))
             }
@@ -1009,7 +1013,12 @@ async fn validate_dpop_access_token(
                     )),
                 },
             );
-            bail!("{}", error.error_description())
+            // A rejected access token (invalid signature, or revoked/unknown
+            // in the token store) is an authentication failure, surfaced as
+            // 401 rather than a 400 client error.
+            return Err(anyhow::Error::new(AuthError::AuthRequired(
+                error.error_description().to_string(),
+            )));
         }
     };
     let scope = oauth_scopes_to_auth_scope(&verified.scopes)?;
