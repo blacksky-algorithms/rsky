@@ -99,14 +99,22 @@ impl Resolver {
             conn.execute("PRAGMA synchronous = NORMAL", [])?;
             conn.execute("PRAGMA incremental_vacuum", [])?;
             conn.execute("PRAGMA optimize = 0x10002", [])?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS plc_operations (cid TEXT, did TEXT, created_at TEXT, nullified INT, operation BLOB);
+                 CREATE TABLE IF NOT EXISTS plc_keys (did TEXT PRIMARY KEY, pds_endpoint TEXT, pds_key TEXT, labeler_endpoint TEXT, labeler_key TEXT);",
+            )?;
         }
         let now = Instant::now();
         let last = now.checked_sub(PLC_EXPORT_INTERVAL).unwrap_or(now);
-        let after = conn.query_one(
+        let after = match conn.query_one(
             "SELECT created_at FROM plc_operations ORDER BY created_at DESC LIMIT 1",
             [],
-            |row| Ok(Some(row.get("created_at")?)),
-        )?;
+            |row| row.get::<_, String>("created_at"),
+        ) {
+            Ok(created_at) => Some(created_at),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(err) => Err(err)?,
+        };
         let client = Client::builder()
             .user_agent("rsky-relay")
             .timeout(REQ_TIMEOUT)
@@ -255,6 +263,11 @@ impl Resolver {
                                     &doc.nullified,
                                     doc.operation.get().as_bytes(),
                                 ))?;
+                                // Export is chronological, so the last non-nullified op wins;
+                                // nullified ops are losing forks and never update routing.
+                                if !doc.nullified {
+                                    apply_pds_key(&tx, &doc.did, doc.operation.get().as_bytes())?;
+                                }
                                 self.after = Some(doc.created_at);
                                 if self.inflight.remove(&doc.did) {
                                     dids.push(doc.did);
@@ -345,6 +358,86 @@ fn parse_plc_doc(input: &str) -> Option<PlcDocument<'_>> {
         }
     }
     None
+}
+
+/// PDS routing derived from a single PLC operation, ready to apply to `plc_keys`.
+enum KeyUpdate {
+    /// The account's current atproto signing key (and PDS endpoint, if declared).
+    Set { endpoint: Option<String>, key: String },
+    /// The account was tombstoned; drop any cached routing.
+    Tombstone,
+}
+
+#[derive(Deserialize)]
+struct PlcOpService {
+    endpoint: String,
+}
+
+/// The subset of a PLC operation needed to route atproto traffic. Genesis `create`
+/// operations use the legacy flat shape; every later op uses `plc_operation`.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum PlcOperation {
+    #[serde(rename = "plc_operation")]
+    Operation {
+        #[serde(rename = "verificationMethods", default)]
+        verification_methods: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        services: std::collections::HashMap<String, PlcOpService>,
+    },
+    #[serde(rename = "create")]
+    Create {
+        #[serde(rename = "signingKey")]
+        signing_key: String,
+        service: String,
+    },
+    #[serde(rename = "plc_tombstone")]
+    Tombstone,
+    #[serde(other)]
+    Other,
+}
+
+/// Derive the atproto PDS signing key and endpoint from a raw PLC operation. Returns
+/// `None` for operations that don't change PDS routing (unknown op types, or ops with no
+/// atproto verification method). Applies only to the PDS plane: `--no-plc-export`/labeler
+/// builds never run the export path this feeds.
+fn derive_pds_key(operation: &[u8]) -> Option<KeyUpdate> {
+    match serde_json::from_slice::<PlcOperation>(operation) {
+        Ok(PlcOperation::Operation { verification_methods, mut services }) => {
+            let key = verification_methods.get("atproto")?.clone();
+            let endpoint = services.remove("atproto_pds").map(|svc| svc.endpoint);
+            Some(KeyUpdate::Set { endpoint, key })
+        }
+        Ok(PlcOperation::Create { signing_key, service }) => {
+            Some(KeyUpdate::Set { endpoint: Some(service), key: signing_key })
+        }
+        Ok(PlcOperation::Tombstone) => Some(KeyUpdate::Tombstone),
+        Ok(PlcOperation::Other) => None,
+        Err(err) => {
+            tracing::debug!(%err, "plc op parse error");
+            None
+        }
+    }
+}
+
+/// Apply a non-nullified PLC operation's derived routing to `plc_keys`: upsert the
+/// current key/endpoint, drop the row on a tombstone, or no-op for irrelevant ops.
+/// `conn` may be a transaction; `prepare_cached` keeps the export hot path fast.
+fn apply_pds_key(conn: &Connection, did: &str, operation: &[u8]) -> rusqlite::Result<()> {
+    match derive_pds_key(operation) {
+        Some(KeyUpdate::Set { endpoint, key }) => {
+            conn.prepare_cached(
+                "INSERT INTO plc_keys (did, pds_endpoint, pds_key) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(did) DO UPDATE SET pds_endpoint = excluded.pds_endpoint, pds_key = excluded.pds_key",
+            )?
+            .execute((did, &endpoint, &key))?;
+        }
+        Some(KeyUpdate::Tombstone) => {
+            conn.prepare_cached("DELETE FROM plc_keys WHERE did = ?1")?.execute((did,))?;
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 fn parse_did_doc(input: &Bytes) -> Option<(String, (DidEndpoint, DidKey))> {
@@ -547,5 +640,162 @@ mod tests {
         resolver.request_direct("not-a-did");
         assert_eq!(resolver.futures.len(), 0);
         assert_eq!(resolver.inflight.len(), 0);
+    }
+
+    const VALID_KEY: &str = "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme";
+
+    fn plc_op(endpoint: Option<&str>) -> String {
+        endpoint.map_or_else(
+            || format!(
+                r#"{{"type":"plc_operation","verificationMethods":{{"atproto":"{VALID_KEY}"}},"services":{{}}}}"#
+            ),
+            |ep| format!(
+                r#"{{"type":"plc_operation","verificationMethods":{{"atproto":"{VALID_KEY}"}},"services":{{"atproto_pds":{{"type":"AtprotoPersonalDataServer","endpoint":"{ep}"}}}}}}"#
+            ),
+        )
+    }
+
+    #[test]
+    fn derive_pds_key_modern_operation_yields_key_and_endpoint() {
+        let op = plc_op(Some("https://pds.example.com"));
+        match derive_pds_key(op.as_bytes()) {
+            Some(KeyUpdate::Set { endpoint, key }) => {
+                assert_eq!(endpoint.as_deref(), Some("https://pds.example.com"));
+                assert_eq!(key, VALID_KEY);
+            }
+            other => panic!("expected Set, got {}", label(other.as_ref())),
+        }
+    }
+
+    #[test]
+    fn derive_pds_key_operation_without_pds_service_has_no_endpoint() {
+        let op = plc_op(None);
+        match derive_pds_key(op.as_bytes()) {
+            Some(KeyUpdate::Set { endpoint, key }) => {
+                assert!(endpoint.is_none());
+                assert_eq!(key, VALID_KEY);
+            }
+            other => panic!("expected Set, got {}", label(other.as_ref())),
+        }
+    }
+
+    #[test]
+    fn derive_pds_key_operation_without_atproto_key_is_ignored() {
+        let op = r#"{"type":"plc_operation","verificationMethods":{},"services":{}}"#;
+        assert!(derive_pds_key(op.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn derive_pds_key_legacy_create_yields_key_and_endpoint() {
+        let op = format!(
+            r#"{{"type":"create","signingKey":"{VALID_KEY}","recoveryKey":"{VALID_KEY}","handle":"alice.test","service":"https://legacy.example.com","prev":null,"sig":"x"}}"#
+        );
+        match derive_pds_key(op.as_bytes()) {
+            Some(KeyUpdate::Set { endpoint, key }) => {
+                assert_eq!(endpoint.as_deref(), Some("https://legacy.example.com"));
+                assert_eq!(key, VALID_KEY);
+            }
+            other => panic!("expected Set, got {}", label(other.as_ref())),
+        }
+    }
+
+    #[test]
+    fn derive_pds_key_tombstone_signals_removal() {
+        let op = r#"{"type":"plc_tombstone","prev":"bafy","sig":"x"}"#;
+        assert!(matches!(derive_pds_key(op.as_bytes()), Some(KeyUpdate::Tombstone)));
+    }
+
+    #[test]
+    fn derive_pds_key_unknown_type_is_ignored() {
+        let op = r#"{"type":"something_else"}"#;
+        assert!(derive_pds_key(op.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn derive_pds_key_malformed_json_is_ignored() {
+        assert!(derive_pds_key(b"not json").is_none());
+    }
+
+    fn label(update: Option<&KeyUpdate>) -> &'static str {
+        match update {
+            Some(KeyUpdate::Set { .. }) => "Set",
+            Some(KeyUpdate::Tombstone) => "Tombstone",
+            None => "None",
+        }
+    }
+
+    /// The stored endpoint for `did`, or `None` when no `plc_keys` row exists. These
+    /// tests only ever store non-null endpoints, so `None` unambiguously means "no row".
+    fn pds_endpoint(resolver: &Resolver, did: &str) -> Option<String> {
+        resolver
+            .conn
+            .query_one("SELECT pds_endpoint FROM plc_keys WHERE did = ?1", [did], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+    }
+
+    #[test]
+    fn apply_pds_key_upserts_then_resolves() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        apply_pds_key(&resolver.conn, "did:plc:alice", plc_op(Some("https://pds.one")).as_bytes())
+            .unwrap();
+        assert_eq!(pds_endpoint(&resolver, "did:plc:alice"), Some("https://pds.one".into()));
+
+        assert!(resolver.query_db("did:plc:alice").unwrap());
+        match resolver.resolve("did:plc:alice").unwrap() {
+            Some((Some(pds), _key)) => assert_eq!(pds, "pds.one"),
+            other => panic!("expected resolved endpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_pds_key_latest_write_wins() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let resolver = test_resolver(&dir);
+        apply_pds_key(&resolver.conn, "did:plc:bob", plc_op(Some("https://pds.old")).as_bytes())
+            .unwrap();
+        apply_pds_key(&resolver.conn, "did:plc:bob", plc_op(Some("https://pds.new")).as_bytes())
+            .unwrap();
+        assert_eq!(pds_endpoint(&resolver, "did:plc:bob"), Some("https://pds.new".into()));
+    }
+
+    #[test]
+    fn apply_pds_key_tombstone_removes_row() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let resolver = test_resolver(&dir);
+        apply_pds_key(&resolver.conn, "did:plc:carol", plc_op(Some("https://pds.gone")).as_bytes())
+            .unwrap();
+        apply_pds_key(
+            &resolver.conn,
+            "did:plc:carol",
+            br#"{"type":"plc_tombstone","prev":"bafy"}"#,
+        )
+        .unwrap();
+        assert_eq!(pds_endpoint(&resolver, "did:plc:carol"), None);
+    }
+
+    #[test]
+    fn apply_pds_key_irrelevant_op_is_noop() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let resolver = test_resolver(&dir);
+        apply_pds_key(&resolver.conn, "did:plc:dave", br#"{"type":"noop"}"#).unwrap();
+        assert_eq!(pds_endpoint(&resolver, "did:plc:dave"), None);
+    }
+
+    #[test]
+    fn empty_operations_table_yields_no_cursor() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let db_path = dir.path().join("plc_directory.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE plc_operations (cid TEXT, did TEXT, created_at TEXT, nullified INT, operation BLOB);
+             CREATE TABLE plc_keys (did TEXT PRIMARY KEY, pds_endpoint TEXT, pds_key TEXT, labeler_endpoint TEXT, labeler_key TEXT);",
+        )
+        .unwrap();
+        drop(conn);
+        let resolver = Resolver::with_db_path(db_path.to_str().unwrap()).unwrap();
+        assert!(resolver.after.is_none());
     }
 }

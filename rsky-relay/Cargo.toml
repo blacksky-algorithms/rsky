@@ -1,6 +1,6 @@
 [package]
 name = "rsky-relay"
-version = "0.1.2"
+version = "0.2.0"
 default-run = "rsky-relay"
 edition = "2024"
 
