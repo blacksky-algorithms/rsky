@@ -22,6 +22,8 @@ pub enum HostError {
     Resolution(String),
     #[error("store error: {0}")]
     Store(String),
+    #[error("space not hosted here: {0}")]
+    SpaceNotFound(String),
     #[error(transparent)]
     Space(#[from] rsky_space::SpaceError),
 }

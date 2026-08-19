@@ -8,6 +8,8 @@ use rsky_space::credential::{
     self, Confirmation, JwtHeader, SpaceClaims, CREDENTIAL_TTL_SECS, CREDENTIAL_TYP,
 };
 use rsky_space::space_id::SpaceId;
+use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use crate::appaccess::AppAccess;
 use crate::attestation::{verify_client_attestation, JtiStore, MetadataFetcher};
@@ -22,17 +24,44 @@ pub trait KeyResolver: Send + Sync {
     async fn signing_key(&self, did: &str) -> Result<String>;
 }
 
-/// A space authority for a single space.
+/// A space authority for one or more spaces of a single type.
 pub struct Authority {
     pub space: SpaceId,
+    hosted: RwLock<BTreeSet<String>>,
+    registered: RwLock<BTreeSet<String>>,
     pub signer: Signer,
     pub app_access: AppAccess,
 }
 
 impl Authority {
     pub fn new(space: SpaceId, signer: Signer, app_access: AppAccess) -> Self {
+        Self::new_many(
+            space.authority.clone(),
+            space.space_type.clone(),
+            [space.skey.clone()],
+            signer,
+            app_access,
+        )
+    }
+
+    pub fn new_many(
+        authority_did: impl Into<String>,
+        space_type: impl Into<String>,
+        skeys: impl IntoIterator<Item = String>,
+        signer: Signer,
+        app_access: AppAccess,
+    ) -> Self {
+        let authority_did = authority_did.into();
+        let space_type = space_type.into();
+        let hosted: BTreeSet<String> = skeys.into_iter().collect();
+        let first_skey = hosted
+            .first()
+            .expect("space authority needs at least one hosted space")
+            .clone();
         Self {
-            space,
+            space: SpaceId::new(authority_did, space_type, first_skey),
+            registered: RwLock::new(hosted.clone()),
+            hosted: RwLock::new(hosted),
             signer,
             app_access,
         }
@@ -44,6 +73,90 @@ impl Authority {
 
     pub fn space_uri(&self) -> String {
         self.space.uri()
+    }
+
+    pub fn space(&self, skey: &str) -> SpaceId {
+        SpaceId::new(&self.space.authority, &self.space.space_type, skey)
+    }
+
+    pub fn spaces(&self) -> Vec<String> {
+        self.hosted
+            .read()
+            .expect("hosted spaces")
+            .iter()
+            .map(|skey| self.space(skey).uri())
+            .collect()
+    }
+
+    pub fn resolve(&self, space_uri: &str) -> Result<SpaceId> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority == self.space.authority
+            && space.space_type == self.space.space_type
+            && self
+                .hosted
+                .read()
+                .expect("hosted spaces")
+                .contains(&space.skey)
+        {
+            Ok(space)
+        } else {
+            Err(HostError::SpaceNotFound(space_uri.to_string()))
+        }
+    }
+
+    pub fn register(&self, space_uri: &str) -> Result<bool> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority != self.space.authority || space.space_type != self.space.space_type {
+            return Err(HostError::SpaceNotFound(space_uri.to_string()));
+        }
+        let newly_registered = self
+            .registered
+            .write()
+            .expect("registered spaces")
+            .insert(space.skey.clone());
+        self.hosted
+            .write()
+            .expect("hosted spaces")
+            .insert(space.skey);
+        Ok(newly_registered)
+    }
+
+    pub fn resolve_registered(&self, space_uri: &str) -> Result<SpaceId> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority == self.space.authority
+            && space.space_type == self.space.space_type
+            && self
+                .registered
+                .read()
+                .expect("registered spaces")
+                .contains(&space.skey)
+        {
+            Ok(space)
+        } else {
+            Err(HostError::SpaceNotFound(space_uri.to_string()))
+        }
+    }
+
+    pub fn unregister(&self, space_uri: &str) -> Result<bool> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority != self.space.authority || space.space_type != self.space.space_type {
+            return Err(HostError::SpaceNotFound(space_uri.to_string()));
+        }
+        let registered = self
+            .registered
+            .write()
+            .expect("registered spaces")
+            .remove(&space.skey);
+        let hosted = self
+            .hosted
+            .write()
+            .expect("hosted spaces")
+            .remove(&space.skey);
+        Ok(registered || hosted)
     }
 
     /// The simplespace config surfaced by `getSpace`.
@@ -170,6 +283,16 @@ mod tests {
             "main",
         );
         Authority::new(space, test_signer(), AppAccess::Open)
+    }
+
+    #[test]
+    fn registering_a_space_makes_it_immediately_serveable() {
+        let authority = authority();
+        let space = "at://did:plc:communityauthority/space/community.blacksky.feed/new";
+
+        assert!(authority.register(space).unwrap());
+        assert_eq!(authority.resolve(space).unwrap().skey, "new");
+        assert!(authority.spaces().contains(&space.to_string()));
     }
 
     fn member_policy(dids: &[&str]) -> Policy {

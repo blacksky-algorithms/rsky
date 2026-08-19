@@ -128,6 +128,11 @@ impl From<HostError> for ApiError {
                 "ClientNotAuthorized",
                 "client not authorized for space",
             ),
+            HostError::SpaceNotFound(_) => Self::new(
+                StatusCode::NOT_FOUND,
+                "SpaceNotFound",
+                "space not hosted here",
+            ),
             HostError::Key(_)
             | HostError::Membership(_)
             | HostError::ManagingApp(_)
