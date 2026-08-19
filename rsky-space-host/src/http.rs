@@ -21,15 +21,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::attestation::{JtiStore, MetadataFetcher};
-use crate::authority::{Authority, KeyResolver};
+use crate::authority::{AuthorityContext, AuthorityRegistry, KeyResolver};
 use crate::commits::CommitSigner;
 use crate::error::HostError;
 use crate::keys::DocSource;
 use crate::managing_app::require_https;
-use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
+use crate::notify::{fan_out_write, NOTIFY_WRITE_LXM};
 use crate::oauth::{verify_access, AuthConfig, RequestAuth};
-use crate::policy::Policy;
-use crate::registration::{LifecycleAcker, REGISTER_SPACE_LXM};
+use crate::registration::REGISTER_SPACE_LXM;
 use crate::repo::{RepoStore, RepoWrite, WriteOutcome, MAX_RECORD_BYTES};
 use crate::service_jwt;
 use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
@@ -40,17 +39,14 @@ const MAX_LIST_LIMIT: i64 = 1000;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub authority: Arc<Authority>,
-    pub policy: Arc<Policy>,
+    pub registry: Arc<AuthorityRegistry>,
     pub keys: Arc<dyn KeyResolver>,
     pub metadata: Arc<dyn MetadataFetcher>,
     pub jti_store: Arc<dyn JtiStore>,
     pub writers: Arc<dyn WriterSetStore>,
     pub registrations: Arc<dyn RegistrationStore>,
-    pub lifecycle_acker: Option<Arc<dyn LifecycleAcker>>,
     /// Resolves a subscriber's service identifier to its delivery endpoint.
     pub docs: Arc<dyn DocSource>,
-    pub notifier: Arc<dyn Notifier>,
     /// Verifies DPoP proofs on the credential-issuance and credential-presenting
     /// paths. Space issuance does not challenge with nonces, so this manager
     /// carries none; the replay store is what makes a proof single-use.
@@ -291,22 +287,22 @@ async fn mint_credential(
             "service is not allowed to mint credentials",
         ));
     }
+    let (context, space) = require_this_space(&state, &params.space)?;
     let key = state.keys.signing_key(&claims.iss).await?;
     service_jwt::verify(
         jwt,
-        &[state.authority.authority_did()],
+        &[context.authority_did()],
         "community.blacksky.space.mintCredential",
         &key,
         (state.now)(),
     )?;
-    let space = require_this_space(&state, &params.space)?;
     let uri = format!(
         "{}/admin/mintCredential",
         state.public_url.trim_end_matches('/')
     );
     let proof = check_proof_uri(&state, &headers, "POST", &uri, None)?;
     let credential =
-        state
+        context
             .authority
             .mint_credential_for(&space, (state.now)(), (state.jti)(), &proof.jkt)?;
     Ok(Json(serde_json::json!({"credential": credential})))
@@ -334,14 +330,14 @@ fn require_space_credential(
     method: &str,
     nsid: &str,
     space_uri: &str,
-) -> Result<rsky_space::space_id::SpaceId, ApiError> {
-    let space = require_this_space(state, space_uri)?;
+) -> Result<(Arc<AuthorityContext>, rsky_space::space_id::SpaceId), ApiError> {
+    let (context, space) = require_this_space(state, space_uri)?;
     let jwt = dpop_credential(headers)?;
     let bound_jkt = credential::verify_space_credential(
         jwt,
         &space.uri(),
-        state.authority.authority_did(),
-        state.authority.signer.did_key(),
+        context.authority_did(),
+        context.authority.signer.did_key(),
         (state.now)(),
     )
     .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidToken", e.to_string()))?;
@@ -353,7 +349,7 @@ fn require_space_credential(
             "DPoP key thumbprint does not match the credential binding",
         ));
     }
-    Ok(space)
+    Ok((context, space))
 }
 
 /// Resolve a `did:...#fragment` subscriber to its delivery endpoint. The
@@ -385,11 +381,16 @@ async fn resolve_service_endpoint(docs: &dyn DocSource, service: &str) -> Result
 fn require_this_space(
     state: &AppState,
     space: &str,
-) -> Result<rsky_space::space_id::SpaceId, ApiError> {
-    state
+) -> Result<(Arc<AuthorityContext>, rsky_space::space_id::SpaceId), ApiError> {
+    let context = state
+        .registry
+        .for_space(space)
+        .map_err(|_| ApiError::invalid_request(format!("space not hosted here: {space}")))?;
+    let space = context
         .authority
         .resolve(space)
-        .map_err(|_| ApiError::invalid_request(format!("space not hosted here: {space}")))
+        .map_err(|_| ApiError::invalid_request(format!("space not hosted here: {space}")))?;
+    Ok((context, space))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -401,7 +402,7 @@ async fn get_space(
     headers: HeaderMap,
     Query(params): Query<GetSpaceParams>,
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
-    let space = require_space_credential(
+    let (context, space) = require_space_credential(
         &state,
         &headers,
         "GET",
@@ -410,19 +411,20 @@ async fn get_space(
     )?;
     Ok(Json(GetSpaceOutput {
         space: space.uri(),
-        config: SpaceConfig::Simplespace(state.authority.space_config(&state.policy)),
+        config: SpaceConfig::Simplespace(context.authority.space_config(&context.policy)),
     }))
 }
 
 async fn require_service_auth(
     state: &AppState,
+    context: &AuthorityContext,
     headers: &HeaderMap,
     expected_lxm: &str,
 ) -> Result<crate::service_jwt::ServiceClaims, ApiError> {
     let jwt = bearer(headers)?;
     let claims = service_jwt::claims(jwt)?;
     let issuer_key = state.keys.signing_key(&claims.iss).await?;
-    let authority_did = state.authority.authority_did();
+    let authority_did = context.authority_did();
     let space_host_aud = format!("{authority_did}#atproto_space_host");
     service_jwt::verify(
         jwt,
@@ -439,7 +441,7 @@ async fn get_space_credential(
     headers: HeaderMap,
     Json(input): Json<GetSpaceCredentialInput>,
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
-    let space = require_this_space(&state, &input.space)?;
+    let (context, space) = require_this_space(&state, &input.space)?;
     let delegation_token = bearer(&headers)?;
     // Before the delegation token, so a caller with a bad proof does not burn
     // its single-use grant finding out.
@@ -450,13 +452,13 @@ async fn get_space_credential(
         "com.atproto.space.getSpaceCredential",
         None,
     )?;
-    let credential = state
+    let credential = context
         .authority
         .get_space_credential_for(
             &space,
             delegation_token,
             input.client_attestation.as_deref(),
-            &state.policy,
+            &context.policy,
             state.keys.as_ref(),
             state.metadata.as_ref(),
             state.jti_store.as_ref(),
@@ -517,7 +519,7 @@ async fn get_latest_commit(
     headers: HeaderMap,
     Query(params): Query<GetLatestCommitParams>,
 ) -> Result<Json<GetLatestCommitOutput>, ApiError> {
-    let space = require_space_credential(
+    let (_, space) = require_space_credential(
         &state,
         &headers,
         "GET",
@@ -534,7 +536,7 @@ async fn list_repo_ops(
     headers: HeaderMap,
     Query(params): Query<ListRepoOpsParams>,
 ) -> Result<Json<ListRepoOpsOutput>, ApiError> {
-    let space = require_space_credential(
+    let (_, space) = require_space_credential(
         &state,
         &headers,
         "GET",
@@ -594,7 +596,7 @@ async fn get_repo(
     headers: HeaderMap,
     Query(params): Query<GetRepoParams>,
 ) -> Result<Response, ApiError> {
-    let space = require_space_credential(
+    let (_, space) = require_space_credential(
         &state,
         &headers,
         "GET",
@@ -702,8 +704,9 @@ async fn register_space(
     if input.generation < 1 {
         return Err(ApiError::invalid_request("generation must be positive"));
     }
-    let claims = require_service_auth(&state, &headers, REGISTER_SPACE_LXM).await?;
-    let expected_issuer = state
+    let context = state.registry.for_space(&input.space)?;
+    let claims = require_service_auth(&state, &context, &headers, REGISTER_SPACE_LXM).await?;
+    let expected_issuer = context
         .policy
         .managing_app()
         .and_then(|service| service.split_once('#').map(|(did, _)| did))
@@ -711,14 +714,14 @@ async fn register_space(
     if claims.iss != expected_issuer {
         return Err(ApiError::forbidden("issuer is not the managing app"));
     }
-    let acker = state.lifecycle_acker.as_ref().ok_or_else(|| {
+    let acker = context.lifecycle_acker.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "LifecycleUnavailable",
             "lifecycle acknowledgement is not configured",
         )
     })?;
-    state.authority.register(&input.space)?;
+    context.authority.register(&input.space)?;
     acker
         .ack_host_registered(&input.space, input.generation)
         .await?;
@@ -731,8 +734,8 @@ async fn write_actor(
     path: &str,
     space: &str,
     repo: &str,
-) -> Result<rsky_space::space_id::SpaceId, ApiError> {
-    let space = require_this_space(state, space)?;
+) -> Result<(Arc<AuthorityContext>, rsky_space::space_id::SpaceId), ApiError> {
+    let (context, space) = require_this_space(state, space)?;
     let url = format!("{}{}", state.public_url.trim_end_matches('/'), path);
     let access = verify_access(
         &RequestAuth {
@@ -752,7 +755,7 @@ async fn write_actor(
             "session subject does not match repo",
         ));
     }
-    Ok(space)
+    Ok((context, space))
 }
 
 async fn create_record(
@@ -760,7 +763,7 @@ async fn create_record(
     headers: HeaderMap,
     Json(input): Json<rsky_lexicon::com::atproto::space::CreateRecordInput>,
 ) -> Result<Json<rsky_lexicon::com::atproto::space::CreateRecordOutput>, ApiError> {
-    let space = write_actor(
+    let (context, space) = write_actor(
         &state,
         &headers,
         "/xrpc/com.atproto.space.createRecord",
@@ -794,7 +797,7 @@ async fn create_record(
         WriteOutcome::Created { cid } => cid.clone(),
         _ => return Err(HostError::Store("create did not create".into()).into()),
     };
-    record_write(&state, &space.uri(), &input.repo, &applied.rev).await?;
+    record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
     Ok(Json(
         rsky_lexicon::com::atproto::space::CreateRecordOutput {
             uri: space.record_uri(&input.repo, &input.collection, &rkey),
@@ -823,7 +826,7 @@ async fn delete_record(
     headers: HeaderMap,
     Json(input): Json<rsky_lexicon::com::atproto::space::DeleteRecordInput>,
 ) -> Result<Json<rsky_lexicon::com::atproto::space::DeleteRecordOutput>, ApiError> {
-    let space = write_actor(
+    let (context, space) = write_actor(
         &state,
         &headers,
         "/xrpc/com.atproto.space.deleteRecord",
@@ -845,7 +848,7 @@ async fn delete_record(
         )
         .await?;
     if !matches!(applied.outcomes[0], WriteOutcome::Noop) {
-        record_write(&state, &space.uri(), &input.repo, &applied.rev).await?;
+        record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
     }
     Ok(Json(
         rsky_lexicon::com::atproto::space::DeleteRecordOutput {
@@ -859,6 +862,7 @@ async fn delete_record(
 
 async fn record_write(
     state: &AppState,
+    context: &AuthorityContext,
     space: &str,
     repo: &str,
     rev: &str,
@@ -870,7 +874,7 @@ async fn record_write(
         .await?;
     let endpoints = state.registrations.endpoints(space, now).await?;
     fan_out_write(
-        state.notifier.clone(),
+        context.notifier.clone(),
         endpoints,
         NotifyWriteInput {
             space: space.to_string(),
@@ -886,7 +890,7 @@ async fn notify_write(
     headers: HeaderMap,
     Json(input): Json<NotifyWriteInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_this_space(&state, &input.space)?;
+    let (context, _) = require_this_space(&state, &input.space)?;
     let jwt = bearer(&headers)?;
     let claims = service_jwt::claims(jwt)?;
     // The repo host signs with the member's own key, so a notification may only
@@ -899,7 +903,7 @@ async fn notify_write(
         ));
     }
     let issuer_key = state.keys.signing_key(&claims.iss).await?;
-    let authority_did = state.authority.authority_did();
+    let authority_did = context.authority_did();
     let space_host_aud = format!("{authority_did}#atproto_space_host");
     service_jwt::verify(
         jwt,
@@ -915,7 +919,7 @@ async fn notify_write(
         .upsert_writer(&input.space, &input.repo, &input.rev, None, now)
         .await?;
     let endpoints = state.registrations.endpoints(&input.space, now).await?;
-    fan_out_write(state.notifier.clone(), endpoints, input);
+    fan_out_write(context.notifier.clone(), endpoints, input);
     Ok(Json(serde_json::json!({})))
 }
 
@@ -924,8 +928,12 @@ mod tests {
     use super::*;
     use crate::appaccess::AppAccess;
     use crate::attestation::{ClientMetadata, InMemoryJtiStore};
+    use crate::authority::Authority;
     use crate::error::Result as HostResult;
     use crate::membership::InMemoryMembership;
+    use crate::notify::Notifier;
+    use crate::policy::Policy;
+    use crate::registration::LifecycleAcker;
     use crate::signing::{test_signer, Signer};
     use crate::store::{InMemoryRegistrations, InMemoryWriterSet};
     use async_trait::async_trait;
@@ -1054,6 +1062,10 @@ mod tests {
         }
     }
 
+    fn ctx(state: &AppState) -> Arc<AuthorityContext> {
+        state.registry.for_space(&space_uri()).unwrap()
+    }
+
     fn fixture(app_access: AppAccess, members: &[&str]) -> Fixture {
         let space = SpaceId::new(
             "did:plc:communityauthority",
@@ -1062,19 +1074,23 @@ mod tests {
         );
         let authority = Authority::new(space, test_signer(), app_access);
         let (tx, writes) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState {
+        let registry = Arc::new(AuthorityRegistry::new());
+        registry.insert(Arc::new(AuthorityContext {
             authority: Arc::new(authority),
             policy: Arc::new(Policy::MemberList(Arc::new(InMemoryMembership::new(
                 members.iter().map(|m| m.to_string()),
             )))),
+            notifier: Arc::new(RecordingNotifier { tx }),
+            lifecycle_acker: None,
+        }));
+        let state = AppState {
+            registry,
             keys: Arc::new(UserKeys),
             metadata: Arc::new(crate::oauth::tests::AsJwks),
             jti_store: Arc::new(InMemoryJtiStore::default()),
             writers: Arc::new(InMemoryWriterSet::default()),
             registrations: Arc::new(InMemoryRegistrations::default()),
-            lifecycle_acker: None,
             docs: Arc::new(NoDocs),
-            notifier: Arc::new(RecordingNotifier { tx }),
             dpop: Arc::new(rsky_oauth::dpop::DpopManager::new(
                 None,
                 Box::new(rsky_oauth::dpop::InMemoryReplayStore::default()),
@@ -1132,7 +1148,7 @@ mod tests {
     }
 
     fn credential_for(state: &AppState) -> String {
-        state
+        ctx(state)
             .authority
             .mint_credential(NOW, "cred-jti".to_string(), &dpop_key().thumbprint())
             .unwrap()
@@ -1144,12 +1160,13 @@ mod tests {
             alg: rsky_crypto::constants::SECP256K1_JWT_ALG.to_string(),
             kid: Some("#atproto".to_string()),
         };
+        let context = ctx(state);
         let claims = SpaceClaims {
             iss: user.to_string(),
-            sub: state.authority.space_uri(),
+            sub: context.authority.space_uri(),
             aud: Some(format!(
                 "{}#atproto_space_host",
-                state.authority.authority_did()
+                context.authority_did()
             )),
             iat: NOW,
             exp: NOW + 60,
@@ -1433,8 +1450,7 @@ mod tests {
             urlencode(MEMBER)
         );
 
-        let wrong_key = f
-            .state
+        let wrong_key = ctx(&f.state)
             .authority
             .mint_credential(NOW, "wrong-key".to_string(), "another-thumbprint")
             .unwrap();
@@ -1488,8 +1504,7 @@ mod tests {
         assert_eq!(body["error"], "AuthenticationRequired");
 
         // A credential bound to someone else's key is refused as well.
-        let other_binding = f
-            .state
+        let other_binding = ctx(&f.state)
             .authority
             .mint_credential(NOW, "other-jti".to_string(), "some-other-thumbprint")
             .unwrap();
@@ -1527,8 +1542,8 @@ mod tests {
         credential::verify_space_credential(
             out["credential"].as_str().unwrap(),
             &space_uri(),
-            f.state.authority.authority_did(),
-            f.state.authority.signer.did_key(),
+            ctx(&f.state).authority_did(),
+            ctx(&f.state).authority.signer.did_key(),
             NOW,
         )
         .unwrap();
@@ -1716,7 +1731,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let aud = format!("{}#atproto_space_host", f.state.authority.authority_did());
+        let aud = format!("{}#atproto_space_host", ctx(&f.state).authority_did());
         let token = member_service_jwt(&aud, NOTIFY_WRITE_LXM);
         let path = "/xrpc/com.atproto.space.notifyWrite";
         let body = serde_json::json!({
@@ -1747,7 +1762,7 @@ mod tests {
     async fn notify_write_auth_failures() {
         let f = fixture(AppAccess::Open, &[]);
         let path = "/xrpc/com.atproto.space.notifyWrite";
-        let authority_did = f.state.authority.authority_did().to_string();
+        let authority_did = ctx(&f.state).authority_did().to_string();
         let body = serde_json::json!({
             "space": space_uri(),
             "repo": MEMBER,
@@ -1815,7 +1830,7 @@ mod tests {
         let mut broken = f.state.clone();
         broken.writers = Arc::new(BrokenWriters);
         let token = member_service_jwt(
-            &format!("{}#atproto_space_host", broken.authority.authority_did()),
+            &format!("{}#atproto_space_host", ctx(&broken).authority_did()),
             NOTIFY_WRITE_LXM,
         );
         let body = serde_json::json!({
@@ -1834,15 +1849,20 @@ mod tests {
 
     #[tokio::test]
     async fn registration_authenticates_the_managing_app_and_acks_before_activation() {
-        let mut f = fixture(AppAccess::Open, &[]);
-        f.state.policy = Arc::new(Policy::ManagingApp {
-            service_id: format!("{MEMBER}#bsky_fg"),
-            client: Arc::new(UnusedManagingApp),
-        });
+        let f = fixture(AppAccess::Open, &[]);
         let acker = Arc::new(RecordingAcker::default());
-        f.state.lifecycle_acker = Some(acker.clone());
+        let existing = ctx(&f.state);
+        f.state.registry.insert(Arc::new(AuthorityContext {
+            authority: existing.authority.clone(),
+            policy: Arc::new(Policy::ManagingApp {
+                service_id: format!("{MEMBER}#bsky_fg"),
+                client: Arc::new(UnusedManagingApp),
+            }),
+            notifier: existing.notifier.clone(),
+            lifecycle_acker: Some(acker.clone()),
+        }));
         let space = "at://did:plc:communityauthority/space/community.blacksky.feed/new";
-        let audience = format!("{}#atproto_space_host", f.state.authority.authority_did());
+        let audience = format!("{}#atproto_space_host", ctx(&f.state).authority_did());
         let token = service_jwt::mint(
             &user_signer(),
             MEMBER,
@@ -1863,7 +1883,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(f.state.authority.resolve_registered(space).is_ok());
+        assert!(ctx(&f.state).authority.resolve_registered(space).is_ok());
         assert_eq!(
             acker.0.lock().unwrap().as_slice(),
             &[(space.to_string(), 7)]

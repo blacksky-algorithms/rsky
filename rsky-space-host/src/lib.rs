@@ -38,6 +38,6 @@ pub mod service_jwt;
 pub mod signing;
 pub mod store;
 
-pub use authority::{Authority, KeyResolver};
+pub use authority::{Authority, AuthorityContext, AuthorityRegistry, KeyResolver};
 pub use error::{HostError, Result};
 pub use policy::Policy;

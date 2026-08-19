@@ -8,7 +8,7 @@ use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::space_id::SpaceId;
 use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::HttpMetadataFetcher;
-use rsky_space_host::authority::Authority;
+use rsky_space_host::authority::{Authority, AuthorityContext, AuthorityRegistry};
 use rsky_space_host::config::{Config, PolicyMode};
 use rsky_space_host::http::{router, AppState, DEFAULT_REGISTRATION_TTL_SECS};
 use rsky_space_host::keys::{DocKeyResolver, ResolverDocSource};
@@ -86,31 +86,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repos = Arc::new(SqliteRepos::open(&cfg.db_path)?);
     let commit_signer = Arc::new(PdsSeam::open(&cfg.actor_store_dir)?);
     let ticker = std::sync::Mutex::new(rsky_common::tid::Ticker::new());
-    let state = AppState {
+    let registry = Arc::new(AuthorityRegistry::new());
+    registry.insert(Arc::new(AuthorityContext {
         authority: Arc::new(authority),
         policy: Arc::new(policy),
+        notifier: Arc::new(HttpNotifier::new(
+            cfg.authority_did.clone(),
+            signer.clone(),
+            now.clone(),
+            jti.clone(),
+        )),
+        lifecycle_acker: (cfg.policy == PolicyMode::ManagingApp).then(|| {
+            Arc::new(HttpLifecycleAcker::new(
+                cfg.lifecycle_url.clone(),
+                cfg.lifecycle_service_did.clone(),
+                cfg.authority_did.clone(),
+                signer,
+                now.clone(),
+                jti.clone(),
+            )) as Arc<dyn rsky_space_host::registration::LifecycleAcker>
+        }),
+    }));
+    let state = AppState {
+        registry,
         keys: Arc::new(DocKeyResolver::new(docs.clone())),
         docs,
         metadata: Arc::new(HttpMetadataFetcher::new()),
         jti_store: store.clone(),
         writers: store.clone(),
         registrations: store,
-        lifecycle_acker: (cfg.policy == PolicyMode::ManagingApp).then(|| {
-            Arc::new(HttpLifecycleAcker::new(
-                cfg.lifecycle_url.clone(),
-                cfg.lifecycle_service_did.clone(),
-                cfg.authority_did.clone(),
-                signer.clone(),
-                now.clone(),
-                jti.clone(),
-            )) as Arc<dyn rsky_space_host::registration::LifecycleAcker>
-        }),
-        notifier: Arc::new(HttpNotifier::new(
-            cfg.authority_did.clone(),
-            signer,
-            now.clone(),
-            jti.clone(),
-        )),
         dpop: Arc::new(DpopManager::new(
             None,
             Box::new(InMemoryReplayStore::default()),
@@ -131,9 +135,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
+    let bootstrap = state.registry.authority(&cfg.authority_did)?;
     tracing::info!(
-        space = %state.authority.space_uri(),
-        authority_key = %state.authority.signer.did_key(),
+        space = %bootstrap.authority.space_uri(),
+        authority_key = %bootstrap.authority.signer.did_key(),
         policy = ?cfg.policy,
         bind = %cfg.bind,
         db = %cfg.db_path,

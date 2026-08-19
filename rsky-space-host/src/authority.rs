@@ -8,14 +8,75 @@ use rsky_space::credential::{
     self, Confirmation, JwtHeader, SpaceClaims, CREDENTIAL_TTL_SECS, CREDENTIAL_TYP,
 };
 use rsky_space::space_id::SpaceId;
-use std::collections::BTreeSet;
-use std::sync::RwLock;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock};
 
 use crate::appaccess::AppAccess;
 use crate::attestation::{verify_client_attestation, JtiStore, MetadataFetcher};
 use crate::error::{HostError, Result};
+use crate::notify::Notifier;
 use crate::policy::Policy;
+use crate::registration::LifecycleAcker;
 use crate::signing::Signer;
+
+/// Everything derived from one space authority: the authority itself plus the
+/// collaborators that mint, verify, or sign in its name.
+pub struct AuthorityContext {
+    pub authority: Arc<Authority>,
+    pub policy: Arc<Policy>,
+    pub notifier: Arc<dyn Notifier>,
+    pub lifecycle_acker: Option<Arc<dyn LifecycleAcker>>,
+}
+
+impl AuthorityContext {
+    pub fn authority_did(&self) -> &str {
+        self.authority.authority_did()
+    }
+}
+
+/// The authorities this host answers for, keyed by authority DID.
+#[derive(Default)]
+pub struct AuthorityRegistry {
+    contexts: RwLock<BTreeMap<String, Arc<AuthorityContext>>>,
+}
+
+impl AuthorityRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, context: Arc<AuthorityContext>) {
+        self.contexts
+            .write()
+            .expect("authority registry")
+            .insert(context.authority_did().to_string(), context);
+    }
+
+    pub fn authority(&self, authority_did: &str) -> Result<Arc<AuthorityContext>> {
+        self.contexts
+            .read()
+            .expect("authority registry")
+            .get(authority_did)
+            .cloned()
+            .ok_or_else(|| HostError::SpaceNotFound(authority_did.to_string()))
+    }
+
+    pub fn for_space(&self, space_uri: &str) -> Result<Arc<AuthorityContext>> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        self.authority(&space.authority)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))
+    }
+
+    pub fn contexts(&self) -> Vec<Arc<AuthorityContext>> {
+        self.contexts
+            .read()
+            .expect("authority registry")
+            .values()
+            .cloned()
+            .collect()
+    }
+}
 
 /// Resolves an account's atproto signing `did:key` (from its DID document), used
 /// to verify a delegation token minted by that user's PDS.
