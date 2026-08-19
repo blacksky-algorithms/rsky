@@ -16,14 +16,23 @@ pub struct Config {
     #[arg(long, env = "DAEMON_SPACES_URL", default_value = "")]
     pub spaces_url: String,
     /// Managing-app API key for dynamic space discovery.
-    #[arg(long, env = "DAEMON_SPACES_API_KEY", default_value = "", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "DAEMON_SPACES_API_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
     pub spaces_api_key: String,
     /// Optional authority filter for dynamic discovery; unset, the daemon
     /// accepts spaces from every authority the managing app serves.
     #[arg(long, env = "DAEMON_AUTHORITY_DID", default_value = "")]
     pub authority_did: String,
     /// Space type accepted from the managing app.
-    #[arg(long, env = "DAEMON_SPACE_TYPE", default_value = "community.blacksky.feed")]
+    #[arg(
+        long,
+        env = "DAEMON_SPACE_TYPE",
+        default_value = "community.blacksky.feed"
+    )]
     pub space_type: String,
 
     /// The space host (authority) base URL, for listRepos + credential mint.
@@ -216,31 +225,57 @@ mod tests {
         assert!(cfg.validate().is_ok());
 
         let discovery_only = Config::try_parse_from([
-            "rsky-daemon", "--space-host-url", "https://host.example",
-            "--service-identity", "did:web:syncer.example", "--spaces-url", "https://feeds.example",
-            "--spaces-api-key", "key", "--authority-did", "did:plc:authority",
-        ]).unwrap();
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+            "--spaces-api-key",
+            "key",
+            "--authority-did",
+            "did:plc:authority",
+        ])
+        .unwrap();
         assert!(discovery_only.validate().is_ok());
         assert_eq!(
             discovery_only.authority_filter().as_deref(),
             Some("did:plc:authority")
         );
         let all_authorities = Config::try_parse_from([
-            "rsky-daemon", "--space-host-url", "https://host.example",
-            "--service-identity", "did:web:syncer.example", "--spaces-url", "https://feeds.example",
-            "--spaces-api-key", "key",
-        ]).unwrap();
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+            "--spaces-api-key",
+            "key",
+        ])
+        .unwrap();
         assert!(all_authorities.validate().is_ok());
         assert!(all_authorities.authority_filter().is_none());
         let keyless_discovery = Config::try_parse_from([
-            "rsky-daemon", "--space-host-url", "https://host.example",
-            "--service-identity", "did:web:syncer.example", "--spaces-url", "https://feeds.example",
-        ]).unwrap();
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+        ])
+        .unwrap();
         assert!(keyless_discovery.validate().is_err());
         let neither = Config::try_parse_from([
-            "rsky-daemon", "--space-host-url", "https://host.example",
-            "--service-identity", "did:web:syncer.example",
-        ]).unwrap();
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+        ])
+        .unwrap();
         assert!(neither.validate().is_err());
     }
 }

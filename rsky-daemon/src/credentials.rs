@@ -4,14 +4,14 @@
 
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
-use rsky_space::credential::{CREDENTIAL_TTL_SECS, decode};
+use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::xrpc::{SpaceHostClient, check, http_client, net_err};
-use crate::{HttpSpaceHost, service_jwt::ServiceJwtIssuer};
+use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
+use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -94,12 +94,17 @@ pub struct SpaceCredentialSource {
 }
 impl SpaceCredentialSource {
     pub fn new(provider: Arc<InternalCredentialProvider>, space: impl Into<String>) -> Self {
-        Self { provider, space: space.into() }
+        Self {
+            provider,
+            space: space.into(),
+        }
     }
 }
 #[async_trait]
 impl CredentialSource for SpaceCredentialSource {
-    async fn credential(&self, now: u64) -> Result<String> { self.provider.credential_for(&self.space, now).await }
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.provider.credential_for(&self.space, now).await
+    }
 }
 impl InternalCredentialProvider {
     pub fn new(
@@ -197,7 +202,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use rsky_lexicon::com::atproto::space::ListReposOutput;
-    use rsky_space::credential::{CREDENTIAL_TYP, JwtHeader, SpaceClaims, encode};
+    use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};

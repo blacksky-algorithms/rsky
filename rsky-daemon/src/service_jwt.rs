@@ -24,6 +24,17 @@ impl ServiceJwtIssuer {
     }
 
     pub fn mint(&self, audience: &str, now: u64, jti: &str) -> Result<String> {
+        self.mint_for(audience, MINT_LXM, now, 60, jti)
+    }
+
+    pub fn mint_for(
+        &self,
+        audience: &str,
+        lxm: &str,
+        now: u64,
+        ttl_secs: u64,
+        jti: &str,
+    ) -> Result<String> {
         #[derive(Serialize)]
         struct Header<'a> {
             typ: &'a str,
@@ -49,8 +60,8 @@ impl ServiceJwtIssuer {
             serde_json::to_vec(&Claims {
                 iss: &self.did,
                 aud: audience,
-                exp: now + 60,
-                lxm: MINT_LXM,
+                exp: now + ttl_secs,
+                lxm,
                 jti,
                 iat: now,
             })

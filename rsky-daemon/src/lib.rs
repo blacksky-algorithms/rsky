@@ -23,6 +23,7 @@ pub mod credentials;
 pub mod dpop;
 pub mod engine;
 pub mod error;
+pub mod feeds;
 pub mod index;
 pub mod journal;
 pub mod notify;
@@ -37,19 +38,26 @@ pub mod sqlite_index;
 pub mod xrpc;
 
 pub use credentials::{
-    CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
-    PdsDelegationSource, SpaceCredentialSource, StaticCredential, unix_now,
+    unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
+    PdsDelegationSource, SpaceCredentialSource, StaticCredential,
 };
-pub use engine::{CommitKeyResolver, SyncOutcome, sync_repo};
+pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
-pub use index::{IndexMutation, InMemoryIndex, JournaledBatch, SpaceIndex};
+pub use feeds::{
+    FeedsProjector, HttpProjectionIngress, ProjectRecord, ProjectRecordsRequest, ProjectionIngress,
+    ProjectionOperation,
+};
+pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
 pub use journal::{drain_all, JournalConsumer, SharedJournalConsumer};
+pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use projection::Projector;
-pub use router::{Router, SyncEvent};
-pub use notify::{NotifyState, WriteNotice, router as notify_router};
 pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
-pub use runner::{MultiRunnerOptions, RunnerOptions, SweepReport, run, run_multi, sync_repo_healing, sync_space_once};
+pub use router::{Router, SyncEvent};
+pub use runner::{
+    run, run_multi, sync_repo_healing, sync_space_once, MultiRunnerOptions, RunnerOptions,
+    SweepReport,
+};
 pub use spaces::{
     CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
 };

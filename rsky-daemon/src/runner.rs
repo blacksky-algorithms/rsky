@@ -3,9 +3,9 @@
 //! to full-state recovery when incremental sync cannot proceed.
 
 use rsky_lexicon::com::atproto::space::RepoRef;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
@@ -16,15 +16,24 @@ use crate::index::SpaceIndex;
 use crate::notify::WriteNotice;
 use crate::recovery::recover_repo;
 use crate::repohost::RepoHostClient;
-use crate::xrpc::SpaceHostClient;
 use crate::spaces::{SpaceRegistry, SpaceSource};
+use crate::xrpc::SpaceHostClient;
 
 const REGISTER_RETRY_SECS: u64 = 30;
 const MIN_REREGISTER_SECS: u64 = 30;
 
 /// Builds a repo-host client bound to the current space credential.
 pub type RepoHostFactory = Box<dyn Fn(String) -> Arc<dyn RepoHostClient> + Send + Sync>;
-pub type MultiSpaceFactory = Arc<dyn Fn(&str) -> Result<(Arc<dyn CredentialSource>, RepoHostFactory, Arc<dyn SpaceIndex>)> + Send + Sync>;
+pub type MultiSpaceFactory = Arc<
+    dyn Fn(
+            &str,
+        ) -> Result<(
+            Arc<dyn CredentialSource>,
+            RepoHostFactory,
+            Arc<dyn SpaceIndex>,
+        )> + Send
+        + Sync,
+>;
 
 pub struct MultiRunnerOptions {
     pub refresh_interval_secs: u64,
@@ -48,27 +57,38 @@ pub async fn run_multi(
     mut notices: mpsc::Receiver<WriteNotice>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    struct Worker { generation: i64, stop: watch::Sender<bool>, notices: mpsc::Sender<WriteNotice>, handle: tokio::task::JoinHandle<()> }
+    struct Worker {
+        generation: i64,
+        stop: watch::Sender<bool>,
+        notices: mpsc::Sender<WriteNotice>,
+        handle: tokio::task::JoinHandle<()>,
+    }
     let mut workers: HashMap<String, Worker> = HashMap::new();
     let mut refresh = tokio::time::interval(Duration::from_secs(opts.refresh_interval_secs.max(1)));
-    loop { tokio::select! {
-        _ = shutdown.changed() => break,
-        _ = refresh.tick() => {
-            let desired = match source.spaces().await { Ok(value) => value, Err(error) => { tracing::warn!(error = %error, "space source unavailable; keeping current workers"); continue; } };
-            let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
-            for space in stale { if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; } }
-            for (space, target) in &desired { if workers.contains_key(space) { continue; }
-                let (creds, repo, index) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
-                let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
-                let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), now_fn: opts.now_fn };
-                let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), rx, stop_rx));
-                workers.insert(space.clone(), Worker { generation: target.generation, stop, notices: tx, handle });
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = refresh.tick() => {
+                let desired = match source.spaces().await { Ok(value) => value, Err(error) => { tracing::warn!(error = %error, "space source unavailable; keeping current workers"); continue; } };
+                let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
+                for space in stale { if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; } }
+                for (space, target) in &desired { if workers.contains_key(space) { continue; }
+                    let (creds, repo, index) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
+                    let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
+                    let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), now_fn: opts.now_fn };
+                    let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), rx, stop_rx));
+                    workers.insert(space.clone(), Worker { generation: target.generation, stop, notices: tx, handle });
+                }
+                registry.replace(workers.keys().cloned().collect());
             }
-            registry.replace(workers.keys().cloned().collect());
+            Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
         }
-        Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
-    }}
-    for (space, worker) in workers { let _ = worker.stop.send(true); let _ = worker.handle.await; tracing::info!(%space, "stopped"); }
+    }
+    for (space, worker) in workers {
+        let _ = worker.stop.send(true);
+        let _ = worker.handle.await;
+        tracing::info!(%space, "stopped");
+    }
     registry.replace(Default::default());
 }
 

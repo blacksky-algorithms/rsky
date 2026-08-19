@@ -244,7 +244,11 @@ mod tests {
     ) -> NotifyState {
         NotifyState {
             space_uri: SPACE.to_string(),
-            registry: { let registry = SpaceRegistry::new(); registry.insert(SPACE); registry },
+            registry: {
+                let registry = SpaceRegistry::new();
+                registry.insert(SPACE);
+                registry
+            },
             service_identity: SYNCER.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,

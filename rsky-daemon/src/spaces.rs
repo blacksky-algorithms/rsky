@@ -261,12 +261,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        assert!(
-            CombinedSource(vec![Box::new(source(server.uri()))])
-                .spaces()
-                .await
-                .is_err()
-        );
+        assert!(CombinedSource(vec![Box::new(source(server.uri()))])
+            .spaces()
+            .await
+            .is_err());
     }
     #[test]
     fn registry_tracks_spaces() {
