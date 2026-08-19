@@ -1,20 +1,27 @@
-//! Minimal EC JWK (P-256) support for verifying ES256-signed JWTs
+//! Minimal EC JWK support for verifying ES256- and ES256K-signed JWTs
 //! (proposal §Client attestation).
 //!
 //! A space authority verifies a client attestation by resolving the client's
 //! published JWKS and checking the JWT signature against the key named by the
-//! attestation's `kid`. Only `kty: "EC"` / `crv: "P-256"` keys are supported,
-//! matching the attestation's required `alg: "ES256"`.
+//! attestation's `kid`. Only `kty: "EC"` keys on the `P-256` and `secp256k1`
+//! curves are supported. Each verifier requires its own curve, so a key can
+//! never be verified under an algorithm it was not issued for.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, SpaceError};
 
 const COORD_LEN: usize = 32;
 
-/// An EC public JWK restricted to the P-256 curve.
+/// The JWK `crv` of an ES256 key.
+pub const CRV_P256: &str = "P-256";
+/// The JWK `crv` of an ES256K key.
+pub const CRV_SECP256K1: &str = "secp256k1";
+
+/// An EC public JWK on a supported curve.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EcJwk {
     pub kty: String,
@@ -42,9 +49,21 @@ impl EcJwk {
                 self.kty
             )));
         }
-        if self.crv != "P-256" {
+        if self.crv != CRV_P256 && self.crv != CRV_SECP256K1 {
             return Err(SpaceError::InvalidJwk(format!(
                 "unsupported crv: {}",
+                self.crv
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate the key and require one specific curve.
+    pub fn require_crv(&self, crv: &str) -> Result<()> {
+        self.validate()?;
+        if self.crv != crv {
+            return Err(SpaceError::InvalidJwk(format!(
+                "expected crv {crv}, got {}",
                 self.crv
             )));
         }
@@ -82,9 +101,27 @@ fn decode_coord(b64: &str, name: &str) -> Result<Vec<u8>> {
 /// `sig` must be the compact 64-byte low-S `r || s` encoding; anything else is
 /// rejected as a bad signature.
 pub fn verify_es256(jwk: &EcJwk, signing_input: &[u8], sig: &[u8]) -> Result<()> {
-    jwk.validate()?;
+    jwk.require_crv(CRV_P256)?;
     let point = jwk.sec1_point()?;
     let ok = rsky_crypto::p256::operations::verify_sig(&point, signing_input, sig, None)
+        .map_err(|e| SpaceError::Crypto(e.to_string()))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(SpaceError::BadSignature)
+    }
+}
+
+/// Verify an ES256K signature over a JWT signing input
+/// (`header_b64.payload_b64` bytes) against a secp256k1 JWK.
+///
+/// `sig` must be the compact 64-byte low-S `r || s` encoding; anything else is
+/// rejected as a bad signature.
+pub fn verify_es256k(jwk: &EcJwk, signing_input: &[u8], sig: &[u8]) -> Result<()> {
+    jwk.require_crv(CRV_SECP256K1)?;
+    let point = jwk.sec1_point()?;
+    let digest = Sha256::digest(signing_input);
+    let ok = rsky_crypto::secp256k1::operations::verify_sig(&point, &digest, sig, None)
         .map_err(|e| SpaceError::Crypto(e.to_string()))?;
     if ok {
         Ok(())
@@ -253,6 +290,81 @@ mod tests {
             verify_es256(&jwk, INPUT, &sig),
             Err(SpaceError::Crypto(_))
         ));
+    }
+
+    fn k1_key() -> secp256k1::SecretKey {
+        secp256k1::SecretKey::from_slice(&[0x63u8; 32]).unwrap()
+    }
+
+    fn k1_jwk_for(key: &secp256k1::SecretKey) -> EcJwk {
+        let secp = secp256k1::Secp256k1::new();
+        let point = key.public_key(&secp).serialize_uncompressed();
+        EcJwk {
+            kty: "EC".to_string(),
+            crv: CRV_SECP256K1.to_string(),
+            x: URL_SAFE_NO_PAD.encode(&point[1..33]),
+            y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+            kid: None,
+        }
+    }
+
+    fn k1_sign(key: &secp256k1::SecretKey, input: &[u8]) -> Vec<u8> {
+        let secp = secp256k1::Secp256k1::new();
+        let digest = Sha256::digest(input);
+        let message = secp256k1::Message::from_digest_slice(&digest).unwrap();
+        secp.sign_ecdsa(&message, key).serialize_compact().to_vec()
+    }
+
+    #[test]
+    fn es256k_verify_roundtrip() {
+        let key = k1_key();
+        verify_es256k(&k1_jwk_for(&key), INPUT, &k1_sign(&key, INPUT)).unwrap();
+    }
+
+    #[test]
+    fn es256k_wrong_key_rejected() {
+        let sig = k1_sign(&k1_key(), INPUT);
+        let other = secp256k1::SecretKey::from_slice(&[0x64u8; 32]).unwrap();
+        assert!(matches!(
+            verify_es256k(&k1_jwk_for(&other), INPUT, &sig),
+            Err(SpaceError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn es256k_tampered_input_rejected() {
+        let key = k1_key();
+        let sig = k1_sign(&key, INPUT);
+        let mut tampered = INPUT.to_vec();
+        tampered[0] ^= 0xFF;
+        assert!(matches!(
+            verify_es256k(&k1_jwk_for(&key), &tampered, &sig),
+            Err(SpaceError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn curve_and_algorithm_must_agree() {
+        let k1 = k1_key();
+        let k1_sig = k1_sign(&k1, INPUT);
+        assert!(matches!(
+            verify_es256(&k1_jwk_for(&k1), INPUT, &k1_sig),
+            Err(SpaceError::InvalidJwk(msg)) if msg.contains("crv")
+        ));
+
+        let p = signing_key();
+        let p_sig = sign(&p, INPUT);
+        assert!(matches!(
+            verify_es256k(&jwk_for(&p, None), INPUT, &p_sig),
+            Err(SpaceError::InvalidJwk(msg)) if msg.contains("crv")
+        ));
+    }
+
+    #[test]
+    fn es256k_jwk_survives_json_roundtrip() {
+        let jwk = k1_jwk_for(&k1_key());
+        let json = serde_json::to_string(&jwk).unwrap();
+        assert_eq!(EcJwk::from_json(&json).unwrap(), jwk);
     }
 
     #[test]

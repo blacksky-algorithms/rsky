@@ -17,7 +17,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rsky_space::jwk::{verify_es256, EcJwk, JwkSet};
+use rsky_space::jwk::{verify_es256, verify_es256k, EcJwk, JwkSet};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -32,7 +32,8 @@ pub const HS256: &str = "HS256";
 /// What an access token may be signed with. `HS256` is not a weakening: it is
 /// what a standalone PDS actually issues (see `verify_as_signature`).
 pub const SUPPORTED_TOKEN_ALGS: [&str; 2] = ["ES256", "HS256"];
-pub const SUPPORTED_PROOF_ALGS: [&str; 1] = ["ES256"];
+pub const ES256K: &str = "ES256K";
+pub const SUPPORTED_PROOF_ALGS: [&str; 2] = ["ES256", ES256K];
 
 /// How long a DPoP proof stays acceptable after its `iat`.
 pub const MAX_DPOP_AGE_SECS: u64 = 300;
@@ -353,8 +354,11 @@ async fn verify_dpop_proof(
         .jwk
         .as_ref()
         .ok_or_else(|| auth_err("proof carries no jwk"))?;
-    verify_es256(jwk, &decoded.signing_input, &decoded.signature)
-        .map_err(|e| auth_err(format!("proof signature: {e}")))?;
+    let verified = match decoded.header.alg.as_str() {
+        ES256K => verify_es256k(jwk, &decoded.signing_input, &decoded.signature),
+        _ => verify_es256(jwk, &decoded.signing_input, &decoded.signature),
+    };
+    verified.map_err(|e| auth_err(format!("proof signature: {e}")))?;
 
     let claims = &decoded.claims;
     if !claims.htm.eq_ignore_ascii_case(request.method) {
@@ -526,6 +530,125 @@ pub(crate) mod tests {
 
     async fn check(token: &str, proof: &str) -> Result<AccessContext> {
         check_at(token, proof, "POST", URL, NOW, &InMemoryJtiStore::default()).await
+    }
+
+    pub(crate) fn k1_client_key() -> secp256k1::SecretKey {
+        secp256k1::SecretKey::from_slice(&[0x33u8; 32]).unwrap()
+    }
+
+    pub(crate) fn k1_jwk_of(key: &secp256k1::SecretKey) -> EcJwk {
+        let point = key
+            .public_key(secp256k1::SECP256K1)
+            .serialize_uncompressed();
+        EcJwk {
+            kty: "EC".to_string(),
+            crv: "secp256k1".to_string(),
+            x: URL_SAFE_NO_PAD.encode(&point[1..33]),
+            y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+            kid: None,
+        }
+    }
+
+    pub(crate) fn k1_sign_jwt(
+        key: &secp256k1::SecretKey,
+        header: serde_json::Value,
+        claims: serde_json::Value,
+    ) -> String {
+        let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let input = format!("{header}.{claims}");
+        let digest = Sha256::digest(input.as_bytes());
+        let message = secp256k1::Message::from_digest_slice(&digest).unwrap();
+        let sig = secp256k1::SECP256K1.sign_ecdsa(&message, key);
+        format!(
+            "{input}.{}",
+            URL_SAFE_NO_PAD.encode(sig.serialize_compact())
+        )
+    }
+
+    /// A proof whose header names `jwk_key` but whose signature is made by
+    /// `signing_key`; equal keys give an ordinary well-formed proof.
+    fn k1_proof(
+        jwk_key: &secp256k1::SecretKey,
+        signing_key: &secp256k1::SecretKey,
+        claims: serde_json::Value,
+    ) -> String {
+        k1_sign_jwt(
+            signing_key,
+            json!({"typ": DPOP_TYP, "alg": ES256K, "jwk": k1_jwk_of(jwk_key)}),
+            claims,
+        )
+    }
+
+    fn token_bound_to(jkt: String) -> String {
+        let mut claims = token_claims();
+        claims["cnf"] = json!({ "jkt": jkt });
+        token_with(claims)
+    }
+
+    #[tokio::test]
+    async fn accepts_an_es256k_dpop_proof() {
+        let key = k1_client_key();
+        let token = token_bound_to(jwk_thumbprint(&k1_jwk_of(&key)));
+        let proof = k1_proof(&key, &key, proof_claims(&token));
+        let context = check(&token, &proof).await.unwrap();
+        assert_eq!(context.did, AUTHOR);
+        assert_eq!(context.jkt, jwk_thumbprint(&k1_jwk_of(&key)));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_es256k_proof_signed_by_another_key() {
+        let key = k1_client_key();
+        let impostor = secp256k1::SecretKey::from_slice(&[0x34u8; 32]).unwrap();
+        let token = token_bound_to(jwk_thumbprint(&k1_jwk_of(&key)));
+        let proof = k1_proof(&key, &impostor, proof_claims(&token));
+        assert!(check(&token, &proof).await.is_err());
+    }
+
+    /// The bound key is the one the token names, not whichever key presents a
+    /// self-consistent proof.
+    #[tokio::test]
+    async fn rejects_an_es256k_proof_for_an_unbound_key() {
+        let bound = k1_client_key();
+        let other = secp256k1::SecretKey::from_slice(&[0x35u8; 32]).unwrap();
+        let token = token_bound_to(jwk_thumbprint(&k1_jwk_of(&bound)));
+        let proof = k1_proof(&other, &other, proof_claims(&token));
+        assert!(check(&token, &proof).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_es256k_proof_carrying_a_p256_key() {
+        let token = token();
+        let proof = sign_jwt(
+            &client_key(),
+            json!({"typ": DPOP_TYP, "alg": ES256K, "jwk": jwk_of(&client_key(), None)}),
+            proof_claims(&token),
+        );
+        assert!(check(&token, &proof).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_es256_proof_carrying_a_secp256k1_key() {
+        let key = k1_client_key();
+        let token = token_bound_to(jwk_thumbprint(&k1_jwk_of(&key)));
+        let proof = k1_sign_jwt(
+            &key,
+            json!({"typ": DPOP_TYP, "alg": "ES256", "jwk": k1_jwk_of(&key)}),
+            proof_claims(&token),
+        );
+        assert!(check(&token, &proof).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_unsupported_proof_alg() {
+        let key = k1_client_key();
+        let token = token_bound_to(jwk_thumbprint(&k1_jwk_of(&key)));
+        let proof = k1_sign_jwt(
+            &key,
+            json!({"typ": DPOP_TYP, "alg": "ES512", "jwk": k1_jwk_of(&key)}),
+            proof_claims(&token),
+        );
+        assert!(check(&token, &proof).await.is_err());
     }
 
     const HS_SECRET: &[u8] = b"a-pds-jwt-secret";
