@@ -23,6 +23,7 @@ impl<I: ProjectionIngress> AppviewProjector<I> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn op(
         &self,
         author: &str,
