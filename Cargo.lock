@@ -8403,6 +8403,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "ipld-core",
  "iroh-car",
  "p256 0.13.2",
  "rsky-common",

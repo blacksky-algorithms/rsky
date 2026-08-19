@@ -133,6 +133,20 @@ impl From<HostError> for ApiError {
                 "SpaceNotFound",
                 "space not hosted here",
             ),
+            HostError::RepoNotFound => {
+                Self::new(StatusCode::NOT_FOUND, "RepoNotFound", "repo not found")
+            }
+            HostError::InvalidRequest(message) => Self::invalid_request(message.clone()),
+            HostError::InvalidSwap => Self::new(
+                StatusCode::CONFLICT,
+                "InvalidSwap",
+                "swap cid did not match",
+            ),
+            HostError::HistoryUnavailable => Self::new(
+                StatusCode::GONE,
+                "HistoryUnavailable",
+                "requested history is no longer available",
+            ),
             HostError::Key(_)
             | HostError::Membership(_)
             | HostError::ManagingApp(_)

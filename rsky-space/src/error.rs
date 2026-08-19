@@ -35,6 +35,8 @@ pub enum SpaceError {
     Car(String),
     #[error("decode error: {0}")]
     Decode(String),
+    #[error("record is {size} bytes, over the {max}-byte limit")]
+    RecordTooLarge { size: usize, max: usize },
     #[error("invalid jwk: {0}")]
     InvalidJwk(String),
     #[error("crypto error: {0}")]

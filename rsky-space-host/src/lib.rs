@@ -21,6 +21,7 @@
 pub mod appaccess;
 pub mod attestation;
 pub mod authority;
+pub mod commits;
 pub mod config;
 pub mod error;
 pub mod http;
@@ -29,6 +30,7 @@ pub mod managing_app;
 pub mod membership;
 pub mod notify;
 pub mod policy;
+pub mod repo;
 pub mod service_jwt;
 pub mod signing;
 pub mod store;
