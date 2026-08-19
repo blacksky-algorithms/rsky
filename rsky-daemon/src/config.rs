@@ -9,8 +9,21 @@ use clap::Parser;
 )]
 pub struct Config {
     /// The space to sync: `at://{authority}/space/{type}/{skey}`.
-    #[arg(long, env = "DAEMON_SPACE_URI")]
+    #[arg(long, env = "DAEMON_SPACE_URI", default_value = "")]
     pub space_uri: String,
+
+    /// Managing-app base URL for dynamic space discovery.
+    #[arg(long, env = "DAEMON_SPACES_URL", default_value = "")]
+    pub spaces_url: String,
+    /// Managing-app API key for dynamic space discovery.
+    #[arg(long, env = "DAEMON_SPACES_API_KEY", default_value = "", hide_env_values = true)]
+    pub spaces_api_key: String,
+    /// Authority whose spaces this daemon discovers.
+    #[arg(long, env = "DAEMON_AUTHORITY_DID", default_value = "")]
+    pub authority_did: String,
+    /// Space type accepted from the managing app.
+    #[arg(long, env = "DAEMON_SPACE_TYPE", default_value = "community.blacksky.feed")]
+    pub space_type: String,
 
     /// The space host (authority) base URL, for listRepos + credential mint.
     #[arg(long, env = "DAEMON_SPACE_HOST_URL")]
@@ -84,6 +97,20 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.space_uri.is_empty() && self.spaces_url.is_empty() {
+            return Err("DAEMON_SPACE_URI or DAEMON_SPACES_URL is required".into());
+        }
+        if !self.spaces_url.is_empty()
+            && (self.spaces_api_key.is_empty() || self.authority_did.is_empty())
+        {
+            return Err(
+                "DAEMON_SPACES_API_KEY and DAEMON_AUTHORITY_DID are required with DAEMON_SPACES_URL"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
     pub fn repo_host_url(&self) -> &str {
         if self.repo_host_url.is_empty() {
             &self.space_host_url
@@ -174,5 +201,18 @@ mod tests {
         assert_eq!(cfg.notify_endpoint(), "http://0.0.0.0:9000");
         assert_eq!(cfg.index_db_path, "/data/space.sqlite");
         assert_eq!(cfg.sweep_interval_secs, 60);
+        assert!(cfg.validate().is_ok());
+
+        let discovery_only = Config::try_parse_from([
+            "rsky-daemon", "--space-host-url", "https://host.example",
+            "--service-identity", "did:web:syncer.example", "--spaces-url", "https://feeds.example",
+            "--spaces-api-key", "key", "--authority-did", "did:plc:authority",
+        ]).unwrap();
+        assert!(discovery_only.validate().is_ok());
+        let neither = Config::try_parse_from([
+            "rsky-daemon", "--space-host-url", "https://host.example",
+            "--service-identity", "did:web:syncer.example",
+        ]).unwrap();
+        assert!(neither.validate().is_err());
     }
 }
