@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::attestation::{JtiStore, MetadataFetcher};
-use crate::authority::{AuthorityContext, AuthorityRegistry, KeyResolver};
+use crate::authority::{AuthorityContext, AuthorityFactory, AuthorityRegistry, KeyResolver};
 use crate::commits::CommitSigner;
 use crate::error::HostError;
 use crate::keys::DocSource;
@@ -31,7 +31,7 @@ use crate::oauth::{verify_access, AuthConfig, RequestAuth};
 use crate::registration::REGISTER_SPACE_LXM;
 use crate::repo::{RepoStore, RepoWrite, WriteOutcome, MAX_RECORD_BYTES};
 use crate::service_jwt;
-use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
+use crate::store::{HostedSpaceStore, RegistrationStore, Subscriber, WriterSetStore};
 
 pub const DEFAULT_REGISTRATION_TTL_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_LIST_LIMIT: i64 = 100;
@@ -40,6 +40,9 @@ const MAX_LIST_LIMIT: i64 = 1000;
 #[derive(Clone)]
 pub struct AppState {
     pub registry: Arc<AuthorityRegistry>,
+    /// Builds the context for an authority first seen at registration time.
+    pub authority_factory: AuthorityFactory,
+    pub hosted_spaces: Arc<dyn HostedSpaceStore>,
     pub keys: Arc<dyn KeyResolver>,
     pub metadata: Arc<dyn MetadataFetcher>,
     pub jti_store: Arc<dyn JtiStore>,
@@ -704,7 +707,24 @@ async fn register_space(
     if input.generation < 1 {
         return Err(ApiError::invalid_request("generation must be positive"));
     }
-    let context = state.registry.for_space(&input.space)?;
+    let (context, adopted) = match state.registry.for_space(&input.space) {
+        Ok(context) => (context, false),
+        Err(_) => {
+            let space = rsky_space::space_id::SpaceId::parse(&input.space).map_err(|_| {
+                ApiError::invalid_request(format!("invalid space uri: {}", input.space))
+            })?;
+            let context = (state.authority_factory)(&space).map_err(|e| match e {
+                HostError::AccountNotHosted(did) => ApiError::invalid_request(format!(
+                    "authority signing key does not resolve: {did}"
+                )),
+                HostError::SpaceNotFound(space) => ApiError::invalid_request(format!(
+                    "space not hosted here: {space}"
+                )),
+                other => ApiError::from(other),
+            })?;
+            (context, true)
+        }
+    };
     let claims = require_service_auth(&state, &context, &headers, REGISTER_SPACE_LXM).await?;
     let expected_issuer = context
         .policy
@@ -714,7 +734,7 @@ async fn register_space(
     if claims.iss != expected_issuer {
         return Err(ApiError::forbidden("issuer is not the managing app"));
     }
-    let acker = context.lifecycle_acker.as_ref().ok_or_else(|| {
+    let acker = context.lifecycle_acker.clone().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "LifecycleUnavailable",
@@ -722,6 +742,19 @@ async fn register_space(
         )
     })?;
     context.authority.register(&input.space)?;
+    let context = if adopted {
+        let winner = state.registry.insert_if_absent(context.clone());
+        if !Arc::ptr_eq(&winner, &context) {
+            winner.authority.register(&input.space)?;
+        }
+        winner
+    } else {
+        context
+    };
+    state
+        .hosted_spaces
+        .record_space(context.authority_did(), &input.space)
+        .await?;
     acker
         .ack_host_registered(&input.space, input.generation)
         .await?;
@@ -1085,6 +1118,10 @@ mod tests {
         }));
         let state = AppState {
             registry,
+            authority_factory: Arc::new(|space: &SpaceId| {
+                Err(HostError::AccountNotHosted(space.authority.clone()))
+            }),
+            hosted_spaces: Arc::new(crate::store::InMemoryHostedSpaces::default()),
             keys: Arc::new(UserKeys),
             metadata: Arc::new(crate::oauth::tests::AsJwks),
             jti_store: Arc::new(InMemoryJtiStore::default()),
@@ -1888,6 +1925,197 @@ mod tests {
             acker.0.lock().unwrap().as_slice(),
             &[(space.to_string(), 7)]
         );
+    }
+
+    #[tokio::test]
+    async fn each_authority_mints_and_verifies_with_its_own_key() {
+        let f = fixture(AppAccess::Open, &[]);
+        let other_space_uri = "at://did:plc:otherauthority/space/community.blacksky.feed/main";
+        let other_signer =
+            Signer::from_secret(secp256k1::SecretKey::from_slice(&[0x66u8; 32]).unwrap());
+        assert_ne!(other_signer.did_key(), test_signer().did_key());
+        let (tx, _writes) = tokio::sync::mpsc::unbounded_channel();
+        f.state.registry.insert(Arc::new(AuthorityContext {
+            authority: Arc::new(Authority::new(
+                SpaceId::parse(other_space_uri).unwrap(),
+                other_signer,
+                AppAccess::Open,
+            )),
+            policy: Arc::new(Policy::Public),
+            notifier: Arc::new(RecordingNotifier { tx }),
+            lifecycle_acker: None,
+        }));
+        let other = f.state.registry.for_space(other_space_uri).unwrap();
+        let path = |space: &str| {
+            format!(
+                "/xrpc/com.atproto.space.getSpace?space={}",
+                urlencode(space)
+            )
+        };
+
+        // Each authority's credential serves its own space.
+        let own = ctx(&f.state)
+            .authority
+            .mint_credential(NOW, "cred-a".to_string(), &dpop_key().thumbprint())
+            .unwrap();
+        let (status, body) = send(&f.state, get_req(&path(&space_uri()), Some(&own))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["space"], space_uri());
+
+        let other_cred = other
+            .authority
+            .mint_credential(NOW, "cred-b".to_string(), &dpop_key().thumbprint())
+            .unwrap();
+        let (status, body) = send(&f.state, get_req(&path(other_space_uri), Some(&other_cred))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["space"], other_space_uri);
+        assert_eq!(body["config"]["policy"], "public");
+
+        // A credential signed with authority A's key never opens authority B's
+        // space, even with matching claims.
+        let cross = ctx(&f.state)
+            .authority
+            .mint_credential_for(
+                &SpaceId::parse(other_space_uri).unwrap(),
+                NOW,
+                "cred-cross".to_string(),
+                &dpop_key().thumbprint(),
+            )
+            .unwrap();
+        let (status, body) = send(&f.state, get_req(&path(other_space_uri), Some(&cross))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "InvalidToken");
+    }
+
+    const DYNAMIC_AUTHORITY: &str = "did:plc:dynauthority";
+    const DYNAMIC_AUTHORITY_KEY: [u8; 32] = [0x33u8; 32];
+
+    fn dynamic_actor_store() -> tempfile::TempDir {
+        use sha2::Digest;
+        let directory = tempfile::tempdir().unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(DYNAMIC_AUTHORITY.as_bytes()));
+        let actor = directory.path().join(&digest[..2]).join(DYNAMIC_AUTHORITY);
+        std::fs::create_dir_all(&actor).unwrap();
+        std::fs::write(actor.join("key"), DYNAMIC_AUTHORITY_KEY).unwrap();
+        std::fs::write(actor.join("store.sqlite"), []).unwrap();
+        directory
+    }
+
+    fn seam_factory(
+        seam: Arc<crate::pds_seam::PdsSeam>,
+        acker: Arc<RecordingAcker>,
+    ) -> crate::authority::AuthorityFactory {
+        Arc::new(move |space: &SpaceId| {
+            let signer = seam.signer(&space.authority)?;
+            let (tx, _writes) = tokio::sync::mpsc::unbounded_channel();
+            Ok(Arc::new(AuthorityContext {
+                authority: Arc::new(Authority::new(
+                    space.clone(),
+                    signer,
+                    AppAccess::Open,
+                )),
+                policy: Arc::new(Policy::ManagingApp {
+                    service_id: format!("{MEMBER}#bsky_fg"),
+                    client: Arc::new(UnusedManagingApp),
+                }),
+                notifier: Arc::new(RecordingNotifier { tx }),
+                lifecycle_acker: Some(acker.clone()),
+            }))
+        })
+    }
+
+    #[tokio::test]
+    async fn registration_creates_an_unknown_authority_from_the_actor_store() {
+        let directory = dynamic_actor_store();
+        let seam = Arc::new(crate::pds_seam::PdsSeam::open(directory.path()).unwrap());
+        let acker = Arc::new(RecordingAcker::default());
+        let mut f = fixture(AppAccess::Open, &[]);
+        f.state.authority_factory = seam_factory(seam, acker.clone());
+        let space = format!("at://{DYNAMIC_AUTHORITY}/space/community.blacksky.feed/main");
+        let token = service_jwt::mint(
+            &user_signer(),
+            MEMBER,
+            &format!("{DYNAMIC_AUTHORITY}#atproto_space_host"),
+            REGISTER_SPACE_LXM,
+            NOW,
+            "register-dyn".to_string(),
+        )
+        .unwrap();
+
+        let (status, body) = send(
+            &f.state,
+            post_req(
+                &format!("/xrpc/{REGISTER_SPACE_LXM}"),
+                Some(&token),
+                serde_json::json!({"space": space, "generation": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let context = f.state.registry.authority(DYNAMIC_AUTHORITY).unwrap();
+        assert!(context.authority.resolve_registered(&space).is_ok());
+        // The new authority signs with the key resolved from the actor store.
+        let expected = Signer::from_secret(
+            secp256k1::SecretKey::from_slice(&DYNAMIC_AUTHORITY_KEY).unwrap(),
+        );
+        assert_eq!(context.authority.signer.did_key(), expected.did_key());
+        let credential = context
+            .authority
+            .mint_credential(NOW, "dyn-jti".to_string(), "jkt")
+            .unwrap();
+        credential::verify_space_credential(
+            &credential,
+            &space,
+            DYNAMIC_AUTHORITY,
+            expected.did_key(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            acker.0.lock().unwrap().as_slice(),
+            &[(space.clone(), 1)]
+        );
+        assert_eq!(
+            f.state.hosted_spaces.hosted_spaces().await.unwrap(),
+            vec![(DYNAMIC_AUTHORITY.to_string(), space)]
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_for_an_unresolvable_authority_fails_clean() {
+        let directory = dynamic_actor_store();
+        let seam = Arc::new(crate::pds_seam::PdsSeam::open(directory.path()).unwrap());
+        let mut f = fixture(AppAccess::Open, &[]);
+        f.state.authority_factory = seam_factory(seam, Arc::new(RecordingAcker::default()));
+        let space = "at://did:plc:keyless/space/community.blacksky.feed/main";
+        let token = service_jwt::mint(
+            &user_signer(),
+            MEMBER,
+            "did:plc:keyless#atproto_space_host",
+            REGISTER_SPACE_LXM,
+            NOW,
+            "register-keyless".to_string(),
+        )
+        .unwrap();
+
+        let (status, body) = send(
+            &f.state,
+            post_req(
+                &format!("/xrpc/{REGISTER_SPACE_LXM}"),
+                Some(&token),
+                serde_json::json!({"space": space, "generation": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "InvalidRequest");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("did:plc:keyless"));
+        assert!(f.state.registry.authority("did:plc:keyless").is_err());
+        assert!(f.state.hosted_spaces.hosted_spaces().await.unwrap().is_empty());
     }
 
     #[tokio::test]

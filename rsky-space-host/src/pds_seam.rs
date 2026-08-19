@@ -120,6 +120,10 @@ impl PdsSeam {
         )
     }
 
+    pub fn signer(&self, author_did: &str) -> Result<Signer> {
+        self.require_signer(author_did)
+    }
+
     fn require_signer(&self, author_did: &str) -> Result<Signer> {
         let Some(path) = self.key_path(author_did) else {
             return Err(HostError::InvalidRequest(format!(

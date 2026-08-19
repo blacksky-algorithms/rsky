@@ -34,6 +34,11 @@ impl AuthorityContext {
     }
 }
 
+/// Builds the [`AuthorityContext`] for an authority first seen at
+/// registration time; fails when the authority's signing key is unavailable.
+pub type AuthorityFactory =
+    Arc<dyn Fn(&SpaceId) -> Result<Arc<AuthorityContext>> + Send + Sync>;
+
 /// The authorities this host answers for, keyed by authority DID.
 #[derive(Default)]
 pub struct AuthorityRegistry {
@@ -50,6 +55,17 @@ impl AuthorityRegistry {
             .write()
             .expect("authority registry")
             .insert(context.authority_did().to_string(), context);
+    }
+
+    /// Insert unless the authority is already present; returns the context
+    /// that ends up registered either way.
+    pub fn insert_if_absent(&self, context: Arc<AuthorityContext>) -> Arc<AuthorityContext> {
+        self.contexts
+            .write()
+            .expect("authority registry")
+            .entry(context.authority_did().to_string())
+            .or_insert(context)
+            .clone()
     }
 
     pub fn authority(&self, authority_did: &str) -> Result<Arc<AuthorityContext>> {

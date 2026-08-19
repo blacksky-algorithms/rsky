@@ -21,12 +21,16 @@ pub enum PolicyMode {
     about = "atproto permissioned-data space authority/host"
 )]
 pub struct Config {
-    /// The space authority DID (dedicated community DID).
-    #[arg(long, env = "SPACEHOST_AUTHORITY_DID")]
+    /// Optional bootstrap authority pin: a space authority DID served from
+    /// startup with an explicit signing key. Set together with
+    /// `SPACEHOST_SIGNING_KEY_HEX`, or leave both unset and let authorities
+    /// arrive via registration.
+    #[arg(long, env = "SPACEHOST_AUTHORITY_DID", default_value = "")]
     pub authority_did: String,
 
-    /// Hex-encoded secp256k1 space signing key (`#atproto_space`).
-    #[arg(long, env = "SPACEHOST_SIGNING_KEY_HEX")]
+    /// Hex-encoded secp256k1 space signing key (`#atproto_space`) for the
+    /// pinned bootstrap authority.
+    #[arg(long, env = "SPACEHOST_SIGNING_KEY_HEX", default_value = "")]
     pub signing_key_hex: String,
 
     /// How the authority authorizes users at credential-mint time.
@@ -147,7 +151,24 @@ impl Config {
         }
     }
 
+    pub fn bootstrap_pin(&self) -> Option<(&str, &str)> {
+        (!self.authority_did.is_empty() && !self.signing_key_hex.is_empty())
+            .then_some((self.authority_did.as_str(), self.signing_key_hex.as_str()))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self.authority_did.is_empty() != self.signing_key_hex.is_empty() {
+            return Err(
+                "SPACEHOST_AUTHORITY_DID and SPACEHOST_SIGNING_KEY_HEX must be set together (bootstrap pin) or both left unset"
+                    .to_string(),
+            );
+        }
+        if self.bootstrap_pin().is_none() && self.actor_store_dir.is_empty() {
+            return Err(
+                "no space authority available: set SPACEHOST_ACTOR_STORE_DIR (authorities register with actor-store keys) or pin one with SPACEHOST_AUTHORITY_DID + SPACEHOST_SIGNING_KEY_HEX"
+                    .to_string(),
+            );
+        }
         if self.policy == PolicyMode::ManagingApp && !self.managing_app.contains('#') {
             return Err(
                 "managing-app policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
@@ -186,7 +207,9 @@ mod tests {
     // which would race sibling tests run in parallel.
     #[test]
     fn parses_args_env_and_requirements() {
-        assert!(Config::try_parse_from(["rsky-space-host"]).is_err());
+        let bare = Config::try_parse_from(["rsky-space-host"]).unwrap();
+        assert!(bare.bootstrap_pin().is_none());
+        assert!(bare.validate().is_err());
 
         let cfg = Config::try_parse_from([
             "rsky-space-host",
@@ -224,7 +247,13 @@ mod tests {
         assert!(format!("{cfg:?}").contains("did:plc:authority"));
 
         let mut cfg = cfg;
-        cfg.update_from(["rsky-space-host", "--bind", "127.0.0.1:9"]);
+        cfg.update_from([
+            "rsky-space-host",
+            "--bind",
+            "127.0.0.1:9",
+            "--authority-did",
+            "did:plc:authority",
+        ]);
         assert_eq!(cfg.bind, "127.0.0.1:9");
         assert_eq!(cfg.authority_did, "did:plc:authority");
 
@@ -301,5 +330,57 @@ mod tests {
         let mut invalid = cfg;
         invalid.managing_app = String::new();
         assert!(invalid.validate().is_err());
+    }
+
+    fn valid_unpinned() -> Config {
+        Config::try_parse_from([
+            "rsky-space-host",
+            "--oauth-issuer",
+            "https://pds.example",
+            "--oauth-jwks-uri",
+            "https://pds.example/jwks",
+            "--oauth-audience",
+            "did:web:pds.example",
+            "--oauth-client-ids",
+            "https://client.example",
+            "--actor-store-dir",
+            "/actors",
+            "--mint-token",
+            "token",
+            "--daemon-service-did",
+            "did:plc:daemon",
+            "--appview-service-did",
+            "did:plc:appview",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_pin_is_optional_but_all_or_nothing() {
+        let cfg = valid_unpinned();
+        assert!(cfg.bootstrap_pin().is_none());
+        assert!(cfg.validate().is_ok());
+
+        let mut half = valid_unpinned();
+        half.authority_did = "did:plc:authority".to_string();
+        assert!(half.validate().is_err());
+
+        let mut half = valid_unpinned();
+        half.signing_key_hex = "aa".repeat(32);
+        assert!(half.validate().is_err());
+
+        let mut pinned = valid_unpinned();
+        pinned.authority_did = "did:plc:authority".to_string();
+        pinned.signing_key_hex = "aa".repeat(32);
+        assert_eq!(
+            pinned.bootstrap_pin(),
+            Some(("did:plc:authority", pinned.signing_key_hex.as_str()))
+        );
+        assert!(pinned.validate().is_ok());
+
+        let mut keyless = valid_unpinned();
+        keyless.actor_store_dir = String::new();
+        let message = keyless.validate().unwrap_err();
+        assert!(message.contains("no space authority available"), "{message}");
     }
 }

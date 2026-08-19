@@ -54,7 +54,7 @@ rsky-identity = { workspace = true }
 rsky-lexicon = { workspace = true }
 rsky-repo = { workspace = true }
 rsky-space = { path = "../rsky-space", version = "0.4.0" }
-rsky-space-host = { path = "../rsky-space-host", version = "0.6.0" }
+rsky-space-host = { path = "../rsky-space-host", version = "0.7.0" }
 rsky-syntax = { workspace = true }
 hickory-resolver = "0.24.1"
 secp256k1 = { workspace = true }
