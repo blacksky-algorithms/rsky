@@ -43,7 +43,7 @@ pub use index::{InMemoryIndex, SpaceIndex};
 pub use notify::{NotifyState, WriteNotice, router as notify_router};
 pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
-pub use runner::{RunnerOptions, SweepReport, run, sync_repo_healing, sync_space_once};
+pub use runner::{MultiRunnerOptions, RunnerOptions, SweepReport, run, run_multi, sync_repo_healing, sync_space_once};
 pub use spaces::{
     CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
 };

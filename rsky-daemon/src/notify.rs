@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use crate::engine::CommitKeyResolver;
 use crate::error::{DaemonError, Result};
 use crate::index::SpaceIndex;
+use crate::spaces::SpaceRegistry;
 
 /// A queued `(space, did)` write notice for the runner to pull.
 pub type WriteNotice = (String, String);
@@ -88,6 +89,7 @@ pub fn decode_claims(jwt: &str) -> Result<ServiceAuthClaims> {
 #[derive(Clone)]
 pub struct NotifyState {
     pub space_uri: String,
+    pub registry: SpaceRegistry,
     /// The authority (space host) DID whose key signs inbound notifications.
     pub authority_did: String,
     /// This syncer's service identity: the required `aud` on inbound tokens.
@@ -143,7 +145,7 @@ async fn notify_write(
             error_body("AuthenticationRequired", e),
         );
     }
-    if input.space != state.space_uri {
+    if !state.registry.contains(&input.space) {
         return (
             StatusCode::BAD_REQUEST,
             error_body("InvalidRequest", "space is not synced by this daemon"),
@@ -170,7 +172,7 @@ async fn notify_space_deleted(
             error_body("AuthenticationRequired", e),
         );
     }
-    if input.space != state.space_uri {
+    if !state.registry.contains(&input.space) {
         return (
             StatusCode::BAD_REQUEST,
             error_body("InvalidRequest", "space is not synced by this daemon"),
@@ -243,6 +245,7 @@ mod tests {
     ) -> NotifyState {
         NotifyState {
             space_uri: SPACE.to_string(),
+            registry: { let registry = SpaceRegistry::new(); registry.insert(SPACE); registry },
             authority_did: AUTHORITY.to_string(),
             service_identity: SYNCER.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
