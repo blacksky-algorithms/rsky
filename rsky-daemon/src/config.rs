@@ -88,6 +88,22 @@ pub struct Config {
     )]
     pub service_signing_key_hex: String,
 
+    /// Feed service base URL for record projection; empty leaves the daemon
+    /// index-only.
+    #[arg(long, env = "DAEMON_FEEDS_URL", default_value = "")]
+    pub feeds_url: String,
+    /// The `aud` the feed service requires on projection calls.
+    #[arg(long, env = "DAEMON_FEEDS_SERVICE_DID", default_value = "")]
+    pub feeds_service_did: String,
+
+    /// Appview base URL for record projection; empty leaves the daemon
+    /// index-only.
+    #[arg(long, env = "DAEMON_APPVIEW_URL", default_value = "")]
+    pub appview_url: String,
+    /// The `aud` the appview requires on projection calls.
+    #[arg(long, env = "DAEMON_APPVIEW_SERVICE_DID", default_value = "")]
+    pub appview_service_did: String,
+
     /// Bind address for the notify listener.
     #[arg(long, env = "DAEMON_NOTIFY_BIND", default_value = "127.0.0.1:8055")]
     pub notify_bind: String,
@@ -119,7 +135,27 @@ impl Config {
         if !self.spaces_url.is_empty() && self.spaces_api_key.is_empty() {
             return Err("DAEMON_SPACES_API_KEY is required with DAEMON_SPACES_URL".into());
         }
+        if !self.feeds_url.is_empty() && self.feeds_service_did.is_empty() {
+            return Err("DAEMON_FEEDS_SERVICE_DID is required with DAEMON_FEEDS_URL".into());
+        }
+        if !self.appview_url.is_empty() && self.appview_service_did.is_empty() {
+            return Err("DAEMON_APPVIEW_SERVICE_DID is required with DAEMON_APPVIEW_URL".into());
+        }
         Ok(())
+    }
+
+    /// `(base url, audience)` for the feed service, or `None` when the daemon
+    /// is configured index-only.
+    pub fn feeds_projection(&self) -> Option<(&str, &str)> {
+        (!self.feeds_url.is_empty())
+            .then_some((self.feeds_url.as_str(), self.feeds_service_did.as_str()))
+    }
+
+    /// `(base url, audience)` for the appview, or `None` when the daemon is
+    /// configured index-only.
+    pub fn appview_projection(&self) -> Option<(&str, &str)> {
+        (!self.appview_url.is_empty())
+            .then_some((self.appview_url.as_str(), self.appview_service_did.as_str()))
     }
 
     pub fn authority_filter(&self) -> Option<String> {
@@ -178,6 +214,8 @@ mod tests {
         assert_eq!(cfg.pds_access_token, "");
         assert_eq!(cfg.static_credential, "");
         assert_eq!(cfg.plc_url(), None);
+        assert_eq!(cfg.feeds_projection(), None);
+        assert_eq!(cfg.appview_projection(), None);
 
         let mut cfg = Config::try_parse_from(REQUIRED.into_iter().chain([
             "--repo-host-url",
@@ -204,6 +242,10 @@ mod tests {
             ("DAEMON_INDEX_DB_PATH", "/data/space.sqlite"),
             ("DAEMON_SWEEP_INTERVAL_SECS", "60"),
             ("DAEMON_PLC_URL", "http://localhost:2582"),
+            ("DAEMON_FEEDS_URL", "http://localhost:8080"),
+            ("DAEMON_FEEDS_SERVICE_DID", "did:web:feeds.example"),
+            ("DAEMON_APPVIEW_URL", "http://localhost:2584"),
+            ("DAEMON_APPVIEW_SERVICE_DID", "did:web:appview.example"),
         ];
         for (k, v) in env {
             std::env::set_var(k, v);
@@ -222,7 +264,27 @@ mod tests {
         assert_eq!(cfg.notify_endpoint(), "http://0.0.0.0:9000");
         assert_eq!(cfg.index_db_path, "/data/space.sqlite");
         assert_eq!(cfg.sweep_interval_secs, 60);
+        assert_eq!(
+            cfg.feeds_projection(),
+            Some(("http://localhost:8080", "did:web:feeds.example"))
+        );
+        assert_eq!(
+            cfg.appview_projection(),
+            Some(("http://localhost:2584", "did:web:appview.example"))
+        );
         assert!(cfg.validate().is_ok());
+
+        let mut audienceless = Config::try_parse_from(
+            REQUIRED
+                .into_iter()
+                .chain(["--feeds-url", "http://localhost:8080"]),
+        )
+        .unwrap();
+        assert!(audienceless.validate().is_err());
+        audienceless
+            .try_update_from(["rsky-daemon", "--appview-url", "http://localhost:2584"])
+            .unwrap();
+        assert!(audienceless.validate().is_err());
 
         let discovery_only = Config::try_parse_from([
             "rsky-daemon",

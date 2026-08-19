@@ -13,6 +13,7 @@ use crate::credentials::CredentialSource;
 use crate::engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 use crate::error::{DaemonError, Result};
 use crate::index::SpaceIndex;
+use crate::journal::{drain_all, SharedJournalConsumer};
 use crate::notify::WriteNotice;
 use crate::recovery::recover_repo;
 use crate::repohost::RepoHostClient;
@@ -21,19 +22,19 @@ use crate::xrpc::SpaceHostClient;
 
 const REGISTER_RETRY_SECS: u64 = 30;
 const MIN_REREGISTER_SECS: u64 = 30;
+/// How often pending batches are retried when no sync has happened, so a
+/// destination that was down recovers without waiting for the next write.
+const PROJECTION_DRAIN_SECS: u64 = 30;
 
 /// Builds a repo-host client bound to the current space credential.
 pub type RepoHostFactory = Box<dyn Fn(String) -> Arc<dyn RepoHostClient> + Send + Sync>;
-pub type MultiSpaceFactory = Arc<
-    dyn Fn(
-            &str,
-        ) -> Result<(
-            Arc<dyn CredentialSource>,
-            RepoHostFactory,
-            Arc<dyn SpaceIndex>,
-        )> + Send
-        + Sync,
->;
+pub type SpaceWorkerParts = (
+    Arc<dyn CredentialSource>,
+    RepoHostFactory,
+    Arc<dyn SpaceIndex>,
+    Vec<SharedJournalConsumer>,
+);
+pub type MultiSpaceFactory = Arc<dyn Fn(&str) -> Result<SpaceWorkerParts> + Send + Sync>;
 
 pub struct MultiRunnerOptions {
     pub refresh_interval_secs: u64,
@@ -73,10 +74,10 @@ pub async fn run_multi(
                 let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
                 for space in stale { if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; } }
                 for (space, target) in &desired { if workers.contains_key(space) { continue; }
-                    let (creds, repo, index) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
+                    let (creds, repo, index, projectors) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
                     let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
                     let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), now_fn: opts.now_fn };
-                    let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), rx, stop_rx));
+                    let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), projectors, rx, stop_rx));
                     workers.insert(space.clone(), Worker { generation: target.generation, stop, notices: tx, handle });
                 }
                 registry.replace(workers.keys().cloned().collect());
@@ -275,11 +276,13 @@ pub async fn run(
     make_repo_host: RepoHostFactory,
     index: Arc<dyn SpaceIndex>,
     keys: Arc<dyn CommitKeyResolver>,
+    projectors: Vec<SharedJournalConsumer>,
     mut notify_rx: mpsc::Receiver<WriteNotice>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut sweep_timer =
         tokio::time::interval(Duration::from_secs(opts.sweep_interval_secs.max(1)));
+    let mut drain_timer = tokio::time::interval(Duration::from_secs(PROJECTION_DRAIN_SECS));
     let mut register_at = Instant::now();
     loop {
         tokio::select! {
@@ -301,6 +304,10 @@ pub async fn run(
                     keys.as_ref(),
                 )
                 .await;
+                drain_all(index.as_ref(), &projectors).await;
+            }
+            _ = drain_timer.tick() => {
+                drain_all(index.as_ref(), &projectors).await;
             }
             Some(notice) = notify_rx.recv() => {
                 handle_notice(
@@ -312,6 +319,7 @@ pub async fn run(
                     notice,
                 )
                 .await;
+                drain_all(index.as_ref(), &projectors).await;
             }
         }
     }
@@ -834,6 +842,7 @@ mod tests {
             make_repo_host,
             index.clone(),
             keys,
+            Vec::new(),
             rx,
             shutdown_rx,
         ));
@@ -858,6 +867,95 @@ mod tests {
         assert_eq!(index.record_count("did:plc:noticed"), 1);
         assert_eq!(index.record_count("did:plc:ignored"), 0);
         assert!(host.registrations.load(Ordering::SeqCst) >= 1);
+
+        shutdown_tx.send(true).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_drains_each_projector_independently() {
+        use crate::feeds::tests::{post_created, CapturingIngress};
+        use crate::feeds::FeedsProjector;
+        use crate::index::IndexMutation;
+        use crate::journal::JournalConsumer;
+        use crate::projection::Projector;
+        use crate::router::{Router, SyncEvent, POST_COLLECTION};
+        use rsky_space::record::encode_record;
+        use rsky_space::space_id::SpaceId;
+
+        struct Stalled;
+        #[async_trait]
+        impl Projector for Stalled {
+            fn name(&self) -> &'static str {
+                "appview"
+            }
+            async fn project(&self, _did: &str, _rev: &str, _events: &[SyncEvent]) -> Result<()> {
+                Err(DaemonError::RetryableProjection("down".to_string()))
+            }
+        }
+
+        let space = SpaceId::parse(SPACE).unwrap();
+        let router = || Router::new(space.clone(), space.authority.clone());
+        let feeds = Arc::new(JournalConsumer::new(
+            router(),
+            Box::new(FeedsProjector::new(CapturingIngress::default(), SPACE)),
+        ));
+        let appview = Arc::new(JournalConsumer::new(router(), Box::new(Stalled)));
+
+        let index = Arc::new(InMemoryIndex::new());
+        index
+            .journal_batch(
+                AUTHOR,
+                "3krev",
+                &[IndexMutation::Upsert {
+                    collection: POST_COLLECTION.to_string(),
+                    rkey: "3ka".to_string(),
+                    cid: "bafypost".to_string(),
+                    rev: "3krev".to_string(),
+                    value: Some(
+                        encode_record(
+                            &match post_created("3ka", "hello") {
+                                SyncEvent::PostCreated { record, .. } => record,
+                                _ => unreachable!("fixture is a post create"),
+                            },
+                            64 * 1024,
+                        )
+                        .unwrap(),
+                    ),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let a = author();
+        let host = Arc::new(PagedSpaceHost::new(vec![ListReposOutput {
+            cursor: None,
+            repos: vec![],
+        }]));
+        let client: Arc<dyn RepoHostClient> = Arc::new(ScriptedRepoHost(HashMap::new()));
+        let make_repo_host: RepoHostFactory = Box::new(move |_| client.clone());
+        let (_tx, rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(run(
+            options(3600),
+            host,
+            Arc::new(StaticCredential("sc.jwt".to_string())),
+            make_repo_host,
+            index.clone(),
+            Arc::new(FixedKey(a.did_key.clone())),
+            vec![feeds.clone(), appview.clone()],
+            rx,
+            shutdown_rx,
+        ));
+
+        for _ in 0..200 {
+            if index.pending_batches("feeds").await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(index.pending_batches("feeds").await.unwrap().is_empty());
+        assert_eq!(index.pending_batches("appview").await.unwrap().len(), 1);
 
         shutdown_tx.send(true).unwrap();
         handle.await.unwrap();
@@ -917,6 +1015,7 @@ mod tests {
             make_repo_host,
             index,
             keys,
+            Vec::new(),
             rx,
             shutdown_rx,
         ));
@@ -964,6 +1063,7 @@ mod tests {
             make_repo_host,
             index,
             keys,
+            Vec::new(),
             rx,
             shutdown_rx,
         ));

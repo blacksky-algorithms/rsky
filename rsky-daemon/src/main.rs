@@ -4,15 +4,18 @@
 use clap::Parser;
 use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
+use rsky_daemon::runner::SpaceWorkerParts;
 use rsky_daemon::{
-    notify_router, CombinedSource, CredentialSource, DaemonError, HttpRepoHost, HttpSpaceHost,
-    HttpSpaceSource, InMemoryIndex, InternalCredentialProvider, MultiRunnerOptions, NotifyState,
-    Result, SpaceCredentialSource, SpaceIndex, SpaceRegistry, SqliteIndex, StaticCredential,
-    StaticSpaces, run_multi,
+    notify_router, run_multi, AppviewProjector, CombinedSource, CredentialSource, DaemonError,
+    FeedsProjector, HttpProjectionIngress, HttpRepoHost, HttpSpaceHost, HttpSpaceSource,
+    InMemoryIndex, InternalCredentialProvider, JournalConsumer, MultiRunnerOptions, NotifyState,
+    Result, Router, SharedJournalConsumer, SpaceCredentialSource, SpaceIndex, SpaceRegistry,
+    SqliteIndex, StaticCredential, StaticSpaces,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
 use rsky_identity::IdResolver;
+use rsky_space::space_id::SpaceId;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
@@ -63,6 +66,51 @@ impl CommitKeyResolver for DidKeyResolver {
     }
 }
 
+/// The projection destinations this process was configured with, if any.
+struct ProjectionConfig {
+    service_identity: String,
+    signing_key_hex: String,
+    feeds: Option<(String, String)>,
+    appview: Option<(String, String)>,
+}
+
+impl ProjectionConfig {
+    fn consumers(&self, space: &str) -> Result<Vec<SharedJournalConsumer>> {
+        if self.feeds.is_none() && self.appview.is_none() {
+            return Ok(Vec::new());
+        }
+        let space_id = SpaceId::parse(space)?;
+        let mut consumers: Vec<SharedJournalConsumer> = Vec::new();
+        if let Some((url, audience)) = &self.feeds {
+            let ingress = HttpProjectionIngress::new(
+                "feeds",
+                url,
+                &self.service_identity,
+                audience,
+                &self.signing_key_hex,
+            )?;
+            consumers.push(Arc::new(JournalConsumer::new(
+                Router::new(space_id.clone(), space_id.authority.clone()),
+                Box::new(FeedsProjector::new(ingress, space)),
+            )));
+        }
+        if let Some((url, audience)) = &self.appview {
+            let ingress = HttpProjectionIngress::new(
+                "appview",
+                url,
+                &self.service_identity,
+                audience,
+                &self.signing_key_hex,
+            )?;
+            consumers.push(Arc::new(JournalConsumer::new(
+                Router::new(space_id.clone(), space_id.authority.clone()),
+                Box::new(AppviewProjector::new(ingress, space)),
+            )));
+        }
+        Ok(consumers)
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -85,7 +133,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
     let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new(cfg.plc_url()));
 
-    let db = if cfg.index_db_path.is_empty() { None } else { Some(Arc::new(SqliteIndex::open(&cfg.index_db_path)?)) };
+    let db = if cfg.index_db_path.is_empty() {
+        None
+    } else {
+        Some(Arc::new(SqliteIndex::open(&cfg.index_db_path)?))
+    };
 
     let shared_creds = if cfg.static_credential.is_empty() {
         if cfg.space_host_mint_token.is_empty() || cfg.service_signing_key_hex.is_empty() {
@@ -108,8 +160,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut sources: Vec<Box<dyn rsky_daemon::SpaceSource>> = Vec::new();
-    if !cfg.space_uri.is_empty() { sources.push(Box::new(StaticSpaces::new([cfg.space_uri.clone()]))); }
-    if !cfg.spaces_url.is_empty() { sources.push(Box::new(HttpSpaceSource::new(&cfg.spaces_url, &cfg.spaces_api_key, authority_filter.clone(), &cfg.space_type))); }
+    if !cfg.space_uri.is_empty() {
+        sources.push(Box::new(StaticSpaces::new([cfg.space_uri.clone()])));
+    }
+    if !cfg.spaces_url.is_empty() {
+        sources.push(Box::new(HttpSpaceSource::new(
+            &cfg.spaces_url,
+            &cfg.spaces_api_key,
+            authority_filter.clone(),
+            &cfg.space_type,
+        )));
+    }
     let source = Arc::new(CombinedSource(sources));
     let registry = SpaceRegistry::new();
 
@@ -142,19 +203,58 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .await
     });
 
-    let repo_host_base = cfg.repo_host_url().to_string(); let static_credential = cfg.static_credential.clone(); let db_for_factory = db.clone(); let dpop_for_factory = dpop.clone(); let shared_for_factory = shared_creds.clone();
-    let factory = Arc::new(move |space: &str| -> Result<(Arc<dyn CredentialSource>, rsky_daemon::runner::RepoHostFactory, Arc<dyn SpaceIndex>)> {
-        let creds: Arc<dyn CredentialSource> = match &shared_for_factory { Some(provider) => Arc::new(SpaceCredentialSource::new(provider.clone(), space)), None => Arc::new(StaticCredential(static_credential.clone()) )};
-        let index: Arc<dyn SpaceIndex> = match &db_for_factory { Some(db) => Arc::new(db.for_space(space)), None => Arc::new(InMemoryIndex::new()) };
-        let base = repo_host_base.clone(); let proof = dpop_for_factory.clone();
-        Ok((creds, Box::new(move |credential| Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))), index))
+    let repo_host_base = cfg.repo_host_url().to_string();
+    let static_credential = cfg.static_credential.clone();
+    let db_for_factory = db.clone();
+    let dpop_for_factory = dpop.clone();
+    let shared_for_factory = shared_creds.clone();
+    let projection = ProjectionConfig {
+        service_identity: cfg.service_identity.clone(),
+        signing_key_hex: cfg.service_signing_key_hex.clone(),
+        feeds: cfg
+            .feeds_projection()
+            .map(|(url, aud)| (url.to_string(), aud.to_string())),
+        appview: cfg
+            .appview_projection()
+            .map(|(url, aud)| (url.to_string(), aud.to_string())),
+    };
+    let factory = Arc::new(move |space: &str| -> Result<SpaceWorkerParts> {
+        let creds: Arc<dyn CredentialSource> = match &shared_for_factory {
+            Some(provider) => Arc::new(SpaceCredentialSource::new(provider.clone(), space)),
+            None => Arc::new(StaticCredential(static_credential.clone())),
+        };
+        let index: Arc<dyn SpaceIndex> = match &db_for_factory {
+            Some(db) => Arc::new(db.for_space(space)),
+            None => Arc::new(InMemoryIndex::new()),
+        };
+        let base = repo_host_base.clone();
+        let proof = dpop_for_factory.clone();
+        Ok((
+            creds,
+            Box::new(move |credential| {
+                Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))
+            }),
+            index,
+            projection.consumers(space)?,
+        ))
     });
-    let opts = MultiRunnerOptions { refresh_interval_secs: cfg.sweep_interval_secs, sweep_interval_secs: cfg.sweep_interval_secs,
+    let opts = MultiRunnerOptions {
+        refresh_interval_secs: cfg.sweep_interval_secs,
+        sweep_interval_secs: cfg.sweep_interval_secs,
         notify_endpoint: cfg.notify_endpoint(),
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
     };
-    let runner = tokio::spawn(run_multi(opts, source, registry, factory, host, keys, notify_rx, shutdown_rx));
+    let runner = tokio::spawn(run_multi(
+        opts,
+        source,
+        registry,
+        factory,
+        host,
+        keys,
+        notify_rx,
+        shutdown_rx,
+    ));
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("ctrl-c received; shutting down");
