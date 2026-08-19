@@ -1,5 +1,7 @@
 //! Configuration for the space-host service (env prefix `SPACEHOST_`).
 
+use crate::oauth::AuthConfig;
+use crate::pds_seam::VerifyOnlyHs256Secret;
 use clap::Parser;
 
 /// The Blacksky community space (v1: a single typed space under the authority).
@@ -81,6 +83,24 @@ pub struct Config {
         default_value = "http://localhost:3600"
     )]
     pub public_url: String,
+
+    #[arg(long, env = "SPACEHOST_OAUTH_ISSUER", default_value = "")]
+    pub oauth_issuer: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_JWKS_URI", default_value = "")]
+    pub oauth_jwks_uri: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_AUDIENCE", default_value = "")]
+    pub oauth_audience: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_CLIENT_IDS", default_value = "")]
+    pub oauth_client_ids: String,
+    #[arg(
+        long,
+        env = "SPACEHOST_OAUTH_HS256_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub oauth_hs256_secret: String,
+    #[arg(long, env = "SPACEHOST_ACTOR_STORE_DIR", default_value = "")]
+    pub actor_store_dir: String,
 }
 
 impl Config {
@@ -100,6 +120,22 @@ impl Config {
             .collect()
     }
 
+    pub fn auth_config(&self) -> AuthConfig {
+        AuthConfig {
+            issuer: self.oauth_issuer.clone(),
+            jwks_uri: self.oauth_jwks_uri.clone(),
+            audience: self.oauth_audience.clone(),
+            client_ids: self
+                .oauth_client_ids
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect(),
+            hs256_secret: VerifyOnlyHs256Secret::new(self.oauth_hs256_secret.as_bytes().to_vec()),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.policy == PolicyMode::ManagingApp && !self.managing_app.contains('#') {
             return Err(
@@ -116,6 +152,10 @@ impl Config {
         }
         if self.public_url.trim_end_matches('/').is_empty() {
             return Err("SPACEHOST_PUBLIC_URL must be an absolute origin".to_string());
+        }
+        self.auth_config().validate()?;
+        if self.actor_store_dir.is_empty() {
+            return Err("SPACEHOST_ACTOR_STORE_DIR is required".to_string());
         }
         Ok(())
     }
@@ -137,6 +177,16 @@ mod tests {
             "did:plc:authority",
             "--signing-key-hex",
             "aa".repeat(32).as_str(),
+            "--oauth-issuer",
+            "https://pds.example",
+            "--oauth-jwks-uri",
+            "https://pds.example/jwks",
+            "--oauth-audience",
+            "did:web:pds.example",
+            "--oauth-client-ids",
+            "https://client.example",
+            "--actor-store-dir",
+            "/actors",
         ])
         .unwrap();
         assert_eq!(cfg.authority_did, "did:plc:authority");
@@ -178,6 +228,11 @@ mod tests {
         std::env::set_var("SPACEHOST_DB_PATH", "/tmp/space.db");
         std::env::set_var("SPACEHOST_PLC_URL", "https://plc.example");
         std::env::set_var("SPACEHOST_BIND", "127.0.0.1:1234");
+        std::env::set_var("SPACEHOST_OAUTH_ISSUER", "https://pds.example");
+        std::env::set_var("SPACEHOST_OAUTH_JWKS_URI", "https://pds.example/jwks");
+        std::env::set_var("SPACEHOST_OAUTH_AUDIENCE", "did:web:pds.example");
+        std::env::set_var("SPACEHOST_OAUTH_CLIENT_IDS", "https://client.example");
+        std::env::set_var("SPACEHOST_ACTOR_STORE_DIR", "/actors");
         let cfg = Config::try_parse_from(["rsky-space-host"]).unwrap();
         for k in [
             "SPACEHOST_AUTHORITY_DID",
@@ -191,6 +246,11 @@ mod tests {
             "SPACEHOST_DB_PATH",
             "SPACEHOST_PLC_URL",
             "SPACEHOST_BIND",
+            "SPACEHOST_OAUTH_ISSUER",
+            "SPACEHOST_OAUTH_JWKS_URI",
+            "SPACEHOST_OAUTH_AUDIENCE",
+            "SPACEHOST_OAUTH_CLIENT_IDS",
+            "SPACEHOST_ACTOR_STORE_DIR",
         ] {
             std::env::remove_var(k);
         }

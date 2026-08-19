@@ -325,7 +325,7 @@ async fn verify_as_signature(
             .ok_or_else(|| auth_err("authorization server jwks is empty"))?,
     };
     verify_es256(jwk, &decoded.signing_input, &decoded.signature)
-    .map_err(|e| auth_err(format!("token signature: {e}")))
+        .map_err(|e| auth_err(format!("token signature: {e}")))
 }
 
 async fn verify_dpop_proof(
@@ -354,7 +354,7 @@ async fn verify_dpop_proof(
         .as_ref()
         .ok_or_else(|| auth_err("proof carries no jwk"))?;
     verify_es256(jwk, &decoded.signing_input, &decoded.signature)
-    .map_err(|e| auth_err(format!("proof signature: {e}")))?;
+        .map_err(|e| auth_err(format!("proof signature: {e}")))?;
 
     let claims = &decoded.claims;
     if !claims.htm.eq_ignore_ascii_case(request.method) {

@@ -15,8 +15,10 @@ use rsky_space_host::keys::{DocKeyResolver, ResolverDocSource};
 use rsky_space_host::managing_app::HttpManagingApp;
 use rsky_space_host::membership::InMemoryMembership;
 use rsky_space_host::notify::HttpNotifier;
+use rsky_space_host::pds_seam::PdsSeam;
 use rsky_space_host::policy::Policy;
 use rsky_space_host::registration::HttpLifecycleAcker;
+use rsky_space_host::repo::SqliteRepos;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::store::SqliteStore;
 use std::sync::Arc;
@@ -81,6 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     let store = Arc::new(SqliteStore::open(&cfg.db_path)?);
+    let repos = Arc::new(SqliteRepos::open(&cfg.db_path)?);
+    let commit_signer = Arc::new(PdsSeam::open(&cfg.actor_store_dir)?);
+    let ticker = std::sync::Mutex::new(rsky_common::tid::Ticker::new());
     let state = AppState {
         authority: Arc::new(authority),
         policy: Arc::new(policy),
@@ -114,6 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         now,
         jti,
         registration_ttl_secs: DEFAULT_REGISTRATION_TTL_SECS,
+        repos,
+        commit_signer,
+        auth: cfg.auth_config(),
+        rev: Arc::new(move || ticker.lock().expect("ticker").next(None).to_string()),
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;

@@ -15,16 +15,20 @@ use rsky_lexicon::com::atproto::space::{
 };
 use rsky_oauth::dpop::{DpopManager, DpopProof, DpopRequest};
 use rsky_space::credential;
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::attestation::{JtiStore, MetadataFetcher};
 use crate::authority::{Authority, KeyResolver};
+use crate::commits::CommitSigner;
 use crate::error::HostError;
 use crate::keys::DocSource;
 use crate::managing_app::require_https;
 use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
+use crate::oauth::{verify_access, AuthConfig, RequestAuth};
 use crate::policy::Policy;
 use crate::registration::{LifecycleAcker, REGISTER_SPACE_LXM};
+use crate::repo::{RepoStore, RepoWrite, WriteOutcome, MAX_RECORD_BYTES};
 use crate::service_jwt;
 use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
 
@@ -54,6 +58,10 @@ pub struct AppState {
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub jti: Arc<dyn Fn() -> String + Send + Sync>,
     pub registration_ttl_secs: u64,
+    pub repos: Arc<dyn RepoStore>,
+    pub commit_signer: Arc<dyn CommitSigner>,
+    pub auth: AuthConfig,
+    pub rev: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -74,6 +82,8 @@ pub fn router(state: AppState) -> Router {
             "/xrpc/community.blacksky.space.register",
             post(register_space),
         )
+        .route("/xrpc/com.atproto.space.createRecord", post(create_record))
+        .route("/xrpc/com.atproto.space.deleteRecord", post(delete_record))
         .with_state(state)
 }
 
@@ -484,6 +494,162 @@ async fn register_space(
     Ok(Json(serde_json::json!({})))
 }
 
+async fn write_actor(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    space: &str,
+    repo: &str,
+) -> Result<rsky_space::space_id::SpaceId, ApiError> {
+    let space = require_this_space(state, space)?;
+    let url = format!("{}{}", state.public_url.trim_end_matches('/'), path);
+    let access = verify_access(
+        &RequestAuth {
+            authorization: headers.get("authorization").and_then(|v| v.to_str().ok()),
+            dpop: headers.get("dpop").and_then(|v| v.to_str().ok()),
+            method: "POST",
+            url: &url,
+        },
+        &state.auth,
+        state.metadata.as_ref(),
+        state.jti_store.as_ref(),
+        (state.now)(),
+    )
+    .await?;
+    if access.did != repo {
+        return Err(ApiError::auth_required(
+            "session subject does not match repo",
+        ));
+    }
+    Ok(space)
+}
+
+async fn create_record(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<rsky_lexicon::com::atproto::space::CreateRecordInput>,
+) -> Result<Json<rsky_lexicon::com::atproto::space::CreateRecordOutput>, ApiError> {
+    let space = write_actor(
+        &state,
+        &headers,
+        "/xrpc/com.atproto.space.createRecord",
+        &input.space,
+        &input.repo,
+    )
+    .await?;
+    if contains_blob_ref(&input.record) {
+        return Err(ApiError::invalid_request(
+            "blob references are not supported",
+        ));
+    }
+    let value = rsky_space::record::encode_record(&input.record, MAX_RECORD_BYTES)
+        .map_err(HostError::from)?;
+    let rev = (state.rev)();
+    let rkey = input.rkey.unwrap_or_else(|| rev.clone());
+    let applied = state
+        .repos
+        .apply_writes(
+            &space.uri(),
+            &input.repo,
+            &rev,
+            &[RepoWrite::Create {
+                collection: input.collection.clone(),
+                rkey: rkey.clone(),
+                value,
+            }],
+        )
+        .await?;
+    let cid = match &applied.outcomes[0] {
+        WriteOutcome::Created { cid } => cid.clone(),
+        _ => return Err(HostError::Store("create did not create".into()).into()),
+    };
+    record_write(&state, &space.uri(), &input.repo, &applied.rev).await?;
+    Ok(Json(
+        rsky_lexicon::com::atproto::space::CreateRecordOutput {
+            uri: space.record_uri(&input.repo, &input.collection, &rkey),
+            cid,
+            commit: Some(rsky_lexicon::com::atproto::space::CommitMeta {
+                rev: applied.rev,
+                hash: hex::encode(applied.hash),
+            }),
+        },
+    ))
+}
+
+fn contains_blob_ref(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(contains_blob_ref),
+        Value::Object(values) => {
+            values.get("$type").and_then(Value::as_str) == Some("blob")
+                || values.values().any(contains_blob_ref)
+        }
+        _ => false,
+    }
+}
+
+async fn delete_record(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<rsky_lexicon::com::atproto::space::DeleteRecordInput>,
+) -> Result<Json<rsky_lexicon::com::atproto::space::DeleteRecordOutput>, ApiError> {
+    let space = write_actor(
+        &state,
+        &headers,
+        "/xrpc/com.atproto.space.deleteRecord",
+        &input.space,
+        &input.repo,
+    )
+    .await?;
+    let applied = state
+        .repos
+        .apply_writes(
+            &space.uri(),
+            &input.repo,
+            &(state.rev)(),
+            &[RepoWrite::Delete {
+                collection: input.collection,
+                rkey: input.rkey,
+                swap_record: input.swap_record,
+            }],
+        )
+        .await?;
+    if !matches!(applied.outcomes[0], WriteOutcome::Noop) {
+        record_write(&state, &space.uri(), &input.repo, &applied.rev).await?;
+    }
+    Ok(Json(
+        rsky_lexicon::com::atproto::space::DeleteRecordOutput {
+            commit: Some(rsky_lexicon::com::atproto::space::CommitMeta {
+                rev: applied.rev,
+                hash: hex::encode(applied.hash),
+            }),
+        },
+    ))
+}
+
+async fn record_write(
+    state: &AppState,
+    space: &str,
+    repo: &str,
+    rev: &str,
+) -> Result<(), ApiError> {
+    let now = (state.now)();
+    state
+        .writers
+        .upsert_writer(space, repo, rev, None, now)
+        .await?;
+    let endpoints = state.registrations.endpoints(space, now).await?;
+    fan_out_write(
+        state.notifier.clone(),
+        endpoints,
+        NotifyWriteInput {
+            space: space.to_string(),
+            repo: repo.to_string(),
+            rev: rev.to_string(),
+        },
+    );
+    Ok(())
+}
+
 async fn notify_write(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -671,7 +837,7 @@ mod tests {
                 members.iter().map(|m| m.to_string()),
             )))),
             keys: Arc::new(UserKeys),
-            metadata: Arc::new(NoFetch),
+            metadata: Arc::new(crate::oauth::tests::AsJwks),
             jti_store: Arc::new(InMemoryJtiStore::default()),
             writers: Arc::new(InMemoryWriterSet::default()),
             registrations: Arc::new(InMemoryRegistrations::default()),
@@ -686,6 +852,10 @@ mod tests {
             now: Arc::new(|| NOW),
             jti: Arc::new(|| "jti-fixed".to_string()),
             registration_ttl_secs: DEFAULT_REGISTRATION_TTL_SECS,
+            repos: Arc::new(crate::repo::InMemoryRepos::default()),
+            commit_signer: Arc::new(test_signer()),
+            auth: crate::oauth::tests::config(),
+            rev: Arc::new(|| "3jzfcijpj2z2c".to_string()),
         };
         Fixture { state, writes }
     }
@@ -814,6 +984,108 @@ mod tests {
         with_auth(builder, "POST", path, token)
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn pds_write_req(path: &str, body: serde_json::Value) -> Request<Body> {
+        let token = crate::oauth::tests::token();
+        let mut claims = crate::oauth::tests::proof_claims(&token);
+        claims["htu"] = serde_json::json!(format!("{PUBLIC_URL}{path}"));
+        claims["jti"] = serde_json::json!(format!(
+            "write-proof-{}",
+            PROOF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("DPoP {token}"))
+            .header("dpop", crate::oauth::tests::proof_with(claims))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_records_verify_the_pds_session() {
+        let f = fixture(AppAccess::Open, &[]);
+        let mut state = f.state.clone();
+        state.now = Arc::new(|| crate::oauth::tests::NOW);
+        let create_path = "/xrpc/com.atproto.space.createRecord";
+        let create = serde_json::json!({
+            "space": space_uri(),
+            "repo": MEMBER,
+            "collection": "app.bsky.feed.post",
+            "rkey": "3jzfcijpj2z2c",
+            "record": {"$type": "app.bsky.feed.post", "text": "private", "createdAt": "2026-08-19T00:00:00Z"},
+        });
+        let (status, out) = send(&state, pds_write_req(create_path, create)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            out["uri"],
+            format!(
+                "{}/did:plc:member/app.bsky.feed.post/3jzfcijpj2z2c",
+                space_uri()
+            )
+        );
+        assert!(out["cid"].as_str().is_some());
+        assert_eq!(out["commit"]["rev"], "3jzfcijpj2z2c");
+
+        let stored = f
+            .state
+            .repos
+            .get_record(&space_uri(), MEMBER, "app.bsky.feed.post", "3jzfcijpj2z2c")
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+
+        let delete = serde_json::json!({
+            "space": space_uri(),
+            "repo": MEMBER,
+            "collection": "app.bsky.feed.post",
+            "rkey": "3jzfcijpj2z2c",
+        });
+        let (status, out) = send(
+            &state,
+            pds_write_req("/xrpc/com.atproto.space.deleteRecord", delete),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["commit"]["rev"], "3jzfcijpj2z2c");
+        assert!(f
+            .state
+            .repos
+            .get_record(&space_uri(), MEMBER, "app.bsky.feed.post", "3jzfcijpj2z2c")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn create_record_rejects_blobs_and_subject_mismatch() {
+        let f = fixture(AppAccess::Open, &[]);
+        let mut state = f.state.clone();
+        state.now = Arc::new(|| crate::oauth::tests::NOW);
+        let blob = serde_json::json!({
+            "space": space_uri(), "repo": MEMBER, "collection": "app.bsky.feed.post", "rkey": "x",
+            "record": {"$type": "app.bsky.feed.post", "embed": {"image": {"$type": "blob", "ref": {"$link": "bafk"}}}},
+        });
+        let (status, out) = send(
+            &state,
+            pds_write_req("/xrpc/com.atproto.space.createRecord", blob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["error"], "InvalidRequest");
+
+        let mismatch = serde_json::json!({
+            "space": space_uri(), "repo": "did:plc:other", "collection": "app.bsky.feed.post", "rkey": "x", "record": {"$type": "app.bsky.feed.post"},
+        });
+        let (status, out) = send(
+            &state,
+            pds_write_req("/xrpc/com.atproto.space.createRecord", mismatch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out["error"], "AuthenticationRequired");
     }
 
     #[tokio::test]
