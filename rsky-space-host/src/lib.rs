@@ -29,6 +29,7 @@ pub mod keys;
 pub mod managing_app;
 pub mod membership;
 pub mod notify;
+pub mod oauth;
 pub mod pds_seam;
 pub mod policy;
 pub mod registration;
