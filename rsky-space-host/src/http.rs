@@ -24,6 +24,7 @@ use crate::keys::DocSource;
 use crate::managing_app::require_https;
 use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
 use crate::policy::Policy;
+use crate::registration::{LifecycleAcker, REGISTER_SPACE_LXM};
 use crate::service_jwt;
 use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
 
@@ -40,6 +41,7 @@ pub struct AppState {
     pub jti_store: Arc<dyn JtiStore>,
     pub writers: Arc<dyn WriterSetStore>,
     pub registrations: Arc<dyn RegistrationStore>,
+    pub lifecycle_acker: Option<Arc<dyn LifecycleAcker>>,
     /// Resolves a subscriber's service identifier to its delivery endpoint.
     pub docs: Arc<dyn DocSource>,
     pub notifier: Arc<dyn Notifier>,
@@ -68,6 +70,10 @@ pub fn router(state: AppState) -> Router {
             post(register_notify),
         )
         .route("/xrpc/com.atproto.space.notifyWrite", post(notify_write))
+        .route(
+            "/xrpc/community.blacksky.space.register",
+            post(register_space),
+        )
         .with_state(state)
 }
 
@@ -94,6 +100,10 @@ impl ApiError {
 
     fn auth_required(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "AuthenticationRequired", message)
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "Forbidden", message)
     }
 }
 
@@ -230,11 +240,13 @@ fn require_space_credential(
     headers: &HeaderMap,
     method: &str,
     nsid: &str,
-) -> Result<(), ApiError> {
+    space_uri: &str,
+) -> Result<rsky_space::space_id::SpaceId, ApiError> {
+    let space = require_this_space(state, space_uri)?;
     let jwt = dpop_credential(headers)?;
     let bound_jkt = credential::verify_space_credential(
         jwt,
-        &state.authority.space_uri(),
+        &space.uri(),
         state.authority.authority_did(),
         state.authority.signer.did_key(),
         (state.now)(),
@@ -248,7 +260,7 @@ fn require_space_credential(
             "DPoP key thumbprint does not match the credential binding",
         ));
     }
-    Ok(())
+    Ok(space)
 }
 
 /// Resolve a `did:...#fragment` subscriber to its delivery endpoint. The
@@ -277,13 +289,14 @@ async fn resolve_service_endpoint(docs: &dyn DocSource, service: &str) -> Result
         })
 }
 
-fn require_this_space(state: &AppState, space: &str) -> Result<(), ApiError> {
-    if space != state.authority.space_uri() {
-        return Err(ApiError::invalid_request(format!(
-            "space not hosted here: {space}"
-        )));
-    }
-    Ok(())
+fn require_this_space(
+    state: &AppState,
+    space: &str,
+) -> Result<rsky_space::space_id::SpaceId, ApiError> {
+    state
+        .authority
+        .resolve(space)
+        .map_err(|_| ApiError::invalid_request(format!("space not hosted here: {space}")))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -295,12 +308,37 @@ async fn get_space(
     headers: HeaderMap,
     Query(params): Query<GetSpaceParams>,
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
-    require_space_credential(&state, &headers, "GET", "com.atproto.space.getSpace")?;
-    require_this_space(&state, &params.space)?;
+    let space = require_space_credential(
+        &state,
+        &headers,
+        "GET",
+        "com.atproto.space.getSpace",
+        &params.space,
+    )?;
     Ok(Json(GetSpaceOutput {
-        space: state.authority.space_uri(),
+        space: space.uri(),
         config: SpaceConfig::Simplespace(state.authority.space_config(&state.policy)),
     }))
+}
+
+async fn require_service_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    expected_lxm: &str,
+) -> Result<crate::service_jwt::ServiceClaims, ApiError> {
+    let jwt = bearer(headers)?;
+    let claims = service_jwt::claims(jwt)?;
+    let issuer_key = state.keys.signing_key(&claims.iss).await?;
+    let authority_did = state.authority.authority_did();
+    let space_host_aud = format!("{authority_did}#atproto_space_host");
+    service_jwt::verify(
+        jwt,
+        &[authority_did, space_host_aud.as_str()],
+        expected_lxm,
+        &issuer_key,
+        (state.now)(),
+    )
+    .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidToken", e.to_string()))
 }
 
 async fn get_space_credential(
@@ -308,7 +346,7 @@ async fn get_space_credential(
     headers: HeaderMap,
     Json(input): Json<GetSpaceCredentialInput>,
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
-    require_this_space(&state, &input.space)?;
+    let space = require_this_space(&state, &input.space)?;
     let delegation_token = bearer(&headers)?;
     // Before the delegation token, so a caller with a bad proof does not burn
     // its single-use grant finding out.
@@ -321,7 +359,8 @@ async fn get_space_credential(
     )?;
     let credential = state
         .authority
-        .get_space_credential(
+        .get_space_credential_for(
+            &space,
             delegation_token,
             input.client_attestation.as_deref(),
             &state.policy,
@@ -341,8 +380,13 @@ async fn list_repos(
     headers: HeaderMap,
     Query(params): Query<ListReposParams>,
 ) -> Result<Json<ListReposOutput>, ApiError> {
-    require_space_credential(&state, &headers, "GET", "com.atproto.space.listRepos")?;
-    require_this_space(&state, &params.space)?;
+    require_space_credential(
+        &state,
+        &headers,
+        "GET",
+        "com.atproto.space.listRepos",
+        &params.space,
+    )?;
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -359,8 +403,13 @@ async fn register_notify(
     headers: HeaderMap,
     Json(input): Json<RegisterNotifyInput>,
 ) -> Result<Json<RegisterNotifyOutput>, ApiError> {
-    require_space_credential(&state, &headers, "POST", "com.atproto.space.registerNotify")?;
-    require_this_space(&state, &input.space)?;
+    require_space_credential(
+        &state,
+        &headers,
+        "POST",
+        "com.atproto.space.registerNotify",
+        &input.space,
+    )?;
     // `service` names the subscriber, which is both where to deliver and who
     // the delivery is addressed to (proposals#100); `endpoint` is the
     // pre-amendment shape and loses when both are sent.
@@ -391,6 +440,43 @@ async fn register_notify(
     Ok(Json(RegisterNotifyOutput {
         expires_at: chrono::DateTime::from_timestamp(expires_at as i64, 0).unwrap_or_default(),
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterSpaceInput {
+    space: String,
+    generation: i64,
+}
+
+async fn register_space(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterSpaceInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if input.generation < 1 {
+        return Err(ApiError::invalid_request("generation must be positive"));
+    }
+    let claims = require_service_auth(&state, &headers, REGISTER_SPACE_LXM).await?;
+    let expected_issuer = state
+        .policy
+        .managing_app()
+        .and_then(|service| service.split_once('#').map(|(did, _)| did))
+        .ok_or_else(|| ApiError::forbidden("space has no managing app"))?;
+    if claims.iss != expected_issuer {
+        return Err(ApiError::forbidden("issuer is not the managing app"));
+    }
+    let acker = state.lifecycle_acker.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LifecycleUnavailable",
+            "lifecycle acknowledgement is not configured",
+        )
+    })?;
+    state.authority.register(&input.space)?;
+    acker
+        .ack_host_registered(&input.space, input.generation)
+        .await?;
+    Ok(Json(serde_json::json!({})))
 }
 
 async fn notify_write(
@@ -546,6 +632,26 @@ mod tests {
         writes: tokio::sync::mpsc::UnboundedReceiver<(String, NotifyWriteInput)>,
     }
 
+    #[derive(Default)]
+    struct RecordingAcker(std::sync::Mutex<Vec<(String, i64)>>);
+
+    #[async_trait]
+    impl LifecycleAcker for RecordingAcker {
+        async fn ack_host_registered(&self, space: &str, generation: i64) -> HostResult<()> {
+            self.0.lock().unwrap().push((space.to_string(), generation));
+            Ok(())
+        }
+    }
+
+    struct UnusedManagingApp;
+
+    #[async_trait]
+    impl crate::managing_app::ManagingAppClient for UnusedManagingApp {
+        async fn check_user_access(&self, _: &str, _: &str, _: Option<&str>) -> HostResult<bool> {
+            Ok(false)
+        }
+    }
+
     fn fixture(app_access: AppAccess, members: &[&str]) -> Fixture {
         let space = SpaceId::new(
             "did:plc:communityauthority",
@@ -564,6 +670,7 @@ mod tests {
             jti_store: Arc::new(InMemoryJtiStore::default()),
             writers: Arc::new(InMemoryWriterSet::default()),
             registrations: Arc::new(InMemoryRegistrations::default()),
+            lifecycle_acker: None,
             docs: Arc::new(NoDocs),
             notifier: Arc::new(RecordingNotifier { tx }),
             dpop: Arc::new(rsky_oauth::dpop::DpopManager::new(
@@ -1090,6 +1197,44 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(out["error"], "InternalError");
+    }
+
+    #[tokio::test]
+    async fn registration_authenticates_the_managing_app_and_acks_before_activation() {
+        let mut f = fixture(AppAccess::Open, &[]);
+        f.state.policy = Arc::new(Policy::ManagingApp {
+            service_id: format!("{MEMBER}#bsky_fg"),
+            client: Arc::new(UnusedManagingApp),
+        });
+        let acker = Arc::new(RecordingAcker::default());
+        f.state.lifecycle_acker = Some(acker.clone());
+        let space = "at://did:plc:communityauthority/space/community.blacksky.feed/new";
+        let audience = format!("{}#atproto_space_host", f.state.authority.authority_did());
+        let token = service_jwt::mint(
+            &user_signer(),
+            MEMBER,
+            &audience,
+            REGISTER_SPACE_LXM,
+            NOW,
+            "register-1".to_string(),
+        )
+        .unwrap();
+        let (status, body) = send(
+            &f.state,
+            post_req(
+                &format!("/xrpc/{REGISTER_SPACE_LXM}"),
+                Some(&token),
+                serde_json::json!({"space": space, "generation": 7}),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(f.state.authority.resolve_registered(space).is_ok());
+        assert_eq!(
+            acker.0.lock().unwrap().as_slice(),
+            &[(space.to_string(), 7)]
+        );
     }
 
     #[tokio::test]

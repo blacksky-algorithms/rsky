@@ -30,6 +30,7 @@ pub mod managing_app;
 pub mod membership;
 pub mod notify;
 pub mod policy;
+pub mod registration;
 pub mod repo;
 pub mod service_jwt;
 pub mod signing;

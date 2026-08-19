@@ -16,6 +16,7 @@ use rsky_space_host::managing_app::HttpManagingApp;
 use rsky_space_host::membership::InMemoryMembership;
 use rsky_space_host::notify::HttpNotifier;
 use rsky_space_host::policy::Policy;
+use rsky_space_host::registration::HttpLifecycleAcker;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::store::SqliteStore;
 use std::sync::Arc;
@@ -89,6 +90,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jti_store: store.clone(),
         writers: store.clone(),
         registrations: store,
+        lifecycle_acker: (cfg.policy == PolicyMode::ManagingApp).then(|| {
+            Arc::new(HttpLifecycleAcker::new(
+                cfg.lifecycle_url.clone(),
+                cfg.lifecycle_service_did.clone(),
+                cfg.authority_did.clone(),
+                signer.clone(),
+                now.clone(),
+                jti.clone(),
+            )) as Arc<dyn rsky_space_host::registration::LifecycleAcker>
+        }),
         notifier: Arc::new(HttpNotifier::new(
             cfg.authority_did.clone(),
             signer,

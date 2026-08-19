@@ -181,7 +181,13 @@ impl Authority {
     /// `dpop_jkt` must come from a DPoP proof this server verified, never from
     /// a request field: a field is an assertion anyone holding a delegation
     /// token can make about a key someone else controls.
-    pub fn mint_credential(&self, now: u64, jti: String, dpop_jkt: &str) -> Result<String> {
+    pub fn mint_credential_for(
+        &self,
+        space: &SpaceId,
+        now: u64,
+        jti: String,
+        dpop_jkt: &str,
+    ) -> Result<String> {
         let header = JwtHeader {
             typ: CREDENTIAL_TYP.to_string(),
             alg: rsky_crypto::constants::SECP256K1_JWT_ALG.to_string(),
@@ -189,7 +195,7 @@ impl Authority {
         };
         let claims = SpaceClaims {
             iss: self.authority_did().to_string(),
-            sub: self.space_uri(),
+            sub: space.uri(),
             aud: None,
             iat: now,
             exp: now + CREDENTIAL_TTL_SECS,
@@ -202,12 +208,17 @@ impl Authority {
         Ok(jwt)
     }
 
+    pub fn mint_credential(&self, now: u64, jti: String, dpop_jkt: &str) -> Result<String> {
+        self.mint_credential_for(&self.space, now, jti, dpop_jkt)
+    }
+
     /// The full `getSpaceCredential` flow: verify the client attestation (when
     /// required or presented), apply appAccess, verify the delegation token,
     /// consult the policy, then mint.
     #[allow(clippy::too_many_arguments)]
-    pub async fn get_space_credential(
+    pub async fn get_space_credential_for(
         &self,
+        space: &SpaceId,
         delegation_jwt: &str,
         attestation_jwt: Option<&str>,
         policy: &Policy,
@@ -241,7 +252,7 @@ impl Authority {
         let user_key = keys.signing_key(&user_did).await?;
         let verified_user = credential::verify_delegation_token(
             delegation_jwt,
-            &self.space_uri(),
+            &space.uri(),
             self.authority_did(),
             &user_key,
             now,
@@ -249,16 +260,40 @@ impl Authority {
         .map_err(|e| HostError::Delegation(e.to_string()))?;
         // User axis: the policy decision (member list, public, or managing app).
         if !policy
-            .authorizes(
-                &self.space_uri(),
-                &verified_user,
-                attested_client_id.as_deref(),
-            )
+            .authorizes(&space.uri(), &verified_user, attested_client_id.as_deref())
             .await?
         {
             return Err(HostError::NotAuthorized);
         }
-        self.mint_credential(now, jti, dpop_jkt)
+        self.mint_credential_for(space, now, jti, dpop_jkt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_space_credential(
+        &self,
+        delegation_jwt: &str,
+        attestation_jwt: Option<&str>,
+        policy: &Policy,
+        keys: &dyn KeyResolver,
+        metadata: &dyn MetadataFetcher,
+        jti_store: &dyn JtiStore,
+        now: u64,
+        jti: String,
+        dpop_jkt: &str,
+    ) -> Result<String> {
+        self.get_space_credential_for(
+            &self.space,
+            delegation_jwt,
+            attestation_jwt,
+            policy,
+            keys,
+            metadata,
+            jti_store,
+            now,
+            jti,
+            dpop_jkt,
+        )
+        .await
     }
 }
 

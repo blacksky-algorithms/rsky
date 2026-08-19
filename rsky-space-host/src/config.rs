@@ -49,6 +49,14 @@ pub struct Config {
     #[arg(long, env = "SPACEHOST_MEMBERSHIP_DB_URL", default_value = "")]
     pub membership_db_url: String,
 
+    /// Feeds base URL that receives host-registration acknowledgements.
+    #[arg(long, env = "SPACEHOST_LIFECYCLE_URL", default_value = "")]
+    pub lifecycle_url: String,
+
+    /// Feeds service DID, used as the acknowledgement JWT audience.
+    #[arg(long, env = "SPACEHOST_LIFECYCLE_SERVICE_DID", default_value = "")]
+    pub lifecycle_service_did: String,
+
     /// SQLite path for host state (writer set, registrations, used nonces).
     #[arg(long, env = "SPACEHOST_DB_PATH", default_value = "./space_host.db")]
     pub db_path: String,
@@ -96,6 +104,14 @@ impl Config {
         if self.policy == PolicyMode::ManagingApp && !self.managing_app.contains('#') {
             return Err(
                 "managing-app policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
+            );
+        }
+        if self.policy == PolicyMode::ManagingApp
+            && (self.lifecycle_url.is_empty() || self.lifecycle_service_did.is_empty())
+        {
+            return Err(
+                "managing-app policy requires SPACEHOST_LIFECYCLE_URL and SPACEHOST_LIFECYCLE_SERVICE_DID"
+                    .to_string(),
             );
         }
         if self.public_url.trim_end_matches('/').is_empty() {
@@ -157,6 +173,8 @@ mod tests {
         std::env::set_var("SPACEHOST_MANAGING_APP", "did:web:app#svc");
         std::env::set_var("SPACEHOST_MEMBERS", "did:plc:aaa, did:plc:bbb,");
         std::env::set_var("SPACEHOST_MEMBERSHIP_DB_URL", "postgres://env");
+        std::env::set_var("SPACEHOST_LIFECYCLE_URL", "https://feeds.example");
+        std::env::set_var("SPACEHOST_LIFECYCLE_SERVICE_DID", "did:web:feeds.example");
         std::env::set_var("SPACEHOST_DB_PATH", "/tmp/space.db");
         std::env::set_var("SPACEHOST_PLC_URL", "https://plc.example");
         std::env::set_var("SPACEHOST_BIND", "127.0.0.1:1234");
@@ -168,6 +186,8 @@ mod tests {
             "SPACEHOST_MANAGING_APP",
             "SPACEHOST_MEMBERS",
             "SPACEHOST_MEMBERSHIP_DB_URL",
+            "SPACEHOST_LIFECYCLE_URL",
+            "SPACEHOST_LIFECYCLE_SERVICE_DID",
             "SPACEHOST_DB_PATH",
             "SPACEHOST_PLC_URL",
             "SPACEHOST_BIND",
@@ -182,6 +202,8 @@ mod tests {
             vec!["did:plc:aaa".to_string(), "did:plc:bbb".to_string()]
         );
         assert_eq!(cfg.db_path, "/tmp/space.db");
+        assert_eq!(cfg.lifecycle_url, "https://feeds.example");
+        assert_eq!(cfg.lifecycle_service_did, "did:web:feeds.example");
         assert_eq!(cfg.plc_url, "https://plc.example");
         assert_eq!(cfg.bind, "127.0.0.1:1234");
         assert!(cfg.validate().is_ok());
