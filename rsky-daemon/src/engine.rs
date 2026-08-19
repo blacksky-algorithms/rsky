@@ -11,7 +11,7 @@ use rsky_space::commit::verify_commit;
 use rsky_space::lthash::element;
 
 use crate::error::{DaemonError, Result};
-use crate::index::SpaceIndex;
+use crate::index::{IndexMutation, SpaceIndex};
 use crate::repohost::RepoHostClient;
 
 /// Resolves an author's atproto signing `did:key` to verify their commit.
@@ -49,6 +49,7 @@ pub async fn sync_repo(
     let mut prev_mismatches = 0usize;
     let mut cursor: Option<String> = None;
     let mut last_rev: Option<String> = None;
+    let mut mutations: Vec<IndexMutation> = Vec::new();
 
     loop {
         let page = client
@@ -70,20 +71,25 @@ pub async fn sync_repo(
             }
             match &op.cid {
                 Some(cid) => {
+                    let value = op.value.as_ref().map(|v| v.to_vec());
                     index
-                        .upsert(
-                            did,
-                            &op.collection,
-                            &op.rkey,
-                            cid,
-                            &op.rev,
-                            op.value.as_ref().map(|v| v.to_vec()),
-                        )
+                        .upsert(did, &op.collection, &op.rkey, cid, &op.rev, value.clone())
                         .await?;
                     lth.add(&element(&op.collection, &op.rkey, cid));
+                    mutations.push(IndexMutation::Upsert {
+                        collection: op.collection.clone(),
+                        rkey: op.rkey.clone(),
+                        cid: cid.clone(),
+                        rev: op.rev.clone(),
+                        value,
+                    });
                 }
                 None => {
                     index.delete(did, &op.collection, &op.rkey).await?;
+                    mutations.push(IndexMutation::Delete {
+                        collection: op.collection.clone(),
+                        rkey: op.rkey.clone(),
+                    });
                 }
             }
             ops_applied += 1;
@@ -109,6 +115,7 @@ pub async fn sync_repo(
             if lth.hash().as_slice() != commit.hash.as_slice() {
                 return Err(DaemonError::Diverged(did.to_string()));
             }
+            index.journal_batch(did, &commit.rev, &mutations).await?;
             index.save_head(did, &commit.rev, &lth).await?;
             return Ok(SyncOutcome {
                 ops_applied,
@@ -126,6 +133,10 @@ pub async fn sync_repo(
     // Exhausted the oplog without a terminal commit: advance to the last op's
     // rev without a hash check; a later sync carries the commit.
     if let Some(rev) = &last_rev {
+        // The head advances here without a commit to check it against, so a
+        // later sync will never replay these ops: journal them now or the
+        // projection loses them outright.
+        index.journal_batch(did, rev, &mutations).await?;
         index.save_head(did, rev, &lth).await?;
     }
     Ok(SyncOutcome {
