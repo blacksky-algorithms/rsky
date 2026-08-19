@@ -75,7 +75,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let space = SpaceId::parse(&cfg.space_uri)?;
     // One proof-of-possession key for the process: the credential it mints is
     // bound to it, and every host it is presented to checks that binding.
-    let dpop = Arc::new(rsky_daemon::dpop::DpopSigner::generate()?);
+    let dpop = Arc::new(if cfg.dpop_key_path.is_empty() {
+        rsky_daemon::dpop::DpopSigner::generate()?
+    } else {
+        rsky_daemon::dpop::DpopSigner::load_or_generate(&cfg.dpop_key_path)?
+    });
     let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
     let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new());
 

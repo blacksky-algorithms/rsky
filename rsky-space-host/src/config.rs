@@ -101,6 +101,17 @@ pub struct Config {
     pub oauth_hs256_secret: String,
     #[arg(long, env = "SPACEHOST_ACTOR_STORE_DIR", default_value = "")]
     pub actor_store_dir: String,
+    #[arg(
+        long,
+        env = "SPACEHOST_MINT_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub mint_token: String,
+    #[arg(long, env = "SPACEHOST_DAEMON_SERVICE_DID", default_value = "")]
+    pub daemon_service_did: String,
+    #[arg(long, env = "SPACEHOST_APPVIEW_SERVICE_DID", default_value = "")]
+    pub appview_service_did: String,
 }
 
 impl Config {
@@ -157,6 +168,12 @@ impl Config {
         if self.actor_store_dir.is_empty() {
             return Err("SPACEHOST_ACTOR_STORE_DIR is required".to_string());
         }
+        if self.mint_token.is_empty()
+            || self.daemon_service_did.is_empty()
+            || self.appview_service_did.is_empty()
+        {
+            return Err("SPACEHOST_MINT_TOKEN, SPACEHOST_DAEMON_SERVICE_DID, and SPACEHOST_APPVIEW_SERVICE_DID are required".to_string());
+        }
         Ok(())
     }
 }
@@ -187,6 +204,12 @@ mod tests {
             "https://client.example",
             "--actor-store-dir",
             "/actors",
+            "--mint-token",
+            "token",
+            "--daemon-service-did",
+            "did:plc:daemon",
+            "--appview-service-did",
+            "did:plc:appview",
         ])
         .unwrap();
         assert_eq!(cfg.authority_did, "did:plc:authority");
@@ -233,6 +256,9 @@ mod tests {
         std::env::set_var("SPACEHOST_OAUTH_AUDIENCE", "did:web:pds.example");
         std::env::set_var("SPACEHOST_OAUTH_CLIENT_IDS", "https://client.example");
         std::env::set_var("SPACEHOST_ACTOR_STORE_DIR", "/actors");
+        std::env::set_var("SPACEHOST_MINT_TOKEN", "token");
+        std::env::set_var("SPACEHOST_DAEMON_SERVICE_DID", "did:plc:daemon");
+        std::env::set_var("SPACEHOST_APPVIEW_SERVICE_DID", "did:plc:appview");
         let cfg = Config::try_parse_from(["rsky-space-host"]).unwrap();
         for k in [
             "SPACEHOST_AUTHORITY_DID",
@@ -251,6 +277,9 @@ mod tests {
             "SPACEHOST_OAUTH_AUDIENCE",
             "SPACEHOST_OAUTH_CLIENT_IDS",
             "SPACEHOST_ACTOR_STORE_DIR",
+            "SPACEHOST_MINT_TOKEN",
+            "SPACEHOST_DAEMON_SERVICE_DID",
+            "SPACEHOST_APPVIEW_SERVICE_DID",
         ] {
             std::env::remove_var(k);
         }

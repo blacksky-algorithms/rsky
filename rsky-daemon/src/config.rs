@@ -48,6 +48,16 @@ pub struct Config {
     )]
     pub static_credential: String,
 
+    #[arg(
+        long,
+        env = "DAEMON_SPACE_HOST_MINT_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub space_host_mint_token: String,
+    #[arg(long, env = "DAEMON_DPOP_KEY_PATH", default_value = "")]
+    pub dpop_key_path: String,
+
     /// Bind address for the notify listener.
     #[arg(long, env = "DAEMON_NOTIFY_BIND", default_value = "127.0.0.1:8055")]
     pub notify_bind: String,

@@ -123,6 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         commit_signer,
         auth: cfg.auth_config(),
         rev: Arc::new(move || ticker.lock().expect("ticker").next(None).to_string()),
+        mint_token: cfg.mint_token.clone(),
+        credential_mint_services: [
+            cfg.daemon_service_did.clone(),
+            cfg.appview_service_did.clone(),
+        ],
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;

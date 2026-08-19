@@ -62,6 +62,8 @@ pub struct AppState {
     pub commit_signer: Arc<dyn CommitSigner>,
     pub auth: AuthConfig,
     pub rev: Arc<dyn Fn() -> String + Send + Sync>,
+    pub mint_token: String,
+    pub credential_mint_services: [String; 2],
 }
 
 pub fn router(state: AppState) -> Router {
@@ -84,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/xrpc/com.atproto.space.createRecord", post(create_record))
         .route("/xrpc/com.atproto.space.deleteRecord", post(delete_record))
+        .route("/admin/mintCredential", post(mint_credential))
         .with_state(state)
 }
 
@@ -216,6 +219,16 @@ fn check_proof(
     access_token: Option<&str>,
 ) -> Result<DpopProof, ApiError> {
     let uri = format!("{}/xrpc/{nsid}", state.public_url.trim_end_matches('/'));
+    check_proof_uri(state, headers, method, &uri, access_token)
+}
+
+fn check_proof_uri(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &str,
+    uri: &str,
+    access_token: Option<&str>,
+) -> Result<DpopProof, ApiError> {
     let proofs: Vec<&str> = headers
         .get_all("dpop")
         .iter()
@@ -240,6 +253,63 @@ fn check_proof(
                 "missing DPoP proof",
             )
         })
+}
+
+#[derive(serde::Deserialize)]
+struct MintCredentialParams {
+    space: String,
+}
+
+async fn mint_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<MintCredentialParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let supplied = headers
+        .get("x-spacehost-mint-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !same_secret(supplied, &state.mint_token) {
+        return Err(ApiError::forbidden("invalid mint token"));
+    }
+    let jwt = bearer(&headers)?;
+    let claims = service_jwt::claims(jwt)?;
+    if !state
+        .credential_mint_services
+        .iter()
+        .any(|did| did == &claims.iss)
+    {
+        return Err(ApiError::forbidden(
+            "service is not allowed to mint credentials",
+        ));
+    }
+    let key = state.keys.signing_key(&claims.iss).await?;
+    service_jwt::verify(
+        jwt,
+        &[state.authority.authority_did()],
+        "community.blacksky.space.mintCredential",
+        &key,
+        (state.now)(),
+    )?;
+    let space = require_this_space(&state, &params.space)?;
+    let uri = format!(
+        "{}/admin/mintCredential",
+        state.public_url.trim_end_matches('/')
+    );
+    let proof = check_proof_uri(&state, &headers, "POST", &uri, None)?;
+    let credential =
+        state
+            .authority
+            .mint_credential_for(&space, (state.now)(), (state.jti)(), &proof.jkt)?;
+    Ok(Json(serde_json::json!({"credential": credential})))
+}
+
+fn same_secret(left: &str, right: &str) -> bool {
+    let mut diff = left.len() ^ right.len();
+    for (a, b) in left.bytes().zip(right.bytes()) {
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
 }
 
 /// Space-credential auth: verify the presented credential against this
@@ -856,6 +926,8 @@ mod tests {
             commit_signer: Arc::new(test_signer()),
             auth: crate::oauth::tests::config(),
             rev: Arc::new(|| "3jzfcijpj2z2c".to_string()),
+            mint_token: "test-mint-token".to_string(),
+            credential_mint_services: ["did:plc:daemon".to_string(), "did:plc:appview".to_string()],
         };
         Fixture { state, writes }
     }
