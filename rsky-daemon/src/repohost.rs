@@ -122,7 +122,7 @@ impl RepoHostClient for HttpRepoHost {
         since: Option<&str>,
         cursor: Option<&str>,
     ) -> Result<OplogPage> {
-        let mut query = vec![("space", space), ("did", did)];
+        let mut query = vec![("space", space), ("repo", did)];
         if let Some(since) = since {
             query.push(("since", since));
         }
@@ -146,7 +146,7 @@ impl RepoHostClient for HttpRepoHost {
         let resp = self
             .get(
                 "com.atproto.space.getRepo",
-                &[("space", space), ("did", did)],
+                &[("space", space), ("repo", did)],
             )
             .await?;
         Ok(resp.bytes().await.map_err(net_err)?.to_vec())
@@ -156,7 +156,7 @@ impl RepoHostClient for HttpRepoHost {
         let out: wire::GetLatestCommitOutput = self
             .get(
                 "com.atproto.space.getLatestCommit",
-                &[("space", space), ("did", did)],
+                &[("space", space), ("repo", did)],
             )
             .await?
             .json()
@@ -208,7 +208,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/xrpc/com.atproto.space.listRepoOps"))
             .and(query_param("space", SPACE))
-            .and(query_param("did", AUTHOR))
+            .and(query_param("repo", AUTHOR))
             .and(query_param("since", "3ka"))
             .and(query_param("cursor", "c1"))
             .and(header("authorization", "DPoP sc.jwt"))
@@ -311,7 +311,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/xrpc/com.atproto.space.getRepo"))
             .and(query_param("space", SPACE))
-            .and(query_param("did", AUTHOR))
+            .and(query_param("repo", AUTHOR))
             .and(header("authorization", "DPoP sc.jwt"))
             .and(header_exists("dpop"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xCAu8, 0x11]))
@@ -329,7 +329,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/xrpc/com.atproto.space.getLatestCommit"))
             .and(query_param("space", SPACE))
-            .and(query_param("did", AUTHOR))
+            .and(query_param("repo", AUTHOR))
             .and(header("authorization", "DPoP sc.jwt"))
             .and(header_exists("dpop"))
             .respond_with(
