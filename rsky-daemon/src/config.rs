@@ -57,6 +57,13 @@ pub struct Config {
     pub space_host_mint_token: String,
     #[arg(long, env = "DAEMON_DPOP_KEY_PATH", default_value = "")]
     pub dpop_key_path: String,
+    #[arg(
+        long,
+        env = "DAEMON_SERVICE_SIGNING_KEY_HEX",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub service_signing_key_hex: String,
 
     /// Bind address for the notify listener.
     #[arg(long, env = "DAEMON_NOTIFY_BIND", default_value = "127.0.0.1:8055")]

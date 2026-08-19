@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
+use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -74,6 +75,54 @@ pub struct StaticCredential(pub String);
 impl CredentialSource for StaticCredential {
     async fn credential(&self, _now: u64) -> Result<String> {
         Ok(self.0.clone())
+    }
+}
+
+pub struct InternalCredentialProvider {
+    space: String,
+    authority_did: String,
+    mint_token: String,
+    issuer: ServiceJwtIssuer,
+    host: Arc<HttpSpaceHost>,
+    cached: Mutex<Option<(String, u64)>>,
+}
+impl InternalCredentialProvider {
+    pub fn new(
+        space: impl Into<String>,
+        authority_did: impl Into<String>,
+        mint_token: impl Into<String>,
+        issuer: ServiceJwtIssuer,
+        host: Arc<HttpSpaceHost>,
+    ) -> Self {
+        Self {
+            space: space.into(),
+            authority_did: authority_did.into(),
+            mint_token: mint_token.into(),
+            issuer,
+            host,
+            cached: Mutex::new(None),
+        }
+    }
+}
+#[async_trait]
+impl CredentialSource for InternalCredentialProvider {
+    async fn credential(&self, now: u64) -> Result<String> {
+        let mut cached = self.cached.lock().await;
+        if let Some((jwt, exp)) = cached.as_ref() {
+            if now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5) {
+                return Ok(jwt.clone());
+            }
+        }
+        let service_jwt = self
+            .issuer
+            .mint(&self.authority_did, now, &format!("mint-{now}"))?;
+        let jwt = self
+            .host
+            .mint_internal_credential(&self.space, &service_jwt, &self.mint_token)
+            .await?;
+        let exp = decode(&jwt)?.claims.exp;
+        *cached = Some((jwt.clone(), exp));
+        Ok(jwt)
     }
 }
 

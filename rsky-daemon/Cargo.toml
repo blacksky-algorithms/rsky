@@ -36,6 +36,7 @@ chrono = { version = "0.4", features = ["serde"] }
 axum = "0.7"
 base64 = "0.22"
 sha2 = { workspace = true }
+secp256k1 = { workspace = true }
 
 [dev-dependencies]
 secp256k1 = { workspace = true }

@@ -5,9 +5,9 @@ use clap::Parser;
 use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::{
-    notify_router, run, CredentialProvider, CredentialSource, DaemonError, HttpRepoHost,
-    HttpSpaceHost, InMemoryIndex, NotifyState, PdsDelegationSource, Result, RunnerOptions,
-    SpaceIndex, SqliteIndex, StaticCredential,
+    notify_router, run, CredentialSource, DaemonError, HttpRepoHost, HttpSpaceHost, InMemoryIndex,
+    InternalCredentialProvider, NotifyState, Result, RunnerOptions, SpaceIndex, SqliteIndex,
+    StaticCredential,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
@@ -75,11 +75,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let space = SpaceId::parse(&cfg.space_uri)?;
     // One proof-of-possession key for the process: the credential it mints is
     // bound to it, and every host it is presented to checks that binding.
-    let dpop = Arc::new(if cfg.dpop_key_path.is_empty() {
-        rsky_daemon::dpop::DpopSigner::generate()?
-    } else {
-        rsky_daemon::dpop::DpopSigner::load_or_generate(&cfg.dpop_key_path)?
-    });
+    if cfg.dpop_key_path.is_empty() {
+        return Err("DAEMON_DPOP_KEY_PATH is required".into());
+    }
+    let dpop = Arc::new(rsky_daemon::dpop::DpopSigner::load_or_generate(
+        &cfg.dpop_key_path,
+    )?);
     let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
     let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new());
 
@@ -91,12 +92,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     let creds: Arc<dyn CredentialSource> = if cfg.static_credential.is_empty() {
-        Arc::new(CredentialProvider::new(
+        if cfg.space_host_mint_token.is_empty() || cfg.service_signing_key_hex.is_empty() {
+            return Err(
+                "DAEMON_SPACE_HOST_MINT_TOKEN and DAEMON_SERVICE_SIGNING_KEY_HEX are required"
+                    .into(),
+            );
+        }
+        Arc::new(InternalCredentialProvider::new(
             &cfg.space_uri,
-            Box::new(PdsDelegationSource::new(
-                &cfg.pds_url,
-                &cfg.pds_access_token,
-            )),
+            &space.authority,
+            &cfg.space_host_mint_token,
+            rsky_daemon::service_jwt::ServiceJwtIssuer::from_hex(
+                &cfg.service_identity,
+                &cfg.service_signing_key_hex,
+            )?,
             host.clone(),
         ))
     } else {

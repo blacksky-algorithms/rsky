@@ -28,12 +28,13 @@ pub mod notify;
 pub mod recovery;
 pub mod repohost;
 pub mod runner;
+pub mod service_jwt;
 pub mod sqlite_index;
 pub mod xrpc;
 
 pub use credentials::{
-    unix_now, CredentialProvider, CredentialSource, DelegationSource, PdsDelegationSource,
-    StaticCredential,
+    unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
+    PdsDelegationSource, StaticCredential,
 };
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
