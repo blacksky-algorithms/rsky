@@ -47,7 +47,7 @@ pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
 pub use feeds::{
     FeedsProjector, HttpProjectionIngress, ProjectRecord, ProjectRecordsRequest, ProjectionIngress,
-    ProjectionOperation,
+    ProjectionOperation, SpaceLifecycleAcker,
 };
 pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
 pub use journal::{drain_all, JournalConsumer, SharedJournalConsumer};

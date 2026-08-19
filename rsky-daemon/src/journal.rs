@@ -100,19 +100,26 @@ impl JournalConsumer {
 pub type SharedJournalConsumer = Arc<JournalConsumer>;
 
 /// Drain every projector, then drop the journal rows all of them have passed.
-pub async fn drain_all(index: &dyn SpaceIndex, consumers: &[SharedJournalConsumer]) {
+/// Returns whether every destination accepted everything pending for it.
+pub async fn drain_all(index: &dyn SpaceIndex, consumers: &[SharedJournalConsumer]) -> bool {
+    let mut succeeded = true;
     for consumer in consumers {
-        if let Err(error) = consumer.drain(index).await {
-            tracing::warn!(projector = consumer.name(), error = %error, "projection drain failed");
+        match consumer.drain_succeeded(index).await {
+            Ok(clean) => succeeded &= clean,
+            Err(error) => {
+                succeeded = false;
+                tracing::warn!(projector = consumer.name(), error = %error, "projection drain failed");
+            }
         }
     }
     if consumers.is_empty() {
-        return;
+        return succeeded;
     }
     let names: Vec<&str> = consumers.iter().map(|c| c.name()).collect();
     if let Err(error) = index.prune_journal(&names).await {
         tracing::warn!(error = %error, "journal prune failed");
     }
+    succeeded
 }
 
 #[cfg(test)]

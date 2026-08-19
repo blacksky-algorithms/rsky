@@ -14,6 +14,7 @@ use crate::service_jwt::ServiceJwtIssuer;
 use crate::unix_now;
 
 pub const PROJECT_RECORDS_LXM: &str = "community.blacksky.space.projectRecords";
+pub const ACK_SYNCERS_OBSERVED_LXM: &str = "community.blacksky.space.ackSyncersObserved";
 /// The receiving side rejects a token whose lifetime exceeds five minutes;
 /// the margin absorbs clock skew between the two services.
 const TOKEN_TTL_SECS: u64 = 240;
@@ -55,6 +56,20 @@ pub trait ProjectionIngress: Send + Sync {
     async fn project_records(&self, request: &ProjectRecordsRequest) -> Result<()>;
 }
 
+#[async_trait]
+impl<T: ProjectionIngress> ProjectionIngress for std::sync::Arc<T> {
+    async fn project_records(&self, request: &ProjectRecordsRequest) -> Result<()> {
+        self.as_ref().project_records(request).await
+    }
+}
+
+/// Tells the feed service this space now has a syncer keeping it current.
+/// Until it hears that, it refuses the space's projections.
+#[async_trait]
+pub trait SpaceLifecycleAcker: Send + Sync {
+    async fn acknowledge_sync(&self, space: &str, generation: i64) -> Result<()>;
+}
+
 /// Posts batches to a service that accepts `projectRecords`, authenticated
 /// with this daemon's own service identity.
 pub struct HttpProjectionIngress {
@@ -82,17 +97,34 @@ impl HttpProjectionIngress {
         })
     }
 
-    fn service_jwt(&self) -> Result<String> {
+    fn service_jwt(&self, lxm: &str) -> Result<String> {
         static JTI: AtomicU64 = AtomicU64::new(1);
         let now = unix_now();
         let jti = format!("{now}-{}", JTI.fetch_add(1, Ordering::Relaxed));
-        self.issuer.mint_for(
-            &self.audience,
-            PROJECT_RECORDS_LXM,
-            now,
-            TOKEN_TTL_SECS,
-            &jti,
-        )
+        self.issuer
+            .mint_for(&self.audience, lxm, now, TOKEN_TTL_SECS, &jti)
+    }
+}
+
+#[async_trait]
+impl SpaceLifecycleAcker for HttpProjectionIngress {
+    async fn acknowledge_sync(&self, space: &str, generation: i64) -> Result<()> {
+        let response = self
+            .http
+            .post(format!("{}/xrpc/{ACK_SYNCERS_OBSERVED_LXM}", self.base_url))
+            .bearer_auth(self.service_jwt(ACK_SYNCERS_OBSERVED_LXM)?)
+            .json(&serde_json::json!({"space": space, "generation": generation}))
+            .send()
+            .await
+            .map_err(|error| DaemonError::Xrpc(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(DaemonError::Xrpc(format!(
+                "{} {ACK_SYNCERS_OBSERVED_LXM} returned {}",
+                self.target,
+                response.status()
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -102,7 +134,7 @@ impl ProjectionIngress for HttpProjectionIngress {
         let response = self
             .http
             .post(format!("{}/xrpc/{PROJECT_RECORDS_LXM}", self.base_url))
-            .bearer_auth(self.service_jwt()?)
+            .bearer_auth(self.service_jwt(PROJECT_RECORDS_LXM)?)
             .json(request)
             .send()
             .await

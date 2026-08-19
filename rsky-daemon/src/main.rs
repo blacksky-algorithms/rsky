@@ -9,8 +9,8 @@ use rsky_daemon::{
     notify_router, run_multi, AppviewProjector, CombinedSource, CredentialSource, DaemonError,
     FeedsProjector, HttpProjectionIngress, HttpRepoHost, HttpSpaceHost, HttpSpaceSource,
     InMemoryIndex, InternalCredentialProvider, JournalConsumer, MultiRunnerOptions, NotifyState,
-    Result, Router, SharedJournalConsumer, SpaceCredentialSource, SpaceIndex, SpaceRegistry,
-    SqliteIndex, StaticCredential, StaticSpaces,
+    Result, Router, SharedJournalConsumer, SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker,
+    SpaceRegistry, SqliteIndex, StaticCredential, StaticSpaces,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
@@ -74,21 +74,28 @@ struct ProjectionConfig {
     appview: Option<(String, String)>,
 }
 
+type ProjectionParts = (
+    Vec<SharedJournalConsumer>,
+    Option<Arc<dyn SpaceLifecycleAcker>>,
+);
+
 impl ProjectionConfig {
-    fn consumers(&self, space: &str) -> Result<Vec<SharedJournalConsumer>> {
+    fn consumers(&self, space: &str) -> Result<ProjectionParts> {
         if self.feeds.is_none() && self.appview.is_none() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         let space_id = SpaceId::parse(space)?;
         let mut consumers: Vec<SharedJournalConsumer> = Vec::new();
+        let mut acker: Option<Arc<dyn SpaceLifecycleAcker>> = None;
         if let Some((url, audience)) = &self.feeds {
-            let ingress = HttpProjectionIngress::new(
+            let ingress = Arc::new(HttpProjectionIngress::new(
                 "feeds",
                 url,
                 &self.service_identity,
                 audience,
                 &self.signing_key_hex,
-            )?;
+            )?);
+            acker = Some(ingress.clone());
             consumers.push(Arc::new(JournalConsumer::new(
                 Router::new(space_id.clone(), space_id.authority.clone()),
                 Box::new(FeedsProjector::new(ingress, space)),
@@ -107,7 +114,7 @@ impl ProjectionConfig {
                 Box::new(AppviewProjector::new(ingress, space)),
             )));
         }
-        Ok(consumers)
+        Ok((consumers, acker))
     }
 }
 
@@ -229,13 +236,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         };
         let base = repo_host_base.clone();
         let proof = dpop_for_factory.clone();
+        let (projectors, acker) = projection.consumers(space)?;
         Ok((
             creds,
             Box::new(move |credential| {
                 Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))
             }),
             index,
-            projection.consumers(space)?,
+            projectors,
+            acker,
         ))
     });
     let opts = MultiRunnerOptions {
