@@ -26,6 +26,8 @@ pub enum HostError {
     InvalidRequest(String),
     #[error("space not hosted here: {0}")]
     SpaceNotFound(String),
+    #[error("account not hosted here: {0}")]
+    AccountNotHosted(String),
     #[error("repo not found")]
     RepoNotFound,
     #[error("swap cid did not match")]

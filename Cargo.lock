@@ -8430,6 +8430,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "hmac",
  "http-body-util",
  "p256 0.13.2",
  "rand 0.8.5",
@@ -8453,6 +8454,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

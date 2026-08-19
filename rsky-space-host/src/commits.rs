@@ -19,16 +19,23 @@ pub const IKM_BYTES: usize = 32;
 
 pub trait CommitSigner: Send + Sync {
     /// The `did:key` a reader verifies commits against.
-    fn did_key(&self) -> &str;
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>>;
+    fn did_key(&self, author_did: &str) -> Result<String>;
+    fn sign(&self, author_did: &str, space_uri: &str, rev: &str, message: &[u8])
+        -> Result<Vec<u8>>;
 }
 
 impl CommitSigner for Signer {
-    fn did_key(&self) -> &str {
-        Signer::did_key(self)
+    fn did_key(&self, _author_did: &str) -> Result<String> {
+        Ok(Signer::did_key(self).to_string())
     }
 
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
+    fn sign(
+        &self,
+        _author_did: &str,
+        _space_uri: &str,
+        _rev: &str,
+        message: &[u8],
+    ) -> Result<Vec<u8>> {
         Signer::sign(self, message).map_err(HostError::Key)
     }
 }
@@ -43,7 +50,7 @@ pub fn mint_commit(
     ikm: [u8; IKM_BYTES],
 ) -> Result<SignedCommit> {
     let ctx = build_ctx(space_uri, author_did, rev, &ikm);
-    let sig = signer.sign(&ctx)?;
+    let sig = signer.sign(author_did, space_uri, rev, &ctx)?;
     let mac = compute_mac(&ikm, &ctx, hash)?;
     Ok(SignedCommit {
         ver: COMMIT_VERSION,
@@ -72,7 +79,7 @@ mod tests {
 
     fn verify(signer: &Signer, commit: &SignedCommit, hash: &[u8]) -> rsky_space::Result<()> {
         verify_commit(
-            CommitSigner::did_key(signer),
+            &CommitSigner::did_key(signer, AUTHOR).unwrap(),
             SPACE,
             AUTHOR,
             &commit.rev,
@@ -113,7 +120,7 @@ mod tests {
         let hash = [7u8; 32];
         let (signer, commit) = minted(hash, [3u8; 32]);
         assert!(verify_commit(
-            CommitSigner::did_key(&signer),
+            &CommitSigner::did_key(&signer, AUTHOR).unwrap(),
             "at://did:plc:auth/space/community.blacksky.feed/other",
             AUTHOR,
             &commit.rev,
@@ -124,7 +131,7 @@ mod tests {
         )
         .is_err());
         assert!(verify_commit(
-            CommitSigner::did_key(&signer),
+            &CommitSigner::did_key(&signer, AUTHOR).unwrap(),
             SPACE,
             "did:plc:someoneelse",
             &commit.rev,
