@@ -18,6 +18,7 @@
 //! - [`runner`] — the loop composing all of the above.
 //! - [`index`] / [`sqlite_index`] — the synced record index.
 
+pub mod appview;
 pub mod config;
 pub mod credentials;
 pub mod dpop;
@@ -37,6 +38,7 @@ pub mod spaces;
 pub mod sqlite_index;
 pub mod xrpc;
 
+pub use appview::AppviewProjector;
 pub use credentials::{
     unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
     PdsDelegationSource, SpaceCredentialSource, StaticCredential,
