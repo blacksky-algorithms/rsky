@@ -1406,6 +1406,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_read_surface_rejects_wrong_key_credentials() {
+        let f = fixture(AppAccess::Open, &[]);
+        let value = rsky_space::record::encode_record(
+            &serde_json::json!({"$type":"app.bsky.feed.post"}),
+            MAX_RECORD_BYTES,
+        )
+        .unwrap();
+        f.state
+            .repos
+            .apply_writes(
+                &space_uri(),
+                MEMBER,
+                "3jzfcijpj2z2c",
+                &[RepoWrite::Create {
+                    collection: "app.bsky.feed.post".to_string(),
+                    rkey: "3jzfcijpj2z2c".to_string(),
+                    value,
+                }],
+            )
+            .await
+            .unwrap();
+        let path = format!(
+            "/xrpc/com.atproto.space.getLatestCommit?space={}&repo={}",
+            urlencode(&space_uri()),
+            urlencode(MEMBER)
+        );
+
+        let wrong_key = f
+            .state
+            .authority
+            .mint_credential(NOW, "wrong-key".to_string(), "another-thumbprint")
+            .unwrap();
+        let (status, body) = send(&f.state, get_req(&path, Some(&wrong_key))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "InvalidDpopProof");
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+    }
+
+    #[tokio::test]
     async fn health_reports_version() {
         let f = fixture(AppAccess::Open, &[]);
         let (status, body) = send(&f.state, get_req("/xrpc/_health", None)).await;
