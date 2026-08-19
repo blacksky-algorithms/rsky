@@ -22,11 +22,11 @@ struct DidKeyResolver {
 }
 
 impl DidKeyResolver {
-    fn new() -> Self {
+    fn new(plc_url: Option<String>) -> Self {
         Self {
             resolver: tokio::sync::Mutex::new(IdResolver::new(IdentityResolverOpts {
                 timeout: None,
-                plc_url: None,
+                plc_url,
                 did_cache: Some(std::sync::Arc::new(MemoryCache::new(None, None))),
                 backup_nameservers: None,
             })),
@@ -83,7 +83,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &cfg.dpop_key_path,
     )?);
     let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
-    let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new());
+    let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new(cfg.plc_url()));
 
     let db = if cfg.index_db_path.is_empty() { None } else { Some(Arc::new(SqliteIndex::open(&cfg.index_db_path)?)) };
 

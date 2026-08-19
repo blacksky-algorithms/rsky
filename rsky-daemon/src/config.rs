@@ -95,6 +95,11 @@ pub struct Config {
     /// Seconds between writer-set sweeps (self-healing when notifications drop).
     #[arg(long, env = "DAEMON_SWEEP_INTERVAL_SECS", default_value_t = 300)]
     pub sweep_interval_secs: u64,
+
+    /// PLC directory to resolve DIDs against. Empty uses the public one,
+    /// which cannot know about a local or staging network.
+    #[arg(long, env = "DAEMON_PLC_URL", default_value = "")]
+    pub plc_url: String,
 }
 
 impl Config {
@@ -110,6 +115,10 @@ impl Config {
 
     pub fn authority_filter(&self) -> Option<String> {
         (!self.authority_did.is_empty()).then(|| self.authority_did.clone())
+    }
+
+    pub fn plc_url(&self) -> Option<String> {
+        (!self.plc_url.is_empty()).then(|| self.plc_url.clone())
     }
     pub fn repo_host_url(&self) -> &str {
         if self.repo_host_url.is_empty() {
@@ -159,6 +168,7 @@ mod tests {
         assert_eq!(cfg.pds_url, "");
         assert_eq!(cfg.pds_access_token, "");
         assert_eq!(cfg.static_credential, "");
+        assert_eq!(cfg.plc_url(), None);
 
         let mut cfg = Config::try_parse_from(REQUIRED.into_iter().chain([
             "--repo-host-url",
@@ -184,6 +194,7 @@ mod tests {
             ("DAEMON_NOTIFY_BIND", "0.0.0.0:9000"),
             ("DAEMON_INDEX_DB_PATH", "/data/space.sqlite"),
             ("DAEMON_SWEEP_INTERVAL_SECS", "60"),
+            ("DAEMON_PLC_URL", "http://localhost:2582"),
         ];
         for (k, v) in env {
             std::env::set_var(k, v);
@@ -198,6 +209,7 @@ mod tests {
         assert_eq!(cfg.pds_access_token, "access.jwt");
         assert_eq!(cfg.static_credential, "sc.jwt");
         assert_eq!(cfg.notify_bind, "0.0.0.0:9000");
+        assert_eq!(cfg.plc_url(), Some("http://localhost:2582".to_string()));
         assert_eq!(cfg.notify_endpoint(), "http://0.0.0.0:9000");
         assert_eq!(cfg.index_db_path, "/data/space.sqlite");
         assert_eq!(cfg.sweep_interval_secs, 60);
