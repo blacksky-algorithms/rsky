@@ -19,6 +19,7 @@ rsky-identity = { workspace = true }
 rsky-lexicon = { workspace = true }
 rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
 rsky-syntax = { workspace = true }
+lexicon_cid = { workspace = true }
 secp256k1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = "0.12"

@@ -9,13 +9,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rsky_lexicon::com::atproto::space::{
-    GetSpaceCredentialInput, GetSpaceCredentialOutput, GetSpaceOutput, GetSpaceParams,
+    GetLatestCommitOutput, GetLatestCommitParams, GetRepoParams, GetSpaceCredentialInput,
+    GetSpaceCredentialOutput, GetSpaceOutput, GetSpaceParams, ListRepoOpsOutput, ListRepoOpsParams,
     ListReposOutput, ListReposParams, NotifyWriteInput, RegisterNotifyInput, RegisterNotifyOutput,
     SpaceConfig,
 };
 use rsky_oauth::dpop::{DpopManager, DpopProof, DpopRequest};
 use rsky_space::credential;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::attestation::{JtiStore, MetadataFetcher};
@@ -75,6 +77,12 @@ pub fn router(state: AppState) -> Router {
             post(get_space_credential),
         )
         .route("/xrpc/com.atproto.space.listRepos", get(list_repos))
+        .route("/xrpc/com.atproto.space.getRepo", get(get_repo))
+        .route("/xrpc/com.atproto.space.listRepoOps", get(list_repo_ops))
+        .route(
+            "/xrpc/com.atproto.space.getLatestCommit",
+            get(get_latest_commit),
+        )
         .route(
             "/xrpc/com.atproto.space.registerNotify",
             post(register_notify),
@@ -481,6 +489,159 @@ async fn list_repos(
         .list_writers(&params.space, params.cursor.as_deref(), limit)
         .await?;
     Ok(Json(ListReposOutput { cursor, repos }))
+}
+
+async fn signed_head(
+    state: &AppState,
+    space: &rsky_space::space_id::SpaceId,
+    repo: &str,
+) -> Result<rsky_lexicon::com::atproto::space::SignedCommit, ApiError> {
+    let head = state
+        .repos
+        .head(&space.uri(), repo)
+        .await?
+        .ok_or(HostError::RepoNotFound)?;
+    crate::commits::mint_commit(
+        state.commit_signer.as_ref(),
+        &space.uri(),
+        repo,
+        &head.rev,
+        &head.hash(),
+        rand::random(),
+    )
+    .map_err(Into::into)
+}
+
+async fn get_latest_commit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<GetLatestCommitParams>,
+) -> Result<Json<GetLatestCommitOutput>, ApiError> {
+    let space = require_space_credential(
+        &state,
+        &headers,
+        "GET",
+        "com.atproto.space.getLatestCommit",
+        &params.space,
+    )?;
+    Ok(Json(GetLatestCommitOutput {
+        commit: signed_head(&state, &space, &params.repo).await?,
+    }))
+}
+
+async fn list_repo_ops(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<ListRepoOpsParams>,
+) -> Result<Json<ListRepoOpsOutput>, ApiError> {
+    let space = require_space_credential(
+        &state,
+        &headers,
+        "GET",
+        "com.atproto.space.listRepoOps",
+        &params.space,
+    )?;
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT) as u32;
+    let page = state
+        .repos
+        .list_ops(
+            &space.uri(),
+            &params.repo,
+            params.since.as_deref(),
+            params.cursor.as_deref(),
+            limit,
+        )
+        .await?;
+    let commit = if page.complete {
+        Some(signed_head(&state, &space, &params.repo).await?)
+    } else {
+        None
+    };
+    let mut ops = Vec::with_capacity(page.ops.len());
+    for op in page.ops {
+        let value = if params.exclude_values.unwrap_or(false) || op.cid.is_none() {
+            None
+        } else {
+            state
+                .repos
+                .get_record(&space.uri(), &params.repo, &op.collection, &op.rkey)
+                .await?
+                .map(|record| rsky_space::record::decode_record(&record.value))
+                .transpose()
+                .map_err(HostError::from)?
+        };
+        ops.push(rsky_lexicon::com::atproto::space::RepoOp {
+            rev: op.rev,
+            collection: op.collection,
+            rkey: op.rkey,
+            cid: op.cid,
+            prev: op.prev,
+            value,
+        });
+    }
+    Ok(Json(ListRepoOpsOutput {
+        cursor: page.cursor,
+        ops,
+        commit,
+    }))
+}
+
+async fn get_repo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<GetRepoParams>,
+) -> Result<Response, ApiError> {
+    let space = require_space_credential(
+        &state,
+        &headers,
+        "GET",
+        "com.atproto.space.getRepo",
+        &params.space,
+    )?;
+    let commit = signed_head(&state, &space, &params.repo).await?;
+    let records = state
+        .repos
+        .list_records(
+            &space.uri(),
+            &params.repo,
+            None,
+            None,
+            MAX_LIST_LIMIT as u32,
+        )
+        .await?
+        .0;
+    let mut entries = BTreeMap::new();
+    let mut blocks = BTreeMap::new();
+    for record in records {
+        let cid: lexicon_cid::Cid = record.cid.parse().map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "stored record has invalid cid",
+            )
+        })?;
+        entries.insert(record.path(), cid);
+        blocks.insert(cid, record.value);
+    }
+    let internal = rsky_space::types::SignedCommit {
+        ver: commit.ver as u8,
+        hash: commit.hash.into(),
+        ikm: commit.ikm.into(),
+        sig: commit.sig.into(),
+        mac: commit.mac.into(),
+        rev: commit.rev,
+    };
+    let car = rsky_space::repo_car_bytes(&internal, &entries, |cid| blocks.get(cid).cloned())
+        .await
+        .map_err(HostError::from)?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/vnd.ipld.car")],
+        car,
+    )
+        .into_response())
 }
 
 async fn register_notify(
@@ -1158,6 +1319,90 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(out["error"], "AuthenticationRequired");
+    }
+
+    #[tokio::test]
+    async fn repo_reads_require_credentials_and_serve_sync_shapes() {
+        let f = fixture(AppAccess::Open, &[]);
+        let value = rsky_space::record::encode_record(
+            &serde_json::json!({"$type":"app.bsky.feed.post","text":"sync"}),
+            MAX_RECORD_BYTES,
+        )
+        .unwrap();
+        f.state
+            .repos
+            .apply_writes(
+                &space_uri(),
+                MEMBER,
+                "3jzfcijpj2z2c",
+                &[RepoWrite::Create {
+                    collection: "app.bsky.feed.post".to_string(),
+                    rkey: "3jzfcijpj2z2c".to_string(),
+                    value,
+                }],
+            )
+            .await
+            .unwrap();
+        let credential = credential_for(&f.state);
+        let query = format!(
+            "space={}&repo={}",
+            urlencode(&space_uri()),
+            urlencode(MEMBER)
+        );
+
+        let (status, body) = send(
+            &f.state,
+            get_req(
+                &format!("/xrpc/com.atproto.space.getLatestCommit?{query}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "AuthenticationRequired");
+
+        let (status, body) = send(
+            &f.state,
+            get_req(
+                &format!("/xrpc/com.atproto.space.listRepoOps?{query}"),
+                Some(&credential),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ops"].as_array().unwrap().len(), 1);
+        assert!(body["commit"].is_object());
+
+        let (status, body) = send(
+            &f.state,
+            get_req(
+                &format!("/xrpc/com.atproto.space.getLatestCommit?{query}"),
+                Some(&credential),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["commit"]["rev"], "3jzfcijpj2z2c");
+
+        let response = router(f.state.clone())
+            .oneshot(get_req(
+                &format!("/xrpc/com.atproto.space.getRepo?{query}"),
+                Some(&credential),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/vnd.ipld.car"
+        );
+        assert!(!response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
     }
 
     #[tokio::test]
