@@ -87,6 +87,21 @@ pub struct InternalCredentialProvider {
     host: Arc<HttpSpaceHost>,
     cached: Mutex<HashMap<String, (String, u64)>>,
 }
+
+/// Adapts the shared internal provider to one worker's `CredentialSource`.
+pub struct SpaceCredentialSource {
+    provider: Arc<InternalCredentialProvider>,
+    space: String,
+}
+impl SpaceCredentialSource {
+    pub fn new(provider: Arc<InternalCredentialProvider>, space: impl Into<String>) -> Self {
+        Self { provider, space: space.into() }
+    }
+}
+#[async_trait]
+impl CredentialSource for SpaceCredentialSource {
+    async fn credential(&self, now: u64) -> Result<String> { self.provider.credential_for(&self.space, now).await }
+}
 impl InternalCredentialProvider {
     pub fn new(
         space: impl Into<String>,

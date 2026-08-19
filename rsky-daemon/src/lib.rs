@@ -35,7 +35,7 @@ pub mod xrpc;
 
 pub use credentials::{
     CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
-    PdsDelegationSource, StaticCredential, unix_now,
+    PdsDelegationSource, SpaceCredentialSource, StaticCredential, unix_now,
 };
 pub use engine::{CommitKeyResolver, SyncOutcome, sync_repo};
 pub use error::{DaemonError, Result};
