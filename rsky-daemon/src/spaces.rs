@@ -49,7 +49,7 @@ impl SpaceSource for StaticSpaces {
 pub struct HttpSpaceSource {
     url: String,
     api_key: String,
-    authority_did: String,
+    authority_did: Option<String>,
     space_type: String,
     http: reqwest::Client,
 }
@@ -58,13 +58,13 @@ impl HttpSpaceSource {
     pub fn new(
         url: impl Into<String>,
         api_key: impl Into<String>,
-        authority_did: impl Into<String>,
+        authority_did: Option<String>,
         space_type: impl Into<String>,
     ) -> Self {
         Self {
             url: url.into().trim_end_matches('/').into(),
             api_key: api_key.into(),
-            authority_did: authority_did.into(),
+            authority_did,
             space_type: space_type.into(),
             http: reqwest::Client::new(),
         }
@@ -85,11 +85,14 @@ struct SyncableSpace {
 #[async_trait]
 impl SpaceSource for HttpSpaceSource {
     async fn spaces(&self) -> Result<BTreeMap<String, SpaceTarget>> {
-        let response = self
+        let mut request = self
             .http
             .get(format!("{}/admin/sync-spaces", self.url))
-            .query(&[("authority", &self.authority_did)])
-            .header("X-RSKY-KEY", &self.api_key)
+            .header("X-RSKY-KEY", &self.api_key);
+        if let Some(authority) = &self.authority_did {
+            request = request.query(&[("authority", authority)]);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| DaemonError::Xrpc(e.to_string()))?;
@@ -113,7 +116,10 @@ impl SpaceSource for HttpSpaceSource {
                         entry.state.as_str(),
                         "host_registered" | "active" | "deleting"
                     )
-                    && space.authority == self.authority_did
+                    && self
+                        .authority_did
+                        .as_deref()
+                        .is_none_or(|authority| space.authority == authority)
                     && space.space_type == self.space_type)
                     .then_some((
                         space.uri(),
@@ -191,7 +197,12 @@ mod tests {
     const A: &str = "at://did:plc:c/space/community.blacksky.feed/a";
     const B: &str = "at://did:plc:c/space/community.blacksky.feed/b";
     fn source(url: String) -> HttpSpaceSource {
-        HttpSpaceSource::new(url, "key", "did:plc:c", "community.blacksky.feed")
+        HttpSpaceSource::new(
+            url,
+            "key",
+            Some("did:plc:c".to_string()),
+            "community.blacksky.feed",
+        )
     }
     #[tokio::test]
     async fn filters_and_reads_managing_app_spaces() {
@@ -199,6 +210,34 @@ mod tests {
         Mock::given(method("GET")).and(path("/admin/sync-spaces")).and(query_param("authority", "did:plc:c")).and(header("X-RSKY-KEY", "key")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"spaces":[{"space":A,"generation":2,"state":"active"},{"space":B,"generation":3,"state":"deleting"},{"space":"at://did:plc:other/space/community.blacksky.feed/x","generation":1,"state":"active"}]}))).mount(&server).await;
         assert_eq!(source(server.uri()).spaces().await.unwrap().len(), 2);
     }
+    #[tokio::test]
+    async fn without_an_authority_filter_all_authorities_are_discovered() {
+        use wiremock::matchers::query_param_is_missing;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/sync-spaces"))
+            .and(query_param_is_missing("authority"))
+            .and(header("X-RSKY-KEY", "key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "spaces": [
+                    {"space": A, "generation": 2, "state": "active"},
+                    {"space": "at://did:plc:other/space/community.blacksky.feed/x", "generation": 1, "state": "active"},
+                    {"space": "at://did:plc:other/space/wrong.type/y", "generation": 1, "state": "active"},
+                    {"space": "at://did:plc:third/space/community.blacksky.feed/z", "generation": 1, "state": "retired"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let spaces = HttpSpaceSource::new(server.uri(), "key", None, "community.blacksky.feed")
+            .spaces()
+            .await
+            .unwrap();
+        assert_eq!(
+            spaces.keys().collect::<Vec<_>>(),
+            vec![A, "at://did:plc:other/space/community.blacksky.feed/x"]
+        );
+    }
+
     #[tokio::test]
     async fn pin_survives_source_outage() {
         let server = MockServer::start().await;

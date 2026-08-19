@@ -81,7 +81,6 @@ impl CredentialSource for StaticCredential {
 
 pub struct InternalCredentialProvider {
     default_space: String,
-    authority_did: String,
     mint_token: String,
     issuer: ServiceJwtIssuer,
     host: Arc<HttpSpaceHost>,
@@ -105,14 +104,12 @@ impl CredentialSource for SpaceCredentialSource {
 impl InternalCredentialProvider {
     pub fn new(
         space: impl Into<String>,
-        authority_did: impl Into<String>,
         mint_token: impl Into<String>,
         issuer: ServiceJwtIssuer,
         host: Arc<HttpSpaceHost>,
     ) -> Self {
         Self {
             default_space: space.into(),
-            authority_did: authority_did.into(),
             mint_token: mint_token.into(),
             issuer,
             host,
@@ -130,9 +127,8 @@ impl InternalCredentialProvider {
                 return Ok(jwt.clone());
             }
         }
-        let service_jwt = self
-            .issuer
-            .mint(&self.authority_did, now, &format!("mint-{now}"))?;
+        let authority = rsky_space::space_id::SpaceId::parse(space)?.authority;
+        let service_jwt = self.issuer.mint(&authority, now, &format!("mint-{now}"))?;
         let jwt = self
             .host
             .mint_internal_credential(space, &service_jwt, &self.mint_token)
@@ -302,7 +298,6 @@ mod tests {
         let b = "at://did:plc:authority/space/community.blacksky.feed/other";
         let provider = InternalCredentialProvider::new(
             a,
-            "did:plc:authority",
             "mint-token",
             ServiceJwtIssuer::from_hex("did:plc:daemon", &"11".repeat(32)).unwrap(),
             Arc::new(HttpSpaceHost::new(

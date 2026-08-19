@@ -13,7 +13,6 @@ use rsky_daemon::{
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
 use rsky_identity::IdResolver;
-use rsky_space::space_id::SpaceId;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
@@ -74,7 +73,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::parse();
     cfg.validate()?;
-    let authority_did = if cfg.authority_did.is_empty() { SpaceId::parse(&cfg.space_uri)?.authority } else { cfg.authority_did.clone() };
+    let authority_filter = cfg.authority_filter();
     // One proof-of-possession key for the process: the credential it mints is
     // bound to it, and every host it is presented to checks that binding.
     if cfg.dpop_key_path.is_empty() {
@@ -97,7 +96,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         Some(Arc::new(InternalCredentialProvider::new(
             &cfg.space_uri,
-            &authority_did,
             &cfg.space_host_mint_token,
             rsky_daemon::service_jwt::ServiceJwtIssuer::from_hex(
                 &cfg.service_identity,
@@ -111,7 +109,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let mut sources: Vec<Box<dyn rsky_daemon::SpaceSource>> = Vec::new();
     if !cfg.space_uri.is_empty() { sources.push(Box::new(StaticSpaces::new([cfg.space_uri.clone()]))); }
-    if !cfg.spaces_url.is_empty() { sources.push(Box::new(HttpSpaceSource::new(&cfg.spaces_url, &cfg.spaces_api_key, &authority_did, &cfg.space_type))); }
+    if !cfg.spaces_url.is_empty() { sources.push(Box::new(HttpSpaceSource::new(&cfg.spaces_url, &cfg.spaces_api_key, authority_filter.clone(), &cfg.space_type))); }
     let source = Arc::new(CombinedSource(sources));
     let registry = SpaceRegistry::new();
 
@@ -120,7 +118,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let notify_state = NotifyState {
         space_uri: cfg.space_uri.clone(),
         registry: registry.clone(),
-        authority_did: authority_did.clone(),
         service_identity: cfg.service_identity.clone(),
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
@@ -129,7 +126,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
     let listener = tokio::net::TcpListener::bind(&cfg.notify_bind).await?;
     tracing::info!(
-        authority = %authority_did,
+        authority = %authority_filter.as_deref().unwrap_or("(any)"),
         host = %cfg.space_host_url,
         notify_bind = %cfg.notify_bind,
         sweep_secs = cfg.sweep_interval_secs,
