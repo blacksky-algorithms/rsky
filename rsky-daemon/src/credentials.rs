@@ -4,13 +4,14 @@
 
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
-use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
+use rsky_space::credential::{CREDENTIAL_TTL_SECS, decode};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
-use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
+use crate::xrpc::{SpaceHostClient, check, http_client, net_err};
+use crate::{HttpSpaceHost, service_jwt::ServiceJwtIssuer};
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -79,12 +80,12 @@ impl CredentialSource for StaticCredential {
 }
 
 pub struct InternalCredentialProvider {
-    space: String,
+    default_space: String,
     authority_did: String,
     mint_token: String,
     issuer: ServiceJwtIssuer,
     host: Arc<HttpSpaceHost>,
-    cached: Mutex<Option<(String, u64)>>,
+    cached: Mutex<HashMap<String, (String, u64)>>,
 }
 impl InternalCredentialProvider {
     pub fn new(
@@ -95,20 +96,21 @@ impl InternalCredentialProvider {
         host: Arc<HttpSpaceHost>,
     ) -> Self {
         Self {
-            space: space.into(),
+            default_space: space.into(),
             authority_did: authority_did.into(),
             mint_token: mint_token.into(),
             issuer,
             host,
-            cached: Mutex::new(None),
+            cached: Mutex::new(HashMap::new()),
         }
     }
-}
-#[async_trait]
-impl CredentialSource for InternalCredentialProvider {
-    async fn credential(&self, now: u64) -> Result<String> {
+
+    /// Get a credential bound to this daemon's DPoP key for any discovered
+    /// space. The service identity is shared, but credentials never cross a
+    /// space boundary in the cache.
+    pub async fn credential_for(&self, space: &str, now: u64) -> Result<String> {
         let mut cached = self.cached.lock().await;
-        if let Some((jwt, exp)) = cached.as_ref() {
+        if let Some((jwt, exp)) = cached.get(space) {
             if now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5) {
                 return Ok(jwt.clone());
             }
@@ -118,11 +120,17 @@ impl CredentialSource for InternalCredentialProvider {
             .mint(&self.authority_did, now, &format!("mint-{now}"))?;
         let jwt = self
             .host
-            .mint_internal_credential(&self.space, &service_jwt, &self.mint_token)
+            .mint_internal_credential(space, &service_jwt, &self.mint_token)
             .await?;
         let exp = decode(&jwt)?.claims.exp;
-        *cached = Some((jwt.clone(), exp));
+        cached.insert(space.to_string(), (jwt.clone(), exp));
         Ok(jwt)
+    }
+}
+#[async_trait]
+impl CredentialSource for InternalCredentialProvider {
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.credential_for(&self.default_space, now).await
     }
 }
 
@@ -178,7 +186,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use rsky_lexicon::com::atproto::space::ListReposOutput;
-    use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
+    use rsky_space::credential::{CREDENTIAL_TYP, JwtHeader, SpaceClaims, encode};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -271,6 +279,34 @@ mod tests {
         let second = provider.credential(6760).await.unwrap();
         assert_eq!(second, credential_jwt(7000));
         assert_eq!(host.mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn internal_credentials_are_cached_per_space() {
+        let a = SPACE;
+        let b = "at://did:plc:authority/space/community.blacksky.feed/other";
+        let provider = InternalCredentialProvider::new(
+            a,
+            "did:plc:authority",
+            "mint-token",
+            ServiceJwtIssuer::from_hex("did:plc:daemon", &"11".repeat(32)).unwrap(),
+            Arc::new(HttpSpaceHost::new(
+                "http://127.0.0.1:9",
+                Arc::new(crate::dpop::DpopSigner::generate().unwrap()),
+            )),
+        );
+        provider.cached.lock().await.extend([
+            (a.into(), (credential_jwt(1000), 8200)),
+            (b.into(), (credential_jwt(2000), 9200)),
+        ]);
+        assert_eq!(
+            provider.credential_for(a, 3000).await.unwrap(),
+            credential_jwt(1000)
+        );
+        assert_eq!(
+            provider.credential_for(b, 3000).await.unwrap(),
+            credential_jwt(2000)
+        );
     }
 
     struct GarbageHost;

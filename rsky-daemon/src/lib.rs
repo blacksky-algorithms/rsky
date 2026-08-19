@@ -29,19 +29,23 @@ pub mod recovery;
 pub mod repohost;
 pub mod runner;
 pub mod service_jwt;
+pub mod spaces;
 pub mod sqlite_index;
 pub mod xrpc;
 
 pub use credentials::{
-    unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
-    PdsDelegationSource, StaticCredential,
+    CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
+    PdsDelegationSource, StaticCredential, unix_now,
 };
-pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
+pub use engine::{CommitKeyResolver, SyncOutcome, sync_repo};
 pub use error::{DaemonError, Result};
 pub use index::{InMemoryIndex, SpaceIndex};
-pub use notify::{router as notify_router, NotifyState, WriteNotice};
+pub use notify::{NotifyState, WriteNotice, router as notify_router};
 pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
-pub use runner::{run, sync_repo_healing, sync_space_once, RunnerOptions, SweepReport};
+pub use runner::{RunnerOptions, SweepReport, run, sync_repo_healing, sync_space_once};
+pub use spaces::{
+    CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
+};
 pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};
