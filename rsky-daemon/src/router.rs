@@ -170,9 +170,30 @@ impl Router {
     }
 }
 
+/// The two sync paths inline a record's value in different encodings: the
+/// oplog carries it as JSON, a full-state CAR as DAG-CBOR. Either may be what
+/// the index holds for a given record, so both are accepted here.
+fn decode_inlined(bytes: &[u8]) -> std::result::Result<Value, String> {
+    match decode_record(bytes) {
+        Ok(value) if value.is_object() => Ok(value),
+        cbor => serde_json::from_slice::<Value>(bytes)
+            .map_err(|json_err| match cbor {
+                Ok(_) => format!("dag-cbor value is not a record; json: {json_err}"),
+                Err(cbor_err) => format!("dag-cbor: {cbor_err}; json: {json_err}"),
+            })
+            .and_then(|value| {
+                if value.is_object() {
+                    Ok(value)
+                } else {
+                    Err("value is not a record".to_string())
+                }
+            }),
+    }
+}
+
 fn decode_value(uri: &str, value: Option<&[u8]>) -> Option<Value> {
     match value {
-        Some(bytes) => match decode_record(bytes) {
+        Some(bytes) => match decode_inlined(bytes) {
             Ok(value) => Some(value),
             Err(err) => {
                 let total = KNOWN_COLLECTION_DECODE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -307,6 +328,18 @@ mod tests {
             r.route(AUTHORITY, &delete(MODERATION_ACTION_COLLECTION)),
             Some(SyncEvent::ModerationAction { record: None, .. })
         ));
+    }
+
+    #[test]
+    fn a_value_inlined_as_json_routes_like_one_inlined_as_dag_cbor() {
+        let mut json_valued = upsert(POST_COLLECTION, post());
+        if let IndexMutation::Upsert { value, .. } = &mut json_valued {
+            *value = Some(serde_json::to_vec(&post()).unwrap());
+        }
+        match router().route(MEMBER, &json_valued) {
+            Some(SyncEvent::PostCreated { record, .. }) => assert_eq!(record["text"], "hello"),
+            other => panic!("expected a post create, got {other:?}"),
+        }
     }
 
     #[test]
