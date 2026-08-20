@@ -180,7 +180,7 @@ async fn sync_followers(config: &Config) -> Result<()> {
     loop {
         let rows = pg
             .query(
-                r#"SELECT did, "followersCount" FROM bsky.profile_agg
+                r#"SELECT did, "followersCount"::int4 FROM bsky.profile_agg
                    WHERE "followersCount" > 0 AND did > $1
                    ORDER BY did
                    LIMIT $2"#,
