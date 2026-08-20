@@ -1,6 +1,6 @@
 [package]
 name = "palomar-sync"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Sync followersFuzzy and PageRank from PostgreSQL to OpenSearch for Palomar search"
