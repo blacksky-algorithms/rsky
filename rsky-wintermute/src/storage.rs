@@ -1,4 +1,7 @@
 use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFER_SIZE};
+
+const LIVE_SEQ_READ_CURSOR: &str = "live_seq_read";
+const LIVE_LEGACY_DRAINED: &str = "live_legacy_drained";
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use heed::types::Bytes;
@@ -160,6 +163,14 @@ impl Storage {
         wtxn.commit()
             .map_err(|e| WintermuteError::Other(format!("LMDB commit failed: {e}")))?;
 
+        // Restore the seq read cursor and legacy-drained flag so a restart
+        // resumes the forward scan instead of re-walking every tombstone.
+        let seq_read_cursor = cursors
+            .get(LIVE_SEQ_READ_CURSOR.as_bytes())?
+            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
+            .map(|b| b.to_vec());
+        let legacy_drained = cursors.get(LIVE_LEGACY_DRAINED.as_bytes())?.is_some();
+
         Ok(Self {
             db,
             firehose_events,
@@ -171,9 +182,9 @@ impl Storage {
             lmdb_env,
             firehose_backfill_db,
             firehose_live_cursor: std::sync::Mutex::new(None),
-            firehose_live_seq_cursor: std::sync::Mutex::new(None),
+            firehose_live_seq_cursor: std::sync::Mutex::new(seq_read_cursor),
             live_seq_next: AtomicU64::new(live_seq_start),
-            legacy_live_drained: AtomicBool::new(false),
+            legacy_live_drained: AtomicBool::new(legacy_drained),
             live_notify: tokio::sync::Notify::new(),
         })
     }
@@ -372,6 +383,12 @@ impl Storage {
             let legacy_results = self.dequeue_live_legacy_batch(limit)?;
             if legacy_results.is_empty() {
                 self.legacy_live_drained.store(true, Ordering::Relaxed);
+                if let Err(e) = self
+                    .cursors
+                    .insert(LIVE_LEGACY_DRAINED.as_bytes(), 1u8.to_be_bytes())
+                {
+                    tracing::warn!("failed to persist legacy-drained flag: {e}");
+                }
                 tracing::info!("legacy firehose_live partition drained, switching to seq keys");
                 self.dequeue_live_seq_batch(limit)?
             } else {
@@ -423,7 +440,27 @@ impl Storage {
             .map(|(k, _)| k.clone())
             .or_else(|| poisoned.last().cloned());
         if let (Some(key), Ok(mut guard)) = (last_key, self.firehose_live_seq_cursor.lock()) {
+            self.cursors
+                .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), key.as_slice())?;
             *guard = Some(key);
+        } else if results.is_empty() && poisoned.is_empty() {
+            // A wiped-and-recreated partition restarts seq keys from zero; a
+            // persisted cursor from before the wipe would then skip everything.
+            if let Some((first, _)) = self.firehose_live_seq.first_key_value()? {
+                let stale = self
+                    .firehose_live_seq_cursor
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .is_some_and(|c| first.as_ref() < c.as_slice());
+                if stale {
+                    tracing::warn!("live seq read cursor is ahead of the partition; resetting");
+                    if let Ok(mut guard) = self.firehose_live_seq_cursor.lock() {
+                        *guard = None;
+                    }
+                    self.cursors.remove(LIVE_SEQ_READ_CURSOR.as_bytes())?;
+                }
+            }
         }
 
         for (key, _) in &results {
@@ -1630,6 +1667,67 @@ mod tests {
             indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
             rev: "3a".to_owned(),
         }
+    }
+
+    #[test]
+    fn live_seq_read_cursor_persists_across_reopen() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..6 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/p{i}"
+                )))
+                .unwrap();
+        }
+        assert_eq!(storage.dequeue_firehose_live_batch(4).unwrap().len(), 4);
+        drop(storage);
+
+        let storage = Storage::new(Some(db_path)).unwrap();
+        let resumed = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(
+            resumed.len(),
+            2,
+            "reopen must resume after the persisted cursor"
+        );
+        assert_eq!(resumed[0].1.uri, "at://did:plc:a/app.bsky.feed.post/p4");
+        assert_eq!(resumed[1].1.uri, "at://did:plc:a/app.bsky.feed.post/p5");
+        drop(dir);
+    }
+
+    #[test]
+    fn stale_read_cursor_resets_when_partition_restarts() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..3 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/q{i}"
+                )))
+                .unwrap();
+        }
+        assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
+        // Simulate the runbook partition wipe: force a cursor far ahead of any
+        // key the recreated partition will produce.
+        storage
+            .cursors
+            .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), 1_000_000u64.to_be_bytes())
+            .unwrap();
+        drop(storage);
+
+        let storage = Storage::new(Some(db_path)).unwrap();
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/fresh"))
+            .unwrap();
+        // Fresh key sorts below the stale cursor: first dequeue detects and
+        // resets, second dequeue returns the job.
+        let first = storage.dequeue_firehose_live_batch(10).unwrap();
+        let second = storage.dequeue_firehose_live_batch(10).unwrap();
+        let total = first.len() + second.len();
+        assert_eq!(total, 1, "job behind a stale cursor must not be skipped");
+        drop(dir);
     }
 
     #[test]

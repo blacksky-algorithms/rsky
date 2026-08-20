@@ -8192,7 +8192,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-oauth"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8211,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "0.13.16"
+version = "0.13.17"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8512,7 +8512,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
