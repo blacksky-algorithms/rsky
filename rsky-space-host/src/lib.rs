@@ -25,6 +25,7 @@ pub mod attestation;
 pub mod authority;
 pub mod commits;
 pub mod config;
+pub mod convert;
 pub mod error;
 pub mod http;
 pub mod keys;

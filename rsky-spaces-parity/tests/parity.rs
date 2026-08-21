@@ -576,11 +576,266 @@ fn blob_refs(path: &std::path::Path) -> i64 {
 #[tokio::test]
 async fn scoreboard() {
     let scenarios = scenarios();
-    let total = scenarios.len();
+    let total = scenarios.len() + 1;
     let mut equal = 0;
     for case in &scenarios {
         equal += usize::from(run(case).await);
     }
+    equal += usize::from(s14_legacy_converter().await);
     println!("parity: {equal}/{total} (+1 documented divergence) scenarios byte-equal");
     assert_eq!(equal, total, "every scenario must be byte-equal");
+}
+
+const LEGACY_SCHEMA: &str = "\
+CREATE TABLE repo (\
+    space_uri TEXT NOT NULL, did TEXT NOT NULL, rev TEXT NOT NULL DEFAULT '', \
+    state BLOB NOT NULL, PRIMARY KEY (space_uri, did));\
+CREATE TABLE record (\
+    space_uri TEXT NOT NULL, did TEXT NOT NULL, path TEXT NOT NULL, \
+    collection TEXT NOT NULL, rkey TEXT NOT NULL, cid TEXT NOT NULL, \
+    value BLOB NOT NULL, PRIMARY KEY (space_uri, did, path));\
+CREATE TABLE repo_op (\
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, space_uri TEXT NOT NULL, \
+    did TEXT NOT NULL, rev TEXT NOT NULL, collection TEXT NOT NULL, \
+    rkey TEXT NOT NULL, cid TEXT, prev TEXT);\
+CREATE INDEX repo_op_repo_seq ON repo_op (space_uri, did, seq);";
+
+const SECOND_DID: &str = "did:plc:paritysecond";
+
+struct LegacyOp {
+    space_uri: String,
+    did: &'static str,
+    rev: &'static str,
+    rkey: &'static str,
+    cid: Option<String>,
+    prev: Option<String>,
+}
+
+/// S14: convert a store in the deployed multi-tenant schema into per-account
+/// files, then read them back with the oracle. The LtHash state and every
+/// oplog row id must survive the conversion, because they are respectively the
+/// digest readers have seen and the cursors syncers hold.
+async fn s14_legacy_converter() -> bool {
+    let name = "S14 legacy store converter";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let legacy_path = temp.path().join("legacy.sqlite");
+    let directory = temp.path().join("actors");
+    let space_a = SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity");
+    let space_b = SpaceId::new(AUTHORITY, "community.blacksky.feed", "second");
+
+    let one_v1 = json!({ "text": "one" });
+    let one_v2 = json!({ "text": "one edited" });
+    let two = json!({ "text": "two" });
+    let three = json!({ "text": "three" });
+    let solo = json!({ "text": "solo" });
+    let mine = json!({ "text": "mine" });
+
+    // Interleaved sequence numbers across accounts: the source numbers its
+    // oplog globally, the destination one file per account.
+    let ops = vec![
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: DID,
+            rev: "3rev1",
+            rkey: "one",
+            cid: Some(cid_of(&one_v1)),
+            prev: None,
+        },
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: DID,
+            rev: "3rev1",
+            rkey: "two",
+            cid: Some(cid_of(&two)),
+            prev: None,
+        },
+        LegacyOp {
+            space_uri: space_b.uri(),
+            did: DID,
+            rev: "3rev2",
+            rkey: "solo",
+            cid: Some(cid_of(&solo)),
+            prev: None,
+        },
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: SECOND_DID,
+            rev: "3rev3",
+            rkey: "mine",
+            cid: Some(cid_of(&mine)),
+            prev: None,
+        },
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: DID,
+            rev: "3rev4",
+            rkey: "one",
+            cid: Some(cid_of(&one_v2)),
+            prev: Some(cid_of(&one_v1)),
+        },
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: DID,
+            rev: "3rev5",
+            rkey: "three",
+            cid: Some(cid_of(&three)),
+            prev: None,
+        },
+        LegacyOp {
+            space_uri: space_a.uri(),
+            did: DID,
+            rev: "3rev6",
+            rkey: "three",
+            cid: None,
+            prev: Some(cid_of(&three)),
+        },
+    ];
+
+    let repos = [
+        (
+            space_a.uri(),
+            DID,
+            "3rev6",
+            vec![("one", &one_v2), ("two", &two)],
+        ),
+        (space_b.uri(), DID, "3rev2", vec![("solo", &solo)]),
+        (space_a.uri(), SECOND_DID, "3rev3", vec![("mine", &mine)]),
+    ];
+
+    {
+        let conn = rusqlite::Connection::open(&legacy_path).expect("legacy db");
+        conn.execute_batch(LEGACY_SCHEMA).expect("legacy schema");
+        for (space_uri, did, rev, records) in &repos {
+            let mut lthash = oracle_rsky_space::lthash::LtHash::new();
+            for (rkey, value) in records {
+                let (cid, bytes) = encode_record(value).expect("record encoding");
+                lthash.add(&oracle_rsky_space::lthash::element(COLLECTION, rkey, &cid));
+                conn.execute(
+                    "INSERT INTO record (space_uri, did, path, collection, rkey, cid, value) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        space_uri,
+                        did,
+                        format!("{COLLECTION}/{rkey}"),
+                        COLLECTION,
+                        rkey,
+                        cid,
+                        bytes
+                    ],
+                )
+                .expect("legacy record");
+            }
+            conn.execute(
+                "INSERT INTO repo (space_uri, did, rev, state) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![space_uri, did, rev, lthash.state_bytes().to_vec()],
+            )
+            .expect("legacy repo");
+        }
+        for op in &ops {
+            conn.execute(
+                "INSERT INTO repo_op (space_uri, did, rev, collection, rkey, cid, prev) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    op.space_uri,
+                    op.did,
+                    op.rev,
+                    COLLECTION,
+                    op.rkey,
+                    op.cid,
+                    op.prev
+                ],
+            )
+            .expect("legacy op");
+        }
+    }
+
+    let totals = rsky_space_host::convert::convert(&legacy_path, &directory).expect("conversion");
+    if totals.accounts != 2 || totals.repos != 3 || totals.records != 4 || totals.ops != 7 {
+        eprintln!("{name}: unexpected conversion totals: {totals:?}");
+        return false;
+    }
+
+    for (space_uri, did, rev, records) in &repos {
+        let path = rsky_space_host::actor_repos::store_path(&directory, did).expect("store path");
+        let store = SpaceStore::new(
+            (*did).into(),
+            get_migrated_db(&path).await.expect("converted db"),
+        );
+        let state = store
+            .repo_state(space_uri)
+            .await
+            .expect("repo state")
+            .expect("repo row");
+        let mut expected = oracle_rsky_space::lthash::LtHash::new();
+        for (rkey, value) in records {
+            expected.add(&oracle_rsky_space::lthash::element(
+                COLLECTION,
+                rkey,
+                &cid_of(value),
+            ));
+        }
+        if state.rev != *rev || state.lthash_state != expected.state_bytes().to_vec() {
+            eprintln!("{name}: {space_uri}/{did} head did not survive conversion");
+            return false;
+        }
+        let served = store.all_records(space_uri).await.expect("records");
+        let expected_records: Vec<_> = records
+            .iter()
+            .map(|(rkey, value)| {
+                let (cid, bytes) = encode_record(value).expect("record encoding");
+                (COLLECTION.to_string(), rkey.to_string(), cid, bytes)
+            })
+            .collect();
+        let served_records: Vec<_> = served
+            .iter()
+            .map(|r| {
+                (
+                    r.collection.clone(),
+                    r.rkey.clone(),
+                    r.cid.clone(),
+                    r.value.clone(),
+                )
+            })
+            .collect();
+        if served_records != expected_records {
+            eprintln!("{name}: {space_uri}/{did} records differ\n  got: {served_records:?}\n  want: {expected_records:?}");
+            return false;
+        }
+
+        // Oplog rows keep their source ids, so a held cursor still means the
+        // same position.
+        let expected_ids: Vec<i64> = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.space_uri == *space_uri && op.did == *did)
+            .map(|(index, _)| index as i64 + 1)
+            .collect();
+        let (served_ops, _) = store
+            .list_repo_ops(space_uri, None, None, usize::MAX >> 1)
+            .await
+            .expect("ops");
+        if served_ops.iter().map(|o| o.id).collect::<Vec<_>>() != expected_ids {
+            eprintln!(
+                "{name}: {space_uri}/{did} oplog ids differ\n  got: {:?}\n  want: {expected_ids:?}",
+                served_ops.iter().map(|o| o.id).collect::<Vec<_>>()
+            );
+            return false;
+        }
+
+        // A syncer holding the first id resumes at the next one, unchanged.
+        if let Some(&first) = expected_ids.first() {
+            let next = expected_ids.get(1).copied();
+            let resumed = rsky_space_host::convert::resumes_at(&path, space_uri, first)
+                .expect("resume lookup");
+            let (after, _) = store
+                .list_repo_ops(space_uri, None, Some(first), usize::MAX >> 1)
+                .await
+                .expect("ops after cursor");
+            if resumed != next || after.first().map(|o| o.id) != next {
+                eprintln!("{name}: {space_uri}/{did} does not resume at {next:?}");
+                return false;
+            }
+        }
+    }
+    true
 }

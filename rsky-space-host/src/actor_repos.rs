@@ -25,6 +25,20 @@ use crate::repo::{
 /// Oplog rows retained per repo before the oldest revisions are dropped.
 pub const DEFAULT_OPLOG_WINDOW: usize = 10_000;
 
+/// `{root}/{sha256(did)[..2]}/{did}/store.sqlite`, the PDS actor layout.
+pub fn store_path(directory: &std::path::Path, did: &str) -> Result<PathBuf> {
+    if did.is_empty()
+        || !did.starts_with("did:")
+        || did.contains('/')
+        || did.contains('\\')
+        || did.contains("..")
+    {
+        return Err(HostError::InvalidRequest(format!("unusable did: {did}")));
+    }
+    let digest = hex::encode(Sha256::digest(did.as_bytes()));
+    Ok(directory.join(&digest[..2]).join(did).join("store.sqlite"))
+}
+
 pub struct ActorStoreRepos {
     directory: PathBuf,
     oplog_window: usize,
@@ -44,22 +58,8 @@ impl ActorStoreRepos {
         })
     }
 
-    /// `{root}/{sha256(did)[..2]}/{did}/store.sqlite`, the PDS actor layout.
     pub fn store_path(&self, did: &str) -> Result<PathBuf> {
-        if did.is_empty()
-            || !did.starts_with("did:")
-            || did.contains('/')
-            || did.contains('\\')
-            || did.contains("..")
-        {
-            return Err(HostError::InvalidRequest(format!("unusable did: {did}")));
-        }
-        let digest = hex::encode(Sha256::digest(did.as_bytes()));
-        Ok(self
-            .directory
-            .join(&digest[..2])
-            .join(did)
-            .join("store.sqlite"))
+        store_path(&self.directory, did)
     }
 
     fn with_store<T>(
