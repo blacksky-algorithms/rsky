@@ -1,3 +1,5 @@
+pub mod layer2;
+
 use rsky_pds::actor_store::space::{SpaceStore, SpaceStoreError};
 use rsky_space_host::error::HostError;
 use rsky_space_host::repo::RepoStore;
