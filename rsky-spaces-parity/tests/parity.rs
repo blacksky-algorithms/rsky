@@ -1,6 +1,8 @@
 use oracle_rsky_space::space_id::SpaceId;
 use rsky_pds::actor_store::db::get_migrated_db;
-use rsky_pds::actor_store::space::{encode_record, oplog_window, SpaceStore, SpaceWrite};
+use rsky_pds::actor_store::space::{
+    blob_refs_in_record, encode_record, SpaceStore, SpaceWrite, DEFAULT_OPLOG_WINDOW,
+};
 use rsky_space_host::actor_repos::ActorStoreRepos;
 use rsky_space_host::repo::{RepoStore, RepoWrite};
 use rsky_spaces_parity::{
@@ -143,23 +145,41 @@ fn in_collection(collection: &'static str, write: ScriptWrite) -> ScriptWrite {
     }
 }
 
+struct Scenario {
+    name: &'static str,
+    window: usize,
+    batches: Vec<Vec<ScriptWrite>>,
+}
+
+fn scenario(name: &'static str, batches: Vec<Vec<ScriptWrite>>) -> Scenario {
+    Scenario {
+        name,
+        window: DEFAULT_OPLOG_WINDOW,
+        batches,
+    }
+}
+
 /// Drive both stores through the same batches, then compare: refusal reasons
-/// per batch, the reads each side serves, the rows each side stored (with
-/// server-minted revisions and oplog ids normalized), and paged reads.
-async fn run(name: &str, batches: Vec<Vec<ScriptWrite>>) -> bool {
+/// per batch, the rows each side stored (with server-minted revisions and oplog
+/// ids normalized), the reads each side serves whole and paged, the answers to
+/// every `since` probe, and finally what the oracle reads back out of the
+/// file the shim wrote.
+async fn run(case: &Scenario) -> bool {
+    let name = case.name;
     let spaces = [
         SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity"),
         SpaceId::new(AUTHORITY, "community.blacksky.feed", "second"),
     ];
     let temp = tempfile::tempdir().expect("tempdir");
-    let shim = ActorStoreRepos::open(temp.path().join("shim")).expect("shim store");
+    let shim = ActorStoreRepos::with_oplog_window(temp.path().join("shim"), case.window)
+        .expect("shim store");
     let pds_path = temp.path().join("store.sqlite");
     let pds = SpaceStore::new(
         DID.into(),
         get_migrated_db(&pds_path).await.expect("pds db"),
     );
 
-    for (index, batch) in batches.iter().enumerate() {
+    for (index, batch) in case.batches.iter().enumerate() {
         for (space_index, space) in spaces.iter().enumerate() {
             let writes: Vec<&ScriptWrite> =
                 batch.iter().filter(|w| w.space == space_index).collect();
@@ -175,11 +195,7 @@ async fn run(name: &str, batches: Vec<Vec<ScriptWrite>>) -> bool {
                 )
                 .await;
             let pds_result = pds
-                .apply_writes(
-                    space,
-                    writes.iter().map(|w| w.pds()).collect(),
-                    oplog_window(),
-                )
+                .apply_writes(space, writes.iter().map(|w| w.pds()).collect(), case.window)
                 .await;
             let (shim_kind, pds_kind) = (shim_outcome(&shim_result), pds_outcome(&pds_result));
             if shim_kind != pds_kind {
@@ -198,6 +214,12 @@ async fn run(name: &str, batches: Vec<Vec<ScriptWrite>>) -> bool {
         && revs_are_well_formed(name, &shim_tables, "shim")
         && revs_are_well_formed(name, &pds_tables, "pds");
 
+    // The oracle, pointed at the shim's own file: the drop-in assertion.
+    let crossed = SpaceStore::new(
+        DID.into(),
+        get_migrated_db(&shim_path).await.expect("cross-open db"),
+    );
+
     for space in &spaces {
         let uri = space.uri();
         equal = equal
@@ -206,7 +228,14 @@ async fn run(name: &str, batches: Vec<Vec<ScriptWrite>>) -> bool {
                 &dump_shim(&shim, &uri, DID).await,
                 &dump_pds(&pds, &uri).await,
             )
-            && paged_reads_equal(name, &shim, &pds, &uri).await;
+            && assert_parity(
+                &format!("{name} cross-open"),
+                &dump_shim(&shim, &uri, DID).await,
+                &dump_pds(&crossed, &uri).await,
+            )
+            && paged_reads_equal(name, &shim, &pds, &uri).await
+            && since_reads_equal(name, &shim, &pds, &uri, &shim_tables.revs, &pds_tables.revs)
+                .await;
     }
     equal
 }
@@ -268,12 +297,21 @@ async fn paged_reads_equal(
                 cursor.map(|c| c.to_string()).as_deref(),
                 PAGE,
             )
-            .await
-            .expect("shim op page");
-        let (mirror, more) = pds
+            .await;
+        let mirror = pds
             .list_repo_ops(space_uri, None, cursor, PAGE as usize)
-            .await
-            .expect("pds op page");
+            .await;
+        let (shim_kind, pds_kind) = (shim_outcome(&page), pds_outcome(&mirror));
+        if shim_kind != pds_kind {
+            eprintln!(
+                "{name}: op page after {cursor:?} outcomes differ\n  \
+                 shim: {shim_kind:?}\n  pds:  {pds_kind:?}"
+            );
+            return false;
+        }
+        let (Ok(page), Ok((mirror, more))) = (page, mirror) else {
+            return true;
+        };
         let left: Vec<_> = page
             .ops
             .iter()
@@ -299,15 +337,64 @@ async fn paged_reads_equal(
     true
 }
 
-fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
+/// Ask both sides for history since each revision they minted. The revisions
+/// differ between the two stores, so each side is probed with its own — the
+/// nth revision on one side answers the nth on the other.
+async fn since_reads_equal(
+    name: &str,
+    shim: &ActorStoreRepos,
+    pds: &SpaceStore,
+    space_uri: &str,
+    shim_revs: &[String],
+    pds_revs: &[String],
+) -> bool {
+    for (index, (shim_rev, pds_rev)) in shim_revs.iter().zip(pds_revs).enumerate() {
+        let page = shim
+            .list_ops(space_uri, DID, Some(shim_rev), None, u32::MAX)
+            .await;
+        let mirror = pds
+            .list_repo_ops(space_uri, Some(pds_rev.clone()), None, usize::MAX >> 1)
+            .await;
+        let (shim_kind, pds_kind) = (shim_outcome(&page), pds_outcome(&mirror));
+        if shim_kind != pds_kind {
+            eprintln!(
+                "{name}: history since revision {index} differs\n  \
+                 shim: {shim_kind:?}\n  pds:  {pds_kind:?}"
+            );
+            return false;
+        }
+        let (Ok(page), Ok((mirror, _))) = (page, mirror) else {
+            continue;
+        };
+        let left: Vec<_> = page
+            .ops
+            .iter()
+            .map(|o| (&o.collection, &o.rkey, &o.cid, &o.prev))
+            .collect();
+        let right: Vec<_> = mirror
+            .iter()
+            .map(|o| (&o.collection, &o.rkey, &o.cid, &o.prev))
+            .collect();
+        if left != right {
+            eprintln!(
+                "{name}: history since revision {index} differs\n  \
+                 shim: {left:?}\n  pds:  {right:?}"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn scenarios() -> Vec<Scenario> {
     let first = json!({ "text": "first" });
     let long = "x".repeat(60 * 1024);
     vec![
-        (
+        scenario(
             "S1 create single record",
             vec![vec![create("one", "first")]],
         ),
-        (
+        scenario(
             "S2 batch create",
             vec![vec![
                 create("one", "one"),
@@ -315,14 +402,14 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 create("three", "three"),
             ]],
         ),
-        (
+        scenario(
             "S3 update with swap-cid success",
             vec![
                 vec![create("one", "first")],
                 vec![update("one", "second", Some(cid_of(&first)))],
             ],
         ),
-        (
+        scenario(
             "S4 swap-cid conflict",
             vec![
                 vec![create("one", "first")],
@@ -333,14 +420,14 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 )],
             ],
         ),
-        (
+        scenario(
             "S5 delete",
             vec![
                 vec![create("one", "first"), create("two", "two")],
                 vec![delete("one", None)],
             ],
         ),
-        (
+        scenario(
             "S6 delete then recreate same rkey",
             vec![
                 vec![create("one", "first")],
@@ -350,7 +437,7 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 vec![delete("one", None)],
             ],
         ),
-        (
+        scenario(
             "S7 unicode and prefix-colliding keys",
             vec![vec![
                 create("é🌍", "unicode rkey"),
@@ -362,18 +449,29 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 in_collection("app.bsky.feed.post.deep", create("a", "deeper collection")),
             ]],
         ),
-        (
+        scenario(
             "S8 large record",
             vec![
                 vec![create("big", &long)],
                 vec![update(
                     "big",
                     "small again",
-                    Some(cid_of(&json!({"text": long}))),
+                    Some(cid_of(&json!({ "text": long }))),
                 )],
             ],
         ),
-        (
+        Scenario {
+            name: "S9 oplog compaction beyond the window",
+            window: 3,
+            batches: (0..6)
+                .map(|i| vec![create(&format!("r{i}"), &format!("body {i}"))])
+                .chain(std::iter::once(vec![
+                    delete("r0", None),
+                    delete("r1", None),
+                ]))
+                .collect(),
+        },
+        scenario(
             "S10 two spaces one author",
             vec![
                 vec![
@@ -386,7 +484,7 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 ],
             ],
         ),
-        (
+        scenario(
             "S11 pagination across many revisions",
             (0..7)
                 .map(|i| vec![create(&format!("r{i}"), &format!("body {i}"))])
@@ -396,7 +494,83 @@ fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
                 ]))
                 .collect(),
         ),
+        scenario(
+            "S13 cross-open after a mixed script",
+            vec![
+                vec![create("keep", "kept"), create("gone", "removed")],
+                vec![
+                    update("keep", "edited", Some(cid_of(&json!({ "text": "kept" })))),
+                    delete("gone", None),
+                    in_collection("app.bsky.feed.like", create("l1", "liked")),
+                ],
+                vec![in_space(1, create("elsewhere", "other space"))],
+            ],
+        ),
     ]
+}
+
+/// S12: blobs are the one documented divergence. The oracle accepts a
+/// blob-bearing record and indexes the reference; the shim's storage keeps the
+/// bytes but indexes nothing, and the host's write path refuses the record
+/// outright, so a blob-carrying space cannot use the drop-in path.
+#[tokio::test]
+async fn s12_blob_bearing_record_is_a_documented_divergence() {
+    let space = SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shim = ActorStoreRepos::open(temp.path().join("shim")).expect("shim store");
+    let pds = SpaceStore::new(
+        DID.into(),
+        get_migrated_db(temp.path().join("store.sqlite"))
+            .await
+            .expect("pds db"),
+    );
+    let record = json!({
+        "text": "with an image",
+        "image": {
+            "$type": "blob",
+            "ref": { "$link": "bafkreibme22gw2h7y2h7tg2fhqotaqjucnbc24deqo72b6mkl2egm4gv4a" },
+            "mimeType": "image/png",
+            "size": 12345,
+        },
+    });
+    assert_eq!(blob_refs_in_record(&record).len(), 1);
+    assert!(rsky_space_host::http::contains_blob_ref(&record));
+
+    pds.apply_writes(
+        &space,
+        vec![SpaceWrite::Create {
+            collection: COLLECTION.into(),
+            rkey: "one".into(),
+            value: record.clone(),
+        }],
+        DEFAULT_OPLOG_WINDOW,
+    )
+    .await
+    .expect("pds accepts blob-bearing records");
+    shim.apply_writes(
+        &space.uri(),
+        DID,
+        "3shimrev",
+        &[RepoWrite::Create {
+            collection: COLLECTION.into(),
+            rkey: "one".into(),
+            value: encoded(&record),
+        }],
+    )
+    .await
+    .expect("shim storage is shape-agnostic");
+
+    let shim_blobs = blob_refs(&shim.store_path(DID).expect("shim store path"));
+    let pds_blobs = blob_refs(&temp.path().join("store.sqlite"));
+    assert_eq!(pds_blobs, 1, "oracle indexes the blob reference");
+    assert_eq!(shim_blobs, 0, "shim indexes no blob references");
+}
+
+fn blob_refs(path: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(path)
+        .expect("store connection")
+        .query_row("SELECT COUNT(*) FROM space_blob_ref", [], |row| row.get(0))
+        .expect("blob ref count")
 }
 
 #[tokio::test]
@@ -404,9 +578,9 @@ async fn scoreboard() {
     let scenarios = scenarios();
     let total = scenarios.len();
     let mut equal = 0;
-    for (name, batches) in scenarios {
-        equal += usize::from(run(name, batches).await);
+    for case in &scenarios {
+        equal += usize::from(run(case).await);
     }
-    println!("parity: {equal}/{total} scenarios byte-equal");
+    println!("parity: {equal}/{total} (+1 documented divergence) scenarios byte-equal");
     assert_eq!(equal, total, "every scenario must be byte-equal");
 }

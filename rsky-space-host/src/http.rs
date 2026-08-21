@@ -846,7 +846,7 @@ async fn create_record(
     ))
 }
 
-fn contains_blob_ref(value: &Value) -> bool {
+pub fn contains_blob_ref(value: &Value) -> bool {
     match value {
         Value::Array(values) => values.iter().any(contains_blob_ref),
         Value::Object(values) => {

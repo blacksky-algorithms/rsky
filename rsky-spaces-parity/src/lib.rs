@@ -4,11 +4,15 @@ use rsky_space_host::repo::RepoStore;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub type OpTuple = (String, String, Option<String>, Option<String>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoDump {
     pub records: Vec<(String, String, String, Vec<u8>)>,
     pub lthash_state: Vec<u8>,
-    pub ops: Vec<(String, String, Option<String>, Option<String>)>,
+    /// `Err` once compaction has dropped the start of history, which is itself
+    /// a value both sides must agree on.
+    pub ops: Result<Vec<OpTuple>, Outcome>,
 }
 
 /// The classification a write batch or read is compared on: either it applied,
@@ -60,21 +64,21 @@ pub async fn dump_shim(store: &dyn RepoStore, space_uri: &str, did: &str) -> Opt
         .list_records(space_uri, did, None, None, u32::MAX)
         .await
         .expect("shim records");
-    let ops = store
-        .list_ops(space_uri, did, None, None, u32::MAX)
-        .await
-        .expect("shim ops");
+    let ops = store.list_ops(space_uri, did, None, None, u32::MAX).await;
     Some(RepoDump {
         records: records
             .into_iter()
             .map(|r| (r.collection, r.rkey, r.cid, r.value))
             .collect(),
         lthash_state: head.state.to_vec(),
-        ops: ops
-            .ops
-            .into_iter()
-            .map(|o| (o.collection, o.rkey, o.cid, o.prev))
-            .collect(),
+        ops: match ops {
+            Ok(page) => Ok(page
+                .ops
+                .into_iter()
+                .map(|o| (o.collection, o.rkey, o.cid, o.prev))
+                .collect()),
+            Err(error) => Err(shim_outcome::<()>(&Err(error))),
+        },
     })
 }
 
@@ -84,20 +88,22 @@ pub async fn dump_pds(store: &SpaceStore, space_uri: &str) -> Option<RepoDump> {
         return None;
     }
     let records = store.all_records(space_uri).await.expect("pds records");
-    let (ops, _) = store
+    let ops = store
         .list_repo_ops(space_uri, None, None, usize::MAX >> 1)
-        .await
-        .expect("pds ops");
+        .await;
     Some(RepoDump {
         records: records
             .into_iter()
             .map(|r| (r.collection, r.rkey, r.cid, r.value))
             .collect(),
         lthash_state: state.lthash_state,
-        ops: ops
-            .into_iter()
-            .map(|o| (o.collection, o.rkey, o.cid, o.prev))
-            .collect(),
+        ops: match ops {
+            Ok((page, _)) => Ok(page
+                .into_iter()
+                .map(|o| (o.collection, o.rkey, o.cid, o.prev))
+                .collect()),
+            Err(error) => Err(pds_outcome::<()>(&Err(error))),
+        },
     })
 }
 
