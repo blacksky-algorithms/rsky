@@ -381,6 +381,9 @@ mod tests {
         let mut keyless = valid_unpinned();
         keyless.actor_store_dir = String::new();
         let message = keyless.validate().unwrap_err();
-        assert!(message.contains("no space authority available"), "{message}");
+        assert!(
+            message.contains("no space authority available"),
+            "{message}"
+        );
     }
 }

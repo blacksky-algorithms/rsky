@@ -36,8 +36,7 @@ impl AuthorityContext {
 
 /// Builds the [`AuthorityContext`] for an authority first seen at
 /// registration time; fails when the authority's signing key is unavailable.
-pub type AuthorityFactory =
-    Arc<dyn Fn(&SpaceId) -> Result<Arc<AuthorityContext>> + Send + Sync>;
+pub type AuthorityFactory = Arc<dyn Fn(&SpaceId) -> Result<Arc<AuthorityContext>> + Send + Sync>;
 
 /// The authorities this host answers for, keyed by authority DID.
 #[derive(Default)]
