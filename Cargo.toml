@@ -17,6 +17,7 @@ members = [
   "rsky-satnav",
   "rsky-space",
   "rsky-space-host",
+  "rsky-spaces-parity",
   "rsky-syntax",
   "rsky-video",
   "rsky-wintermute",
