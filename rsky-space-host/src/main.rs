@@ -20,7 +20,7 @@ use rsky_space_host::notify::HttpNotifier;
 use rsky_space_host::pds_seam::PdsSeam;
 use rsky_space_host::policy::Policy;
 use rsky_space_host::registration::{HttpLifecycleAcker, LifecycleAcker};
-use rsky_space_host::repo::SqliteRepos;
+use rsky_space_host::repo::ActorStoreRepos;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::store::{HostedSpaceStore, SqliteStore};
 use std::sync::Arc;
@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         did_cache: std::sync::Arc::new(MemoryCache::new(None, None)),
     })));
     let store = Arc::new(SqliteStore::open(&cfg.db_path)?);
-    let repos = Arc::new(SqliteRepos::open(&cfg.db_path)?);
+    let repos = Arc::new(ActorStoreRepos::open(&cfg.actor_store_dir)?);
     let seam = Arc::new(PdsSeam::open(&cfg.actor_store_dir)?);
 
     let builder = Arc::new(ContextBuilder {

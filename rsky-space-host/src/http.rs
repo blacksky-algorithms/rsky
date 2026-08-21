@@ -187,6 +187,7 @@ impl From<HostError> for ApiError {
             | HostError::ManagingApp(_)
             | HostError::Resolution(_)
             | HostError::Store(_)
+            | HostError::Unimplemented
             | HostError::Space(_) => {
                 tracing::error!(error = %e, "internal error");
                 Self::new(
@@ -717,9 +718,9 @@ async fn register_space(
                 HostError::AccountNotHosted(did) => ApiError::invalid_request(format!(
                     "authority signing key does not resolve: {did}"
                 )),
-                HostError::SpaceNotFound(space) => ApiError::invalid_request(format!(
-                    "space not hosted here: {space}"
-                )),
+                HostError::SpaceNotFound(space) => {
+                    ApiError::invalid_request(format!("space not hosted here: {space}"))
+                }
                 other => ApiError::from(other),
             })?;
             (context, true)
@@ -1201,10 +1202,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: user.to_string(),
             sub: context.authority.space_uri(),
-            aud: Some(format!(
-                "{}#atproto_space_host",
-                context.authority_did()
-            )),
+            aud: Some(format!("{}#atproto_space_host", context.authority_did())),
             iat: NOW,
             exp: NOW + 60,
             jti: "delegation-jti".to_string(),
@@ -1966,7 +1964,8 @@ mod tests {
             .authority
             .mint_credential(NOW, "cred-b".to_string(), &dpop_key().thumbprint())
             .unwrap();
-        let (status, body) = send(&f.state, get_req(&path(other_space_uri), Some(&other_cred))).await;
+        let (status, body) =
+            send(&f.state, get_req(&path(other_space_uri), Some(&other_cred))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["space"], other_space_uri);
         assert_eq!(body["config"]["policy"], "public");
@@ -2009,11 +2008,7 @@ mod tests {
             let signer = seam.signer(&space.authority)?;
             let (tx, _writes) = tokio::sync::mpsc::unbounded_channel();
             Ok(Arc::new(AuthorityContext {
-                authority: Arc::new(Authority::new(
-                    space.clone(),
-                    signer,
-                    AppAccess::Open,
-                )),
+                authority: Arc::new(Authority::new(space.clone(), signer, AppAccess::Open)),
                 policy: Arc::new(Policy::ManagingApp {
                     service_id: format!("{MEMBER}#bsky_fg"),
                     client: Arc::new(UnusedManagingApp),
@@ -2056,9 +2051,8 @@ mod tests {
         let context = f.state.registry.authority(DYNAMIC_AUTHORITY).unwrap();
         assert!(context.authority.resolve_registered(&space).is_ok());
         // The new authority signs with the key resolved from the actor store.
-        let expected = Signer::from_secret(
-            secp256k1::SecretKey::from_slice(&DYNAMIC_AUTHORITY_KEY).unwrap(),
-        );
+        let expected =
+            Signer::from_secret(secp256k1::SecretKey::from_slice(&DYNAMIC_AUTHORITY_KEY).unwrap());
         assert_eq!(context.authority.signer.did_key(), expected.did_key());
         let credential = context
             .authority
@@ -2072,10 +2066,7 @@ mod tests {
             NOW,
         )
         .unwrap();
-        assert_eq!(
-            acker.0.lock().unwrap().as_slice(),
-            &[(space.clone(), 1)]
-        );
+        assert_eq!(acker.0.lock().unwrap().as_slice(), &[(space.clone(), 1)]);
         assert_eq!(
             f.state.hosted_spaces.hosted_spaces().await.unwrap(),
             vec![(DYNAMIC_AUTHORITY.to_string(), space)]
@@ -2115,7 +2106,13 @@ mod tests {
             .unwrap()
             .contains("did:plc:keyless"));
         assert!(f.state.registry.authority("did:plc:keyless").is_err());
-        assert!(f.state.hosted_spaces.hosted_spaces().await.unwrap().is_empty());
+        assert!(f
+            .state
+            .hosted_spaces
+            .hosted_spaces()
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

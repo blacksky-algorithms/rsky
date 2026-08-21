@@ -13,7 +13,6 @@
 use async_trait::async_trait;
 use rsky_space::lthash::{element, LtHash};
 use rsky_space::record::dag_cbor_cid;
-use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -179,6 +178,67 @@ pub trait RepoStore: Send + Sync {
 
     /// Drop a repo entirely (account deletion, space deletion).
     async fn delete_repo(&self, space_uri: &str, did: &str) -> Result<()>;
+}
+
+pub struct ActorStoreRepos;
+
+impl ActorStoreRepos {
+    pub fn open(_directory: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+#[async_trait]
+impl RepoStore for ActorStoreRepos {
+    async fn apply_writes(
+        &self,
+        _space_uri: &str,
+        _did: &str,
+        _rev: &str,
+        _writes: &[RepoWrite],
+    ) -> Result<Applied> {
+        Err(HostError::Unimplemented)
+    }
+
+    async fn head(&self, _space_uri: &str, _did: &str) -> Result<Option<RepoHead>> {
+        Err(HostError::Unimplemented)
+    }
+
+    async fn get_record(
+        &self,
+        _space_uri: &str,
+        _did: &str,
+        _collection: &str,
+        _rkey: &str,
+    ) -> Result<Option<StoredRecord>> {
+        Err(HostError::Unimplemented)
+    }
+
+    async fn list_records(
+        &self,
+        _space_uri: &str,
+        _did: &str,
+        _collection: Option<&str>,
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> Result<(Vec<StoredRecord>, Option<String>)> {
+        Err(HostError::Unimplemented)
+    }
+
+    async fn list_ops(
+        &self,
+        _space_uri: &str,
+        _did: &str,
+        _since: Option<&str>,
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> Result<OpPage> {
+        Err(HostError::Unimplemented)
+    }
+
+    async fn delete_repo(&self, _space_uri: &str, _did: &str) -> Result<()> {
+        Err(HostError::Unimplemented)
+    }
 }
 
 /// Fold one batch into an existing record set + digest. Shared by both
@@ -506,330 +566,6 @@ fn finish_op_page(ops: Vec<StoredOp>, limit: u32, last_seq: Option<i64>) -> OpPa
         cursor: if reached_head { None } else { cursor },
         ops,
     }
-}
-
-// ------------------------------------------------------------------- sqlite
-
-/// SQLite-backed repo storage. Volume per host is modest and every batch is a
-/// single transaction, so one connection behind a mutex is sufficient.
-pub struct SqliteRepos {
-    conn: Mutex<Connection>,
-}
-
-impl SqliteRepos {
-    pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory().map_err(sql_err)?)
-    }
-
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::init(Connection::open(path).map_err(sql_err)?)
-    }
-
-    pub fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS repo (
-                space_uri TEXT NOT NULL,
-                did TEXT NOT NULL,
-                rev TEXT NOT NULL DEFAULT '',
-                state BLOB NOT NULL,
-                PRIMARY KEY (space_uri, did)
-            );
-            CREATE TABLE IF NOT EXISTS record (
-                space_uri TEXT NOT NULL,
-                did TEXT NOT NULL,
-                path TEXT NOT NULL,
-                collection TEXT NOT NULL,
-                rkey TEXT NOT NULL,
-                cid TEXT NOT NULL,
-                value BLOB NOT NULL,
-                PRIMARY KEY (space_uri, did, path)
-            );
-            CREATE TABLE IF NOT EXISTS repo_op (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                space_uri TEXT NOT NULL,
-                did TEXT NOT NULL,
-                rev TEXT NOT NULL,
-                collection TEXT NOT NULL,
-                rkey TEXT NOT NULL,
-                cid TEXT,
-                prev TEXT
-            );
-            CREATE INDEX IF NOT EXISTS repo_op_repo_seq ON repo_op (space_uri, did, seq);",
-        )
-        .map_err(sql_err)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-}
-
-fn sql_err(e: rusqlite::Error) -> HostError {
-    HostError::Store(e.to_string())
-}
-
-fn state_from_blob(blob: Vec<u8>) -> Result<[u8; STATE_BYTES]> {
-    blob.try_into()
-        .map_err(|_| HostError::Store("corrupt lthash state".into()))
-}
-
-fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<StoredRecord> {
-    Ok(StoredRecord {
-        collection: row.get("collection")?,
-        rkey: row.get("rkey")?,
-        cid: row.get("cid")?,
-        value: row.get("value")?,
-    })
-}
-
-fn row_to_op(row: &rusqlite::Row) -> rusqlite::Result<StoredOp> {
-    Ok(StoredOp {
-        seq: row.get("seq")?,
-        rev: row.get("rev")?,
-        collection: row.get("collection")?,
-        rkey: row.get("rkey")?,
-        cid: row.get("cid")?,
-        prev: row.get("prev")?,
-    })
-}
-
-#[async_trait]
-impl RepoStore for SqliteRepos {
-    async fn apply_writes(
-        &self,
-        space_uri: &str,
-        did: &str,
-        rev: &str,
-        writes: &[RepoWrite],
-    ) -> Result<Applied> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().map_err(sql_err)?;
-
-        let existing_state: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT state FROM repo WHERE space_uri = ?1 AND did = ?2",
-                rusqlite::params![space_uri, did],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        let mut current_rev: String = tx
-            .query_row(
-                "SELECT rev FROM repo WHERE space_uri = ?1 AND did = ?2",
-                rusqlite::params![space_uri, did],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?
-            .unwrap_or_default();
-
-        let mut lt = match existing_state {
-            Some(blob) => LtHash::from_state_bytes(&state_from_blob(blob)?),
-            None => LtHash::new(),
-        };
-
-        // Only the paths this batch touches are needed to plan it.
-        let mut existing = BTreeMap::new();
-        for write in writes {
-            let path = record_path(write.collection(), write.rkey());
-            if let Some(record) = tx
-                .query_row(
-                    "SELECT collection, rkey, cid, value FROM record
-                     WHERE space_uri = ?1 AND did = ?2 AND path = ?3",
-                    rusqlite::params![space_uri, did, path],
-                    row_to_record,
-                )
-                .optional()
-                .map_err(sql_err)?
-            {
-                existing.insert(path, record);
-            }
-        }
-
-        let planned = plan_batch(&existing, &mut lt, writes)?;
-        for p in &planned {
-            if p.is_noop() {
-                continue;
-            }
-            let path = record_path(&p.collection, &p.rkey);
-            match (&p.cid, &p.value) {
-                (Some(cid), Some(value)) => {
-                    tx.execute(
-                        "INSERT INTO record (space_uri, did, path, collection, rkey, cid, value)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                         ON CONFLICT (space_uri, did, path)
-                         DO UPDATE SET cid = ?6, value = ?7",
-                        rusqlite::params![space_uri, did, path, p.collection, p.rkey, cid, value],
-                    )
-                    .map_err(sql_err)?;
-                }
-                _ => {
-                    tx.execute(
-                        "DELETE FROM record WHERE space_uri = ?1 AND did = ?2 AND path = ?3",
-                        rusqlite::params![space_uri, did, path],
-                    )
-                    .map_err(sql_err)?;
-                }
-            }
-            tx.execute(
-                "INSERT INTO repo_op (space_uri, did, rev, collection, rkey, cid, prev)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![space_uri, did, rev, p.collection, p.rkey, p.cid, p.prev],
-            )
-            .map_err(sql_err)?;
-            current_rev = rev.to_string();
-        }
-
-        tx.execute(
-            "INSERT INTO repo (space_uri, did, rev, state) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (space_uri, did) DO UPDATE SET rev = ?3, state = ?4",
-            rusqlite::params![space_uri, did, current_rev, lt.state_bytes().to_vec()],
-        )
-        .map_err(sql_err)?;
-        tx.commit().map_err(sql_err)?;
-
-        Ok(Applied {
-            rev: current_rev,
-            hash: lt.hash(),
-            outcomes: planned.into_iter().map(|p| p.outcome).collect(),
-        })
-    }
-
-    async fn head(&self, space_uri: &str, did: &str) -> Result<Option<RepoHead>> {
-        let conn = self.conn.lock().unwrap();
-        let row: Option<(String, Vec<u8>)> = conn
-            .query_row(
-                "SELECT rev, state FROM repo WHERE space_uri = ?1 AND did = ?2",
-                rusqlite::params![space_uri, did],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        row.map(|(rev, state)| {
-            Ok(RepoHead {
-                rev,
-                state: state_from_blob(state)?,
-            })
-        })
-        .transpose()
-    }
-
-    async fn get_record(
-        &self,
-        space_uri: &str,
-        did: &str,
-        collection: &str,
-        rkey: &str,
-    ) -> Result<Option<StoredRecord>> {
-        self.conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT collection, rkey, cid, value FROM record
-                 WHERE space_uri = ?1 AND did = ?2 AND path = ?3",
-                rusqlite::params![space_uri, did, record_path(collection, rkey)],
-                row_to_record,
-            )
-            .optional()
-            .map_err(sql_err)
-    }
-
-    async fn list_records(
-        &self,
-        space_uri: &str,
-        did: &str,
-        collection: Option<&str>,
-        cursor: Option<&str>,
-        limit: u32,
-    ) -> Result<(Vec<StoredRecord>, Option<String>)> {
-        let conn = self.conn.lock().unwrap();
-        require_repo(&conn, space_uri, did)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT collection, rkey, cid, value FROM record
-                 WHERE space_uri = ?1 AND did = ?2 AND path > ?3
-                   AND (?4 IS NULL OR collection = ?4)
-                 ORDER BY path ASC LIMIT ?5",
-            )
-            .map_err(sql_err)?;
-        let page = stmt
-            .query_map(
-                rusqlite::params![space_uri, did, cursor.unwrap_or(""), collection, limit],
-                row_to_record,
-            )
-            .map_err(sql_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(sql_err)?;
-        let cursor = page_cursor(&page, limit, |r| r.path());
-        Ok((page, cursor))
-    }
-
-    async fn list_ops(
-        &self,
-        space_uri: &str,
-        did: &str,
-        since: Option<&str>,
-        cursor: Option<&str>,
-        limit: u32,
-    ) -> Result<OpPage> {
-        let conn = self.conn.lock().unwrap();
-        require_repo(&conn, space_uri, did)?;
-        let bounds: (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT (SELECT rev FROM repo_op WHERE space_uri = ?1 AND did = ?2
-                          ORDER BY seq ASC LIMIT 1),
-                        (SELECT seq FROM repo_op WHERE space_uri = ?1 AND did = ?2
-                          ORDER BY seq DESC LIMIT 1)",
-                rusqlite::params![space_uri, did],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(sql_err)?;
-        ensure_history(since, bounds.0.as_deref())?;
-        let after = parse_cursor(cursor)?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT seq, rev, collection, rkey, cid, prev FROM repo_op
-                 WHERE space_uri = ?1 AND did = ?2
-                   AND (?3 IS NULL OR rev > ?3)
-                   AND (?4 IS NULL OR seq > ?4)
-                 ORDER BY seq ASC LIMIT ?5",
-            )
-            .map_err(sql_err)?;
-        let ops = stmt
-            .query_map(
-                rusqlite::params![space_uri, did, since, after, limit],
-                row_to_op,
-            )
-            .map_err(sql_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(sql_err)?;
-        Ok(finish_op_page(ops, limit, bounds.1))
-    }
-
-    async fn delete_repo(&self, space_uri: &str, did: &str) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().map_err(sql_err)?;
-        for table in ["record", "repo_op", "repo"] {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE space_uri = ?1 AND did = ?2"),
-                rusqlite::params![space_uri, did],
-            )
-            .map_err(sql_err)?;
-        }
-        tx.commit().map_err(sql_err)
-    }
-}
-
-fn require_repo(conn: &Connection, space_uri: &str, did: &str) -> Result<()> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM repo WHERE space_uri = ?1 AND did = ?2",
-            rusqlite::params![space_uri, did],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(sql_err)?;
-    exists.map(|_| ()).ok_or(HostError::RepoNotFound)
 }
 
 #[cfg(test)]
@@ -1176,7 +912,6 @@ mod tests {
             #[tokio::test]
             async fn $name() {
                 $exercise(&InMemoryRepos::default()).await;
-                $exercise(&SqliteRepos::open_in_memory().unwrap()).await;
             }
         };
     }
@@ -1200,7 +935,7 @@ mod tests {
             .await
             .unwrap();
 
-        let b = SqliteRepos::open_in_memory().unwrap();
+        let b = InMemoryRepos::default();
         b.apply_writes(SPACE, DID, "3rev1", &[create("y", "two")])
             .await
             .unwrap();
@@ -1212,36 +947,6 @@ mod tests {
             a.head(SPACE, DID).await.unwrap().unwrap().hash(),
             b.head(SPACE, DID).await.unwrap().unwrap().hash()
         );
-    }
-
-    #[tokio::test]
-    async fn sqlite_persists_across_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("repos.db");
-        let cid = {
-            let store = SqliteRepos::open(&path).unwrap();
-            let applied = store
-                .apply_writes(SPACE, DID, "3rev1", &[create("a", "one")])
-                .await
-                .unwrap();
-            match &applied.outcomes[0] {
-                WriteOutcome::Created { cid } => cid.clone(),
-                other => panic!("unexpected outcome {other:?}"),
-            }
-        };
-        let store = SqliteRepos::open(&path).unwrap();
-        let got = store
-            .get_record(SPACE, DID, POST, "a")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(got.cid, cid);
-        assert_eq!(store.head(SPACE, DID).await.unwrap().unwrap().rev, "3rev1");
-
-        assert!(matches!(
-            SqliteRepos::open(dir.path().join("missing/nested.db")),
-            Err(HostError::Store(_))
-        ));
     }
 
     #[test]

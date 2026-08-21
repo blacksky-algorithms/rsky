@@ -34,6 +34,8 @@ pub enum HostError {
     InvalidSwap,
     #[error("requested history is no longer available")]
     HistoryUnavailable,
+    #[error("not implemented")]
+    Unimplemented,
     #[error(transparent)]
     Space(#[from] rsky_space::SpaceError),
 }

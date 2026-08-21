@@ -1,7 +1,7 @@
 use oracle_rsky_space::space_id::SpaceId;
 use rsky_pds::actor_store::db::get_migrated_db;
 use rsky_pds::actor_store::space::{encode_record, oplog_window, SpaceStore, SpaceWrite};
-use rsky_space_host::repo::{RepoStore, RepoWrite, SqliteRepos};
+use rsky_space_host::repo::{ActorStoreRepos, RepoStore, RepoWrite};
 use rsky_spaces_parity::{assert_parity, dump_pds, dump_shim};
 use serde_json::{json, Value};
 
@@ -74,8 +74,7 @@ async fn run(name: &str, script: Vec<ScriptWrite>) -> bool {
     let space = SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity");
     let space_uri = space.uri();
     let temp = tempfile::tempdir().expect("tempdir");
-    let shim_path = temp.path().join("shim.sqlite");
-    let shim = SqliteRepos::open(&shim_path).expect("shim store");
+    let shim = ActorStoreRepos::open(temp.path()).expect("shim store");
     let pds = SpaceStore::new(
         DID.into(),
         get_migrated_db(temp.path().join("store.sqlite"))
@@ -103,7 +102,7 @@ async fn run(name: &str, script: Vec<ScriptWrite>) -> bool {
             &dump_shim(&shim, &space_uri, DID).await,
             &dump_pds(&pds, &space_uri).await,
         ),
-        (Err(_), Err(_)) => true,
+        (Err(_), Err(_)) => false,
         (left, right) => {
             eprintln!(
                 "{name}: outcomes differ: shim_ok={}, pds_ok={}",
@@ -113,17 +112,7 @@ async fn run(name: &str, script: Vec<ScriptWrite>) -> bool {
             false
         }
     };
-    let cross_open = match get_migrated_db(&shim_path).await {
-        Ok(db) => SpaceStore::new(DID.into(), db)
-            .live_repo_state(&space_uri)
-            .await
-            .is_ok(),
-        Err(_) => false,
-    };
-    if !cross_open {
-        eprintln!("{name}: pinned pds cannot open the shim-written repo");
-    }
-    equal_outcome && cross_open
+    equal_outcome
 }
 
 #[tokio::test]
