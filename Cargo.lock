@@ -8354,7 +8354,7 @@ dependencies = [
  "rsky-oauth 0.3.2",
  "rsky-repo 0.0.6",
  "rsky-space 0.4.2",
- "rsky-space-host 0.7.1",
+ "rsky-space-host 0.7.2",
  "rsky-syntax 0.1.0",
  "rusqlite",
  "secp256k1",
@@ -8678,7 +8678,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-space-host"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -8716,15 +8716,23 @@ dependencies = [
 
 [[package]]
 name = "rsky-spaces-parity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "hmac",
+ "reqwest 0.12.23",
+ "rsky-crypto 0.2.0",
+ "rsky-oauth 0.3.2",
  "rsky-pds 0.13.17 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
  "rsky-space 0.4.1",
  "rsky-space 0.4.2",
- "rsky-space-host 0.7.1",
+ "rsky-space-host 0.7.2",
  "rusqlite",
+ "secp256k1",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]

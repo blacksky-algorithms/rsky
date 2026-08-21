@@ -171,16 +171,22 @@ impl From<HostError> for ApiError {
                 "RepoNotFound",
                 "repo not hosted here",
             ),
-            HostError::InvalidRequest(message)
-            | HostError::RecordExists(message)
-            | HostError::RecordNotFound(message) => Self::invalid_request(message.clone()),
+            HostError::InvalidRequest(message) => Self::invalid_request(message.clone()),
+            // These four names and statuses are what rsky-pds answers with, so
+            // a client cannot tell the two write paths apart.
+            HostError::RecordExists(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "RecordExists", message.clone())
+            }
+            HostError::RecordNotFound(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "RecordNotFound", message.clone())
+            }
             HostError::InvalidSwap => Self::new(
-                StatusCode::CONFLICT,
+                StatusCode::BAD_REQUEST,
                 "InvalidSwap",
                 "swap cid did not match",
             ),
             HostError::HistoryUnavailable => Self::new(
-                StatusCode::GONE,
+                StatusCode::BAD_REQUEST,
                 "HistoryUnavailable",
                 "requested history is no longer available",
             ),
@@ -573,10 +579,13 @@ async fn list_repo_ops(
         let value = if params.exclude_values.unwrap_or(false) || op.cid.is_none() {
             None
         } else {
+            // Only the op that still holds the current record carries a value:
+            // a superseded op's cid no longer names what is stored.
             state
                 .repos
                 .get_record(&space.uri(), &params.repo, &op.collection, &op.rkey)
                 .await?
+                .filter(|record| Some(&record.cid) == op.cid.as_ref())
                 .map(|record| rsky_space::record::decode_record(&record.value))
                 .transpose()
                 .map_err(HostError::from)?
@@ -833,7 +842,15 @@ async fn create_record(
         WriteOutcome::Created { cid } => cid.clone(),
         _ => return Err(HostError::Store("create did not create".into()).into()),
     };
-    record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
+    record_write(
+        &state,
+        &context,
+        &space.uri(),
+        &input.repo,
+        &applied.rev,
+        Some(hex::encode(applied.hash)),
+    )
+    .await?;
     Ok(Json(
         rsky_lexicon::com::atproto::space::CreateRecordOutput {
             uri: space.record_uri(&input.repo, &input.collection, &rkey),
@@ -883,7 +900,15 @@ async fn delete_record(
             }],
         )
         .await?;
-    record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
+    record_write(
+        &state,
+        &context,
+        &space.uri(),
+        &input.repo,
+        &applied.rev,
+        Some(hex::encode(applied.hash)),
+    )
+    .await?;
     Ok(Json(
         rsky_lexicon::com::atproto::space::DeleteRecordOutput {
             commit: Some(rsky_lexicon::com::atproto::space::CommitMeta {
@@ -900,11 +925,12 @@ async fn record_write(
     space: &str,
     repo: &str,
     rev: &str,
+    hash: Option<String>,
 ) -> Result<(), ApiError> {
     let now = (state.now)();
     state
         .writers
-        .upsert_writer(space, repo, rev, None, now)
+        .upsert_writer(space, repo, rev, hash.as_deref(), now)
         .await?;
     let endpoints = state.registrations.endpoints(space, now).await?;
     fan_out_write(
