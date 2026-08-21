@@ -8722,6 +8722,7 @@ dependencies = [
  "rsky-space 0.4.1",
  "rsky-space 0.4.2",
  "rsky-space-host 0.7.1",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

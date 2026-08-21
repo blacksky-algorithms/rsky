@@ -18,6 +18,7 @@
 //! `com.atproto.space.*` DTOs from rsky-lexicon, backed by in-memory or SQLite
 //! [stores](store).
 
+pub mod actor_schema;
 pub mod appaccess;
 pub mod attestation;
 pub mod authority;

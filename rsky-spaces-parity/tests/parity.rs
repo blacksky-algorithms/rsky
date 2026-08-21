@@ -5,6 +5,28 @@ use rsky_space_host::repo::{ActorStoreRepos, RepoStore, RepoWrite};
 use rsky_spaces_parity::{assert_parity, dump_pds, dump_shim};
 use serde_json::{json, Value};
 
+fn sqlite_master(path: &std::path::Path) -> Vec<(String, String, String)> {
+    let connection = rusqlite::Connection::open(path).expect("schema connection");
+    let mut statement = connection
+        .prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+        .expect("schema statement");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("schema rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("schema values")
+}
+
+#[tokio::test]
+async fn actor_schema_matches_pinned_oracle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shim_path = temp.path().join("shim.sqlite");
+    let pds_path = temp.path().join("pds.sqlite");
+    rsky_space_host::actor_schema::get_migrated_db(&shim_path).expect("shim migration");
+    get_migrated_db(&pds_path).await.expect("pds migration");
+    assert_eq!(sqlite_master(&shim_path), sqlite_master(&pds_path));
+}
+
 const DID: &str = "did:plc:parityauthor";
 const AUTHORITY: &str = "did:plc:parityauthority";
 const COLLECTION: &str = "app.bsky.feed.post";
