@@ -8005,7 +8005,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-daemon"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -8395,7 +8395,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-space"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -8403,6 +8403,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "ipld-core",
  "iroh-car",
  "p256 0.13.2",
  "rsky-common",
@@ -8421,14 +8422,16 @@ dependencies = [
 
 [[package]]
 name = "rsky-space-host"
-version = "0.5.1"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "cid",
  "clap",
  "hex",
+ "hmac",
  "http-body-util",
  "p256 0.13.2",
  "rand 0.8.5",
@@ -8452,6 +8455,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

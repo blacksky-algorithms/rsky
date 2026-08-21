@@ -16,8 +16,19 @@ pub enum DaemonError {
     /// full-state recovery (`getRepo`).
     #[error("history unavailable: {0}")]
     HistoryUnavailable(String),
+    /// A projection destination was unreachable or overloaded. Distinct from
+    /// [`DaemonError::Xrpc`] because it must not consume the batch's failure
+    /// budget: an outage is not a bad batch.
+    #[error("projection destination unavailable: {0}")]
+    RetryableProjection(String),
     #[error(transparent)]
     Space(#[from] rsky_space::SpaceError),
+}
+
+impl DaemonError {
+    pub fn is_retryable_projection(&self) -> bool {
+        matches!(self, Self::RetryableProjection(_))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, DaemonError>;

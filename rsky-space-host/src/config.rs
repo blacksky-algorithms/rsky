@@ -1,5 +1,7 @@
 //! Configuration for the space-host service (env prefix `SPACEHOST_`).
 
+use crate::oauth::AuthConfig;
+use crate::pds_seam::VerifyOnlyHs256Secret;
 use clap::Parser;
 
 /// The Blacksky community space (v1: a single typed space under the authority).
@@ -19,12 +21,16 @@ pub enum PolicyMode {
     about = "atproto permissioned-data space authority/host"
 )]
 pub struct Config {
-    /// The space authority DID (dedicated community DID).
-    #[arg(long, env = "SPACEHOST_AUTHORITY_DID")]
+    /// Optional bootstrap authority pin: a space authority DID served from
+    /// startup with an explicit signing key. Set together with
+    /// `SPACEHOST_SIGNING_KEY_HEX`, or leave both unset and let authorities
+    /// arrive via registration.
+    #[arg(long, env = "SPACEHOST_AUTHORITY_DID", default_value = "")]
     pub authority_did: String,
 
-    /// Hex-encoded secp256k1 space signing key (`#atproto_space`).
-    #[arg(long, env = "SPACEHOST_SIGNING_KEY_HEX")]
+    /// Hex-encoded secp256k1 space signing key (`#atproto_space`) for the
+    /// pinned bootstrap authority.
+    #[arg(long, env = "SPACEHOST_SIGNING_KEY_HEX", default_value = "")]
     pub signing_key_hex: String,
 
     /// How the authority authorizes users at credential-mint time.
@@ -48,6 +54,14 @@ pub struct Config {
     /// Postgres URL for the `blacksky-beta` membership list (managing-app policy).
     #[arg(long, env = "SPACEHOST_MEMBERSHIP_DB_URL", default_value = "")]
     pub membership_db_url: String,
+
+    /// Feeds base URL that receives host-registration acknowledgements.
+    #[arg(long, env = "SPACEHOST_LIFECYCLE_URL", default_value = "")]
+    pub lifecycle_url: String,
+
+    /// Feeds service DID, used as the acknowledgement JWT audience.
+    #[arg(long, env = "SPACEHOST_LIFECYCLE_SERVICE_DID", default_value = "")]
+    pub lifecycle_service_did: String,
 
     /// SQLite path for host state (writer set, registrations, used nonces).
     #[arg(long, env = "SPACEHOST_DB_PATH", default_value = "./space_host.db")]
@@ -73,6 +87,35 @@ pub struct Config {
         default_value = "http://localhost:3600"
     )]
     pub public_url: String,
+
+    #[arg(long, env = "SPACEHOST_OAUTH_ISSUER", default_value = "")]
+    pub oauth_issuer: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_JWKS_URI", default_value = "")]
+    pub oauth_jwks_uri: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_AUDIENCE", default_value = "")]
+    pub oauth_audience: String,
+    #[arg(long, env = "SPACEHOST_OAUTH_CLIENT_IDS", default_value = "")]
+    pub oauth_client_ids: String,
+    #[arg(
+        long,
+        env = "SPACEHOST_OAUTH_HS256_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub oauth_hs256_secret: String,
+    #[arg(long, env = "SPACEHOST_ACTOR_STORE_DIR", default_value = "")]
+    pub actor_store_dir: String,
+    #[arg(
+        long,
+        env = "SPACEHOST_MINT_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub mint_token: String,
+    #[arg(long, env = "SPACEHOST_DAEMON_SERVICE_DID", default_value = "")]
+    pub daemon_service_did: String,
+    #[arg(long, env = "SPACEHOST_APPVIEW_SERVICE_DID", default_value = "")]
+    pub appview_service_did: String,
 }
 
 impl Config {
@@ -92,14 +135,65 @@ impl Config {
             .collect()
     }
 
+    pub fn auth_config(&self) -> AuthConfig {
+        AuthConfig {
+            issuer: self.oauth_issuer.clone(),
+            jwks_uri: self.oauth_jwks_uri.clone(),
+            audience: self.oauth_audience.clone(),
+            client_ids: self
+                .oauth_client_ids
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect(),
+            hs256_secret: VerifyOnlyHs256Secret::new(self.oauth_hs256_secret.as_bytes().to_vec()),
+        }
+    }
+
+    pub fn bootstrap_pin(&self) -> Option<(&str, &str)> {
+        (!self.authority_did.is_empty() && !self.signing_key_hex.is_empty())
+            .then_some((self.authority_did.as_str(), self.signing_key_hex.as_str()))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self.authority_did.is_empty() != self.signing_key_hex.is_empty() {
+            return Err(
+                "SPACEHOST_AUTHORITY_DID and SPACEHOST_SIGNING_KEY_HEX must be set together (bootstrap pin) or both left unset"
+                    .to_string(),
+            );
+        }
+        if self.bootstrap_pin().is_none() && self.actor_store_dir.is_empty() {
+            return Err(
+                "no space authority available: set SPACEHOST_ACTOR_STORE_DIR (authorities register with actor-store keys) or pin one with SPACEHOST_AUTHORITY_DID + SPACEHOST_SIGNING_KEY_HEX"
+                    .to_string(),
+            );
+        }
         if self.policy == PolicyMode::ManagingApp && !self.managing_app.contains('#') {
             return Err(
                 "managing-app policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
             );
         }
+        if self.policy == PolicyMode::ManagingApp
+            && (self.lifecycle_url.is_empty() || self.lifecycle_service_did.is_empty())
+        {
+            return Err(
+                "managing-app policy requires SPACEHOST_LIFECYCLE_URL and SPACEHOST_LIFECYCLE_SERVICE_DID"
+                    .to_string(),
+            );
+        }
         if self.public_url.trim_end_matches('/').is_empty() {
             return Err("SPACEHOST_PUBLIC_URL must be an absolute origin".to_string());
+        }
+        self.auth_config().validate()?;
+        if self.actor_store_dir.is_empty() {
+            return Err("SPACEHOST_ACTOR_STORE_DIR is required".to_string());
+        }
+        if self.mint_token.is_empty()
+            || self.daemon_service_did.is_empty()
+            || self.appview_service_did.is_empty()
+        {
+            return Err("SPACEHOST_MINT_TOKEN, SPACEHOST_DAEMON_SERVICE_DID, and SPACEHOST_APPVIEW_SERVICE_DID are required".to_string());
         }
         Ok(())
     }
@@ -113,7 +207,9 @@ mod tests {
     // which would race sibling tests run in parallel.
     #[test]
     fn parses_args_env_and_requirements() {
-        assert!(Config::try_parse_from(["rsky-space-host"]).is_err());
+        let bare = Config::try_parse_from(["rsky-space-host"]).unwrap();
+        assert!(bare.bootstrap_pin().is_none());
+        assert!(bare.validate().is_err());
 
         let cfg = Config::try_parse_from([
             "rsky-space-host",
@@ -121,6 +217,22 @@ mod tests {
             "did:plc:authority",
             "--signing-key-hex",
             "aa".repeat(32).as_str(),
+            "--oauth-issuer",
+            "https://pds.example",
+            "--oauth-jwks-uri",
+            "https://pds.example/jwks",
+            "--oauth-audience",
+            "did:web:pds.example",
+            "--oauth-client-ids",
+            "https://client.example",
+            "--actor-store-dir",
+            "/actors",
+            "--mint-token",
+            "token",
+            "--daemon-service-did",
+            "did:plc:daemon",
+            "--appview-service-did",
+            "did:plc:appview",
         ])
         .unwrap();
         assert_eq!(cfg.authority_did, "did:plc:authority");
@@ -135,7 +247,13 @@ mod tests {
         assert!(format!("{cfg:?}").contains("did:plc:authority"));
 
         let mut cfg = cfg;
-        cfg.update_from(["rsky-space-host", "--bind", "127.0.0.1:9"]);
+        cfg.update_from([
+            "rsky-space-host",
+            "--bind",
+            "127.0.0.1:9",
+            "--authority-did",
+            "did:plc:authority",
+        ]);
         assert_eq!(cfg.bind, "127.0.0.1:9");
         assert_eq!(cfg.authority_did, "did:plc:authority");
 
@@ -157,9 +275,19 @@ mod tests {
         std::env::set_var("SPACEHOST_MANAGING_APP", "did:web:app#svc");
         std::env::set_var("SPACEHOST_MEMBERS", "did:plc:aaa, did:plc:bbb,");
         std::env::set_var("SPACEHOST_MEMBERSHIP_DB_URL", "postgres://env");
+        std::env::set_var("SPACEHOST_LIFECYCLE_URL", "https://feeds.example");
+        std::env::set_var("SPACEHOST_LIFECYCLE_SERVICE_DID", "did:web:feeds.example");
         std::env::set_var("SPACEHOST_DB_PATH", "/tmp/space.db");
         std::env::set_var("SPACEHOST_PLC_URL", "https://plc.example");
         std::env::set_var("SPACEHOST_BIND", "127.0.0.1:1234");
+        std::env::set_var("SPACEHOST_OAUTH_ISSUER", "https://pds.example");
+        std::env::set_var("SPACEHOST_OAUTH_JWKS_URI", "https://pds.example/jwks");
+        std::env::set_var("SPACEHOST_OAUTH_AUDIENCE", "did:web:pds.example");
+        std::env::set_var("SPACEHOST_OAUTH_CLIENT_IDS", "https://client.example");
+        std::env::set_var("SPACEHOST_ACTOR_STORE_DIR", "/actors");
+        std::env::set_var("SPACEHOST_MINT_TOKEN", "token");
+        std::env::set_var("SPACEHOST_DAEMON_SERVICE_DID", "did:plc:daemon");
+        std::env::set_var("SPACEHOST_APPVIEW_SERVICE_DID", "did:plc:appview");
         let cfg = Config::try_parse_from(["rsky-space-host"]).unwrap();
         for k in [
             "SPACEHOST_AUTHORITY_DID",
@@ -168,9 +296,19 @@ mod tests {
             "SPACEHOST_MANAGING_APP",
             "SPACEHOST_MEMBERS",
             "SPACEHOST_MEMBERSHIP_DB_URL",
+            "SPACEHOST_LIFECYCLE_URL",
+            "SPACEHOST_LIFECYCLE_SERVICE_DID",
             "SPACEHOST_DB_PATH",
             "SPACEHOST_PLC_URL",
             "SPACEHOST_BIND",
+            "SPACEHOST_OAUTH_ISSUER",
+            "SPACEHOST_OAUTH_JWKS_URI",
+            "SPACEHOST_OAUTH_AUDIENCE",
+            "SPACEHOST_OAUTH_CLIENT_IDS",
+            "SPACEHOST_ACTOR_STORE_DIR",
+            "SPACEHOST_MINT_TOKEN",
+            "SPACEHOST_DAEMON_SERVICE_DID",
+            "SPACEHOST_APPVIEW_SERVICE_DID",
         ] {
             std::env::remove_var(k);
         }
@@ -182,6 +320,8 @@ mod tests {
             vec!["did:plc:aaa".to_string(), "did:plc:bbb".to_string()]
         );
         assert_eq!(cfg.db_path, "/tmp/space.db");
+        assert_eq!(cfg.lifecycle_url, "https://feeds.example");
+        assert_eq!(cfg.lifecycle_service_did, "did:web:feeds.example");
         assert_eq!(cfg.plc_url, "https://plc.example");
         assert_eq!(cfg.bind, "127.0.0.1:1234");
         assert!(cfg.validate().is_ok());
@@ -190,5 +330,57 @@ mod tests {
         let mut invalid = cfg;
         invalid.managing_app = String::new();
         assert!(invalid.validate().is_err());
+    }
+
+    fn valid_unpinned() -> Config {
+        Config::try_parse_from([
+            "rsky-space-host",
+            "--oauth-issuer",
+            "https://pds.example",
+            "--oauth-jwks-uri",
+            "https://pds.example/jwks",
+            "--oauth-audience",
+            "did:web:pds.example",
+            "--oauth-client-ids",
+            "https://client.example",
+            "--actor-store-dir",
+            "/actors",
+            "--mint-token",
+            "token",
+            "--daemon-service-did",
+            "did:plc:daemon",
+            "--appview-service-did",
+            "did:plc:appview",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_pin_is_optional_but_all_or_nothing() {
+        let cfg = valid_unpinned();
+        assert!(cfg.bootstrap_pin().is_none());
+        assert!(cfg.validate().is_ok());
+
+        let mut half = valid_unpinned();
+        half.authority_did = "did:plc:authority".to_string();
+        assert!(half.validate().is_err());
+
+        let mut half = valid_unpinned();
+        half.signing_key_hex = "aa".repeat(32);
+        assert!(half.validate().is_err());
+
+        let mut pinned = valid_unpinned();
+        pinned.authority_did = "did:plc:authority".to_string();
+        pinned.signing_key_hex = "aa".repeat(32);
+        assert_eq!(
+            pinned.bootstrap_pin(),
+            Some(("did:plc:authority", pinned.signing_key_hex.as_str()))
+        );
+        assert!(pinned.validate().is_ok());
+
+        let mut keyless = valid_unpinned();
+        keyless.actor_store_dir = String::new();
+        let message = keyless.validate().unwrap_err();
+        assert!(message.contains("no space authority available"), "{message}");
     }
 }

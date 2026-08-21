@@ -16,6 +16,7 @@ use base64::Engine as _;
 use rsky_oauth::jwk::{EcCurve, Jwk};
 use rsky_oauth::jwt::{sign, JwtClaims, JwtHeader};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,30 @@ impl DpopSigner {
         Err(DaemonError::Xrpc(
             "could not generate a DPoP key".to_string(),
         ))
+    }
+
+    /// Load the daemon's stable proof key, creating it once when absent.
+    pub fn load_or_generate(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.exists() {
+            let bytes = std::fs::read(path).map_err(|e| DaemonError::Xrpc(e.to_string()))?;
+            return Jwk::from_private_key_bytes(EcCurve::P256, &bytes)
+                .map(|key| Self {
+                    key,
+                    counter: AtomicU64::new(0),
+                })
+                .map_err(|e| DaemonError::Xrpc(e.to_string()));
+        }
+        let signer = Self::generate()?;
+        let bytes = signer
+            .key
+            .private_key_bytes()
+            .map_err(|e| DaemonError::Xrpc(e.to_string()))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DaemonError::Xrpc(e.to_string()))?;
+        }
+        std::fs::write(path, bytes).map_err(|e| DaemonError::Xrpc(e.to_string()))?;
+        Ok(signer)
     }
 
     /// RFC 7638 thumbprint — what a credential minted for this signer carries

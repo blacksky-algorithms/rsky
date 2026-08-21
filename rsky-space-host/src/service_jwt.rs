@@ -33,6 +33,30 @@ pub struct ServiceClaims {
 
 pub const SERVICE_JWT_TTL_SECS: u64 = 60;
 
+pub trait ServiceJwtIssuer: Send + Sync {
+    fn mint(&self, aud: &str, lxm: &str, now: u64, jti: String) -> Result<String>;
+}
+
+pub struct SignerIssuer {
+    issuer: String,
+    signer: Signer,
+}
+
+impl SignerIssuer {
+    pub fn new(issuer: impl Into<String>, signer: Signer) -> Self {
+        Self {
+            issuer: issuer.into(),
+            signer,
+        }
+    }
+}
+
+impl ServiceJwtIssuer for SignerIssuer {
+    fn mint(&self, aud: &str, lxm: &str, now: u64, jti: String) -> Result<String> {
+        mint(&self.signer, &self.issuer, aud, lxm, now, jti)
+    }
+}
+
 /// Mint a service-auth JWT signed by `signer` (sha256 then ECDSA, compact r||s).
 pub fn mint(
     signer: &Signer,

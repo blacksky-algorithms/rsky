@@ -18,29 +18,50 @@
 //! - [`runner`] — the loop composing all of the above.
 //! - [`index`] / [`sqlite_index`] — the synced record index.
 
+pub mod appview;
 pub mod config;
 pub mod credentials;
 pub mod dpop;
 pub mod engine;
 pub mod error;
+pub mod feeds;
 pub mod index;
+pub mod journal;
 pub mod notify;
+pub mod projection;
 pub mod recovery;
 pub mod repohost;
+pub mod router;
 pub mod runner;
+pub mod service_jwt;
+pub mod spaces;
 pub mod sqlite_index;
 pub mod xrpc;
 
+pub use appview::AppviewProjector;
 pub use credentials::{
-    unix_now, CredentialProvider, CredentialSource, DelegationSource, PdsDelegationSource,
-    StaticCredential,
+    unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
+    PdsDelegationSource, SpaceCredentialSource, StaticCredential,
 };
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
-pub use index::{InMemoryIndex, SpaceIndex};
+pub use feeds::{
+    FeedsProjector, HttpProjectionIngress, ProjectRecord, ProjectRecordsRequest, ProjectionIngress,
+    ProjectionOperation, SpaceLifecycleAcker,
+};
+pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
+pub use journal::{drain_all, JournalConsumer, SharedJournalConsumer};
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
+pub use projection::Projector;
 pub use recovery::recover_repo;
 pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
-pub use runner::{run, sync_repo_healing, sync_space_once, RunnerOptions, SweepReport};
+pub use router::{Router, SyncEvent};
+pub use runner::{
+    run, run_multi, sync_repo_healing, sync_space_once, MultiRunnerOptions, RunnerOptions,
+    SweepReport,
+};
+pub use spaces::{
+    CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
+};
 pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};
