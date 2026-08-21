@@ -1,8 +1,9 @@
 use oracle_rsky_space::space_id::SpaceId;
 use rsky_pds::actor_store::db::get_migrated_db;
 use rsky_pds::actor_store::space::{encode_record, oplog_window, SpaceStore, SpaceWrite};
-use rsky_space_host::repo::{ActorStoreRepos, RepoStore, RepoWrite};
-use rsky_spaces_parity::{assert_parity, dump_pds, dump_shim};
+use rsky_space_host::actor_repos::ActorStoreRepos;
+use rsky_space_host::repo::{RepoStore, RepoWrite};
+use rsky_spaces_parity::{assert_parity, dump_pds, dump_shim, pds_outcome, shim_outcome};
 use serde_json::{json, Value};
 
 fn sqlite_master(path: &std::path::Path) -> Vec<(String, String, String)> {
@@ -92,126 +93,140 @@ impl ScriptWrite {
     }
 }
 
-async fn run(name: &str, script: Vec<ScriptWrite>) -> bool {
+fn create(rkey: &'static str, text: &str) -> ScriptWrite {
+    ScriptWrite::Create {
+        rkey,
+        value: json!({ "text": text }),
+    }
+}
+
+fn cid_of(value: &Value) -> String {
+    encode_record(value).expect("record encoding").0
+}
+
+/// Drive both stores through the same batches, comparing the outcome of each
+/// batch and then the two stores' contents.
+async fn run(name: &str, batches: Vec<Vec<ScriptWrite>>) -> bool {
     let space = SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity");
     let space_uri = space.uri();
     let temp = tempfile::tempdir().expect("tempdir");
-    let shim = ActorStoreRepos::open(temp.path()).expect("shim store");
+    let shim = ActorStoreRepos::open(temp.path().join("shim")).expect("shim store");
     let pds = SpaceStore::new(
         DID.into(),
         get_migrated_db(temp.path().join("store.sqlite"))
             .await
             .expect("pds db"),
     );
-    let shim_result = shim
-        .apply_writes(
-            &space_uri,
-            DID,
-            "3shimrev",
-            &script.iter().map(ScriptWrite::shim).collect::<Vec<_>>(),
-        )
-        .await;
-    let pds_result = pds
-        .apply_writes(
-            &space,
-            script.iter().map(ScriptWrite::pds).collect(),
-            oplog_window(),
-        )
-        .await;
-    let equal_outcome = match (shim_result, pds_result) {
-        (Ok(_), Ok(_)) => assert_parity(
-            name,
-            &dump_shim(&shim, &space_uri, DID).await,
-            &dump_pds(&pds, &space_uri).await,
-        ),
-        (Err(_), Err(_)) => false,
-        (left, right) => {
+
+    for (index, batch) in batches.iter().enumerate() {
+        let shim_result = shim
+            .apply_writes(
+                &space_uri,
+                DID,
+                "3shimrev",
+                &batch.iter().map(ScriptWrite::shim).collect::<Vec<_>>(),
+            )
+            .await;
+        let pds_result = pds
+            .apply_writes(
+                &space,
+                batch.iter().map(ScriptWrite::pds).collect(),
+                oplog_window(),
+            )
+            .await;
+        let (shim_outcome, pds_outcome) = (shim_outcome(&shim_result), pds_outcome(&pds_result));
+        if shim_outcome != pds_outcome {
             eprintln!(
-                "{name}: outcomes differ: shim_ok={}, pds_ok={}",
-                left.is_ok(),
-                right.is_ok()
+                "{name}: batch {index} outcomes differ\n  shim: {shim_outcome:?}\n  pds:  {pds_outcome:?}"
             );
-            false
+            return false;
         }
-    };
-    equal_outcome
+    }
+
+    assert_parity(
+        name,
+        &dump_shim(&shim, &space_uri, DID).await,
+        &dump_pds(&pds, &space_uri).await,
+    )
 }
 
-#[tokio::test]
-async fn scoreboard() {
-    let first = json!({"text": "first"});
-    let first_cid = encode_record(&first).expect("record encoding").0;
-    let scenarios = [
+fn scenarios() -> Vec<(&'static str, Vec<Vec<ScriptWrite>>)> {
+    let first = json!({ "text": "first" });
+    vec![
         (
-            "S1 create",
-            vec![ScriptWrite::Create {
-                rkey: "one",
-                value: first.clone(),
-            }],
+            "S1 create single record",
+            vec![vec![create("one", "first")]],
         ),
         (
             "S2 batch create",
+            vec![vec![
+                create("one", "one"),
+                create("two", "two"),
+                create("three", "three"),
+            ]],
+        ),
+        (
+            "S3 update with swap-cid success",
             vec![
-                ScriptWrite::Create {
+                vec![create("one", "first")],
+                vec![ScriptWrite::Update {
                     rkey: "one",
-                    value: json!({"text":"one"}),
-                },
-                ScriptWrite::Create {
-                    rkey: "two",
-                    value: json!({"text":"two"}),
-                },
-                ScriptWrite::Create {
-                    rkey: "three",
-                    value: json!({"text":"three"}),
-                },
+                    value: json!({ "text": "second" }),
+                    swap: Some(cid_of(&first)),
+                }],
             ],
         ),
         (
-            "S3 update swap success",
+            "S4 swap-cid conflict",
             vec![
-                ScriptWrite::Create {
+                vec![create("one", "first")],
+                vec![ScriptWrite::Update {
                     rkey: "one",
-                    value: first.clone(),
-                },
-                ScriptWrite::Update {
-                    rkey: "one",
-                    value: json!({"text":"second"}),
-                    swap: Some(first_cid.clone()),
-                },
-            ],
-        ),
-        (
-            "S4 swap conflict",
-            vec![
-                ScriptWrite::Create {
-                    rkey: "one",
-                    value: first,
-                },
-                ScriptWrite::Update {
-                    rkey: "one",
-                    value: json!({"text":"second"}),
-                    swap: Some("bafyreinvalid".into()),
-                },
+                    value: json!({ "text": "second" }),
+                    swap: Some(cid_of(&json!({ "text": "stale" }))),
+                }],
             ],
         ),
         (
             "S5 delete",
             vec![
-                ScriptWrite::Create {
-                    rkey: "one",
-                    value: json!({"text":"first"}),
-                },
-                ScriptWrite::Delete {
+                vec![create("one", "first"), create("two", "two")],
+                vec![ScriptWrite::Delete {
                     rkey: "one",
                     swap: None,
-                },
+                }],
             ],
         ),
-    ];
+        (
+            "S6 delete then recreate same rkey",
+            vec![
+                vec![create("one", "first")],
+                vec![ScriptWrite::Delete {
+                    rkey: "one",
+                    swap: Some(cid_of(&first)),
+                }],
+                vec![create("one", "reborn")],
+                vec![ScriptWrite::Delete {
+                    rkey: "one",
+                    swap: None,
+                }],
+                vec![ScriptWrite::Delete {
+                    rkey: "one",
+                    swap: None,
+                }],
+            ],
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn scoreboard() {
+    let scenarios = scenarios();
+    let total = scenarios.len();
     let mut equal = 0;
-    for (name, script) in scenarios {
-        equal += usize::from(run(name, script).await);
+    for (name, batches) in scenarios {
+        equal += usize::from(run(name, batches).await);
     }
-    println!("parity: {equal}/5 scenarios byte-equal");
-    assert_eq!(equal, 5, "parity harness must be red before convergence");
+    println!("parity: {equal}/{total} scenarios byte-equal");
+    assert_eq!(equal, total, "every scenario must be byte-equal");
 }

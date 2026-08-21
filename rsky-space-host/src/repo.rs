@@ -22,7 +22,7 @@ use crate::error::{HostError, Result};
 /// DAG-CBOR well-formedness are the only limits the host applies to a value.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 
-const STATE_BYTES: usize = 2048;
+pub(crate) const STATE_BYTES: usize = 2048;
 
 /// One mutation in an atomic batch. Values are already-encoded DAG-CBOR.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,67 +180,6 @@ pub trait RepoStore: Send + Sync {
     async fn delete_repo(&self, space_uri: &str, did: &str) -> Result<()>;
 }
 
-pub struct ActorStoreRepos;
-
-impl ActorStoreRepos {
-    pub fn open(_directory: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self)
-    }
-}
-
-#[async_trait]
-impl RepoStore for ActorStoreRepos {
-    async fn apply_writes(
-        &self,
-        _space_uri: &str,
-        _did: &str,
-        _rev: &str,
-        _writes: &[RepoWrite],
-    ) -> Result<Applied> {
-        Err(HostError::Unimplemented)
-    }
-
-    async fn head(&self, _space_uri: &str, _did: &str) -> Result<Option<RepoHead>> {
-        Err(HostError::Unimplemented)
-    }
-
-    async fn get_record(
-        &self,
-        _space_uri: &str,
-        _did: &str,
-        _collection: &str,
-        _rkey: &str,
-    ) -> Result<Option<StoredRecord>> {
-        Err(HostError::Unimplemented)
-    }
-
-    async fn list_records(
-        &self,
-        _space_uri: &str,
-        _did: &str,
-        _collection: Option<&str>,
-        _cursor: Option<&str>,
-        _limit: u32,
-    ) -> Result<(Vec<StoredRecord>, Option<String>)> {
-        Err(HostError::Unimplemented)
-    }
-
-    async fn list_ops(
-        &self,
-        _space_uri: &str,
-        _did: &str,
-        _since: Option<&str>,
-        _cursor: Option<&str>,
-        _limit: u32,
-    ) -> Result<OpPage> {
-        Err(HostError::Unimplemented)
-    }
-
-    async fn delete_repo(&self, _space_uri: &str, _did: &str) -> Result<()> {
-        Err(HostError::Unimplemented)
-    }
-}
-
 /// Fold one batch into an existing record set + digest. Shared by both
 /// backings so their semantics cannot drift.
 fn plan_batch(
@@ -358,7 +297,7 @@ impl PlannedWrite {
     }
 }
 
-fn page_cursor<T>(page: &[T], limit: u32, key: impl Fn(&T) -> String) -> Option<String> {
+pub(crate) fn page_cursor<T>(page: &[T], limit: u32, key: impl Fn(&T) -> String) -> Option<String> {
     match page.last() {
         Some(last) if page.len() == limit as usize => Some(key(last)),
         _ => None,
@@ -549,7 +488,7 @@ fn ensure_history(since: Option<&str>, earliest_retained: Option<&str>) -> Resul
     }
 }
 
-fn parse_cursor(cursor: Option<&str>) -> Result<Option<i64>> {
+pub(crate) fn parse_cursor(cursor: Option<&str>) -> Result<Option<i64>> {
     cursor
         .map(|c| {
             c.parse::<i64>()
@@ -558,7 +497,7 @@ fn parse_cursor(cursor: Option<&str>) -> Result<Option<i64>> {
         .transpose()
 }
 
-fn finish_op_page(ops: Vec<StoredOp>, limit: u32, last_seq: Option<i64>) -> OpPage {
+pub(crate) fn finish_op_page(ops: Vec<StoredOp>, limit: u32, last_seq: Option<i64>) -> OpPage {
     let reached_head = ops.last().map(|o| o.seq) == last_seq;
     let cursor = page_cursor(&ops, limit, |o| o.seq.to_string());
     OpPage {

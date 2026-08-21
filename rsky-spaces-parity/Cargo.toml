@@ -9,6 +9,7 @@ rsky-space-host = { path = "../rsky-space-host" }
 rsky-space = { path = "../rsky-space" }
 oracle-rsky-space = { package = "rsky-space", git = "https://github.com/blacksky-algorithms/rsky.git", rev = "7ebd21ae788c550ee8510034d94eb19ede148738" }
 rsky-pds = { git = "https://github.com/blacksky-algorithms/rsky.git", rev = "7ebd21ae788c550ee8510034d94eb19ede148738" }
+anyhow = "1"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }

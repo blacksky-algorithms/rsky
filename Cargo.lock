@@ -8718,6 +8718,7 @@ dependencies = [
 name = "rsky-spaces-parity"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "rsky-pds 0.13.17 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
  "rsky-space 0.4.1",
  "rsky-space 0.4.2",

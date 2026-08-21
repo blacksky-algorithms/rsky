@@ -171,7 +171,9 @@ impl From<HostError> for ApiError {
                 "RepoNotFound",
                 "repo not hosted here",
             ),
-            HostError::InvalidRequest(message) => Self::invalid_request(message.clone()),
+            HostError::InvalidRequest(message)
+            | HostError::RecordExists(message)
+            | HostError::RecordNotFound(message) => Self::invalid_request(message.clone()),
             HostError::InvalidSwap => Self::new(
                 StatusCode::CONFLICT,
                 "InvalidSwap",

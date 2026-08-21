@@ -30,6 +30,10 @@ pub enum HostError {
     AccountNotHosted(String),
     #[error("repo not found")]
     RepoNotFound,
+    #[error("record already exists: {0}")]
+    RecordExists(String),
+    #[error("record not found: {0}")]
+    RecordNotFound(String),
     #[error("swap cid did not match")]
     InvalidSwap,
     #[error("requested history is no longer available")]

@@ -6,6 +6,7 @@ use rsky_identity::did::did_resolver::DidResolver;
 use rsky_identity::types::{DidResolverOpts, MemoryCache};
 use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::space_id::SpaceId;
+use rsky_space_host::actor_repos::ActorStoreRepos;
 use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::HttpMetadataFetcher;
 use rsky_space_host::authority::{
@@ -20,7 +21,6 @@ use rsky_space_host::notify::HttpNotifier;
 use rsky_space_host::pds_seam::PdsSeam;
 use rsky_space_host::policy::Policy;
 use rsky_space_host::registration::{HttpLifecycleAcker, LifecycleAcker};
-use rsky_space_host::repo::ActorStoreRepos;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::store::{HostedSpaceStore, SqliteStore};
 use std::sync::Arc;
