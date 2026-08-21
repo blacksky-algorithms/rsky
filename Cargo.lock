@@ -8716,10 +8716,11 @@ dependencies = [
 
 [[package]]
 name = "rsky-spaces-parity"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "hex",
  "hmac",
  "reqwest 0.12.23",
  "rsky-crypto 0.2.0",

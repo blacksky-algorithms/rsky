@@ -74,6 +74,35 @@ impl Server {
         }
     }
 
+    /// Poll the log until `needle` appears, for a server with no health
+    /// endpoint to poll instead.
+    pub async fn wait_log(&mut self, needle: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                bail!(
+                    "{} exited early ({status}); log:\n{}",
+                    self.name,
+                    self.tail()
+                );
+            }
+            if std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .contains(needle)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "{} never logged {needle:?}; log:\n{}",
+                    self.name,
+                    self.tail()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     pub fn tail(&self) -> String {
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();
         text.lines()
