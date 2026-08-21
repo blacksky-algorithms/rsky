@@ -883,9 +883,7 @@ async fn delete_record(
             }],
         )
         .await?;
-    if !matches!(applied.outcomes[0], WriteOutcome::Noop) {
-        record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
-    }
+    record_write(&state, &context, &space.uri(), &input.repo, &applied.rev).await?;
     Ok(Json(
         rsky_lexicon::com::atproto::space::DeleteRecordOutput {
             commit: Some(rsky_lexicon::com::atproto::space::CommitMeta {

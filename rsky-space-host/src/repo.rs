@@ -63,14 +63,13 @@ impl RepoWrite {
     }
 }
 
-/// What a write did. A delete of an absent record is [`WriteOutcome::Noop`]:
-/// it produces no oplog entry and leaves the digest untouched.
+/// What a write did. Every applied write produces an oplog entry, so a batch
+/// that touches an absent record is refused rather than silently doing nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
     Created { cid: String },
     Updated { cid: String },
     Deleted,
-    Noop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,9 +203,7 @@ fn plan_batch(
                 value,
             } => {
                 if current.is_some() {
-                    return Err(HostError::InvalidRequest(format!(
-                        "record already exists: {path}"
-                    )));
+                    return Err(HostError::RecordExists(path));
                 }
                 let cid = dag_cbor_cid(value).to_string();
                 lt.add(&element(collection, rkey, &cid));
@@ -226,10 +223,11 @@ fn plan_batch(
                 swap_record,
             } => {
                 check_swap(swap_record.as_deref(), current.as_deref())?;
+                let Some(prev) = current.clone() else {
+                    return Err(HostError::RecordNotFound(path));
+                };
                 let cid = dag_cbor_cid(value).to_string();
-                if let Some(prev) = &current {
-                    lt.remove(&element(collection, rkey, prev));
-                }
+                lt.remove(&element(collection, rkey, &prev));
                 lt.add(&element(collection, rkey, &cid));
                 PlannedWrite {
                     collection: collection.clone(),
@@ -247,15 +245,7 @@ fn plan_batch(
             } => {
                 check_swap(swap_record.as_deref(), current.as_deref())?;
                 let Some(prev) = current.clone() else {
-                    planned.push(PlannedWrite {
-                        collection: collection.clone(),
-                        rkey: rkey.clone(),
-                        cid: None,
-                        prev: None,
-                        value: None,
-                        outcome: WriteOutcome::Noop,
-                    });
-                    continue;
+                    return Err(HostError::RecordNotFound(path));
                 };
                 lt.remove(&element(collection, rkey, &prev));
                 PlannedWrite {
@@ -289,12 +279,6 @@ struct PlannedWrite {
     prev: Option<String>,
     value: Option<Vec<u8>>,
     outcome: WriteOutcome,
-}
-
-impl PlannedWrite {
-    fn is_noop(&self) -> bool {
-        self.outcome == WriteOutcome::Noop
-    }
 }
 
 pub(crate) fn page_cursor<T>(page: &[T], limit: u32, key: impl Fn(&T) -> String) -> Option<String> {
@@ -348,9 +332,6 @@ impl RepoStore for InMemoryRepos {
 
         let mut seq = self.next_seq.lock().unwrap();
         for p in &planned {
-            if p.is_noop() {
-                continue;
-            }
             let path = record_path(&p.collection, &p.rkey);
             match &p.cid {
                 Some(cid) => {
@@ -380,9 +361,7 @@ impl RepoStore for InMemoryRepos {
         }
 
         repo.state = lt.state_bytes();
-        if planned.iter().any(|p| !p.is_noop()) {
-            repo.rev = rev.to_string();
-        }
+        repo.rev = rev.to_string();
         Ok(Applied {
             rev: repo.rev.clone(),
             hash: lt.hash(),
@@ -609,7 +588,7 @@ mod tests {
             store
                 .apply_writes(SPACE, DID, "3rev2", &[create("a", "again")])
                 .await,
-            Err(HostError::InvalidRequest(_))
+            Err(HostError::RecordExists(_))
         ));
         assert!(matches!(
             store
@@ -654,18 +633,35 @@ mod tests {
         assert_eq!(records.len(), 1);
     }
 
-    async fn exercise_noop_delete(store: &dyn RepoStore) {
+    async fn exercise_absent_record(store: &dyn RepoStore) {
         store
             .apply_writes(SPACE, DID, "3rev1", &[create("a", "one")])
             .await
             .unwrap();
-        let applied = store
-            .apply_writes(SPACE, DID, "3rev2", &[delete("ghost")])
-            .await
-            .unwrap();
-        assert_eq!(applied.outcomes, vec![WriteOutcome::Noop]);
-        // A no-op neither advances the revision nor writes an oplog entry.
-        assert_eq!(applied.rev, "3rev1");
+        assert!(matches!(
+            store
+                .apply_writes(SPACE, DID, "3rev2", &[delete("ghost")])
+                .await,
+            Err(HostError::RecordNotFound(_))
+        ));
+        assert!(matches!(
+            store
+                .apply_writes(
+                    SPACE,
+                    DID,
+                    "3rev2",
+                    &[RepoWrite::Update {
+                        collection: POST.to_string(),
+                        rkey: "ghost".to_string(),
+                        value: value("x"),
+                        swap_record: None,
+                    }]
+                )
+                .await,
+            Err(HostError::RecordNotFound(_))
+        ));
+        // A refused batch neither advances the revision nor logs an operation.
+        assert_eq!(store.head(SPACE, DID).await.unwrap().unwrap().rev, "3rev1");
         let page = store.list_ops(SPACE, DID, None, None, 10).await.unwrap();
         assert_eq!(page.ops.len(), 1);
     }
@@ -857,7 +853,7 @@ mod tests {
 
     both_backings!(write_read_cycle, exercise_write_read_cycle);
     both_backings!(swap_and_conflict, exercise_swap_and_conflict);
-    both_backings!(noop_delete, exercise_noop_delete);
+    both_backings!(absent_record, exercise_absent_record);
     both_backings!(atomic_batch, exercise_atomic_batch);
     both_backings!(listing, exercise_listing);
     both_backings!(oplog_paging, exercise_oplog_paging);
