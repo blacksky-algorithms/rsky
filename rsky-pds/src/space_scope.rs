@@ -16,6 +16,7 @@
 //! wildcard space type has no declaration to draw from, so its default stays
 //! empty and confers no write targets, per spec.
 
+use rsky_syntax::nsid::Nsid;
 use std::fmt;
 
 pub const SPACE_SCOPE_PREFIX: &str = "space:";
@@ -89,11 +90,6 @@ pub struct SpaceScope {
     pub manage: Vec<ManageOp>,
 }
 
-fn valid_nsid(s: &str) -> bool {
-    // an NSID has at least two dots and non-empty segments
-    s.matches('.').count() >= 2 && s.split('.').all(|seg| !seg.is_empty())
-}
-
 impl SpaceScope {
     pub fn parse(scope: &str) -> Result<Self, ScopeParseError> {
         let rest = scope
@@ -103,7 +99,7 @@ impl SpaceScope {
             Some((st, q)) => (st, Some(q)),
             None => (rest, None),
         };
-        if space_type != "*" && !valid_nsid(space_type) {
+        if space_type != "*" && Nsid::parse(space_type).is_err() {
             return Err(ScopeParseError(format!(
                 "space type `{space_type}` is not an NSID or `*`"
             )));
@@ -143,7 +139,7 @@ impl SpaceScope {
                         skey = Some(value.to_string());
                     }
                     "collection" => {
-                        if value != "*" && !valid_nsid(value) {
+                        if value != "*" && Nsid::parse(value).is_err() {
                             return Err(ScopeParseError(format!(
                                 "collection `{value}` is not an NSID or `*`"
                             )));

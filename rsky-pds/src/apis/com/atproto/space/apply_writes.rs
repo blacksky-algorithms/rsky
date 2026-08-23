@@ -3,7 +3,6 @@ use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
-    valid_nsid,
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
@@ -17,6 +16,7 @@ use rsky_lexicon::com::atproto::space::{
     ApplyWritesInput, ApplyWritesOutput, ApplyWritesResult, CreateResult, DeleteResult,
     UpdateResult,
 };
+use rsky_syntax::nsid::ensure_valid_nsid;
 
 const MAX_WRITES: usize = 200;
 
@@ -81,7 +81,7 @@ pub async fn space_apply_writes(
                 ))
             }
         };
-        if !valid_nsid(&collection) {
+        if ensure_valid_nsid(&collection).is_err() {
             return Err(ApiError::InvalidRequest(format!(
                 "invalid collection: {collection}"
             )));
