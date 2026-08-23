@@ -18,11 +18,11 @@ pub async fn inner_get_service_auth(
 ) -> Result<String> {
     let credentials = auth.access.credentials.unwrap();
     let did = credentials.clone().did.unwrap();
-    let exp = exp.map(|exp| exp * 1000);
+    // `exp` is seconds since the epoch (RFC 7519 §4.1.4).
     if let Some(exp) = exp {
         let system_time = SystemTime::now();
         let now: DateTime<UtcOffset> = system_time.into();
-        let diff = from_micros_to_utc(exp as i64) - now;
+        let diff = from_micros_to_utc((exp * 1_000_000) as i64) - now;
         if diff.num_milliseconds() < 0 {
             bail!("BadExpiration: expiration is in past");
         } else if diff.num_milliseconds() > HOUR as i64 {
@@ -42,7 +42,7 @@ pub async fn inner_get_service_auth(
     create_service_jwt(ServiceJwtParams {
         iss: did,
         aud,
-        exp: None,
+        exp,
         lxm,
         jti: None,
     })

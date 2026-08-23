@@ -22,10 +22,10 @@ pub struct CarResponder(Vec<u8>, Header<'static>);
 /// Serialize a whole permissioned repo as a two-root CAR (signed commit +
 /// index), records in lexicographic path order (spec §Repo serialization).
 #[tracing::instrument(skip_all)]
-#[rocket::get("/xrpc/com.atproto.space.getRepo?<space>&<did>")]
+#[rocket::get("/xrpc/com.atproto.space.getRepo?<space>&<repo>")]
 pub async fn space_get_repo(
     space: String,
-    did: String,
+    repo: String,
     auth: SpaceReadAuth,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
@@ -35,14 +35,14 @@ pub async fn space_get_repo(
     authorize_space_read(
         &auth,
         &space_id,
-        &did,
+        &repo,
         &SpaceRequest::ReadSelf { collection: None },
     )?;
     let reader = open_local_repo(
         actor_store,
         blobstore_factory,
         &account_manager,
-        &did,
+        &repo,
         false,
     )
     .await?;
@@ -67,7 +67,7 @@ pub async fn space_get_repo(
         .keypair()
         .await
         .map_err(internal_error("missing actor keypair"))?;
-    let commit = sign_commit(&keypair, &space_id.uri(), &did, &state.rev, &state.hash())
+    let commit = sign_commit(&keypair, &space_id.uri(), &repo, &state.rev, &state.hash())
         .map_err(internal_error("commit signing failed"))?;
     let car = repo_car_bytes(&commit, &entries, move |cid| blocks.get(cid).cloned())
         .await

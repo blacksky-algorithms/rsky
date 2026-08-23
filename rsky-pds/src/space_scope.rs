@@ -206,13 +206,21 @@ impl SpaceScope {
         }
     }
 
-    fn permits_collection(&self, collection: &str) -> bool {
-        match &self.collections {
-            Some(collections) => collections.iter().any(|c| c == "*" || c == collection),
-            // declared-collections default; see the module note. Wildcard
-            // space types have no declaration, so the default is empty.
-            None => self.space_type != "*",
-        }
+    /// Collection check for a **write**: an omitted collection defaults to the
+    /// space-type declaration's list, which is not resolvable here, so we fail
+    /// closed rather than grant every collection.
+    fn permits_write_collection(&self, collection: &str) -> bool {
+        matches!(&self.collections, Some(collections)
+            if collections.iter().any(|c| c == "*" || c == collection))
+    }
+
+    /// Whether a read_self grant is limited to specific collections. An
+    /// unconstrained read_self covers the holder's whole own repo (reading
+    /// your own data is not a cross-repo leak); a collection-limited one must
+    /// not reach beyond those collections.
+    fn is_collection_limited(&self) -> bool {
+        matches!(&self.collections, Some(collections)
+            if !collections.iter().any(|c| c == "*"))
     }
 
     /// Whole-space read (covers every repo, ignores `collection`).
@@ -230,8 +238,16 @@ impl SpaceScope {
             return false;
         }
         match collection {
-            Some(collection) => self.permits_collection(collection),
-            None => true,
+            // A named collection: authorized when the grant is unconstrained
+            // (covers all own collections) or explicitly lists it.
+            Some(collection) => {
+                !self.is_collection_limited()
+                    || matches!(&self.collections, Some(collections)
+                        if collections.iter().any(|c| c == "*" || c == collection))
+            }
+            // A whole-repo read names no single collection; a collection-
+            // limited read_self must not satisfy it and leak the rest.
+            None => !self.is_collection_limited(),
         }
     }
 
@@ -241,7 +257,7 @@ impl SpaceScope {
             action,
             SpaceAction::Create | SpaceAction::Update | SpaceAction::Delete
         ) && self.has_action(action)
-            && self.permits_collection(collection)
+            && self.permits_write_collection(collection)
     }
 
     /// A space-management operation. Ignores `collection`; omitted by default.
@@ -372,9 +388,18 @@ mod tests {
         // authority defaults to self
         assert!(allowed(s, SELF_DID, &SpaceRequest::Read));
         assert!(!allowed(s, OTHER_AUTH, &SpaceRequest::Read));
-        // write access to declared collections (allow-all interim semantics)
-        assert!(allowed(s, SELF_DID, &write(SpaceAction::Create, THREAD)));
-        assert!(allowed(s, SELF_DID, &write(SpaceAction::Delete, REPLY)));
+        // Writes need an explicit collection: an omitted collection defaults
+        // to the space-type declaration, which is not resolvable here, so
+        // writes fail closed until the grant names its collections.
+        assert!(!allowed(s, SELF_DID, &write(SpaceAction::Create, THREAD)));
+        assert!(!allowed(s, SELF_DID, &write(SpaceAction::Delete, REPLY)));
+        // Naming the collection grants the write.
+        let s_col = "space:com.atmoboards.forum?collection=com.atmoboards.thread";
+        assert!(allowed(
+            s_col,
+            SELF_DID,
+            &write(SpaceAction::Create, THREAD)
+        ));
         // no manage capability by default
         assert!(!allowed(
             s,
@@ -389,7 +414,8 @@ mod tests {
         let s = "space:com.atmoboards.forum?authority=*";
         assert!(allowed(s, OTHER_AUTH, &SpaceRequest::Read));
         assert!(allowed(s, SELF_DID, &SpaceRequest::Read));
-        assert!(allowed(s, OTHER_AUTH, &write(SpaceAction::Create, THREAD)));
+        // write needs an explicit collection (fail-closed default)
+        assert!(!allowed(s, OTHER_AUTH, &write(SpaceAction::Create, THREAD)));
         // a different space type is not covered
         assert!(!authorize(
             &[scope(s)],
@@ -533,8 +559,9 @@ mod tests {
         assert!(!allowed(s, OTHER_AUTH, &write(SpaceAction::Create, THREAD)));
         assert!(!allowed(s, OTHER_AUTH, &SpaceRequest::Read));
 
-        // manage alongside default full record access
-        let s = "space:com.atmoboards.forum?authority=*&manage=update&manage=delete";
+        // manage alongside record access; the write needs an explicit
+        // collection (fail-closed default) while read is unconstrained
+        let s = "space:com.atmoboards.forum?authority=*&collection=com.atmoboards.thread&manage=update&manage=delete";
         assert!(allowed(
             s,
             OTHER_AUTH,

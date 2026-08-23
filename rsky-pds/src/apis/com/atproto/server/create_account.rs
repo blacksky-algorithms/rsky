@@ -44,6 +44,7 @@ pub struct TransformedCreateAccountInput {
 pub async fn server_create_account(
     body: Json<CreateAccountInput>,
     auth: UserDidAuthOptional,
+    admin: Option<crate::auth_verifier::AdminToken>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     cfg: &State<ServerConfig>,
@@ -56,6 +57,7 @@ pub async fn server_create_account(
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
         _ => None,
     };
+    let is_admin = admin.is_some();
     // @TODO: Evaluate if we need to validate for entryway PDS
     let TransformedCreateAccountInput {
         email,
@@ -70,6 +72,7 @@ pub async fn server_create_account(
         id_resolver,
         body.into_inner(),
         requester,
+        is_admin,
         &account_manager,
     )
     .await?;
@@ -241,11 +244,13 @@ pub async fn server_create_account(
 }
 
 /// Validates Create Account Parameters and builds PLC Operation if needed
+#[allow(clippy::too_many_arguments)]
 pub async fn validate_inputs_for_local_pds(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     input: CreateAccountInput,
     requester: Option<String>,
+    is_admin: bool,
     account_manager: &AccountManager,
 ) -> Result<TransformedCreateAccountInput, ApiError> {
     let did: String;
@@ -315,7 +320,7 @@ pub async fn validate_inputs_for_local_pds(
 
     match input.did {
         Some(input_did) => {
-            if input_did == requester.unwrap_or("n/a".to_string()) {
+            if !is_admin && Some(&input_did) != requester.as_ref() {
                 return Err(ApiError::AuthRequiredError(format!(
                     "Missing auth to create account with did: {input_did}"
                 )));

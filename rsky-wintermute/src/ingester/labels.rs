@@ -34,6 +34,9 @@ pub async fn subscribe_labels(
             .map_err(|e| WintermuteError::Other(format!("label pool creation failed: {e}")))?,
     );
 
+    // One pool per labeler host, the second multiplier on the connection ceiling.
+    crate::metrics::register_pool(format!("labels:{labeler_host}"), &pool);
+
     // Semaphore to limit concurrent indexing tasks (configurable via INLINE_CONCURRENCY)
     let semaphore = Arc::new(Semaphore::new(*INLINE_CONCURRENCY));
 

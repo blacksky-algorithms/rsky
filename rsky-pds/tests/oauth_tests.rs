@@ -334,7 +334,8 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
         ))
         .dispatch()
         .await;
-    assert_eq!(response.status(), Status::BadRequest);
+    // RFC 9449 §8: a missing DPoP nonce is challenged with 401 use_dpop_nonce.
+    assert_eq!(response.status(), Status::Unauthorized);
     let resource_nonce = response
         .headers()
         .get_one("DPoP-Nonce")
@@ -377,7 +378,8 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
         ))
         .dispatch()
         .await;
-    assert_eq!(response.status(), Status::BadRequest);
+    // A proof signed by the wrong DPoP key is an authentication failure (401).
+    assert_eq!(response.status(), Status::Unauthorized);
     assert!(response
         .headers()
         .get_one("WWW-Authenticate")
@@ -481,7 +483,8 @@ async fn oauth_revocation() {
         ))
         .dispatch()
         .await;
-    assert_eq!(response.status(), Status::BadRequest);
+    // A revoked token is an authentication failure (401), not a client error.
+    assert_eq!(response.status(), Status::Unauthorized);
     assert!(response
         .headers()
         .get_one("WWW-Authenticate")

@@ -13,17 +13,19 @@ use rsky_lexicon::com::atproto::space::{
     ListReposOutput, ListReposParams, NotifyWriteInput, RegisterNotifyInput, RegisterNotifyOutput,
     SpaceConfig,
 };
+use rsky_oauth::dpop::{DpopManager, DpopProof, DpopRequest};
 use rsky_space::credential;
 use std::sync::Arc;
 
 use crate::attestation::{JtiStore, MetadataFetcher};
 use crate::authority::{Authority, KeyResolver};
 use crate::error::HostError;
+use crate::keys::DocSource;
 use crate::managing_app::require_https;
 use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
 use crate::policy::Policy;
 use crate::service_jwt;
-use crate::store::{RegistrationStore, WriterSetStore};
+use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
 
 pub const DEFAULT_REGISTRATION_TTL_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_LIST_LIMIT: i64 = 100;
@@ -38,7 +40,15 @@ pub struct AppState {
     pub jti_store: Arc<dyn JtiStore>,
     pub writers: Arc<dyn WriterSetStore>,
     pub registrations: Arc<dyn RegistrationStore>,
+    /// Resolves a subscriber's service identifier to its delivery endpoint.
+    pub docs: Arc<dyn DocSource>,
     pub notifier: Arc<dyn Notifier>,
+    /// Verifies DPoP proofs on the credential-issuance and credential-presenting
+    /// paths. Space issuance does not challenge with nonces, so this manager
+    /// carries none; the replay store is what makes a proof single-use.
+    pub dpop: Arc<DpopManager>,
+    /// Public origin proofs must be bound to.
+    pub public_url: String,
     pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub jti: Arc<dyn Fn() -> String + Send + Sync>,
     pub registration_ttl_secs: u64,
@@ -143,18 +153,109 @@ fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or_else(|| ApiError::auth_required("missing bearer token"))
 }
 
+fn dpop_credential(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("DPoP "))
+        .ok_or_else(|| ApiError::auth_required("missing DPoP-bound space credential"))
+}
+
+/// Check the request's DPoP proof (RFC 9449). `access_token` is the credential
+/// the proof must hash into `ath`, and is absent at issuance, where the
+/// delegation token is a grant rather than a bound token.
+fn check_proof(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &str,
+    nsid: &str,
+    access_token: Option<&str>,
+) -> Result<DpopProof, ApiError> {
+    let uri = format!("{}/xrpc/{nsid}", state.public_url.trim_end_matches('/'));
+    let proofs: Vec<&str> = headers
+        .get_all("dpop")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    state
+        .dpop
+        .check_proof(
+            &DpopRequest {
+                method,
+                uri: &uri,
+                dpop_headers: &proofs,
+                access_token,
+            },
+            (state.now)(),
+        )
+        .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidDpopProof", e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "InvalidDpopProof",
+                "missing DPoP proof",
+            )
+        })
+}
+
 /// Space-credential auth: verify the presented credential against this
-/// authority's own space key.
-fn require_space_credential(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let jwt = bearer(headers)?;
-    credential::verify_space_credential(
+/// authority's own space key, then confirm the presenter holds the key it is
+/// bound to.
+///
+/// A credential reads every repo in its space and is presented to each of
+/// their hosts in turn, so as a bearer token it would be a shared secret any
+/// one of those hosts could replay against the others. `Bearer` is refused
+/// even with a valid proof beside it.
+fn require_space_credential(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &str,
+    nsid: &str,
+) -> Result<(), ApiError> {
+    let jwt = dpop_credential(headers)?;
+    let bound_jkt = credential::verify_space_credential(
         jwt,
         &state.authority.space_uri(),
         state.authority.authority_did(),
         state.authority.signer.did_key(),
         (state.now)(),
     )
-    .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidToken", e.to_string()))
+    .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidToken", e.to_string()))?;
+    let proof = check_proof(state, headers, method, nsid, Some(jwt))?;
+    if proof.jkt != bound_jkt {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "InvalidDpopProof",
+            "DPoP key thumbprint does not match the credential binding",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve a `did:...#fragment` subscriber to its delivery endpoint. The
+/// fragment defaults to `#atproto_space_syncer`, the entry a subscriber
+/// publishes for this purpose.
+async fn resolve_service_endpoint(docs: &dyn DocSource, service: &str) -> Result<String, ApiError> {
+    let (did, fragment) = match service.split_once('#') {
+        Some((did, fragment)) => (did, fragment),
+        None => (service, "atproto_space_syncer"),
+    };
+    let doc = docs.did_document(did).await.map_err(|e| {
+        ApiError::invalid_request(format!("could not resolve service {service}: {e}"))
+    })?;
+    doc.service
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|entry| {
+            entry.id.rsplit_once('#').map(|(_, f)| f) == Some(fragment) || entry.id == fragment
+        })
+        .map(|entry| entry.service_endpoint.clone())
+        .ok_or_else(|| {
+            ApiError::invalid_request(format!(
+                "no {fragment} service in the DID document for {did}"
+            ))
+        })
 }
 
 fn require_this_space(state: &AppState, space: &str) -> Result<(), ApiError> {
@@ -175,7 +276,7 @@ async fn get_space(
     headers: HeaderMap,
     Query(params): Query<GetSpaceParams>,
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
-    require_space_credential(&state, &headers)?;
+    require_space_credential(&state, &headers, "GET", "com.atproto.space.getSpace")?;
     require_this_space(&state, &params.space)?;
     Ok(Json(GetSpaceOutput {
         space: state.authority.space_uri(),
@@ -185,13 +286,24 @@ async fn get_space(
 
 async fn get_space_credential(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<GetSpaceCredentialInput>,
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
     require_this_space(&state, &input.space)?;
+    let delegation_token = bearer(&headers)?;
+    // Before the delegation token, so a caller with a bad proof does not burn
+    // its single-use grant finding out.
+    let proof = check_proof(
+        &state,
+        &headers,
+        "POST",
+        "com.atproto.space.getSpaceCredential",
+        None,
+    )?;
     let credential = state
         .authority
         .get_space_credential(
-            &input.delegation_token,
+            delegation_token,
             input.client_attestation.as_deref(),
             &state.policy,
             state.keys.as_ref(),
@@ -199,6 +311,7 @@ async fn get_space_credential(
             state.jti_store.as_ref(),
             (state.now)(),
             (state.jti)(),
+            &proof.jkt,
         )
         .await?;
     Ok(Json(GetSpaceCredentialOutput { credential }))
@@ -209,7 +322,7 @@ async fn list_repos(
     headers: HeaderMap,
     Query(params): Query<ListReposParams>,
 ) -> Result<Json<ListReposOutput>, ApiError> {
-    require_space_credential(&state, &headers)?;
+    require_space_credential(&state, &headers, "GET", "com.atproto.space.listRepos")?;
     require_this_space(&state, &params.space)?;
     let limit = params
         .limit
@@ -227,14 +340,34 @@ async fn register_notify(
     headers: HeaderMap,
     Json(input): Json<RegisterNotifyInput>,
 ) -> Result<Json<RegisterNotifyOutput>, ApiError> {
-    require_space_credential(&state, &headers)?;
+    require_space_credential(&state, &headers, "POST", "com.atproto.space.registerNotify")?;
     require_this_space(&state, &input.space)?;
-    require_https(&input.endpoint)
-        .map_err(|_| ApiError::invalid_request("endpoint must be https"))?;
+    // `service` names the subscriber, which is both where to deliver and who
+    // the delivery is addressed to (proposals#100); `endpoint` is the
+    // pre-amendment shape and loses when both are sent.
+    let subscriber = match (&input.service, &input.endpoint) {
+        (Some(service), _) => Subscriber {
+            endpoint: resolve_service_endpoint(state.docs.as_ref(), service).await?,
+            service: Some(service.clone()),
+        },
+        (None, Some(endpoint)) => {
+            require_https(endpoint)
+                .map_err(|_| ApiError::invalid_request("endpoint must be https"))?;
+            Subscriber {
+                endpoint: endpoint.clone(),
+                service: None,
+            }
+        }
+        (None, None) => {
+            return Err(ApiError::invalid_request(
+                "registerNotify requires a service or an endpoint",
+            ))
+        }
+    };
     let expires_at = (state.now)() + state.registration_ttl_secs;
     state
         .registrations
-        .register(&input.space, &input.endpoint, expires_at)
+        .register(&input.space, &subscriber, expires_at)
         .await?;
     Ok(Json(RegisterNotifyOutput {
         expires_at: chrono::DateTime::from_timestamp(expires_at as i64, 0).unwrap_or_default(),
@@ -251,7 +384,7 @@ async fn notify_write(
     let claims = service_jwt::claims(jwt)?;
     // The repo host signs with the member's own key, so a notification may only
     // announce the issuer's own repo.
-    if claims.iss != input.did {
+    if claims.iss != input.repo {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "InvalidToken",
@@ -272,7 +405,7 @@ async fn notify_write(
     let now = (state.now)();
     state
         .writers
-        .upsert_writer(&input.space, &input.did, &input.rev, None, now)
+        .upsert_writer(&input.space, &input.repo, &input.rev, None, now)
         .await?;
     let endpoints = state.registrations.endpoints(&input.space, now).await?;
     fan_out_write(state.notifier.clone(), endpoints, input);
@@ -299,6 +432,7 @@ mod tests {
     use tower::ServiceExt;
 
     const NOW: u64 = 1000;
+    const PUBLIC_URL: &str = "https://space.example";
     const MEMBER: &str = "did:plc:member";
 
     fn space_uri() -> String {
@@ -337,16 +471,28 @@ mod tests {
     }
     #[async_trait]
     impl Notifier for RecordingNotifier {
-        async fn notify_write(&self, endpoint: &str, input: &NotifyWriteInput) -> HostResult<()> {
-            self.tx.send((endpoint.to_string(), input.clone())).unwrap();
+        async fn notify_write(&self, to: &Subscriber, input: &NotifyWriteInput) -> HostResult<()> {
+            self.tx
+                .send((to.audience().to_string(), input.clone()))
+                .unwrap();
             Ok(())
         }
         async fn notify_space_deleted(
             &self,
-            _endpoint: &str,
+            _to: &Subscriber,
             _input: &NotifySpaceDeletedInput,
         ) -> HostResult<()> {
             Ok(())
+        }
+    }
+
+    /// The tests never register by service identifier, so nothing here should
+    /// reach DID resolution -- and a test that starts to will say so.
+    struct NoDocs;
+    #[async_trait]
+    impl crate::keys::DocSource for NoDocs {
+        async fn did_document(&self, did: &str) -> HostResult<rsky_identity::types::DidDocument> {
+            Err(HostError::Resolution(format!("no document for {did}")))
         }
     }
 
@@ -399,7 +545,13 @@ mod tests {
             jti_store: Arc::new(InMemoryJtiStore::default()),
             writers: Arc::new(InMemoryWriterSet::default()),
             registrations: Arc::new(InMemoryRegistrations::default()),
+            docs: Arc::new(NoDocs),
             notifier: Arc::new(RecordingNotifier { tx }),
+            dpop: Arc::new(rsky_oauth::dpop::DpopManager::new(
+                None,
+                Box::new(rsky_oauth::dpop::InMemoryReplayStore::default()),
+            )),
+            public_url: PUBLIC_URL.to_string(),
             now: Arc::new(|| NOW),
             jti: Arc::new(|| "jti-fixed".to_string()),
             registration_ttl_secs: DEFAULT_REGISTRATION_TTL_SECS,
@@ -407,10 +559,48 @@ mod tests {
         Fixture { state, writes }
     }
 
+    const TEST_DPOP_KEY: [u8; 32] = [0x42u8; 32];
+    static PROOF_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn dpop_key() -> rsky_oauth::jwk::Jwk {
+        rsky_oauth::jwk::Jwk::from_private_key_bytes(rsky_oauth::jwk::EcCurve::P256, &TEST_DPOP_KEY)
+            .unwrap()
+    }
+
+    /// A proof over `{PUBLIC_URL}/xrpc/{nsid}`. `access_token` is the bound
+    /// credential when there is one; issuance has none.
+    fn dpop_proof(method: &str, nsid: &str, access_token: Option<&str>) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let key = dpop_key();
+        let mut header = rsky_oauth::jwt::JwtHeader::new("ES256");
+        header.typ = Some("dpop+jwt".to_string());
+        header.jwk = Some(key.to_public());
+        let mut claims = rsky_oauth::jwt::JwtClaims {
+            iat: Some(NOW),
+            jti: Some(format!(
+                "proof-{}",
+                PROOF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            )),
+            ..Default::default()
+        };
+        claims.extra.insert("htm".to_string(), method.into());
+        claims.extra.insert(
+            "htu".to_string(),
+            format!("{PUBLIC_URL}/xrpc/{nsid}").into(),
+        );
+        if let Some(token) = access_token {
+            let ath = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(token.as_bytes()));
+            claims.extra.insert("ath".to_string(), ath.into());
+        }
+        rsky_oauth::jwt::sign(&header, &claims, &key).unwrap()
+    }
+
     fn credential_for(state: &AppState) -> String {
         state
             .authority
-            .mint_credential(NOW, "cred-jti".to_string())
+            .mint_credential(NOW, "cred-jti".to_string(), &dpop_key().thumbprint())
             .unwrap()
     }
 
@@ -430,6 +620,7 @@ mod tests {
             iat: NOW,
             exp: NOW + 60,
             jti: "delegation-jti".to_string(),
+            cnf: None,
         };
         encode(&header, &claims, |input| user_signer().sign(input)).unwrap()
     }
@@ -445,23 +636,53 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
-    fn get_req(path: &str, token: Option<&str>) -> Request<Body> {
-        let mut builder = Request::builder().method("GET").uri(path);
-        if let Some(token) = token {
-            builder = builder.header("authorization", format!("Bearer {token}"));
+    /// Attach the credential the way the server now demands it: a space
+    /// credential under `DPoP` with a matching proof, a delegation token as a
+    /// `Bearer` grant with a proof carrying no `ath`, anything else as a plain
+    /// bearer token.
+    fn with_auth(
+        mut builder: axum::http::request::Builder,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+    ) -> axum::http::request::Builder {
+        let Some(token) = token else {
+            return builder;
+        };
+        let nsid = path
+            .trim_start_matches("/xrpc/")
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        match credential::decode(token).map(|d| d.header.typ) {
+            Ok(typ) if typ == credential::CREDENTIAL_TYP => {
+                builder = builder.header("authorization", format!("DPoP {token}"));
+                builder.header("dpop", dpop_proof(method, &nsid, Some(token)))
+            }
+            Ok(typ) if typ == DELEGATION_TYP => {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+                builder.header("dpop", dpop_proof(method, &nsid, None))
+            }
+            _ => builder.header("authorization", format!("Bearer {token}")),
         }
-        builder.body(Body::empty()).unwrap()
+    }
+
+    fn get_req(path: &str, token: Option<&str>) -> Request<Body> {
+        let builder = Request::builder().method("GET").uri(path);
+        with_auth(builder, "GET", path, token)
+            .body(Body::empty())
+            .unwrap()
     }
 
     fn post_req(path: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
-        let mut builder = Request::builder()
+        let builder = Request::builder()
             .method("POST")
             .uri(path)
             .header("content-type", "application/json");
-        if let Some(token) = token {
-            builder = builder.header("authorization", format!("Bearer {token}"));
-        }
-        builder.body(Body::from(body.to_string())).unwrap()
+        with_auth(builder, "POST", path, token)
+            .body(Body::from(body.to_string()))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -484,11 +705,39 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"], "AuthenticationRequired");
 
+        // A bearer token is not a credential presentation, whatever it holds.
         let (status, body) = send(&f.state, get_req(&path, Some("garbage"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["error"], "InvalidToken");
+        assert_eq!(body["error"], "AuthenticationRequired");
 
         let token = credential_for(&f.state);
+
+        // Not even a real credential with a valid proof beside it: the scheme
+        // is the refusal, so it cannot be used to opt out of the binding.
+        let as_bearer = Request::builder()
+            .method("GET")
+            .uri(&path)
+            .header("authorization", format!("Bearer {token}"))
+            .header(
+                "dpop",
+                dpop_proof("GET", "com.atproto.space.getSpace", Some(&token)),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(&f.state, as_bearer).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "AuthenticationRequired");
+
+        // A credential bound to someone else's key is refused as well.
+        let other_binding = f
+            .state
+            .authority
+            .mint_credential(NOW, "other-jti".to_string(), "some-other-thumbprint")
+            .unwrap();
+        let (status, body) = send(&f.state, get_req(&path, Some(&other_binding))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "InvalidDpopProof");
+
         let (status, body) = send(&f.state, get_req(&path, Some(&token))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["space"], space_uri());
@@ -512,11 +761,9 @@ mod tests {
         let f = fixture(AppAccess::Open, &[MEMBER]);
         let path = "/xrpc/com.atproto.space.getSpaceCredential";
 
-        let body = serde_json::json!({
-            "space": space_uri(),
-            "delegationToken": delegation_for(&f.state, MEMBER),
-        });
-        let (status, out) = send(&f.state, post_req(path, None, body)).await;
+        let body = serde_json::json!({ "space": space_uri() });
+        let delegation = delegation_for(&f.state, MEMBER);
+        let (status, out) = send(&f.state, post_req(path, Some(&delegation), body)).await;
         assert_eq!(status, StatusCode::OK);
         credential::verify_space_credential(
             out["credential"].as_str().unwrap(),
@@ -527,29 +774,51 @@ mod tests {
         )
         .unwrap();
 
+        // A credential is minted only for a proof-carrying request: the key
+        // it binds to is established by the proof, so there is nothing to bind
+        // without one.
+        let unbound = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {delegation}"))
+            .body(Body::from(
+                serde_json::json!({ "space": space_uri() }).to_string(),
+            ))
+            .unwrap();
+        let (status, out) = send(&f.state, unbound).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(out["error"], "InvalidDpopProof");
+
         // Non-member is refused by the policy.
         let f = fixture(AppAccess::Open, &[]);
-        let body = serde_json::json!({
-            "space": space_uri(),
-            "delegationToken": delegation_for(&f.state, MEMBER),
-        });
-        let (status, out) = send(&f.state, post_req(path, None, body)).await;
+        let body = serde_json::json!({ "space": space_uri() });
+        let delegation = delegation_for(&f.state, MEMBER);
+        let (status, out) = send(&f.state, post_req(path, Some(&delegation), body)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(out["error"], "NotAuthorized");
 
         // Garbage delegation token.
-        let body = serde_json::json!({
-            "space": space_uri(),
-            "delegationToken": "garbage",
-        });
-        let (status, out) = send(&f.state, post_req(path, None, body)).await;
+        let garbage = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer garbage")
+            .header(
+                "dpop",
+                dpop_proof("POST", "com.atproto.space.getSpaceCredential", None),
+            )
+            .body(Body::from(
+                serde_json::json!({ "space": space_uri() }).to_string(),
+            ))
+            .unwrap();
+        let (status, out) = send(&f.state, garbage).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(out["error"], "InvalidToken");
 
         // Wrong space.
         let body = serde_json::json!({
             "space": "at://did:plc:other/space/community.blacksky.feed/main",
-            "delegationToken": "x",
         });
         let (status, out) = send(&f.state, post_req(path, None, body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -564,20 +833,17 @@ mod tests {
         );
         let path = "/xrpc/com.atproto.space.getSpaceCredential";
 
-        let body = serde_json::json!({
-            "space": space_uri(),
-            "delegationToken": delegation_for(&f.state, MEMBER),
-        });
-        let (status, out) = send(&f.state, post_req(path, None, body)).await;
+        let delegation = delegation_for(&f.state, MEMBER);
+        let body = serde_json::json!({ "space": space_uri() });
+        let (status, out) = send(&f.state, post_req(path, Some(&delegation), body)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(out["error"], "AttestationRequired");
 
         let body = serde_json::json!({
             "space": space_uri(),
-            "delegationToken": delegation_for(&f.state, MEMBER),
             "clientAttestation": "garbage",
         });
-        let (status, out) = send(&f.state, post_req(path, None, body)).await;
+        let (status, out) = send(&f.state, post_req(path, Some(&delegation), body)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(out["error"], "InvalidAttestation");
     }
@@ -658,7 +924,13 @@ mod tests {
             .endpoints(&space_uri(), NOW)
             .await
             .unwrap();
-        assert_eq!(endpoints, vec!["https://syncer.example".to_string()]);
+        assert_eq!(
+            endpoints,
+            vec![Subscriber {
+                endpoint: "https://syncer.example".to_string(),
+                service: None,
+            }]
+        );
 
         // Non-https endpoints are rejected.
         let body = serde_json::json!({
@@ -675,7 +947,14 @@ mod tests {
         let mut f = fixture(AppAccess::Open, &[]);
         f.state
             .registrations
-            .register(&space_uri(), "https://syncer.example", NOW + 100)
+            .register(
+                &space_uri(),
+                &Subscriber {
+                    endpoint: "https://syncer.example".to_string(),
+                    service: None,
+                },
+                NOW + 100,
+            )
             .await
             .unwrap();
         let aud = format!("{}#atproto_space_host", f.state.authority.authority_did());
@@ -683,7 +962,7 @@ mod tests {
         let path = "/xrpc/com.atproto.space.notifyWrite";
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
 
@@ -702,7 +981,7 @@ mod tests {
 
         let (endpoint, forwarded) = f.writes.recv().await.unwrap();
         assert_eq!(endpoint, "https://syncer.example");
-        assert_eq!(forwarded.did, MEMBER);
+        assert_eq!(forwarded.repo, MEMBER);
     }
 
     #[tokio::test]
@@ -712,7 +991,7 @@ mod tests {
         let authority_did = f.state.authority.authority_did().to_string();
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
 
@@ -725,7 +1004,7 @@ mod tests {
         let token = member_service_jwt(&authority_did, NOTIFY_WRITE_LXM);
         let other = serde_json::json!({
             "space": space_uri(),
-            "did": "did:plc:someoneelse",
+            "repo": "did:plc:someoneelse",
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), other)).await;
@@ -742,7 +1021,7 @@ mod tests {
         let token = member_service_jwt(&authority_did, NOTIFY_WRITE_LXM);
         let wrong_space = serde_json::json!({
             "space": "at://did:plc:other/space/community.blacksky.feed/main",
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), wrong_space)).await;
@@ -763,7 +1042,7 @@ mod tests {
         .unwrap();
         let unknown = serde_json::json!({
             "space": space_uri(),
-            "did": "did:plc:unknown",
+            "repo": "did:plc:unknown",
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(&f.state, post_req(path, Some(&token), unknown)).await;
@@ -782,7 +1061,7 @@ mod tests {
         );
         let body = serde_json::json!({
             "space": space_uri(),
-            "did": MEMBER,
+            "repo": MEMBER,
             "rev": "3jzfcijpj2z2c",
         });
         let (status, out) = send(
@@ -845,7 +1124,10 @@ mod tests {
         let notifier = RecordingNotifier { tx };
         notifier
             .notify_space_deleted(
-                "https://syncer.example",
+                &Subscriber {
+                    endpoint: "https://syncer.example".to_string(),
+                    service: None,
+                },
                 &NotifySpaceDeletedInput { space: space_uri() },
             )
             .await

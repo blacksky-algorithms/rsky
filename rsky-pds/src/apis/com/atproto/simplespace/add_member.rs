@@ -3,7 +3,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::simplespace::{require_manage, space_error};
 use crate::apis::com::atproto::space::parse_space_uri;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -17,7 +17,7 @@ use rsky_lexicon::com::atproto::simplespace::AddMemberInput;
 )]
 pub async fn simplespace_add_member(
     body: Json<AddMemberInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<(), ApiError> {
@@ -43,5 +43,19 @@ pub async fn simplespace_add_member(
         .add_member(&space_id.uri(), &member)
         .await
         .map_err(space_error)?;
+    // A membership must be discoverable through the member's own listSpaces
+    // before their first write creates a repo row. Only a local member's
+    // store can be written from here; a remote member's PDS learns through
+    // its own flows.
+    if actor_store.exists(&member).await.unwrap_or(false) {
+        if let Ok(member_reader) = actor_store
+            .read(member.clone(), blobstore_factory.blobstore(member.clone()))
+            .await
+        {
+            if let Err(error) = member_reader.space.record_joined(&space_id).await {
+                tracing::warn!(%error, "failed to index membership on the member's store");
+            }
+        }
+    }
     Ok(())
 }

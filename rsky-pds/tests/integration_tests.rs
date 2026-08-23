@@ -215,6 +215,68 @@ async fn get_access_token(client: &rocket::local::asynchronous::Client) -> Strin
     body["accessJwt"].as_str().unwrap().to_string()
 }
 
+/// `listRecords` must return the record value itself and omit the cursor on a
+/// short final page. Consumers treat a nested `{uri, cid, value}` as a failed
+/// write, and a final-page cursor invites a needless empty request.
+#[tokio::test]
+async fn test_list_records_has_direct_values_and_no_final_cursor() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    // Accounts created with a supplied did start deactivated; writes need it live.
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+
+    for rkey in ["one", "two"] {
+        let response = client
+            .post("/xrpc/com.atproto.repo.createRecord")
+            .header(ContentType::JSON)
+            .header(Header::new("Authorization", format!("Bearer {token}")))
+            .body(
+                json!({
+                    "repo": did,
+                    "collection": "com.example.record",
+                    "rkey": rkey,
+                    "validate": false,
+                    "record": {"$type": "com.example.record", "text": rkey}
+                })
+                .to_string(),
+            )
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok, "create {rkey}");
+    }
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.listRecords?repo={did}&collection=com.example.record&limit=1"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let first: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(first["records"].as_array().unwrap().len(), 1);
+    assert_eq!(first["records"][0]["value"]["$type"], "com.example.record");
+    assert!(first["records"][0]["value"].get("value").is_none());
+    let cursor = first["cursor"].as_str().expect("full page has a cursor");
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.listRecords?repo={did}&collection=com.example.record&limit=1&cursor={cursor}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let final_page: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(final_page["records"].as_array().unwrap().len(), 1);
+    assert!(final_page.get("cursor").is_none(), "{final_page}");
+}
+
 #[tokio::test]
 async fn test_check_signup_queue() {
     let (_dir, client) = common::get_client().await;
@@ -550,4 +612,93 @@ async fn test_identity_resolution() {
     let body: serde_json::Value = response.into_json().await.unwrap();
     assert_eq!(body["did"], bar_did);
     assert_eq!(body["handle"], "handle.invalid");
+}
+
+/// An authorization server resolving an `include:` permission set reaches for
+/// this method, unauthenticated, and needs a proof either way: absence is
+/// answered with a CAR that proves it, not with an error. Its absence on a PDS
+/// surfaces two hops away as an opaque `invalid_scope`, naming neither the
+/// method nor the host.
+#[tokio::test]
+async fn test_sync_get_record_proves_presence_and_absence_anonymously() {
+    let (_dir, client) = common::get_client().await;
+    create_account(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+
+    for rkey in ["self", "nothing-was-ever-written-here"] {
+        let response = client
+            .get(format!(
+                "/xrpc/com.atproto.sync.getRecord?did={did}&collection=com.atproto.lexicon.schema&rkey={rkey}"
+            ))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok, "rkey {rkey}");
+        assert_eq!(
+            response.headers().get_one("Content-Type"),
+            Some("application/vnd.ipld.car")
+        );
+        assert!(
+            !response.into_bytes().await.unwrap().is_empty(),
+            "the CAR carries the blocks that prove the answer"
+        );
+    }
+}
+
+/// applyWrites must answer with a JSON object {commit, results}, not an empty
+/// 200. A client that requires JSON reads an empty body as a failed write and
+/// retries, duplicating records — the bug bulleted.app hit.
+#[tokio::test]
+async fn test_apply_writes_returns_commit_and_results() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+
+    let response = client
+        .post("/xrpc/com.atproto.repo.applyWrites")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .body(
+            json!({
+                "repo": did,
+                "validate": false,
+                "writes": [{
+                    "$type": "com.atproto.repo.applyWrites#create",
+                    "collection": "com.example.record",
+                    "rkey": "aw1",
+                    "value": {"$type": "com.example.record", "text": "batch"}
+                }]
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.expect("a JSON body, not empty");
+    assert!(body["commit"]["cid"].is_string(), "{body}");
+    assert!(body["commit"]["rev"].is_string(), "{body}");
+    let results = body["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["$type"],
+        "com.atproto.repo.applyWrites#createResult"
+    );
+    assert!(results[0]["uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/com.example.record/aw1"));
+    assert!(results[0]["cid"].is_string());
 }

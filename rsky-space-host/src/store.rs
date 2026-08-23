@@ -34,11 +34,38 @@ pub trait WriterSetStore: Send + Sync {
     ) -> Result<(Vec<RepoRef>, Option<String>)>;
 }
 
-/// Endpoints registered (via `registerNotify`) to receive write notifications.
+/// A subscriber registered (via `registerNotify`) to receive write
+/// notifications.
+///
+/// `service` is the DID (with optional service fragment) each delivery is
+/// addressed to. A bare URL cannot be an `aud`, so a registration that names
+/// only an endpoint leaves its deliveries unverifiable by whoever receives
+/// them; that shape predates proposals#100 and is kept only for subscribers
+/// already deployed against it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Subscriber {
+    pub endpoint: String,
+    pub service: Option<String>,
+}
+
+impl Subscriber {
+    /// Who a delivery to this subscriber is addressed to.
+    #[must_use]
+    pub fn audience(&self) -> &str {
+        self.service.as_deref().unwrap_or(&self.endpoint)
+    }
+}
+
+/// Subscribers registered (via `registerNotify`) to receive write notifications.
 #[async_trait]
 pub trait RegistrationStore: Send + Sync {
-    async fn register(&self, space_uri: &str, endpoint: &str, expires_at: u64) -> Result<()>;
-    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<String>>;
+    async fn register(
+        &self,
+        space_uri: &str,
+        subscriber: &Subscriber,
+        expires_at: u64,
+    ) -> Result<()>;
+    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<Subscriber>>;
 }
 
 fn next_cursor(page: &[RepoRef], limit: u32) -> Option<String> {
@@ -100,27 +127,35 @@ impl WriterSetStore for InMemoryWriterSet {
 
 #[derive(Default)]
 pub struct InMemoryRegistrations {
-    endpoints: Mutex<BTreeMap<(String, String), u64>>,
+    endpoints: Mutex<BTreeMap<(String, String), (u64, Option<String>)>>,
 }
 
 #[async_trait]
 impl RegistrationStore for InMemoryRegistrations {
-    async fn register(&self, space_uri: &str, endpoint: &str, expires_at: u64) -> Result<()> {
-        self.endpoints
-            .lock()
-            .unwrap()
-            .insert((space_uri.to_string(), endpoint.to_string()), expires_at);
+    async fn register(
+        &self,
+        space_uri: &str,
+        subscriber: &Subscriber,
+        expires_at: u64,
+    ) -> Result<()> {
+        self.endpoints.lock().unwrap().insert(
+            (space_uri.to_string(), subscriber.endpoint.clone()),
+            (expires_at, subscriber.service.clone()),
+        );
         Ok(())
     }
 
-    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<String>> {
+    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<Subscriber>> {
         Ok(self
             .endpoints
             .lock()
             .unwrap()
             .iter()
-            .filter(|((space, _), expires_at)| space == space_uri && **expires_at > now)
-            .map(|((_, endpoint), _)| endpoint.clone())
+            .filter(|((space, _), (expires_at, _))| space == space_uri && *expires_at > now)
+            .map(|((_, endpoint), (_, service))| Subscriber {
+                endpoint: endpoint.clone(),
+                service: service.clone(),
+            })
             .collect())
     }
 }
@@ -153,6 +188,7 @@ impl SqliteStore {
                 space_uri TEXT NOT NULL,
                 endpoint TEXT NOT NULL,
                 expires_at INTEGER NOT NULL,
+                service TEXT,
                 PRIMARY KEY (space_uri, endpoint)
             );
             CREATE TABLE IF NOT EXISTS used_jti (
@@ -231,30 +267,46 @@ impl WriterSetStore for SqliteStore {
 
 #[async_trait]
 impl RegistrationStore for SqliteStore {
-    async fn register(&self, space_uri: &str, endpoint: &str, expires_at: u64) -> Result<()> {
+    async fn register(
+        &self,
+        space_uri: &str,
+        subscriber: &Subscriber,
+        expires_at: u64,
+    ) -> Result<()> {
         self.conn
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO registration (space_uri, endpoint, expires_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT (space_uri, endpoint) DO UPDATE SET expires_at = ?3",
-                rusqlite::params![space_uri, endpoint, expires_at],
+                "INSERT INTO registration (space_uri, endpoint, expires_at, service)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (space_uri, endpoint) DO UPDATE SET
+                 expires_at = ?3, service = ?4",
+                rusqlite::params![
+                    space_uri,
+                    subscriber.endpoint,
+                    expires_at,
+                    subscriber.service
+                ],
             )
             .map_err(sql_err)?;
         Ok(())
     }
 
-    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<String>> {
+    async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<Subscriber>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT endpoint FROM registration
+                "SELECT endpoint, service FROM registration
                  WHERE space_uri = ?1 AND expires_at > ?2 ORDER BY endpoint ASC",
             )
             .map_err(sql_err)?;
         let rows = stmt
-            .query_map(rusqlite::params![space_uri, now], |row| row.get(0))
+            .query_map(rusqlite::params![space_uri, now], |row| {
+                Ok(Subscriber {
+                    endpoint: row.get(0)?,
+                    service: row.get(1)?,
+                })
+            })
             .map_err(sql_err)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sql_err)
@@ -334,36 +386,44 @@ mod tests {
         assert_eq!(page.len(), 1);
     }
 
+    fn subscriber(endpoint: &str, service: Option<&str>) -> Subscriber {
+        Subscriber {
+            endpoint: endpoint.to_string(),
+            service: service.map(str::to_string),
+        }
+    }
+
     async fn exercise_registrations(store: &dyn RegistrationStore) {
+        let a = subscriber("https://syncer.example/a", None);
+        let b = subscriber("https://syncer.example/b", None);
+        store.register(SPACE, &a, 100).await.unwrap();
+        store.register(SPACE, &b, 50).await.unwrap();
         store
-            .register(SPACE, "https://syncer.example/a", 100)
+            .register(
+                OTHER_SPACE,
+                &subscriber("https://syncer.example/c", None),
+                100,
+            )
             .await
             .unwrap();
-        store
-            .register(SPACE, "https://syncer.example/b", 50)
-            .await
-            .unwrap();
-        store
-            .register(OTHER_SPACE, "https://syncer.example/c", 100)
-            .await
-            .unwrap();
-        // Re-registration extends the expiry.
-        store
-            .register(SPACE, "https://syncer.example/b", 200)
-            .await
-            .unwrap();
+        // Re-registration extends the expiry and can name the subscriber it
+        // was made without.
+        let b_named = subscriber(
+            "https://syncer.example/b",
+            Some("did:web:b#atproto_space_syncer"),
+        );
+        store.register(SPACE, &b_named, 200).await.unwrap();
 
         let live = store.endpoints(SPACE, 99).await.unwrap();
-        assert_eq!(
-            live,
-            vec![
-                "https://syncer.example/a".to_string(),
-                "https://syncer.example/b".to_string()
-            ]
-        );
+        assert_eq!(live, vec![a.clone(), b_named.clone()]);
         let later = store.endpoints(SPACE, 150).await.unwrap();
-        assert_eq!(later, vec!["https://syncer.example/b".to_string()]);
+        assert_eq!(later, vec![b_named.clone()]);
         assert!(store.endpoints(SPACE, 500).await.unwrap().is_empty());
+
+        // A delivery is addressed to the subscriber when it named itself, and
+        // falls back to the endpoint when it did not.
+        assert_eq!(b_named.audience(), "did:web:b#atproto_space_syncer");
+        assert_eq!(a.audience(), "https://syncer.example/a");
     }
 
     #[tokio::test]

@@ -497,6 +497,7 @@ mod tests {
             code_challenge: "challenge".to_string(),
             code_challenge_method: "S256".to_string(),
             login_hint: None,
+            response_mode: None,
             prompt: None,
             dpop_jkt: None,
         };

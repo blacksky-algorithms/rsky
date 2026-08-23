@@ -9,16 +9,20 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["space", "endpoint"],
+          "required": ["space"],
           "properties": {
             "space": {
               "type": "string",
               "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
             },
+            "service": {
+              "type": "string",
+              "description": "Service identifier of the subscriber: a DID with an optional service fragment naming the DID-document entry to deliver to, e.g. did:web:syncer.example#atproto_space_syncer. Supplies both the delivery endpoint and the audience notifications are addressed to."
+            },
             "endpoint": {
               "type": "string",
               "format": "uri",
-              "description": "The service endpoint that will receive notifyWrite calls."
+              "description": "The service endpoint that will receive notifyWrite calls. Superseded by service, which wins when both are sent."
             },
             "repo": {
               "type": "string",

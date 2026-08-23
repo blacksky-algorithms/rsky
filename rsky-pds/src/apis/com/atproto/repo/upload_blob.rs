@@ -1,7 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::auth_verifier::AccessStandardCheckTakedown;
 use anyhow::Result;
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::Status;
@@ -36,7 +36,7 @@ impl<'r> FromRequest<'r> for ContentType {
 }
 
 async fn inner_upload_blob(
-    auth: AccessStandardIncludeChecks,
+    auth: AccessStandardCheckTakedown,
     blob: Data<'_>,
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,
@@ -93,7 +93,7 @@ async fn inner_upload_blob(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.uploadBlob", data = "<blob>")]
 pub async fn upload_blob(
-    auth: AccessStandardIncludeChecks,
+    auth: AccessStandardCheckTakedown,
     blob: Data<'_>,
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,

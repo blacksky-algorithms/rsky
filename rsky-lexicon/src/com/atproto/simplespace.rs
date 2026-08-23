@@ -37,6 +37,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSpaceInput {
+    #[serde(rename = "type")]
     pub space_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skey: Option<String>,
@@ -46,7 +47,7 @@ pub struct CreateSpaceInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSpaceOutput {
-    pub space: String,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +85,13 @@ pub struct ListMembersParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     pub did: String,
+    /// Rev (TID) at which this member was added. Empty for rows that predate
+    /// the column.
+    #[serde(rename = "memberRev")]
+    pub member_rev: String,
+    /// ISO-8601 add timestamp. Empty for rows that predate the column.
+    #[serde(rename = "addedAt")]
+    pub added_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,13 +191,13 @@ mod tests {
                     managing_app: None,
                 }),
             },
-            r#"{"spaceType":"com.example.forum","skey":"self","config":{"policy":"public"}}"#,
+            r#"{"type":"com.example.forum","skey":"self","config":{"policy":"public"}}"#,
         );
         roundtrip(
             &CreateSpaceOutput {
-                space: SPACE.to_string(),
+                uri: SPACE.to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self"}"#,
+            r#"{"uri":"at://did:plc:auth/space/com.example.forum/self"}"#,
         );
     }
 
@@ -247,9 +255,11 @@ mod tests {
                 cursor: Some("c1".to_string()),
                 members: vec![Member {
                     did: "did:plc:member".to_string(),
+                    member_rev: "3jzfcijpj2z2a".to_string(),
+                    added_at: "2026-01-01T00:00:00.000Z".to_string(),
                 }],
             },
-            r#"{"cursor":"c1","members":[{"did":"did:plc:member"}]}"#,
+            r#"{"cursor":"c1","members":[{"did":"did:plc:member","memberRev":"3jzfcijpj2z2a","addedAt":"2026-01-01T00:00:00.000Z"}]}"#,
         );
     }
 

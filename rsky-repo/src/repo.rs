@@ -5,8 +5,8 @@ use crate::error::DataStoreError;
 use crate::mst::MST;
 use crate::storage::types::RepoStorage;
 use crate::types::{
-    CollectionContents, Commit, CommitData, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp,
-    RepoContents, RepoRecord, UnsignedCommit,
+    CollectionContents, Commit, CommitData, Lex, RecordCreateOrUpdateOp, RecordWriteEnum,
+    RecordWriteOp, RepoContents, RepoRecord, UnsignedCommit,
 };
 use crate::util;
 use anyhow::{bail, Result};
@@ -160,7 +160,7 @@ impl Repo {
         let mut new_blocks = BlockMap::new();
         let mut data = MST::create(storage, None, None).await?;
         for record in initial_writes.unwrap_or_default() {
-            let cid = new_blocks.add(record.record)?;
+            let cid = new_blocks.add(util::lex_to_ipld(Lex::Map(record.record)))?;
             let data_key = util::format_data_key(record.collection, record.rkey);
             data = data.add(&data_key, cid, None).await?;
         }
@@ -229,12 +229,12 @@ impl Repo {
         for write in writes.clone() {
             match write {
                 RecordWriteOp::Create(write) => {
-                    let cid = leaves.add(write.record)?;
+                    let cid = leaves.add(util::lex_to_ipld(Lex::Map(write.record)))?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
                     data = data.add(&data_key, cid, None).await?;
                 }
                 RecordWriteOp::Update(write) => {
-                    let cid = leaves.add(write.record)?;
+                    let cid = leaves.add(util::lex_to_ipld(Lex::Map(write.record)))?;
                     let data_key = util::format_data_key(write.collection, write.rkey);
                     data = data.update(&data_key, cid).await?;
                 }
@@ -464,7 +464,9 @@ mod tests {
                     claims.push(RecordCidClaim {
                         collection: coll.to_string(),
                         rkey: rkey.to_string(),
-                        cid: Some(cid_for_cbor(coll_content.get(rkey).unwrap())?),
+                        cid: Some(cid_for_cbor(&util::lex_to_ipld(Lex::Map(
+                            coll_content.get(rkey).unwrap().clone(),
+                        )))?),
                     });
                 }
             }
@@ -1150,13 +1152,14 @@ mod tests {
                 None => bail!("Could not find record for claim"),
                 Some(found_claim) => assert_eq!(
                     found_claim.cid,
-                    Some(cid_for_cbor(
+                    Some(cid_for_cbor(&util::lex_to_ipld(Lex::Map(
                         repo_data
                             .get(&record.collection)
                             .unwrap()
                             .get(&record.rkey)
                             .unwrap()
-                    )?)
+                            .clone()
+                    )))?)
                 ),
             }
         }

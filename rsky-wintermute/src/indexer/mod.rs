@@ -116,6 +116,10 @@ impl IndexerManager {
         let pool_backfill = Self::create_pool(database_url, backfill_pool_size.max(10))?;
         let pool_labels = Self::create_pool(database_url, labels_pool_size.max(5))?;
 
+        crate::metrics::register_pool("indexer_live", &pool_live);
+        crate::metrics::register_pool("indexer_backfill", &pool_backfill);
+        crate::metrics::register_pool("indexer_labels", &pool_labels);
+
         let id_resolver = IdResolver::new(IdentityResolverOpts {
             timeout: Some(IDENTITY_RESOLVER_TIMEOUT),
             plc_url: None,
@@ -2141,6 +2145,10 @@ impl IndexerManager {
 
         // Collect timing results (only include non-empty collections)
         let mut collection_timings: Vec<(String, u128, usize)> = Vec::new();
+        // Jobs from a failed collection copy must surface as per-job errors so
+        // the caller can requeue them; a dropped error here loses the events.
+        let mut failed_jobs: std::collections::HashMap<&[u8], String> =
+            std::collections::HashMap::new();
 
         let (ms, count, err) = posts_result;
         if count > 0 {
@@ -2149,6 +2157,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for posts failed: {e}");
             batch_failed = true;
+            for pj in &posts {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         let (ms, count, err) = likes_result;
@@ -2158,6 +2169,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for likes failed: {e}");
             batch_failed = true;
+            for pj in &likes {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         let (ms, count, err) = follows_result;
@@ -2167,6 +2181,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for follows failed: {e}");
             batch_failed = true;
+            for pj in &follows {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         let (ms, count, err) = reposts_result;
@@ -2176,6 +2193,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for reposts failed: {e}");
             batch_failed = true;
+            for pj in &reposts {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         let (ms, count, err) = blocks_result;
@@ -2185,6 +2205,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for blocks failed: {e}");
             batch_failed = true;
+            for pj in &blocks {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         let (ms, count, err) = profiles_result;
@@ -2194,6 +2217,9 @@ impl IndexerManager {
         if let Some(e) = err {
             tracing::error!("COPY batch insert for profiles failed: {e}");
             batch_failed = true;
+            for pj in &profiles {
+                failed_jobs.insert(pj.key.as_slice(), e.to_string());
+            }
         }
 
         // Process "other" collection types sequentially (less common)
@@ -2227,10 +2253,13 @@ impl IndexerManager {
         }
         let collections_ms = collections_start.elapsed().as_millis();
 
-        // All creates succeeded (or were stale)
         for pj in &parsed_jobs {
             metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
-            results.push(((*pj.key).clone(), Ok(())));
+            let result = failed_jobs.get(pj.key.as_slice()).map_or_else(
+                || Ok(()),
+                |msg| Err(WintermuteError::Other(format!("batch copy failed: {msg}"))),
+            );
+            results.push(((*pj.key).clone(), result));
         }
 
         let total_ms = batch_start.elapsed().as_millis();

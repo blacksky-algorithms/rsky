@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.unregisterNotify",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Withdraw a write-notification registration made with com.atproto.space.registerNotify. Idempotent: succeeds whether or not a matching registration existed. Requires a space credential.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "service": {
+              "type": "string",
+              "description": "Service identifier of the subscriber to remove, as passed to registerNotify."
+            },
+            "endpoint": {
+              "type": "string",
+              "format": "uri",
+              "description": "The registered endpoint to remove, when the registration named one rather than a service."
+            },
+            "repo": {
+              "type": "string",
+              "format": "did",
+              "description": "When calling a repo host, withdraw the registration for this specific repo rather than the whole space."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    }
+  }
+}

@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::error::{HostError, Result};
 use crate::service_jwt;
 use crate::signing::Signer;
+use crate::store::Subscriber;
 
 pub const NOTIFY_WRITE_LXM: &str = "com.atproto.space.notifyWrite";
 pub const NOTIFY_SPACE_DELETED_LXM: &str = "com.atproto.space.notifySpaceDeleted";
@@ -19,17 +20,20 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delivers a single notification to a single registered endpoint.
 #[async_trait]
 pub trait Notifier: Send + Sync {
-    async fn notify_write(&self, endpoint: &str, input: &NotifyWriteInput) -> Result<()>;
+    async fn notify_write(&self, to: &Subscriber, input: &NotifyWriteInput) -> Result<()>;
     async fn notify_space_deleted(
         &self,
-        endpoint: &str,
+        to: &Subscriber,
         input: &NotifySpaceDeletedInput,
     ) -> Result<()>;
 }
 
-/// HTTP [`Notifier`]: POSTs the XRPC procedure to the endpoint with a
-/// service-auth JWT signed by the authority. Registrations carry only an
-/// endpoint URL (no DID), so the token's `aud` is the registered endpoint.
+/// HTTP [`Notifier`]: POSTs the XRPC procedure to the subscriber's endpoint
+/// with a service-auth JWT signed by the authority, addressed to the
+/// subscriber's service identifier. A registration made before proposals#100
+/// names no identifier, and its deliveries fall back to addressing the
+/// endpoint URL -- which no receiver can verify itself against, which is why
+/// the amendment exists.
 pub struct HttpNotifier {
     authority_did: String,
     signer: Signer,
@@ -68,15 +72,16 @@ impl HttpNotifier {
         }
     }
 
-    async fn post<T: Serialize + Sync>(&self, endpoint: &str, lxm: &str, input: &T) -> Result<()> {
+    async fn post<T: Serialize + Sync>(&self, to: &Subscriber, lxm: &str, input: &T) -> Result<()> {
         let token = service_jwt::mint(
             &self.signer,
             &self.authority_did,
-            endpoint,
+            to.audience(),
             lxm,
             (self.now)(),
             (self.jti)(),
         )?;
+        let endpoint = to.endpoint.as_str();
         let url = format!("{}/xrpc/{lxm}", endpoint.trim_end_matches('/'));
         let response = self
             .http
@@ -98,28 +103,33 @@ impl HttpNotifier {
 
 #[async_trait]
 impl Notifier for HttpNotifier {
-    async fn notify_write(&self, endpoint: &str, input: &NotifyWriteInput) -> Result<()> {
-        self.post(endpoint, NOTIFY_WRITE_LXM, input).await
+    async fn notify_write(&self, to: &Subscriber, input: &NotifyWriteInput) -> Result<()> {
+        self.post(to, NOTIFY_WRITE_LXM, input).await
     }
 
     async fn notify_space_deleted(
         &self,
-        endpoint: &str,
+        to: &Subscriber,
         input: &NotifySpaceDeletedInput,
     ) -> Result<()> {
-        self.post(endpoint, NOTIFY_SPACE_DELETED_LXM, input).await
+        self.post(to, NOTIFY_SPACE_DELETED_LXM, input).await
     }
 }
 
 /// Fan a write notification out to every registered endpoint as detached
 /// best-effort tasks.
-pub fn fan_out_write(notifier: Arc<dyn Notifier>, endpoints: Vec<String>, input: NotifyWriteInput) {
-    for endpoint in endpoints {
+pub fn fan_out_write(
+    notifier: Arc<dyn Notifier>,
+    subscribers: Vec<Subscriber>,
+    input: NotifyWriteInput,
+) {
+    for subscriber in subscribers {
         let notifier = notifier.clone();
         let input = input.clone();
         tokio::spawn(async move {
-            if let Err(e) = notifier.notify_write(&endpoint, &input).await {
-                tracing::warn!(endpoint, error = %e, "notifyWrite delivery failed");
+            if let Err(e) = notifier.notify_write(&subscriber, &input).await {
+                tracing::warn!(endpoint = subscriber.endpoint, error = %e,
+                    "notifyWrite delivery failed");
             }
         });
     }
@@ -127,13 +137,18 @@ pub fn fan_out_write(notifier: Arc<dyn Notifier>, endpoints: Vec<String>, input:
 
 /// Broadcast a space deletion to syncers/repo hosts, best-effort (outbound
 /// helper for the authority; the inbound syncer handler is not this crate).
-pub async fn broadcast_space_deleted(notifier: &dyn Notifier, endpoints: &[String], space: &str) {
+pub async fn broadcast_space_deleted(
+    notifier: &dyn Notifier,
+    subscribers: &[Subscriber],
+    space: &str,
+) {
     let input = NotifySpaceDeletedInput {
         space: space.to_string(),
     };
-    for endpoint in endpoints {
-        if let Err(e) = notifier.notify_space_deleted(endpoint, &input).await {
-            tracing::warn!(endpoint, error = %e, "notifySpaceDeleted delivery failed");
+    for subscriber in subscribers {
+        if let Err(e) = notifier.notify_space_deleted(subscriber, &input).await {
+            tracing::warn!(endpoint = subscriber.endpoint, error = %e,
+                "notifySpaceDeleted delivery failed");
         }
     }
 }
@@ -144,6 +159,13 @@ mod tests {
     use crate::signing::test_signer;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn to(endpoint: impl Into<String>) -> Subscriber {
+        Subscriber {
+            endpoint: endpoint.into(),
+            service: None,
+        }
+    }
 
     const SPACE: &str = "at://did:plc:auth/space/community.blacksky.feed/main";
 
@@ -159,7 +181,7 @@ mod tests {
     fn write_input() -> NotifyWriteInput {
         NotifyWriteInput {
             space: SPACE.to_string(),
-            did: "did:plc:writer".to_string(),
+            repo: "did:plc:writer".to_string(),
             rev: "3jzfcijpj2z2c".to_string(),
         }
     }
@@ -171,7 +193,7 @@ mod tests {
             .and(path(format!("/xrpc/{NOTIFY_WRITE_LXM}")))
             .and(body_json(serde_json::json!({
                 "space": SPACE,
-                "did": "did:plc:writer",
+                "repo": "did:plc:writer",
                 "rev": "3jzfcijpj2z2c",
             })))
             .respond_with(ResponseTemplate::new(200))
@@ -179,7 +201,7 @@ mod tests {
             .await;
 
         notifier()
-            .notify_write(&server.uri(), &write_input())
+            .notify_write(&to(server.uri()), &write_input())
             .await
             .unwrap();
 
@@ -210,7 +232,7 @@ mod tests {
 
         let n = notifier();
         // One reachable endpoint, one failing: both are attempted.
-        broadcast_space_deleted(&n, &[server.uri(), "http://127.0.0.1:1".to_string()], SPACE).await;
+        broadcast_space_deleted(&n, &[to(server.uri()), to("http://127.0.0.1:1")], SPACE).await;
     }
 
     #[tokio::test]
@@ -220,11 +242,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let res = notifier().notify_write(&server.uri(), &write_input()).await;
+        let res = notifier()
+            .notify_write(&to(server.uri()), &write_input())
+            .await;
         assert!(matches!(res, Err(HostError::Store(msg)) if msg.contains("500")));
 
         let res = notifier()
-            .notify_write("http://127.0.0.1:1", &write_input())
+            .notify_write(&to("http://127.0.0.1:1"), &write_input())
             .await;
         assert!(res.is_err());
     }
@@ -237,8 +261,8 @@ mod tests {
         }
         #[async_trait]
         impl Notifier for Recording {
-            async fn notify_write(&self, endpoint: &str, _input: &NotifyWriteInput) -> Result<()> {
-                self.tx.send(endpoint.to_string()).unwrap();
+            async fn notify_write(&self, to: &Subscriber, _input: &NotifyWriteInput) -> Result<()> {
+                self.tx.send(to.endpoint.clone()).unwrap();
                 if self.fail {
                     Err(HostError::Store("down".into()))
                 } else {
@@ -247,7 +271,7 @@ mod tests {
             }
             async fn notify_space_deleted(
                 &self,
-                _endpoint: &str,
+                _to: &Subscriber,
                 _input: &NotifySpaceDeletedInput,
             ) -> Result<()> {
                 Ok(())
@@ -259,7 +283,7 @@ mod tests {
             let notifier = Arc::new(Recording { tx, fail });
             notifier
                 .notify_space_deleted(
-                    "https://a.example",
+                    &to("https://a.example"),
                     &NotifySpaceDeletedInput {
                         space: SPACE.to_string(),
                     },
@@ -268,10 +292,7 @@ mod tests {
                 .unwrap();
             fan_out_write(
                 notifier,
-                vec![
-                    "https://a.example".to_string(),
-                    "https://b.example".to_string(),
-                ],
+                vec![to("https://a.example"), to("https://b.example")],
                 write_input(),
             );
             let mut seen = vec![rx.recv().await.unwrap(), rx.recv().await.unwrap()];

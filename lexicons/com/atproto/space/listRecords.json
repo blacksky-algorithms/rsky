@@ -7,13 +7,16 @@
       "description": "List the records in a permissioned repo, inlining record values by default. Set excludeValues for a metadata-only listing of paths and CIDs. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
       "parameters": {
         "type": "params",
-        "required": ["space", "did"],
+        "required": [
+          "space",
+          "repo"
+        ],
         "properties": {
           "space": {
             "type": "string",
             "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
           },
-          "did": {
+          "repo": {
             "type": "string",
             "format": "did",
             "description": "The DID of the repo's author."
@@ -30,7 +33,9 @@
             "default": 50,
             "description": "The number of records to return."
           },
-          "cursor": { "type": "string" },
+          "cursor": {
+            "type": "string"
+          },
           "excludeValues": {
             "type": "boolean",
             "default": false,
@@ -42,27 +47,44 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["records"],
+          "required": [
+            "records"
+          ],
           "properties": {
-            "cursor": { "type": "string" },
+            "cursor": {
+              "type": "string"
+            },
             "records": {
               "type": "array",
-              "items": { "type": "ref", "ref": "#record" }
+              "items": {
+                "type": "ref",
+                "ref": "#record"
+              }
             }
           }
         }
       },
-      "errors": [{ "name": "RepoNotFound" }]
+      "errors": [
+        {
+          "name": "RepoNotFound"
+        }
+      ]
     },
     "record": {
       "type": "object",
-      "required": ["uri", "cid"],
+      "required": [
+        "uri",
+        "cid"
+      ],
       "properties": {
         "uri": {
           "type": "string",
           "description": "Permissioned record URI, in the form at://{authority}/space/{spaceType}/{skey}/{authorDid}/{collection}/{rkey}. Not a standard at-uri."
         },
-        "cid": { "type": "string", "format": "cid" },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        },
         "value": {
           "type": "unknown",
           "description": "The record value. Omitted when excludeValues is set."

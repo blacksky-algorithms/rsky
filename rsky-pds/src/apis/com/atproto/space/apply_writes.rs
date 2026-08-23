@@ -2,10 +2,11 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{
-    apply_space_writes, commit_meta, parse_space_uri, valid_key_part, valid_nsid,
+    apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
+    valid_nsid,
 };
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;
 use crate::space_scope::{SpaceAction, SpaceRequest};
@@ -13,8 +14,8 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::tid::TID;
 use rsky_lexicon::com::atproto::space::{
-    ApplyWritesInput, ApplyWritesOutput, ApplyWritesResult, ApplyWritesWrite, CreateResult,
-    DeleteResult, UpdateResult,
+    ApplyWritesInput, ApplyWritesOutput, ApplyWritesResult, CreateResult, DeleteResult,
+    UpdateResult,
 };
 
 const MAX_WRITES: usize = 200;
@@ -29,19 +30,21 @@ const MAX_WRITES: usize = 200;
 )]
 pub async fn space_apply_writes(
     body: Json<ApplyWritesInput>,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
     let ApplyWritesInput {
         space,
+        repo,
         validate: _,
         writes,
     } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
+    require_repo_matches_subject(&repo, &did)?;
     if writes.len() > MAX_WRITES {
         return Err(ApiError::InvalidRequest(format!(
             "too many writes. max: {MAX_WRITES}"
@@ -49,27 +52,33 @@ pub async fn space_apply_writes(
     }
     let mut prepared = Vec::with_capacity(writes.len());
     for write in writes {
-        let (action, collection, rkey, value) = match write {
-            ApplyWritesWrite::Create(create) => {
-                let rkey = match create.rkey {
-                    Some(rkey) => rkey,
-                    None => TID::next_str(None).map_err(|_| ApiError::RuntimeError)?,
-                };
-                (
-                    SpaceAction::Create,
-                    create.collection,
-                    rkey,
-                    Some(create.value),
-                )
+        let action = match write.action.as_str() {
+            "create" => SpaceAction::Create,
+            "update" => SpaceAction::Update,
+            "delete" => SpaceAction::Delete,
+            other => {
+                return Err(ApiError::InvalidRequest(format!(
+                    "invalid write action: {other}"
+                )))
             }
-            ApplyWritesWrite::Update(update) => (
-                SpaceAction::Update,
-                update.collection,
-                update.rkey,
-                Some(update.value),
-            ),
-            ApplyWritesWrite::Delete(delete) => {
-                (SpaceAction::Delete, delete.collection, delete.rkey, None)
+        };
+        let collection = write.collection;
+        let rkey = match (action, write.rkey) {
+            (_, Some(rkey)) if !rkey.is_empty() => rkey,
+            (SpaceAction::Create, _) => TID::next_str(None).map_err(|_| ApiError::RuntimeError)?,
+            _ => {
+                return Err(ApiError::InvalidRequest(
+                    "rkey is required for update and delete".to_string(),
+                ))
+            }
+        };
+        let value = match (action, write.value) {
+            (SpaceAction::Delete, _) => None,
+            (_, Some(value)) => Some(value),
+            (_, None) => {
+                return Err(ApiError::InvalidRequest(
+                    "value is required for create and update".to_string(),
+                ))
             }
         };
         if !valid_nsid(&collection) {

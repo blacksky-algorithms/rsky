@@ -148,33 +148,38 @@ async fn prepare_import_repo_writes(
             let did = _did.clone();
             async move {
                 Ok::<PreparedWrite, anyhow::Error>(match write {
+                    // Imported records already exist and were verified
+                    // against the CAR's MST, so they are indexed under the
+                    // CAR's own CIDs (never a recomputed one, which diverges
+                    // the moment a re-encode differs by a byte) and are not
+                    // re-validated against local lexicons.
                     RecordWriteDescript::Create(write) => {
                         let parsed_record = get_and_parse_record(blocks, write.cid)?;
-                        PreparedWrite::Create(
-                            prepare_create(PrepareCreateOpts {
-                                did: did.clone(),
-                                collection: write.collection,
-                                rkey: Some(write.rkey),
-                                swap_cid: None,
-                                record: parsed_record.record,
-                                validate: Some(true),
-                            })
-                            .await?,
-                        )
+                        let mut prepared = prepare_create(PrepareCreateOpts {
+                            did: did.clone(),
+                            collection: write.collection,
+                            rkey: Some(write.rkey),
+                            swap_cid: None,
+                            record: parsed_record.record,
+                            validate: Some(false),
+                        })
+                        .await?;
+                        prepared.cid = write.cid;
+                        PreparedWrite::Create(prepared)
                     }
                     RecordWriteDescript::Update(write) => {
                         let parsed_record = get_and_parse_record(blocks, write.cid)?;
-                        PreparedWrite::Update(
-                            prepare_update(PrepareUpdateOpts {
-                                did: did.clone(),
-                                collection: write.collection,
-                                rkey: write.rkey,
-                                swap_cid: None,
-                                record: parsed_record.record,
-                                validate: Some(true),
-                            })
-                            .await?,
-                        )
+                        let mut prepared = prepare_update(PrepareUpdateOpts {
+                            did: did.clone(),
+                            collection: write.collection,
+                            rkey: write.rkey,
+                            swap_cid: None,
+                            record: parsed_record.record,
+                            validate: Some(false),
+                        })
+                        .await?;
+                        prepared.cid = write.cid;
+                        PreparedWrite::Update(prepared)
                     }
                     RecordWriteDescript::Delete(write) => {
                         PreparedWrite::Delete(prepare_delete(PrepareDeleteOpts {

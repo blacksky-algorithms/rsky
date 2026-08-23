@@ -162,9 +162,60 @@ pub struct GetRecordOutput {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ListRecordsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub records: Vec<Record>,
 }
+
+/// `{cid, rev}` commit metadata shared by the write outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CommitMeta {
+    pub cid: String,
+    pub rev: String,
+}
+
+/// Output of `applyWrites`: the commit and one result per write.
+///
+/// A missing body here is not a valid response -- the lexicon declares a JSON
+/// object -- and a client that requires JSON (Bulleted) reads an empty 200 as a
+/// failed write and retries, duplicating records.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ApplyWritesOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<CommitMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<ApplyWritesOutputResult>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "$type")]
+pub enum ApplyWritesOutputResult {
+    #[serde(rename = "com.atproto.repo.applyWrites#createResult")]
+    Create(ApplyWritesResultCreate),
+    #[serde(rename = "com.atproto.repo.applyWrites#updateResult")]
+    Update(ApplyWritesResultUpdate),
+    #[serde(rename = "com.atproto.repo.applyWrites#deleteResult")]
+    Delete(ApplyWritesResultDelete),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ApplyWritesResultCreate {
+    pub uri: String,
+    pub cid: String,
+    #[serde(rename = "validationStatus", skip_serializing_if = "Option::is_none")]
+    pub validation_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ApplyWritesResultUpdate {
+    pub uri: String,
+    pub cid: String,
+    #[serde(rename = "validationStatus", skip_serializing_if = "Option::is_none")]
+    pub validation_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ApplyWritesResultDelete {}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CreateRecordOutput {

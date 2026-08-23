@@ -1,7 +1,7 @@
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{internal_error, parse_space_uri};
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessSpace;
 use crate::space_auth::{mint_delegation_token, session_permits};
 use crate::space_scope::SpaceRequest;
 use rocket::serde::json::Json;
@@ -14,7 +14,7 @@ use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
 #[rocket::get("/xrpc/com.atproto.space.getDelegationToken?<space>")]
 pub async fn space_get_delegation_token(
     space: String,
-    auth: AccessFull,
+    auth: AccessSpace,
     actor_store: &State<ActorStore>,
 ) -> Result<Json<GetDelegationTokenOutput>, ApiError> {
     let space_id = parse_space_uri(&space)?;

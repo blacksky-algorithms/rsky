@@ -6,6 +6,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::commit::{sign_commit, to_lexicon};
 use crate::actor_store::space::{
     blob_refs_in_record, oplog_window, SpaceCommitResult, SpaceStore, SpaceStoreError, SpaceWrite,
+    Subscriber,
 };
 use crate::actor_store::{ActorStore, ActorStoreReader};
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -26,9 +27,11 @@ pub mod get_delegation_token;
 pub mod get_latest_commit;
 pub mod get_record;
 pub mod get_repo;
+pub mod get_repo_state;
 pub mod get_space;
 pub mod get_space_credential;
 pub mod host;
+pub mod list_blobs;
 pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
@@ -37,6 +40,7 @@ pub mod notify_space_deleted;
 pub mod notify_write;
 pub mod put_record;
 pub mod register_notify;
+pub mod unregister_notify;
 
 /// How long a notify registration (explicit or auto) stays live.
 pub const NOTIFY_REGISTRATION_TTL_SECS: i64 = 7 * 24 * 3600;
@@ -85,6 +89,18 @@ pub fn space_error(error: anyhow::Error) -> ApiError {
             tracing::error!("space route error: {error}");
             ApiError::RuntimeError
         }
+    }
+}
+
+/// A write names the repo it targets, which must be the authenticated one:
+/// there is no delegated writing into someone else's permissioned repo.
+pub fn require_repo_matches_subject(repo: &str, subject: &str) -> Result<(), ApiError> {
+    if repo == subject {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidRequest(
+            "repo must equal the authenticated subject".to_string(),
+        ))
     }
 }
 
@@ -212,7 +228,13 @@ async fn notify_after_write(
     space: &SpaceId,
     commit: &SpaceCommitResult,
 ) {
-    let mut endpoints: Vec<String> = Vec::new();
+    // Two legs with different issuers: registrations held by the authority
+    // (syncers) get leg 2 signed by the authority; registrations held by the
+    // writing repo (the auto-registered space host) get leg 1 signed by the
+    // writer.
+    let mut host_subscribers: Vec<Subscriber> = Vec::new();
+    let mut repo_subscribers: Vec<Subscriber> = Vec::new();
+    let mut authority_keypair: Option<Keypair> = None;
     let now = rsky_common::now();
     // The authority's view of the space: writer set + registered syncers.
     if actor_store.exists(&space.authority).await.unwrap_or(false) {
@@ -241,8 +263,12 @@ async fn notify_after_write(
                     .host_notify_endpoints(&space.uri(), &now)
                     .await
                 {
-                    Ok(host_endpoints) => endpoints.extend(host_endpoints),
+                    Ok(host_endpoints) => host_subscribers.extend(host_endpoints),
                     Err(error) => tracing::warn!(%error, "failed to load host registrations"),
+                }
+                match authority_reader.keypair().await {
+                    Ok(kp) => authority_keypair = Some(kp),
+                    Err(error) => tracing::warn!(%error, "missing authority keypair"),
                 }
             }
             Err(error) => tracing::warn!(%error, "failed to open authority store"),
@@ -252,21 +278,26 @@ async fn notify_after_write(
         .repo_notify_endpoints(&space.uri(), &now)
         .await
     {
-        Ok(repo_endpoints) => endpoints.extend(repo_endpoints),
+        Ok(repo_endpoints) => repo_subscribers.extend(repo_endpoints),
         Err(error) => tracing::warn!(%error, "failed to load repo notify registrations"),
     }
-    endpoints.sort();
-    endpoints.dedup();
+    host_subscribers.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    host_subscribers.dedup_by(|a, b| a.endpoint == b.endpoint);
+    repo_subscribers.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    repo_subscribers.dedup_by(|a, b| a.endpoint == b.endpoint);
+    repo_subscribers.retain(|s| !host_subscribers.iter().any(|h| h.endpoint == s.endpoint));
 
     let remote_authority =
         space.authority != did && !actor_store.exists(&space.authority).await.unwrap_or(false);
     let ctx = NotifyWriteTask {
         keypair,
+        authority_keypair,
         own_space_store,
         did: did.to_string(),
         space: space.clone(),
         rev: commit.rev.clone(),
-        endpoints,
+        host_subscribers,
+        repo_subscribers,
         plc_url: server_config.identity.plc_url.clone(),
         auto_register_authority: remote_authority,
     };
@@ -277,11 +308,13 @@ async fn notify_after_write(
 
 struct NotifyWriteTask {
     keypair: Keypair,
+    authority_keypair: Option<Keypair>,
     own_space_store: SpaceStore,
     did: String,
     space: SpaceId,
     rev: String,
-    endpoints: Vec<String>,
+    host_subscribers: Vec<Subscriber>,
+    repo_subscribers: Vec<Subscriber>,
     plc_url: String,
     auto_register_authority: bool,
 }
@@ -291,16 +324,26 @@ impl NotifyWriteTask {
         if self.auto_register_authority {
             match resolve_space_host_endpoint(&self.plc_url, &self.space.authority).await {
                 Ok(endpoint) => {
+                    // The authority is the audience for leg 1, and it is the
+                    // one identity here that is known without being told.
+                    let subscriber = Subscriber {
+                        endpoint,
+                        service: Some(self.space.authority.clone()),
+                    };
                     let expires_at = format_expiry(&notify_expiry());
                     if let Err(error) = self
                         .own_space_store
-                        .register_repo_notify(&self.space.uri(), &endpoint, &expires_at)
+                        .register_repo_notify(&self.space.uri(), &subscriber, &expires_at)
                         .await
                     {
                         tracing::warn!(%error, "failed to auto-register space host");
                     }
-                    if !self.endpoints.contains(&endpoint) {
-                        self.endpoints.push(endpoint);
+                    if !self
+                        .repo_subscribers
+                        .iter()
+                        .any(|s| s.endpoint == subscriber.endpoint)
+                    {
+                        self.repo_subscribers.push(subscriber);
                     }
                 }
                 Err(error) => {
@@ -309,20 +352,43 @@ impl NotifyWriteTask {
                 }
             }
         }
-        let body = serde_json::json!({
-            "space": self.space.uri(),
-            "did": self.did,
-            "rev": self.rev,
-        });
+        // Serialize the typed input rather than hand-building the JSON, so the
+        // wire field names cannot drift from the lexicon (the field is `repo`).
+        let body = serde_json::to_value(rsky_lexicon::com::atproto::space::NotifyWriteInput {
+            space: self.space.uri(),
+            repo: self.did.clone(),
+            rev: self.rev.clone(),
+        })
+        .expect("NotifyWriteInput serializes");
+        // Leg 1: the writing repo's host tells the space host the repo
+        // advanced, issued by the writer.
         deliver_notifications(
             &self.keypair,
             &self.did,
             &self.space.authority,
             NOTIFY_WRITE_LXM,
-            &self.endpoints,
+            &self.repo_subscribers,
             &body,
         )
         .await;
+        // Leg 2: the space host forwards to registered syncers, issued by the
+        // authority. Only populated when the authority is hosted here.
+        if !self.host_subscribers.is_empty() {
+            if let Some(authority_keypair) = &self.authority_keypair {
+                deliver_notifications(
+                    authority_keypair,
+                    &self.space.authority,
+                    &self.space.authority,
+                    NOTIFY_WRITE_LXM,
+                    &self.host_subscribers,
+                    &body,
+                )
+                .await;
+            } else {
+                tracing::warn!(space = %self.space.uri(),
+                    "leg-2 notifications skipped: no authority keypair");
+            }
+        }
         Ok(())
     }
 }
@@ -357,20 +423,26 @@ pub async fn resolve_space_host_endpoint(plc_url: &str, authority: &str) -> Resu
     anyhow::bail!("no space host endpoint in DID document for {authority}")
 }
 
-/// POST a signed, method-bound notification to each endpoint, best-effort.
+/// POST a signed, method-bound notification to each subscriber, best-effort.
+///
+/// Each delivery is addressed to the subscriber that registered
+/// (proposals#100), which is what lets the receiver verify the call was meant
+/// for it. `fallback_aud` covers subscribers registered before the amendment,
+/// which named an endpoint and no identity.
 pub async fn deliver_notifications(
     keypair: &Keypair,
     iss: &str,
-    aud: &str,
+    fallback_aud: &str,
     lxm: &str,
-    endpoints: &[String],
+    subscribers: &[Subscriber],
     body: &serde_json::Value,
 ) {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client");
-    for endpoint in endpoints {
+    for subscriber in subscribers {
+        let aud = subscriber.service.as_deref().unwrap_or(fallback_aud);
         let token = match mint_space_service_token(keypair, iss, aud, lxm) {
             Ok(token) => token,
             Err(error) => {
@@ -378,7 +450,7 @@ pub async fn deliver_notifications(
                 return;
             }
         };
-        let url = format!("{}/xrpc/{lxm}", endpoint.trim_end_matches('/'));
+        let url = format!("{}/xrpc/{lxm}", subscriber.endpoint.trim_end_matches('/'));
         match client.post(&url).bearer_auth(token).json(body).send().await {
             Ok(response) if response.status().is_success() => {
                 tracing::debug!(%url, "notification delivered");
@@ -399,7 +471,7 @@ pub fn queue_space_deleted_notifications(
     keypair: Keypair,
     authority: String,
     space_uri: String,
-    endpoints: Vec<String>,
+    endpoints: Vec<Subscriber>,
 ) {
     actor_store.background_queue.add(async move {
         let body = serde_json::json!({ "space": space_uri });
@@ -433,4 +505,16 @@ pub fn valid_nsid(s: &str) -> bool {
         && s.split('.').all(|seg| {
             !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_must_be_the_authenticated_subject() {
+        assert!(require_repo_matches_subject("did:plc:a", "did:plc:a").is_ok());
+        let error = require_repo_matches_subject("did:plc:b", "did:plc:a").unwrap_err();
+        assert!(matches!(error, ApiError::InvalidRequest(_)));
+    }
 }

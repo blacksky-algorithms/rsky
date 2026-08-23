@@ -78,6 +78,9 @@ pub async fn get_record(
     req: ProxyRequest<'_>,
     account_manager: AccountManager,
 ) -> Result<Json<GetRecordOutput>, ApiError> {
+    // social-app substring-matches "Could not locate record: <at-uri>", so
+    // the not-found message must carry the requested uri.
+    let uri = format!("at://{repo}/{collection}/{rkey}");
     match inner_get_record(
         repo,
         collection,
@@ -93,7 +96,9 @@ pub async fn get_record(
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RecordNotFound)
+            Err(ApiError::RecordNotFoundUri(format!(
+                "Could not locate record: {uri}"
+            )))
         }
     }
 }

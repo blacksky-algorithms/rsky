@@ -33,6 +33,7 @@ pub enum JsonBlobRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(transparent)]
 pub struct BlobRef {
     pub original: JsonBlobRef,
 }

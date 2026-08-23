@@ -107,6 +107,9 @@ pub struct RunnerOptions {
     pub space_uri: String,
     pub sweep_interval_secs: u64,
     pub notify_endpoint: String,
+    /// This syncer's own service identifier, so the host can address its
+    /// deliveries to it.
+    pub service_identity: String,
     pub now_fn: fn() -> u64,
 }
 
@@ -118,8 +121,13 @@ async fn register(
     let now = (opts.now_fn)();
     let attempt = async {
         let credential = creds.credential(now).await?;
-        host.register_notify(&opts.space_uri, &credential, &opts.notify_endpoint)
-            .await
+        host.register_notify(
+            &opts.space_uri,
+            &credential,
+            &opts.notify_endpoint,
+            Some(&opts.service_identity),
+        )
+        .await
     };
     match attempt.await {
         Ok(expiry) => {
@@ -425,6 +433,7 @@ mod tests {
             _space: &str,
             _credential: &str,
             _endpoint: &str,
+            _service: Option<&str>,
         ) -> Result<DateTime<Utc>> {
             self.registrations.fetch_add(1, Ordering::SeqCst);
             Ok(self.expiry)
@@ -718,6 +727,7 @@ mod tests {
             space_uri: SPACE.to_string(),
             sweep_interval_secs: sweep_secs,
             notify_endpoint: "https://syncer.example/notify".to_string(),
+            service_identity: "did:web:syncer.example".to_string(),
             now_fn: fixed_now,
         }
     }
@@ -809,6 +819,7 @@ mod tests {
             _space: &str,
             _credential: &str,
             _endpoint: &str,
+            _service: Option<&str>,
         ) -> Result<DateTime<Utc>> {
             Err(DaemonError::Xrpc("host down".to_string()))
         }

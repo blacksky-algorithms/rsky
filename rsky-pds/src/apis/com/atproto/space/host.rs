@@ -140,11 +140,11 @@ pub async fn def_policy(
                     .list_members(&def.space_uri, MEMBER_PAGE_SIZE, cursor.clone())
                     .await
                     .map_err(super::space_error)?;
-                let Some(last) = page.last().cloned() else {
+                let Some(last) = page.last().map(|(did, _, _)| did.clone()) else {
                     break;
                 };
                 let full_page = page.len() == MEMBER_PAGE_SIZE;
-                members.extend(page);
+                members.extend(page.into_iter().map(|(did, _, _)| did));
                 if !full_page {
                     break;
                 }

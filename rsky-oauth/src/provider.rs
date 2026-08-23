@@ -18,6 +18,15 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use url::Url;
 
+/// Resolves permission-set `include:` scopes into the effective grants they
+/// confer, so the issued access token's `scope` claim reflects what the session
+/// can actually do rather than the unresolved reference. Async because
+/// resolution reaches the network; a no-op returns the scope unchanged.
+#[async_trait::async_trait]
+pub trait ScopeExpander: Send + Sync {
+    async fn expand(&self, granted_scope: &str) -> String;
+}
+
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
 
 /// Client identification material submitted with PAR/token/revoke calls.
@@ -82,6 +91,9 @@ pub struct OAuthProviderConfig {
     pub dpop: DpopManager,
     /// client_ids treated as trusted (first-party) for UI purposes.
     pub trusted_clients: Vec<String>,
+    /// Expands `include:` permission sets into the token's effective scope.
+    /// `None` leaves the granted scope unexpanded.
+    pub scope_expander: Option<Arc<dyn ScopeExpander>>,
 }
 
 pub struct OAuthProvider {
@@ -92,6 +104,7 @@ pub struct OAuthProvider {
     store: Arc<dyn OAuthStore>,
     dpop: DpopManager,
     trusted_clients: Vec<String>,
+    scope_expander: Option<Arc<dyn ScopeExpander>>,
 }
 
 impl OAuthProvider {
@@ -104,6 +117,7 @@ impl OAuthProvider {
             store: config.store,
             dpop: config.dpop,
             trusted_clients: config.trusted_clients,
+            scope_expander: config.scope_expander,
         }
     }
 
@@ -355,7 +369,18 @@ impl OAuthProvider {
     ) -> Result<String, OAuthError> {
         let mut url = Url::parse(&parameters.redirect_uri)
             .map_err(|_| OAuthError::ServerError("stored redirect_uri is invalid".to_string()))?;
-        {
+        let fragment_mode = parameters.response_mode.as_deref() == Some("fragment");
+        if fragment_mode {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (key, value) in pairs {
+                serializer.append_pair(key, value);
+            }
+            if let Some(state) = &parameters.state {
+                serializer.append_pair("state", state);
+            }
+            serializer.append_pair("iss", &self.issuer);
+            url.set_fragment(Some(&serializer.finish()));
+        } else {
             let mut query = url.query_pairs_mut();
             for (key, value) in pairs {
                 query.append_pair(key, value);
@@ -472,6 +497,13 @@ impl OAuthProvider {
             .then(generate_refresh_token);
         let mut parameters = data.parameters.clone();
         parameters.dpop_jkt = Some(jkt.clone());
+        // The client metadata was validated against the literal granted scope
+        // (with `include:`); the token carries the expanded scope, so a
+        // resource server or client reading the token sees the effective
+        // grants. Stored on the token so refreshes stay consistent.
+        if let Some(expander) = &self.scope_expander {
+            parameters.scope = expander.expand(&parameters.scope).await;
+        }
         let token_data = TokenData {
             created_at: now,
             updated_at: now,
@@ -732,9 +764,18 @@ impl OAuthProvider {
 
     /// The public JWK set served at /oauth/jwks.
     pub fn jwks(&self) -> JwkSet {
-        JwkSet {
-            keys: vec![self.signing_key.to_public()],
+        let mut key = self.signing_key.to_public();
+        // Advertise `alg` and a stable `kid` so a client can pin the key and
+        // survive rotation (RFC 7517 recommendations).
+        if key.alg.is_none() {
+            if let Ok(curve) = key.curve() {
+                key.alg = Some(curve.alg().to_string());
+            }
         }
+        if key.kid.is_none() {
+            key.kid = Some(key.thumbprint());
+        }
+        JwkSet { keys: vec![key] }
     }
 
     /// RFC 8414 authorization server metadata document.
@@ -750,7 +791,7 @@ impl OAuthProvider {
             ],
             "subject_types_supported": ["public"],
             "response_types_supported": [RESPONSE_TYPE_CODE],
-            "response_modes_supported": ["query"],
+            "response_modes_supported": ["query", "fragment"],
             "grant_types_supported": [GRANT_AUTHORIZATION_CODE, GRANT_REFRESH_TOKEN],
             "code_challenge_methods_supported": [CODE_CHALLENGE_METHOD_S256],
             "ui_locales_supported": ["en-US"],
@@ -935,6 +976,7 @@ mod tests {
             store: store.clone(),
             dpop: DpopManager::new(nonce, Box::new(InMemoryReplayStore::default())),
             trusted_clients: vec![],
+            scope_expander: None,
         });
         Setup { provider, store }
     }
@@ -998,6 +1040,7 @@ mod tests {
             code_challenge: Some(PKCE_CHALLENGE.to_string()),
             code_challenge_method: Some(CODE_CHALLENGE_METHOD_S256.to_string()),
             login_hint: None,
+            response_mode: None,
             prompt: None,
         }
     }
@@ -1687,6 +1730,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fragment_response_mode_redirects_in_the_fragment() {
+        let setup = setup();
+        let key = dpop_key();
+        let htu = format!("{ISSUER}/oauth/par");
+        let proof = proof(&key, "POST", &htu, NOW, None, None);
+        let headers = [proof.as_str()];
+        let mut request = par_request(CLIENT_ID);
+        request.response_mode = Some("fragment".to_string());
+        let par = setup
+            .provider
+            .pushed_authorization_request(
+                &credentials(CLIENT_ID),
+                &request,
+                &DpopRequest {
+                    method: "POST",
+                    uri: &htu,
+                    dpop_headers: &headers,
+                    access_token: None,
+                },
+                NOW,
+            )
+            .await
+            .unwrap();
+        let redirect = setup
+            .provider
+            .reject(CLIENT_ID, &par.request_uri, DEVICE, NOW)
+            .await
+            .unwrap();
+        let url = Url::parse(&redirect).unwrap();
+        // Everything rides in the fragment; the query stays empty. A browser
+        // client reading only the fragment must find state and iss there.
+        assert!(url.query().is_none(), "query must be empty: {redirect}");
+        let fragment = url.fragment().expect("fragment present");
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(fragment.as_bytes())
+            .into_owned()
+            .collect();
+        assert!(pairs
+            .iter()
+            .any(|(key, value)| key == "error" && value == "access_denied"));
+        assert!(pairs.iter().any(|(key, _)| key == "state"));
+        assert!(pairs.iter().any(|(key, _)| key == "iss"));
+    }
+
+    #[tokio::test]
     async fn token_grant_failures() {
         let setup = setup();
         let key = dpop_key();
@@ -2181,6 +2268,7 @@ mod tests {
                 code_challenge: PKCE_CHALLENGE.to_string(),
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256.to_string(),
                 login_hint: None,
+                response_mode: None,
                 prompt: None,
                 dpop_jkt: None,
             },
@@ -2303,6 +2391,7 @@ mod tests {
                 code_challenge: PKCE_CHALLENGE.to_string(),
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256.to_string(),
                 login_hint: None,
+                response_mode: None,
                 prompt: None,
                 dpop_jkt: Some(jkt),
             },
@@ -2323,6 +2412,18 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn published_jwks_carries_kid_and_alg() {
+        let setup = setup();
+        let jwks = setup.provider.jwks();
+        let key = &jwks.keys[0];
+        assert!(key.d.is_none(), "private scalar must not be published");
+        assert!(key.kid.is_some(), "kid required for key rotation");
+        assert!(key.alg.is_some(), "alg recommended");
+        // kid is the RFC 7638 thumbprint of the public key.
+        assert_eq!(key.kid.as_deref(), Some(key.thumbprint().as_str()));
     }
 
     #[tokio::test]

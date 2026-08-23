@@ -7,13 +7,16 @@
       "description": "Download a whole permissioned repo as a serialized CAR file for full-state backfill. The CAR header declares two roots, in order: the signed commit block, then a DAG-CBOR index map from '{collection}/{rkey}' to record CID with keys in lexicographic order. Record blocks follow in the same order. Blobs are not included. Requires a covering OAuth scope or a space credential; implemented by a repo host.",
       "parameters": {
         "type": "params",
-        "required": ["space", "did"],
+        "required": [
+          "space",
+          "repo"
+        ],
         "properties": {
           "space": {
             "type": "string",
             "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
           },
-          "did": {
+          "repo": {
             "type": "string",
             "format": "did",
             "description": "The DID of the repo's author."
@@ -23,7 +26,11 @@
       "output": {
         "encoding": "application/vnd.ipld.car"
       },
-      "errors": [{ "name": "RepoNotFound" }]
+      "errors": [
+        {
+          "name": "RepoNotFound"
+        }
+      ]
     }
   }
 }

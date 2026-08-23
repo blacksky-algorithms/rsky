@@ -105,6 +105,11 @@ pub async fn delete_record(
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
+    crate::apis::assert_repo_scope(
+        &auth.access.credentials,
+        &body.collection,
+        crate::oauth_scope::RepoAction::Delete,
+    )?;
     match inner_delete_record(
         body,
         auth,

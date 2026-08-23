@@ -67,7 +67,6 @@ pub struct GetSpaceOutput {
 #[serde(rename_all = "camelCase")]
 pub struct GetSpaceCredentialInput {
     pub space: String,
-    pub delegation_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_attestation: Option<String>,
 }
@@ -96,7 +95,7 @@ pub struct ListReposOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetRecordParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +114,7 @@ pub struct GetRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct ListRecordsParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,7 +127,8 @@ pub struct ListRecordsParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
-    pub uri: String,
+    pub collection: String,
+    pub rkey: String,
     pub cid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
@@ -144,14 +144,42 @@ pub struct ListRecordsOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetBlobParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub cid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListBlobsParams {
+    pub space: String,
+    pub repo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListBlobsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub cids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnregisterNotifyInput {
+    pub space: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetLatestCommitParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,14 +190,14 @@ pub struct GetLatestCommitOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetRepoParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRepoOpsParams {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,6 +232,7 @@ pub struct GetDelegationTokenOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
@@ -224,6 +253,7 @@ pub struct CreateRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct PutRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +275,7 @@ pub struct PutRecordOutput {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteRecordInput {
     pub space: String,
+    pub repo: String,
     pub collection: String,
     pub rkey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,41 +291,28 @@ pub struct DeleteRecordOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyWritesInput {
     pub space: String,
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate: Option<bool>,
-    pub writes: Vec<ApplyWritesWrite>,
+    pub writes: Vec<ApplyWritesOp>,
 }
 
+/// One operation in a space `applyWrites` batch.
+///
+/// The space plane's writes are tagged by an `action` string, not the repo
+/// plane's `$type` union -- the two planes' applyWrites deliberately take
+/// different shapes, and the reference and its clients send `action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "$type")]
-pub enum ApplyWritesWrite {
-    #[serde(rename = "com.atproto.space.applyWrites#create")]
-    Create(WriteCreate),
-    #[serde(rename = "com.atproto.space.applyWrites#update")]
-    Update(WriteUpdate),
-    #[serde(rename = "com.atproto.space.applyWrites#delete")]
-    Delete(WriteDelete),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WriteCreate {
+pub struct ApplyWritesOp {
+    /// `"create"` | `"update"` | `"delete"`.
+    pub action: String,
     pub collection: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Empty or omitted on create means auto-TID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WriteUpdate {
-    pub collection: String,
-    pub rkey: String,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriteDelete {
-    pub collection: String,
-    pub rkey: String,
+    /// The record value; omitted for delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -333,6 +351,10 @@ pub struct DeleteResult {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSpacesParams {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub space_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,13 +365,34 @@ pub struct ListSpacesParams {
 pub struct ListSpacesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    pub spaces: Vec<String>,
+    pub spaces: Vec<SpaceInfo>,
+}
+
+/// One entry in `listSpaces`: the space and the viewer's relationship to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub uri: String,
+    #[serde(rename = "isOwner")]
+    pub is_owner: bool,
+    #[serde(rename = "isMember")]
+    pub is_member: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterNotifyInput {
     pub space: String,
-    pub endpoint: String,
+    /// Service identifier of the subscriber: a DID with an optional service
+    /// fragment naming the entry in its DID document to deliver to. Supplies
+    /// both the audience and the endpoint; a bare URL cannot be an audience,
+    /// so a registration without this leaves its deliveries unverifiable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Pre-amendment shape, kept so a deployed subscriber keeps receiving
+    /// notifications. `service` wins when both are sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 }
@@ -363,7 +406,7 @@ pub struct RegisterNotifyOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyWriteInput {
     pub space: String,
-    pub did: String,
+    pub repo: String,
     pub rev: String,
 }
 
@@ -519,10 +562,9 @@ mod tests {
         roundtrip(
             &GetSpaceCredentialInput {
                 space: SPACE.to_string(),
-                delegation_token: "dt.jwt".to_string(),
                 client_attestation: Some("ca.jwt".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","delegationToken":"dt.jwt","clientAttestation":"ca.jwt"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","clientAttestation":"ca.jwt"}"#,
         );
         roundtrip(
             &GetSpaceCredentialOutput {
@@ -560,12 +602,12 @@ mod tests {
         roundtrip(
             &GetRecordParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 cid: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
         );
         roundtrip(
             &GetRecordOutput {
@@ -582,24 +624,27 @@ mod tests {
         roundtrip(
             &ListRecordsParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: None,
                 limit: Some(50),
                 cursor: None,
                 exclude_values: Some(true),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","limit":50,"excludeValues":true}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","limit":50,"excludeValues":true}"#,
         );
+        // Row shape per the reference's `listRecords#record`: {collection,
+        // rkey, cid, value?} — consumers key on collection/rkey, not a uri.
         roundtrip(
             &ListRecordsOutput {
                 cursor: None,
                 records: vec![Record {
-                    uri: format!("{SPACE}/did:plc:writer/com.example.post/3jzfcijpj2z2b"),
+                    collection: "com.example.post".to_string(),
+                    rkey: "3jzfcijpj2z2b".to_string(),
                     cid: "bafyreianew".to_string(),
                     value: None,
                 }],
             },
-            r#"{"records":[{"uri":"at://did:plc:auth/space/com.example.forum/self/did:plc:writer/com.example.post/3jzfcijpj2z2b","cid":"bafyreianew"}]}"#,
+            r#"{"records":[{"collection":"com.example.post","rkey":"3jzfcijpj2z2b","cid":"bafyreianew"}]}"#,
         );
     }
 
@@ -608,17 +653,17 @@ mod tests {
         roundtrip(
             &GetBlobParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 cid: "bafkreiblob".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","cid":"bafkreiblob"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","cid":"bafkreiblob"}"#,
         );
         roundtrip(
             &GetRepoParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer"}"#,
         );
     }
 
@@ -627,9 +672,9 @@ mod tests {
         roundtrip(
             &GetLatestCommitParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer"}"#,
         );
         roundtrip(
             &GetLatestCommitOutput {
@@ -644,13 +689,13 @@ mod tests {
         roundtrip(
             &ListRepoOpsParams {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 since: Some("3jzfcijpj2z2a".to_string()),
                 cursor: None,
                 limit: Some(500),
                 exclude_values: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","since":"3jzfcijpj2z2a","limit":500}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","since":"3jzfcijpj2z2a","limit":500}"#,
         );
         roundtrip(
             &ListRepoOpsOutput {
@@ -690,12 +735,13 @@ mod tests {
         roundtrip(
             &CreateRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: None,
                 validate: Some(true),
                 record: json!({"text": "hi"}),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","validate":true,"record":{"text":"hi"}}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","validate":true,"record":{"text":"hi"}}"#,
         );
         roundtrip(
             &CreateRecordOutput {
@@ -715,13 +761,14 @@ mod tests {
         roundtrip(
             &PutRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 validate: None,
                 record: json!({"text": "hi"}),
                 swap_record: Some("bafyreiaold".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","rkey":"3jzfcijpj2z2b","record":{"text":"hi"},"swapRecord":"bafyreiaold"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b","record":{"text":"hi"},"swapRecord":"bafyreiaold"}"#,
         );
         roundtrip(
             &PutRecordOutput {
@@ -738,11 +785,12 @@ mod tests {
         roundtrip(
             &DeleteRecordInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 collection: "com.example.post".to_string(),
                 rkey: "3jzfcijpj2z2b".to_string(),
                 swap_record: None,
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","collection":"com.example.post","rkey":"3jzfcijpj2z2b"}"#,
         );
         roundtrip(
             &DeleteRecordOutput {
@@ -760,26 +808,39 @@ mod tests {
         roundtrip(
             &ApplyWritesInput {
                 space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
                 validate: None,
                 writes: vec![
-                    ApplyWritesWrite::Create(WriteCreate {
+                    ApplyWritesOp {
+                        action: "create".to_string(),
                         collection: "com.example.post".to_string(),
                         rkey: None,
-                        value: json!({"text": "hi"}),
-                    }),
-                    ApplyWritesWrite::Update(WriteUpdate {
+                        value: Some(json!({"text": "hi"})),
+                    },
+                    ApplyWritesOp {
+                        action: "update".to_string(),
                         collection: "com.example.post".to_string(),
-                        rkey: "3jzfcijpj2z2b".to_string(),
-                        value: json!({"text": "hello"}),
-                    }),
-                    ApplyWritesWrite::Delete(WriteDelete {
+                        rkey: Some("3jzfcijpj2z2b".to_string()),
+                        value: Some(json!({"text": "hello"})),
+                    },
+                    ApplyWritesOp {
+                        action: "delete".to_string(),
                         collection: "com.example.post".to_string(),
-                        rkey: "3jzfcijpj2z2d".to_string(),
-                    }),
+                        rkey: Some("3jzfcijpj2z2d".to_string()),
+                        value: None,
+                    },
                 ],
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","writes":[{"$type":"com.atproto.space.applyWrites#create","collection":"com.example.post","value":{"text":"hi"}},{"$type":"com.atproto.space.applyWrites#update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"$type":"com.atproto.space.applyWrites#delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","writes":[{"action":"create","collection":"com.example.post","value":{"text":"hi"}},{"action":"update","collection":"com.example.post","rkey":"3jzfcijpj2z2b","value":{"text":"hello"}},{"action":"delete","collection":"com.example.post","rkey":"3jzfcijpj2z2d"}]}"#,
         );
+        // The exact body bulleted's writer sent (from the PDS log of the run
+        // this shape bug blocked). It must parse; a `$type` union here refuses
+        // it with `missing field $type`.
+        let bulleted: ApplyWritesInput = serde_json::from_str(
+            r#"{"repo":"did:plc:ajbz7fsdsj3d5nfrspm7tco3","space":"at://did:plc:ajbz7fsdsj3d5nfrspm7tco3/space/app.bulleted.space/interop","writes":[{"action":"create","collection":"app.bulleted.node","rkey":"3mt2hejeu2lr3","value":{"$type":"app.bulleted.node","createdAt":"2026-08-14T15:18:25.406992798Z","layout":"bullet","sortKey":"a0","text":"rt2-1507-b"}}]}"#,
+        )
+        .expect("bulleted's captured applyWrites body must parse");
+        assert_eq!(bulleted.writes[0].action, "create");
         roundtrip(
             &ApplyWritesOutput {
                 commit: Some(CommitMeta {
@@ -806,17 +867,24 @@ mod tests {
     fn list_spaces_pair() {
         roundtrip(
             &ListSpacesParams {
+                space_type: Some("com.example.forum".to_string()),
+                did: Some("did:plc:auth".to_string()),
                 limit: None,
                 cursor: Some("c1".to_string()),
             },
-            r#"{"cursor":"c1"}"#,
+            r#"{"type":"com.example.forum","did":"did:plc:auth","cursor":"c1"}"#,
         );
         roundtrip(
             &ListSpacesOutput {
                 cursor: None,
-                spaces: vec![SPACE.to_string()],
+                spaces: vec![SpaceInfo {
+                    uri: SPACE.to_string(),
+                    is_owner: true,
+                    is_member: true,
+                    created_at: "2026-01-01T00:00:00.000Z".to_string(),
+                }],
             },
-            r#"{"spaces":["at://did:plc:auth/space/com.example.forum/self"]}"#,
+            r#"{"spaces":[{"uri":"at://did:plc:auth/space/com.example.forum/self","isOwner":true,"isMember":true,"createdAt":"2026-01-01T00:00:00.000Z"}]}"#,
         );
     }
 
@@ -825,10 +893,47 @@ mod tests {
         roundtrip(
             &RegisterNotifyInput {
                 space: SPACE.to_string(),
-                endpoint: "https://sync.example.com".to_string(),
+                service: Some("did:web:sync.example#atproto_space_syncer".to_string()),
+                endpoint: Some("https://sync.example.com".to_string()),
                 repo: Some("did:plc:writer".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","endpoint":"https://sync.example.com","repo":"did:plc:writer"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","service":"did:web:sync.example#atproto_space_syncer","endpoint":"https://sync.example.com","repo":"did:plc:writer"}"#,
+        );
+        // The pre-amendment shape still parses, and a subscriber that names
+        // only an endpoint stays legible on the wire.
+        roundtrip(
+            &RegisterNotifyInput {
+                space: SPACE.to_string(),
+                service: None,
+                endpoint: Some("https://sync.example.com".to_string()),
+                repo: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","endpoint":"https://sync.example.com"}"#,
+        );
+        roundtrip(
+            &UnregisterNotifyInput {
+                space: SPACE.to_string(),
+                service: Some("did:web:sync.example#atproto_space_syncer".to_string()),
+                endpoint: None,
+                repo: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","service":"did:web:sync.example#atproto_space_syncer"}"#,
+        );
+        roundtrip(
+            &ListBlobsParams {
+                space: SPACE.to_string(),
+                repo: "did:plc:writer".to_string(),
+                limit: Some(500),
+                cursor: None,
+            },
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","limit":500}"#,
+        );
+        roundtrip(
+            &ListBlobsOutput {
+                cursor: Some("bafkreiblob".to_string()),
+                cids: vec!["bafkreiblob".to_string()],
+            },
+            r#"{"cursor":"bafkreiblob","cids":["bafkreiblob"]}"#,
         );
         roundtrip(
             &RegisterNotifyOutput {
@@ -843,10 +948,10 @@ mod tests {
         roundtrip(
             &NotifyWriteInput {
                 space: SPACE.to_string(),
-                did: "did:plc:writer".to_string(),
+                repo: "did:plc:writer".to_string(),
                 rev: "3jzfcijpj2z2c".to_string(),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","did":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
         );
         roundtrip(
             &NotifySpaceDeletedInput {

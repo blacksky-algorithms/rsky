@@ -32,6 +32,15 @@ impl Policy {
         user_did: &str,
         attested_client_id: Option<&str>,
     ) -> Result<bool> {
+        // The authority is implicitly authorized for their own space under
+        // every policy: membership is a fact the authority holds, and a list
+        // that excluded its own keeper would lock them out of whole-space
+        // reads of the space they anchor.
+        if let Ok(space) = rsky_space::space_id::SpaceId::parse(space_uri) {
+            if space.authority == user_did {
+                return Ok(true);
+            }
+        }
         match self {
             Policy::Public => Ok(true),
             Policy::MemberList(members) => members.is_member(user_did).await,

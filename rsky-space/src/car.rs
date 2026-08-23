@@ -297,7 +297,7 @@ mod tests {
         let car = car_of(&f).await;
         assert_eq!(
             hex::encode(Sha256::digest(&car)),
-            "fcefb95637f8ab8a3965c68e3ce530c7e5549cc013e8506f98baae6df846fb3b"
+            "b1e702230790c5bcad45e910f74891a76def02764ddb6d434e18e517e5d68a60"
         );
 
         let v = RepoCarValidator::new(car.as_slice()).await.unwrap();

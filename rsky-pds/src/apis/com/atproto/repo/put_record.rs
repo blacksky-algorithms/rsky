@@ -133,6 +133,16 @@ pub async fn put_record(
     account_manager: AccountManager,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug put_record {body:#?}");
+    crate::apis::assert_repo_scope(
+        &auth.access.credentials,
+        &body.collection,
+        crate::oauth_scope::RepoAction::Create,
+    )?;
+    crate::apis::assert_repo_scope(
+        &auth.access.credentials,
+        &body.collection,
+        crate::oauth_scope::RepoAction::Update,
+    )?;
     match inner_put_record(
         body,
         auth,
