@@ -499,14 +499,6 @@ pub fn valid_key_part(part: &str, max_len: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '~'))
 }
 
-pub fn valid_nsid(s: &str) -> bool {
-    s.matches('.').count() >= 2
-        && s.len() <= 317
-        && s.split('.').all(|seg| {
-            !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
