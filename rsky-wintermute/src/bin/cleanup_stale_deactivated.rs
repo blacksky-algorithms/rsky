@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
 
     let mut cfg = Config::new();
     cfg.url = Some(args.database_url.clone());
+    cfg.options = Some(rsky_wintermute::config::pg_connect_options());
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });

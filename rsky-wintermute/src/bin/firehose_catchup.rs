@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
     // Setup database pool
     let mut cfg = Config::new();
     cfg.url = Some(args.database_url);
+    cfg.options = Some(rsky_wintermute::config::pg_connect_options());
     cfg.pool = Some(deadpool_postgres::PoolConfig {
         max_size: args.pool_size,
         ..Default::default()

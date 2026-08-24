@@ -143,6 +143,7 @@ impl IndexerManager {
     fn create_pool(database_url: &str, size: usize) -> Result<Pool, WintermuteError> {
         let mut pg_config = Config::new();
         pg_config.url = Some(database_url.to_owned());
+        pg_config.options = Some(crate::config::pg_connect_options());
         pg_config.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });

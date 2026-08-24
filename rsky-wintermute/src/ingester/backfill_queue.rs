@@ -61,6 +61,7 @@ pub async fn populate_backfill_queue(
     } else {
         let mut pg_config = Config::new();
         pg_config.url = Some(database_url);
+        pg_config.options = Some(crate::config::pg_connect_options());
         pg_config.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });

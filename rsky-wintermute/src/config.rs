@@ -261,6 +261,20 @@ pub fn pg_pool_config(max_size: usize) -> deadpool_postgres::PoolConfig {
     }
 }
 
+/// The libpq `options` string every Postgres pool in this crate shares.
+///
+/// `client_min_messages=warning` is required because the bulk indexer issues
+/// `CREATE TEMP TABLE IF NOT EXISTS` for its staging tables on every batch, while pools
+/// recycle with `RecyclingMethod::Fast` and so never discard them. Every batch after the
+/// first therefore raises a `duplicate_table` NOTICE, which tokio-postgres logs at INFO;
+/// that stream dominates the journal and collapses log retention. Suppressing it at the
+/// server means the notice is never generated or transmitted, which a client-side log
+/// filter cannot achieve.
+#[must_use]
+pub fn pg_connect_options() -> String {
+    "-c client_min_messages=warning".to_owned()
+}
+
 // Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
 // This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
 pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
@@ -471,5 +485,20 @@ mod tests {
         assert_eq!(cfg.timeouts.wait, pg_pool_timeouts().wait);
         assert_eq!(cfg.timeouts.create, pg_pool_timeouts().create);
         assert_eq!(cfg.timeouts.recycle, pg_pool_timeouts().recycle);
+    }
+
+    #[test]
+    fn pg_connect_options_suppresses_notices() {
+        let opts = pg_connect_options();
+        assert_eq!(opts, "-c client_min_messages=warning");
+    }
+
+    #[test]
+    fn pg_connect_options_is_accepted_by_deadpool_config() {
+        let mut cfg = deadpool_postgres::Config::new();
+        cfg.url = Some("postgres://u@127.0.0.1:1/d".to_owned());
+        cfg.options = Some(pg_connect_options());
+        let pg = cfg.get_pg_config().expect("config builds");
+        assert_eq!(pg.get_options(), Some("-c client_min_messages=warning"));
     }
 }

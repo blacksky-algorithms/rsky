@@ -150,6 +150,7 @@ async fn create_pool(
 ) -> Result<Pool, Box<dyn std::error::Error>> {
     let mut cfg = Config::new();
     cfg.url = Some(database_url.to_string());
+    cfg.options = Some(rsky_wintermute::config::pg_connect_options());
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
