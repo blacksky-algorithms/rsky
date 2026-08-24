@@ -13,8 +13,30 @@
 
 use rsky_crypto::types::VerifyOptions;
 use rsky_space::jwk::{EcJwk, CRV_P256, CRV_SECP256K1};
-use rsky_space::{Result, SpaceError};
+use rsky_space::SpaceError;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+/// Distinct from `SpaceError::BadSignature`, whose message reads "commit
+/// signature verification failed" — accurate for a repo commit, actively
+/// misleading on a DPoP proof, which is where it kept surfacing.
+#[derive(Debug, Error)]
+pub enum ClientJwsError {
+    #[error("presented signature does not verify against the key in its header")]
+    BadSignature,
+    #[error("unusable key: {0}")]
+    Key(String),
+    #[error("verification failed: {0}")]
+    Crypto(String),
+}
+
+type Result<T> = std::result::Result<T, ClientJwsError>;
+
+impl From<SpaceError> for ClientJwsError {
+    fn from(error: SpaceError) -> Self {
+        ClientJwsError::Key(error.to_string())
+    }
+}
 
 fn malleable() -> Option<VerifyOptions> {
     Some(VerifyOptions {
@@ -26,7 +48,7 @@ fn outcome(ok: bool) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(SpaceError::BadSignature)
+        Err(ClientJwsError::BadSignature)
     }
 }
 
@@ -35,7 +57,7 @@ pub fn verify_client_es256(jwk: &EcJwk, signing_input: &[u8], sig: &[u8]) -> Res
     jwk.require_crv(CRV_P256)?;
     let point = jwk.sec1_point()?;
     let ok = rsky_crypto::p256::operations::verify_sig(&point, signing_input, sig, malleable())
-        .map_err(|e| SpaceError::Crypto(e.to_string()))?;
+        .map_err(|e| ClientJwsError::Crypto(e.to_string()))?;
     outcome(ok)
 }
 
@@ -45,7 +67,7 @@ pub fn verify_client_es256k(jwk: &EcJwk, signing_input: &[u8], sig: &[u8]) -> Re
     let point = jwk.sec1_point()?;
     let digest = Sha256::digest(signing_input);
     let ok = rsky_crypto::secp256k1::operations::verify_sig(&point, &digest, sig, malleable())
-        .map_err(|e| SpaceError::Crypto(e.to_string()))?;
+        .map_err(|e| ClientJwsError::Crypto(e.to_string()))?;
     outcome(ok)
 }
 
