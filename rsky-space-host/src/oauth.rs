@@ -15,9 +15,10 @@
 //! `client_id` stands in for one. A token revoked before it expires still
 //! verifies until `exp`.
 
+use crate::client_jws::{verify_client_es256, verify_client_es256k};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rsky_space::jwk::{verify_es256, verify_es256k, EcJwk, JwkSet};
+use rsky_space::jwk::{EcJwk, JwkSet};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -325,7 +326,7 @@ async fn verify_as_signature(
             .first()
             .ok_or_else(|| auth_err("authorization server jwks is empty"))?,
     };
-    verify_es256(jwk, &decoded.signing_input, &decoded.signature)
+    verify_client_es256(jwk, &decoded.signing_input, &decoded.signature)
         .map_err(|e| auth_err(format!("token signature: {e}")))
 }
 
@@ -355,8 +356,8 @@ async fn verify_dpop_proof(
         .as_ref()
         .ok_or_else(|| auth_err("proof carries no jwk"))?;
     let verified = match decoded.header.alg.as_str() {
-        ES256K => verify_es256k(jwk, &decoded.signing_input, &decoded.signature),
-        _ => verify_es256(jwk, &decoded.signing_input, &decoded.signature),
+        ES256K => verify_client_es256k(jwk, &decoded.signing_input, &decoded.signature),
+        _ => verify_client_es256(jwk, &decoded.signing_input, &decoded.signature),
     };
     verified.map_err(|e| auth_err(format!("proof signature: {e}")))?;
 

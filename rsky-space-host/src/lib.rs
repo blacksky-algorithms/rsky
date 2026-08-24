@@ -23,6 +23,7 @@ pub mod actor_schema;
 pub mod appaccess;
 pub mod attestation;
 pub mod authority;
+pub mod client_jws;
 pub mod commits;
 pub mod config;
 pub mod convert;
