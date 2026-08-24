@@ -1,4 +1,4 @@
-mod bulk;
+pub(crate) mod bulk;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -16,7 +16,7 @@ use crate::storage::Storage;
 use crate::types::LabelEvent;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
 use dashmap::DashMap;
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::Pool;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
@@ -26,7 +26,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio_postgres::NoTls;
 
 // Global semaphore to serialize like inserts across all workers.
 // The like table has a 133GB index that causes severe contention when
@@ -141,17 +140,7 @@ impl IndexerManager {
     }
 
     fn create_pool(database_url: &str, size: usize) -> Result<Pool, WintermuteError> {
-        let mut pg_config = Config::new();
-        pg_config.url = Some(database_url.to_owned());
-        pg_config.options = Some(crate::config::pg_connect_options());
-        pg_config.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        pg_config.pool = Some(crate::config::pg_pool_config(size));
-
-        pg_config
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
+        crate::config::create_pg_pool(database_url, crate::config::pg_pool_config(size))
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {

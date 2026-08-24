@@ -275,6 +275,45 @@ pub fn pg_connect_options() -> String {
     "-c client_min_messages=warning".to_owned()
 }
 
+/// Build a pool whose connections are ready for `indexer::bulk`.
+///
+/// The staging-table DDL runs once per connection in a `post_create` hook instead of on
+/// every batch. Pools that reach those functions must be built here or they fail with
+/// `undefined_table`; a pool built any other way has no staging tables.
+pub fn create_pg_pool(
+    database_url: &str,
+    pool_config: deadpool_postgres::PoolConfig,
+) -> Result<deadpool_postgres::Pool, crate::types::WintermuteError> {
+    use crate::types::WintermuteError;
+
+    let mut cfg = deadpool_postgres::Config::new();
+    cfg.url = Some(database_url.to_owned());
+    cfg.options = Some(pg_connect_options());
+    cfg.manager = Some(deadpool_postgres::ManagerConfig {
+        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+    });
+    cfg.pool = Some(pool_config);
+
+    cfg.builder(deadpool_postgres::tokio_postgres::NoTls)
+        .map_err(|e| WintermuteError::Other(format!("pool config invalid: {e}")))?
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .post_create(deadpool_postgres::Hook::async_fn(|client, _| {
+            Box::pin(async move {
+                client
+                    .batch_execute(crate::indexer::bulk::BULK_STAGING_DDL)
+                    .await
+                    .map_err(|e| {
+                        deadpool_postgres::HookError::message(format!(
+                            "bulk staging DDL failed: {e}"
+                        ))
+                    })?;
+                Ok(())
+            })
+        }))
+        .build()
+        .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
+}
+
 // Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
 // This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
 pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
