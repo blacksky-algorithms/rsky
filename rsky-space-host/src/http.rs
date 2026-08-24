@@ -300,7 +300,7 @@ async fn mint_credential(
         ));
     }
     let (context, space) = require_this_space(&state, &params.space)?;
-    let key = state.keys.signing_key(&claims.iss).await?;
+    let key = state.keys.service_key(&claims.iss).await?;
     service_jwt::verify(
         jwt,
         &[context.authority_did()],
@@ -435,7 +435,7 @@ async fn require_service_auth(
 ) -> Result<crate::service_jwt::ServiceClaims, ApiError> {
     let jwt = bearer(headers)?;
     let claims = service_jwt::claims(jwt)?;
-    let issuer_key = state.keys.signing_key(&claims.iss).await?;
+    let issuer_key = state.keys.service_key(&claims.iss).await?;
     let authority_did = context.authority_did();
     let space_host_aud = format!("{authority_did}#atproto_space_host");
     service_jwt::verify(
@@ -962,7 +962,7 @@ async fn notify_write(
             "issuer does not match notified repo",
         ));
     }
-    let issuer_key = state.keys.signing_key(&claims.iss).await?;
+    let issuer_key = state.keys.service_key(&claims.iss).await?;
     let authority_did = context.authority_did();
     let space_host_aud = format!("{authority_did}#atproto_space_host");
     service_jwt::verify(
@@ -1021,7 +1021,7 @@ mod tests {
     struct UserKeys;
     #[async_trait]
     impl KeyResolver for UserKeys {
-        async fn signing_key(&self, did: &str) -> HostResult<String> {
+        async fn service_key(&self, did: &str) -> HostResult<String> {
             if did == MEMBER {
                 Ok(user_signer().did_key().to_string())
             } else {

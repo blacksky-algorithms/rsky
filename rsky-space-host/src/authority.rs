@@ -97,7 +97,7 @@ impl AuthorityRegistry {
 /// to verify a delegation token minted by that user's PDS.
 #[async_trait]
 pub trait KeyResolver: Send + Sync {
-    async fn signing_key(&self, did: &str) -> Result<String>;
+    async fn service_key(&self, did: &str) -> Result<String>;
 }
 
 /// A space authority for one or more spaces of a single type.
@@ -325,7 +325,7 @@ impl Authority {
         let decoded =
             credential::decode(delegation_jwt).map_err(|e| HostError::Delegation(e.to_string()))?;
         let user_did = decoded.claims.iss.clone();
-        let user_key = keys.signing_key(&user_did).await?;
+        let user_key = keys.service_key(&user_did).await?;
         let verified_user = credential::verify_delegation_token(
             delegation_jwt,
             &space.uri(),
@@ -501,7 +501,7 @@ mod tests {
     struct DenyAllKeys;
     #[async_trait]
     impl KeyResolver for DenyAllKeys {
-        async fn signing_key(&self, _did: &str) -> Result<String> {
+        async fn service_key(&self, _did: &str) -> Result<String> {
             Err(HostError::Membership("no key".into()))
         }
     }
@@ -509,7 +509,7 @@ mod tests {
     struct FixedKey(String);
     #[async_trait]
     impl KeyResolver for FixedKey {
-        async fn signing_key(&self, _did: &str) -> Result<String> {
+        async fn service_key(&self, _did: &str) -> Result<String> {
             Ok(self.0.clone())
         }
     }
