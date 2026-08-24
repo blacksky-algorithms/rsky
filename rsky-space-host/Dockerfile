@@ -23,6 +23,7 @@ COPY rsky-repo/Cargo.toml rsky-repo/Cargo.toml
 COPY rsky-satnav/Cargo.toml rsky-satnav/Cargo.toml
 COPY rsky-space/Cargo.toml rsky-space/Cargo.toml
 COPY rsky-space-host/Cargo.toml rsky-space-host/Cargo.toml
+COPY rsky-spaces-parity/Cargo.toml rsky-spaces-parity/Cargo.toml
 COPY rsky-syntax/Cargo.toml rsky-syntax/Cargo.toml
 COPY rsky-video/Cargo.toml rsky-video/Cargo.toml
 COPY rsky-wintermute/Cargo.toml rsky-wintermute/Cargo.toml
@@ -48,6 +49,7 @@ RUN mkdir -p \
         echo 'fn main() {}' > $crate/src/main.rs; \
     done && \
     touch rsky-pds/src/lib.rs rsky-repo/src/lib.rs && \
+    mkdir -p rsky-spaces-parity/src && touch rsky-spaces-parity/src/lib.rs && \
     mkdir -p rsky-wintermute/src/bin && \
     for bin in queue_backfill fix_blob_refs plc_import label_sync car_loader \
         cleanup_stale_deactivated; do \
