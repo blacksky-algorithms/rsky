@@ -217,6 +217,19 @@ fn validate_actor_store_layout(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A temporary actor store holding one account's signing key, laid out the way
+/// the PDS lays out `{data}/actors`.
+#[cfg(test)]
+pub(crate) fn test_actor_store(did: &str, secret: [u8; SECRET_KEY_BYTES]) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let digest = hex::encode(Sha256::digest(did.as_bytes()));
+    let actor = directory.path().join(&digest[..2]).join(did);
+    std::fs::create_dir_all(&actor).unwrap();
+    std::fs::write(actor.join("key"), secret).unwrap();
+    std::fs::write(actor.join("store.sqlite"), []).unwrap();
+    directory
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,13 +240,7 @@ mod tests {
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
 
     fn actor_store(secret: [u8; 32]) -> tempfile::TempDir {
-        let directory = tempfile::tempdir().unwrap();
-        let digest = hex::encode(Sha256::digest(DID.as_bytes()));
-        let actor = directory.path().join(&digest[..2]).join(DID);
-        std::fs::create_dir_all(&actor).unwrap();
-        std::fs::write(actor.join("key"), secret).unwrap();
-        std::fs::write(actor.join("store.sqlite"), []).unwrap();
-        directory
+        test_actor_store(DID, secret)
     }
 
     #[test]

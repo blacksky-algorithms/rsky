@@ -197,16 +197,51 @@ impl Config {
         }
         Ok(())
     }
+
+    /// The managing-app conversation is service auth, which is keyed on the
+    /// authority's `#atproto` key rather than the space key. A pinned authority
+    /// carries only the space key, so without an actor-store key for it the
+    /// policy can never mint a call the managing app will accept. Fail at boot
+    /// instead of at a member's first read. `has_service_key` answers whether
+    /// the actor store holds a signing key for that DID.
+    pub fn validate_pinned_service_key(
+        &self,
+        has_service_key: impl FnOnce(&str) -> bool,
+    ) -> Result<(), String> {
+        let Some((authority_did, _)) = self.bootstrap_pin() else {
+            return Ok(());
+        };
+        if self.policy != PolicyMode::ManagingApp {
+            return Ok(());
+        }
+        if has_service_key(authority_did) {
+            return Ok(());
+        }
+        Err(format!(
+            "managing-app policy needs an actor-store signing key for the pinned authority {authority_did}: SPACEHOST_ACTOR_STORE_DIR has none, so only the public and member-list policies are available to a pinned host"
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // `Config` falls back to env vars, and the env-var test below mutates
+    // process-global state, so every parse in this module is serialized.
+    static PARSE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn parse_lock() -> std::sync::MutexGuard<'static, ()> {
+        PARSE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     // One sequential test: the env-var section mutates process-global state,
     // which would race sibling tests run in parallel.
     #[test]
     fn parses_args_env_and_requirements() {
+        let _guard = parse_lock();
         let bare = Config::try_parse_from(["rsky-space-host"]).unwrap();
         assert!(bare.bootstrap_pin().is_none());
         assert!(bare.validate().is_err());
@@ -333,6 +368,7 @@ mod tests {
     }
 
     fn valid_unpinned() -> Config {
+        let _guard = parse_lock();
         Config::try_parse_from([
             "rsky-space-host",
             "--oauth-issuer",
@@ -353,6 +389,55 @@ mod tests {
             "did:plc:appview",
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn pinned_managing_app_needs_an_actor_store_service_key() {
+        fn pinned_managing_app(policy: PolicyMode) -> Config {
+            let mut cfg = valid_unpinned();
+            cfg.authority_did = "did:plc:authority".to_string();
+            cfg.signing_key_hex = "aa".repeat(32);
+            cfg.policy = policy;
+            cfg.managing_app = "did:web:feeds.example#bsky_fg".to_string();
+            cfg.lifecycle_url = "https://feeds.example".to_string();
+            cfg.lifecycle_service_did = "did:web:feeds.example".to_string();
+            cfg
+        }
+
+        let pinned = pinned_managing_app(PolicyMode::ManagingApp);
+        assert!(pinned.validate().is_ok());
+
+        // No actor-store key for the pinned authority: refuse at boot.
+        let message = pinned
+            .validate_pinned_service_key(|_| false)
+            .expect_err("must refuse");
+        assert!(message.contains("did:plc:authority"), "{message}");
+        assert!(message.contains("member-list"), "{message}");
+
+        // With a key, the same config is accepted, and the probe sees the
+        // pinned authority rather than some other DID.
+        let mut asked = String::new();
+        pinned
+            .validate_pinned_service_key(|did| {
+                asked = did.to_string();
+                true
+            })
+            .unwrap();
+        assert_eq!(asked, "did:plc:authority");
+
+        // The other policies are unaffected — that is the point of the fallback.
+        pinned_managing_app(PolicyMode::MemberList)
+            .validate_pinned_service_key(|_| false)
+            .unwrap();
+        pinned_managing_app(PolicyMode::Public)
+            .validate_pinned_service_key(|_| false)
+            .unwrap();
+
+        // An unpinned host resolves its authorities from the actor store, so
+        // there is nothing to reject.
+        let mut unpinned = valid_unpinned();
+        unpinned.policy = PolicyMode::ManagingApp;
+        unpinned.validate_pinned_service_key(|_| false).unwrap();
     }
 
     #[test]

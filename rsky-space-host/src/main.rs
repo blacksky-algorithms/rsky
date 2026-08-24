@@ -18,9 +18,10 @@ use rsky_space_host::keys::{DocKeyResolver, DocSource, ResolverDocSource};
 use rsky_space_host::managing_app::HttpManagingApp;
 use rsky_space_host::membership::InMemoryMembership;
 use rsky_space_host::notify::HttpNotifier;
-use rsky_space_host::pds_seam::PdsSeam;
+use rsky_space_host::pds_seam::{PdsSeam, PdsServiceJwtIssuer};
 use rsky_space_host::policy::Policy;
 use rsky_space_host::registration::{HttpLifecycleAcker, LifecycleAcker};
+use rsky_space_host::service_jwt::ServiceJwtIssuer;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::store::{HostedSpaceStore, SqliteStore};
 use std::sync::Arc;
@@ -49,6 +50,7 @@ struct ContextBuilder {
     members: Vec<String>,
     lifecycle_url: String,
     lifecycle_service_did: String,
+    seam: Arc<PdsSeam>,
     docs: Arc<dyn DocSource>,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     jti: Arc<dyn Fn() -> String + Send + Sync>,
@@ -57,6 +59,13 @@ struct ContextBuilder {
 impl ContextBuilder {
     fn context(&self, space: SpaceId, signer: Signer) -> AuthorityContext {
         let authority_did = space.authority.clone();
+        // Service auth to the managing app is keyed on the authority's
+        // `#atproto` key, not the space key, so it is minted from the actor
+        // store rather than from the configured space signer.
+        let service_issuer: Arc<dyn ServiceJwtIssuer> = Arc::new(PdsServiceJwtIssuer::new(
+            self.seam.clone(),
+            authority_did.clone(),
+        ));
         let policy = match self.policy {
             PolicyMode::Public => Policy::Public,
             PolicyMode::MemberList => {
@@ -64,10 +73,9 @@ impl ContextBuilder {
             }
             PolicyMode::ManagingApp => Policy::ManagingApp {
                 service_id: self.managing_app.clone(),
-                client: Arc::new(HttpManagingApp::new(
+                client: Arc::new(HttpManagingApp::with_issuer(
                     self.managing_app.clone(),
-                    authority_did.clone(),
-                    signer.clone(),
+                    service_issuer.clone(),
                     self.docs.clone(),
                     self.now.clone(),
                     self.jti.clone(),
@@ -84,11 +92,10 @@ impl ContextBuilder {
                 self.jti.clone(),
             )),
             lifecycle_acker: (self.policy == PolicyMode::ManagingApp).then(|| {
-                Arc::new(HttpLifecycleAcker::new(
+                Arc::new(HttpLifecycleAcker::with_issuer(
                     self.lifecycle_url.clone(),
                     self.lifecycle_service_did.clone(),
-                    authority_did,
-                    signer,
+                    service_issuer,
                     self.now.clone(),
                     self.jti.clone(),
                 )) as Arc<dyn LifecycleAcker>
@@ -118,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteStore::open(&cfg.db_path)?);
     let repos = Arc::new(ActorStoreRepos::open(&cfg.actor_store_dir)?);
     let seam = Arc::new(PdsSeam::open(&cfg.actor_store_dir)?);
+    cfg.validate_pinned_service_key(|did| seam.key_path(did).is_some_and(|path| path.exists()))?;
 
     let builder = Arc::new(ContextBuilder {
         policy: cfg.policy,
@@ -125,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         members: cfg.member_dids(),
         lifecycle_url: cfg.lifecycle_url.clone(),
         lifecycle_service_did: cfg.lifecycle_service_did.clone(),
+        seam: seam.clone(),
         docs: docs.clone(),
         now: now.clone(),
         jti: jti.clone(),
