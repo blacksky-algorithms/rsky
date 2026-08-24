@@ -295,6 +295,7 @@ async fn main() -> Result<()> {
     let shim_dir = run_dir.join("shim");
     let pds_actors = pds_dir.join("actors");
     let shim_actors = shim_dir.join("actors");
+    let shim_stores = shim_dir.join("space-stores");
     for dir in [&pds_dir, &shim_dir, &pds_dir.join("blobs")] {
         std::fs::create_dir_all(dir)?;
     }
@@ -432,9 +433,12 @@ async fn main() -> Result<()> {
     println!("space created on the oracle: {space}");
 
     // The space host reads account signing keys from a PDS-shaped actor store
-    // directory and writes its own stores beside them.
+    // directory it never writes to, and writes its own per-account stores into
+    // a separate directory (Option A). Running both jobs off one path is the
+    // configuration that hid them being conflated, so the gate keeps them apart.
     copy_tree(&pds_actors, &shim_actors)?;
-    let accounts = reset_stores(&shim_actors)?;
+    let accounts = reset_stores(&shim_stores)?;
+    let keys_before = tree_digest(&shim_actors)?;
     println!("space host store directory prepared for {accounts} account(s)");
 
     let shim_env: Vec<(String, String)> = vec![
@@ -451,6 +455,10 @@ async fn main() -> Result<()> {
         (
             "SPACEHOST_ACTOR_STORE_DIR",
             shim_actors.display().to_string(),
+        ),
+        (
+            "SPACEHOST_SPACE_STORE_DIR",
+            shim_stores.display().to_string(),
         ),
         ("SPACEHOST_OAUTH_ISSUER", OAUTH_ISSUER.to_string()),
         ("SPACEHOST_OAUTH_JWKS_URI", format!("{OAUTH_ISSUER}/jwks")),
@@ -503,7 +511,12 @@ async fn main() -> Result<()> {
     shim.stop();
     pds.stop();
 
-    compare_stores(&pds_actors, &shim_actors, &mut board)?;
+    compare_stores(&pds_actors, &shim_stores, &mut board)?;
+    board.equal_if(
+        "key directory untouched",
+        tree_digest(&shim_actors)? == keys_before,
+        shim_actors.display().to_string(),
+    );
 
     let report = board.render();
     print!("{report}");
@@ -840,6 +853,39 @@ async fn probe_pds_only_surface(gate: &Gate, board: &mut Scoreboard) -> Result<(
         );
     }
     Ok(())
+}
+
+/// A content fingerprint of every file under `root`, so the gate can prove the
+/// key directory is never written to.
+fn tree_digest(root: &Path) -> Result<BTreeMap<String, u64>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let bytes = std::fs::read(&path)?;
+            let mut hash = 1469598103934665603u64;
+            for byte in bytes {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            out.insert(relative, hash);
+        }
+    }
+    Ok(out)
 }
 
 fn compare_stores(pds_actors: &Path, shim_actors: &Path, board: &mut Scoreboard) -> Result<()> {

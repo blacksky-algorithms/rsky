@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -170,19 +170,46 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The first migration recreates the PDS's base schema. A store the PDS itself
+/// created already has those tables under different bookkeeping, so applying it
+/// there would both fail and be a write into a file this service does not own.
+const BASELINE_MIGRATION: &str = "001";
+
+/// Whether the base schema is already present, i.e. this file was created by
+/// something other than these migrations.
+fn baseline_present(tx: &rusqlite::Transaction<'_>) -> Result<bool> {
+    tx.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repo_root'",
+        [],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(sql_err)
+}
+
 pub fn get_migrated_db(path: impl AsRef<Path>) -> Result<Connection> {
     let mut connection = Connection::open(path).map_err(sql_err)?;
     let transaction = connection.transaction().map_err(sql_err)?;
     transaction
         .execute_batch("CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY, \"appliedAt\" TEXT NOT NULL)")
         .map_err(sql_err)?;
-    let applied = transaction
+    let mut applied = transaction
         .prepare("SELECT name FROM migrations")
         .map_err(sql_err)?
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(sql_err)?
         .collect::<rusqlite::Result<HashSet<_>>>()
         .map_err(sql_err)?;
+    if !applied.contains(BASELINE_MIGRATION) && baseline_present(&transaction)? {
+        transaction
+            .execute(
+                "INSERT INTO migrations (name, \"appliedAt\") VALUES (?1, datetime('now'))",
+                [BASELINE_MIGRATION],
+            )
+            .map_err(sql_err)?;
+        applied.insert(BASELINE_MIGRATION.to_string());
+    }
     for (name, sql) in MIGRATIONS {
         if !applied.contains(*name) {
             transaction.execute_batch(sql).map_err(sql_err)?;

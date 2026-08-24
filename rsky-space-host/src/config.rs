@@ -103,8 +103,15 @@ pub struct Config {
         hide_env_values = true
     )]
     pub oauth_hs256_secret: String,
+    /// Read-only source of per-account signing keys: the PDS's own `actors`
+    /// directory. Never written to.
     #[arg(long, env = "SPACEHOST_ACTOR_STORE_DIR", default_value = "")]
     pub actor_store_dir: String,
+    /// This service's own per-account store directory, holding the space
+    /// tables. Separate from the PDS's actors directory, which is mounted
+    /// read-only in production and belongs to another writer.
+    #[arg(long, env = "SPACEHOST_SPACE_STORE_DIR", default_value = "")]
+    pub space_store_dir: String,
     #[arg(
         long,
         env = "SPACEHOST_MINT_TOKEN",
@@ -189,6 +196,15 @@ impl Config {
         if self.actor_store_dir.is_empty() {
             return Err("SPACEHOST_ACTOR_STORE_DIR is required".to_string());
         }
+        if self.space_store_dir.is_empty() {
+            return Err("SPACEHOST_SPACE_STORE_DIR is required".to_string());
+        }
+        if same_directory(&self.actor_store_dir, &self.space_store_dir) {
+            return Err(
+                "SPACEHOST_SPACE_STORE_DIR must not be SPACEHOST_ACTOR_STORE_DIR: space tables are written to this service's own per-account stores, never into the PDS's actor files"
+                    .to_string(),
+            );
+        }
         if self.mint_token.is_empty()
             || self.daemon_service_did.is_empty()
             || self.appview_service_did.is_empty()
@@ -220,6 +236,18 @@ impl Config {
         Err(format!(
             "managing-app policy needs an actor-store signing key for the pinned authority {authority_did}: SPACEHOST_ACTOR_STORE_DIR has none, so only the public and member-list policies are available to a pinned host"
         ))
+    }
+}
+
+/// Whether two settings name the same directory. Resolved paths are compared
+/// when both exist, so `/pds/actors` and `/pds/../pds/actors` are also caught.
+fn same_directory(left: &str, right: &str) -> bool {
+    if left.trim_end_matches('/') == right.trim_end_matches('/') {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -262,6 +290,8 @@ mod tests {
             "https://client.example",
             "--actor-store-dir",
             "/actors",
+            "--space-store-dir",
+            "/space-stores",
             "--mint-token",
             "token",
             "--daemon-service-did",
@@ -320,6 +350,7 @@ mod tests {
         std::env::set_var("SPACEHOST_OAUTH_AUDIENCE", "did:web:pds.example");
         std::env::set_var("SPACEHOST_OAUTH_CLIENT_IDS", "https://client.example");
         std::env::set_var("SPACEHOST_ACTOR_STORE_DIR", "/actors");
+        std::env::set_var("SPACEHOST_SPACE_STORE_DIR", "/space-stores");
         std::env::set_var("SPACEHOST_MINT_TOKEN", "token");
         std::env::set_var("SPACEHOST_DAEMON_SERVICE_DID", "did:plc:daemon");
         std::env::set_var("SPACEHOST_APPVIEW_SERVICE_DID", "did:plc:appview");
@@ -341,6 +372,7 @@ mod tests {
             "SPACEHOST_OAUTH_AUDIENCE",
             "SPACEHOST_OAUTH_CLIENT_IDS",
             "SPACEHOST_ACTOR_STORE_DIR",
+            "SPACEHOST_SPACE_STORE_DIR",
             "SPACEHOST_MINT_TOKEN",
             "SPACEHOST_DAEMON_SERVICE_DID",
             "SPACEHOST_APPVIEW_SERVICE_DID",
@@ -381,6 +413,8 @@ mod tests {
             "https://client.example",
             "--actor-store-dir",
             "/actors",
+            "--space-store-dir",
+            "/space-stores",
             "--mint-token",
             "token",
             "--daemon-service-did",
@@ -389,6 +423,39 @@ mod tests {
             "did:plc:appview",
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn the_space_store_must_not_be_the_pds_actor_store() {
+        let mut cfg = valid_unpinned();
+        assert!(cfg.validate().is_ok());
+
+        // The PDS's actor directory is a key source, never a write target: it
+        // belongs to another writer and is mounted read-only in production.
+        cfg.space_store_dir = cfg.actor_store_dir.clone();
+        let message = cfg.validate().expect_err("must refuse");
+        assert!(message.contains("SPACEHOST_SPACE_STORE_DIR"), "{message}");
+
+        // Trailing-slash and traversal spellings of the same directory too.
+        cfg.space_store_dir = "/actors/".to_string();
+        assert!(cfg.validate().is_err());
+
+        let existing = tempfile::tempdir().unwrap();
+        let mut resolved = valid_unpinned();
+        resolved.actor_store_dir = existing.path().display().to_string();
+        resolved.space_store_dir = existing
+            .path()
+            .join("..")
+            .join(existing.path().file_name().unwrap())
+            .display()
+            .to_string();
+        assert!(resolved.validate().is_err());
+
+        // And it is required at all: silently defaulting it to the actor store
+        // is how the two jobs got conflated in the first place.
+        let mut missing = valid_unpinned();
+        missing.space_store_dir = String::new();
+        assert!(missing.validate().is_err());
     }
 
     #[test]

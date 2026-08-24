@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         did_cache: std::sync::Arc::new(MemoryCache::new(None, None)),
     })));
     let store = Arc::new(SqliteStore::open(&cfg.db_path)?);
-    let repos = Arc::new(ActorStoreRepos::open(&cfg.actor_store_dir)?);
+    let repos = Arc::new(ActorStoreRepos::open(&cfg.space_store_dir)?);
     let seam = Arc::new(PdsSeam::open(&cfg.actor_store_dir)?);
     cfg.validate_pinned_service_key(|did| seam.key_path(did).is_some_and(|path| path.exists()))?;
 

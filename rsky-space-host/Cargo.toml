@@ -1,6 +1,6 @@
 [package]
 name = "rsky-space-host"
-version = "0.7.4"
+version = "0.7.5"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "atproto permissioned-data space authority/host: issues space credentials, manages a space, routes write notifications"
 edition = "2021"

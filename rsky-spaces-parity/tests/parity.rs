@@ -33,6 +33,92 @@ async fn actor_schema_matches_pinned_oracle() {
     assert_eq!(sqlite_master(&shim_path), sqlite_master(&pds_path));
 }
 
+/// S15: the shim's init is safe against a store the **PDS** created.
+///
+/// Every other case here builds its own store tree, so none of them ever open
+/// a file the oracle wrote first — which is how a build whose every live write
+/// failed on `table repo_root already exists` passed this suite. Migration 001
+/// recreates the PDS base schema, so a PDS-created file must be adopted, not
+/// re-migrated, and must come back byte-identical.
+#[tokio::test]
+async fn shim_init_adopts_a_pds_created_store_without_touching_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("pds-created.sqlite");
+    get_migrated_db(&path).await.expect("pds migration");
+    let before = sqlite_master(&path);
+    let before_bytes = std::fs::read(&path).expect("read");
+
+    // The shim opening it must succeed rather than re-running migration 001.
+    rsky_space_host::actor_schema::get_migrated_db(&path).expect("shim adopts the pds store");
+
+    let after = sqlite_master(&path);
+    for object in &before {
+        let (kind, name, _) = object;
+        assert!(
+            after.contains(object),
+            "shim init altered the pds object {kind} {name}"
+        );
+    }
+    // Nothing pre-existing is rewritten, and the schema still carries the
+    // space tables the oracle put there.
+    assert_eq!(after, before, "shim init changed a pds-created schema");
+    assert!(
+        after.iter().any(|(_, name, _)| name == "space_record"),
+        "the pds-created store is missing the space tables"
+    );
+    // Opening it a second time is a no-op, so a restart is safe too.
+    let twice = std::fs::read(&path).expect("read");
+    rsky_space_host::actor_schema::get_migrated_db(&path).expect("second open");
+    assert_eq!(twice, std::fs::read(&path).expect("read"));
+    assert_ne!(before_bytes.len(), 0);
+}
+
+/// S16: the shim writes to its own directory while reading keys from the PDS's.
+///
+/// Option A (`Design/spaces-storage-parity.md`) keeps the two directories
+/// separate; the suite only ever ran them as the same path, which is precisely
+/// the configuration that hid one setting doing both jobs.
+#[tokio::test]
+async fn separated_key_and_store_directories_write_only_to_the_space_store() {
+    use rsky_space_host::pds_seam::PdsSeam;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let actors = temp.path().join("pds-actors");
+    let spaces = temp.path().join("space-stores");
+    std::fs::create_dir_all(&actors).expect("actors dir");
+
+    // A PDS-shaped account: a key file and a store the PDS created.
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(DID.as_bytes());
+    let account = actors.join(&hex::encode(digest)[..2]).join(DID);
+    std::fs::create_dir_all(&account).expect("account dir");
+    std::fs::write(account.join("key"), [7u8; 32]).expect("key");
+    get_migrated_db(account.join("store.sqlite"))
+        .await
+        .expect("pds store");
+    let pds_store_before = std::fs::read(account.join("store.sqlite")).expect("read");
+
+    let seam = PdsSeam::open(&actors).expect("seam opens the pds actors dir");
+    seam.signer(DID).expect("signing key resolves");
+
+    let repos = ActorStoreRepos::open(&spaces).expect("space store opens");
+    let space = SpaceId::new(AUTHORITY, "community.blacksky.feed", "parity");
+    let write = create("s16", "written to the space store");
+    repos
+        .apply_writes(&space.uri(), DID, "", &[write.shim()])
+        .await
+        .expect("write lands in the space store");
+
+    // The write went to the shim's own file, and the PDS's is untouched.
+    let shim_path = repos.store_path(DID).expect("shim path");
+    assert!(shim_path.starts_with(&spaces));
+    assert!(shim_path.is_file());
+    assert_eq!(
+        pds_store_before,
+        std::fs::read(account.join("store.sqlite")).expect("read"),
+        "the pds store must not be written to"
+    );
+}
+
 const DID: &str = "did:plc:parityauthor";
 const AUTHORITY: &str = "did:plc:parityauthority";
 const COLLECTION: &str = "app.bsky.feed.post";
