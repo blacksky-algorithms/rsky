@@ -175,6 +175,12 @@ impl CommitSigner for PdsSeam {
     }
 }
 
+// A live PDS actor store accumulates partial account dirs (abandoned
+// creations, deactivations, mid-migration state). Their presence is not this
+// service's concern: key availability is enforced per authority when it
+// registers or signs (`require_signer` → AccountNotHosted). Boot validation
+// therefore only proves the mount itself is right; malformed entries are
+// logged and skipped, never fatal.
 fn validate_actor_store_layout(root: &Path) -> Result<()> {
     if !root.is_dir() {
         return Err(HostError::Store(format!(
@@ -189,15 +195,12 @@ fn validate_actor_store_layout(root: &Path) -> Result<()> {
         if name == "reserved_keys" {
             continue;
         }
-        if name.len() != 2 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(HostError::Store(format!(
-                "unrecognized actor-store layout entry: {name}"
-            )));
-        }
-        if !prefix.path().is_dir() {
-            return Err(HostError::Store(format!(
-                "actor-store shard is not a directory: {name}"
-            )));
+        if name.len() != 2
+            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !prefix.path().is_dir()
+        {
+            tracing::warn!(entry = %name, "skipping unrecognized actor-store layout entry");
+            continue;
         }
         for actor in
             std::fs::read_dir(prefix.path()).map_err(|error| HostError::Store(error.to_string()))?
@@ -208,9 +211,10 @@ fn validate_actor_store_layout(root: &Path) -> Result<()> {
                 || !actor.path().join("store.sqlite").is_file()
                 || !actor.path().join("key").is_file()
             {
-                return Err(HostError::Store(format!(
-                    "unrecognized actor-store account layout: {actor_name}"
-                )));
+                tracing::warn!(
+                    actor = %actor_name,
+                    "skipping malformed actor-store account dir"
+                );
             }
         }
     }
@@ -271,12 +275,28 @@ mod tests {
     }
 
     #[test]
-    fn layout_drift_refuses_startup() {
-        let directory = tempfile::tempdir().unwrap();
+    fn layout_drift_is_skipped_not_fatal() {
+        // A live PDS actor store carries partial dirs (abandoned creations,
+        // deactivations). They must not brick the host: signing for such an
+        // account still fails per-actor, but boot proceeds.
+        let directory = actor_store([7u8; 32]);
         std::fs::create_dir(directory.path().join("unexpected-layout")).unwrap();
+        let partial = directory.path().join("aa").join("did:plc:abandoned");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("store.sqlite"), []).unwrap(); // no key file
+        let seam = PdsSeam::open(directory.path()).expect("boot survives layout drift");
         assert!(matches!(
-            PdsSeam::open(directory.path()),
-            Err(HostError::Store(message)) if message.contains("layout")
+            seam.signer("did:plc:abandoned"),
+            Err(HostError::AccountNotHosted(_))
+        ));
+        assert!(seam.signer(DID).is_ok());
+    }
+
+    #[test]
+    fn missing_actor_store_root_still_refuses_startup() {
+        assert!(matches!(
+            PdsSeam::open(std::path::Path::new("/nonexistent/actors")),
+            Err(HostError::Store(message)) if message.contains("not a directory")
         ));
     }
 
