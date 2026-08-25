@@ -121,6 +121,16 @@ pub struct Config {
     #[arg(long, env = "DAEMON_SWEEP_INTERVAL_SECS", default_value_t = 300)]
     pub sweep_interval_secs: u64,
 
+    /// Sweeps a batch refused with "author is not admitted" is re-attempted
+    /// for before it is parked. Admission can arrive late; it can also never
+    /// arrive, so the retry is slow but finite.
+    #[arg(
+        long,
+        env = "DAEMON_DENIAL_PARK_AFTER",
+        default_value_t = crate::journal::DENIAL_PARK_AFTER
+    )]
+    pub denial_park_after: u32,
+
     /// PLC directory to resolve DIDs against. Empty uses the public one,
     /// which cannot know about a local or staging network.
     #[arg(long, env = "DAEMON_PLC_URL", default_value = "")]
@@ -206,6 +216,7 @@ mod tests {
 
         let cfg = Config::try_parse_from(REQUIRED).unwrap();
         assert_eq!(cfg.sweep_interval_secs, 300);
+        assert_eq!(cfg.denial_park_after, crate::journal::DENIAL_PARK_AFTER);
         assert_eq!(cfg.index_db_path, "");
         assert_eq!(cfg.notify_bind, "127.0.0.1:8055");
         assert_eq!(cfg.repo_host_url(), "https://host.example");
@@ -241,6 +252,7 @@ mod tests {
             ("DAEMON_NOTIFY_BIND", "0.0.0.0:9000"),
             ("DAEMON_INDEX_DB_PATH", "/data/space.sqlite"),
             ("DAEMON_SWEEP_INTERVAL_SECS", "60"),
+            ("DAEMON_DENIAL_PARK_AFTER", "7"),
             ("DAEMON_PLC_URL", "http://localhost:2582"),
             ("DAEMON_FEEDS_URL", "http://localhost:8080"),
             ("DAEMON_FEEDS_SERVICE_DID", "did:web:feeds.example"),
@@ -264,6 +276,7 @@ mod tests {
         assert_eq!(cfg.notify_endpoint(), "http://0.0.0.0:9000");
         assert_eq!(cfg.index_db_path, "/data/space.sqlite");
         assert_eq!(cfg.sweep_interval_secs, 60);
+        assert_eq!(cfg.denial_park_after, 7);
         assert_eq!(
             cfg.feeds_projection(),
             Some(("http://localhost:8080", "did:web:feeds.example"))

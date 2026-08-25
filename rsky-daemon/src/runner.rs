@@ -14,7 +14,7 @@ use crate::engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 use crate::error::{DaemonError, Result};
 use crate::feeds::SpaceLifecycleAcker;
 use crate::index::SpaceIndex;
-use crate::journal::{drain_all, SharedJournalConsumer};
+use crate::journal::{drain_all, drain_all_sweep, SharedJournalConsumer};
 use crate::notify::WriteNotice;
 use crate::recovery::recover_repo;
 use crate::repohost::RepoHostClient;
@@ -317,7 +317,7 @@ pub async fn run(
                     keys.as_ref(),
                 )
                 .await;
-                let projected = drain_all(index.as_ref(), &projectors).await;
+                let projected = drain_all_sweep(index.as_ref(), &projectors).await;
                 if swept && projected && !acknowledged {
                     if let Some(acker) = &lifecycle_acker {
                         match acker.acknowledge_sync(&opts.space_uri, opts.generation).await {

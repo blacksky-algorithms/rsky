@@ -51,9 +51,15 @@ CREATE TABLE IF NOT EXISTS projection_failure (
     attempts      INTEGER NOT NULL,
     last_error    TEXT NOT NULL,
     dead_lettered INTEGER NOT NULL DEFAULT 0,
+    denials       INTEGER NOT NULL DEFAULT 0,
+    parked        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (projector, space_uri, did, rev)
 );
 ";
+
+/// Columns added to `projection_failure` after its first release; an index
+/// created by an earlier build has the table but not these.
+const FAILURE_COLUMNS: [&str; 2] = ["denials", "parked"];
 
 fn db_err(e: rusqlite::Error) -> DaemonError {
     DaemonError::Index(e.to_string())
@@ -72,9 +78,38 @@ impl SqliteIndex {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        Self::add_missing_failure_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    fn add_missing_failure_columns(conn: &Connection) -> Result<()> {
+        let mut present = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('projection_failure')")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(db_err)?;
+            for row in rows {
+                present.push(row.map_err(db_err)?);
+            }
+        }
+        for column in FAILURE_COLUMNS {
+            if !present.iter().any(|name| name == column) {
+                conn.execute(
+                    &format!(
+                        "ALTER TABLE projection_failure
+                         ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    ),
+                    [],
+                )
+                .map_err(db_err)?;
+            }
+        }
+        Ok(())
     }
 
     /// A [`SpaceIndex`] handle scoped to one space.
@@ -199,7 +234,8 @@ impl SpaceIndex for SpaceScopedIndex {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT j.did, j.rev, j.mutations FROM projection_journal j
+                "SELECT j.did, j.rev, j.mutations, COALESCE(f.denials, 0)
+                 FROM projection_journal j
                  LEFT JOIN projector_cursor c
                    ON c.projector = ?1 AND c.space_uri = j.space_uri AND c.did = j.did
                  LEFT JOIN projection_failure f
@@ -207,6 +243,7 @@ impl SpaceIndex for SpaceScopedIndex {
                  WHERE j.space_uri = ?2
                    AND (c.rev IS NULL OR j.rev > c.rev)
                    AND COALESCE(f.dead_lettered, 0) = 0
+                   AND COALESCE(f.parked, 0) = 0
                  ORDER BY j.did, j.rev",
             )
             .map_err(db_err)?;
@@ -219,6 +256,7 @@ impl SpaceIndex for SpaceScopedIndex {
                     author: row.get(0)?,
                     rev: row.get(1)?,
                     mutations,
+                    denials: row.get(3)?,
                 })
             })
             .map_err(db_err)?;
@@ -272,6 +310,36 @@ impl SpaceIndex for SpaceScopedIndex {
         .map_err(db_err)
     }
 
+    async fn record_projection_denial(
+        &self,
+        projector: &str,
+        did: &str,
+        rev: &str,
+        error: &str,
+        park_after: u32,
+    ) -> Result<u32> {
+        let conn = self.db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO projection_failure
+                 (projector, space_uri, did, rev, attempts, last_error, dead_lettered,
+                  denials, parked)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, 1, CASE WHEN 1 >= ?6 THEN 1 ELSE 0 END)
+             ON CONFLICT (projector, space_uri, did, rev) DO UPDATE
+                 SET denials = denials + 1,
+                     last_error = ?5,
+                     parked = CASE WHEN denials + 1 >= ?6 THEN 1 ELSE 0 END",
+            params![projector, self.space_uri, did, rev, error, park_after],
+        )
+        .map_err(db_err)?;
+        conn.query_row(
+            "SELECT denials FROM projection_failure
+             WHERE projector = ?1 AND space_uri = ?2 AND did = ?3 AND rev = ?4",
+            params![projector, self.space_uri, did, rev],
+            |row| row.get(0),
+        )
+        .map_err(db_err)
+    }
+
     async fn prune_journal(&self, projectors: &[&str]) -> Result<usize> {
         if projectors.is_empty() {
             return Ok(0);
@@ -293,7 +361,7 @@ impl SpaceIndex for SpaceScopedIndex {
                   WHERE f.space_uri = projection_journal.space_uri
                     AND f.did = projection_journal.did
                     AND f.rev = projection_journal.rev
-                    AND f.dead_lettered = 1)"
+                    AND (f.dead_lettered = 1 OR f.parked = 1))"
         );
         let count = projectors.len() as i64;
         let mut values: Vec<&dyn rusqlite::ToSql> = vec![&self.space_uri, &count];
@@ -302,7 +370,8 @@ impl SpaceIndex for SpaceScopedIndex {
         }
         let pruned = tx.execute(&sql, &values[..]).map_err(db_err)?;
         tx.execute(
-            "DELETE FROM projection_failure WHERE space_uri = ?1 AND dead_lettered = 0
+            "DELETE FROM projection_failure
+             WHERE space_uri = ?1 AND dead_lettered = 0 AND parked = 0
              AND NOT EXISTS (SELECT 1 FROM projection_journal j
                   WHERE j.space_uri = projection_failure.space_uri
                     AND j.did = projection_failure.did
@@ -624,6 +693,111 @@ mod tests {
 
         index.purge_space().await.unwrap();
         assert!(index.pending_batches("appview").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn denials_are_budgeted_apart_from_dead_letters_and_survive_a_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let index = db.for_space(SPACE);
+        let mutation = IndexMutation::Delete {
+            collection: "app.bsky.feed.post".to_string(),
+            rkey: "3ka".to_string(),
+        };
+        index
+            .journal_batch(AUTHOR, "3rev1", &[mutation])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            index
+                .record_projection_denial("appview", AUTHOR, "3rev1", "401", 2)
+                .await
+                .unwrap(),
+            1
+        );
+        let pending = index.pending_batches("appview").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].denials, 1);
+
+        // A denial leaves the poison budget untouched.
+        let attempts: u32 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT attempts FROM projection_failure
+                 WHERE projector = 'appview' AND space_uri = ?1 AND did = ?2 AND rev = '3rev1'",
+                params![SPACE, AUTHOR],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(attempts, 0);
+
+        assert_eq!(
+            index
+                .record_projection_denial("appview", AUTHOR, "3rev1", "401", 2)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(index.pending_batches("appview").await.unwrap().is_empty());
+
+        // A parked batch keeps its journal row, so it stays inspectable.
+        index
+            .advance_projector_cursor("appview", AUTHOR, "3rev1")
+            .await
+            .unwrap();
+        assert_eq!(index.prune_journal(&["appview"]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_index_written_before_the_denial_columns_is_migrated_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projection_failure (
+                     projector     TEXT NOT NULL,
+                     space_uri     TEXT NOT NULL,
+                     did           TEXT NOT NULL,
+                     rev           TEXT NOT NULL,
+                     attempts      INTEGER NOT NULL,
+                     last_error    TEXT NOT NULL,
+                     dead_lettered INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (projector, space_uri, did, rev)
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO projection_failure
+                     (projector, space_uri, did, rev, attempts, last_error, dead_lettered)
+                 VALUES ('appview', ?1, ?2, '3rev1', 3, 'boom', 1)",
+                params![SPACE, AUTHOR],
+            )
+            .unwrap();
+        }
+
+        let db = Arc::new(SqliteIndex::open(path.to_str().unwrap()).unwrap());
+        let index = db.for_space(SPACE);
+        assert_eq!(
+            index
+                .record_projection_denial("appview", AUTHOR, "3rev2", "401", 5)
+                .await
+                .unwrap(),
+            1
+        );
+        let (denials, parked, dead): (u32, u32, u32) = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT denials, parked, dead_lettered FROM projection_failure
+                 WHERE rev = '3rev1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!((denials, parked, dead), (0, 0, 1));
     }
 
     #[tokio::test]

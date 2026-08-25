@@ -70,6 +70,7 @@ impl CommitKeyResolver for DidKeyResolver {
 struct ProjectionConfig {
     service_identity: String,
     signing_key_hex: String,
+    denial_park_after: u32,
     feeds: Option<(String, String)>,
     appview: Option<(String, String)>,
 }
@@ -96,10 +97,13 @@ impl ProjectionConfig {
                 &self.signing_key_hex,
             )?);
             acker = Some(ingress.clone());
-            consumers.push(Arc::new(JournalConsumer::new(
-                Router::new(space_id.clone(), space_id.authority.clone()),
-                Box::new(FeedsProjector::new(ingress, space)),
-            )));
+            consumers.push(Arc::new(
+                JournalConsumer::new(
+                    Router::new(space_id.clone(), space_id.authority.clone()),
+                    Box::new(FeedsProjector::new(ingress, space)),
+                )
+                .with_denial_park_after(self.denial_park_after),
+            ));
         }
         if let Some((url, audience)) = &self.appview {
             let ingress = HttpProjectionIngress::new(
@@ -109,10 +113,13 @@ impl ProjectionConfig {
                 audience,
                 &self.signing_key_hex,
             )?;
-            consumers.push(Arc::new(JournalConsumer::new(
-                Router::new(space_id.clone(), space_id.authority.clone()),
-                Box::new(AppviewProjector::new(ingress, space)),
-            )));
+            consumers.push(Arc::new(
+                JournalConsumer::new(
+                    Router::new(space_id.clone(), space_id.authority.clone()),
+                    Box::new(AppviewProjector::new(ingress, space)),
+                )
+                .with_denial_park_after(self.denial_park_after),
+            ));
         }
         Ok((consumers, acker))
     }
@@ -218,6 +225,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let projection = ProjectionConfig {
         service_identity: cfg.service_identity.clone(),
         signing_key_hex: cfg.service_signing_key_hex.clone(),
+        denial_park_after: cfg.denial_park_after,
         feeds: cfg
             .feeds_projection()
             .map(|(url, aud)| (url.to_string(), aud.to_string())),

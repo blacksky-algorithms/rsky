@@ -8045,7 +8045,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-daemon"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -8716,7 +8716,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-spaces-parity"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

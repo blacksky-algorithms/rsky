@@ -149,6 +149,9 @@ impl ProjectionIngress for HttpProjectionIngress {
         if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(DaemonError::RetryableProjection(message));
         }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(DaemonError::AdmissionDenied(message));
+        }
         Err(DaemonError::Xrpc(message))
     }
 }
@@ -462,6 +465,21 @@ pub(crate) mod tests {
             .project_records(&ProjectRecordsRequest { ops: vec![] })
             .await
             .unwrap_err();
+        assert!(!error.is_retryable_projection());
+        assert!(!error.is_admission_denied());
+
+        let denying = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(
+                r#"{"error":"NotAuthorized","message":"author is not admitted to this space"}"#,
+            ))
+            .mount(&denying)
+            .await;
+        let error = ingress(&denying)
+            .project_records(&ProjectRecordsRequest { ops: vec![] })
+            .await
+            .unwrap_err();
+        assert!(error.is_admission_denied());
         assert!(!error.is_retryable_projection());
 
         let unreachable = HttpProjectionIngress::new(

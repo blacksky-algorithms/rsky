@@ -50,7 +50,7 @@ pub use feeds::{
     ProjectionOperation, SpaceLifecycleAcker,
 };
 pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
-pub use journal::{drain_all, JournalConsumer, SharedJournalConsumer};
+pub use journal::{drain_all, drain_all_sweep, JournalConsumer, SharedJournalConsumer};
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use projection::Projector;
 pub use recovery::recover_repo;
