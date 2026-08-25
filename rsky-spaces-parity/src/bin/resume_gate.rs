@@ -137,14 +137,17 @@ fn seed_actor_store(root: &Path, did: &str, key_hex: &str) -> Result<PathBuf> {
     Ok(store)
 }
 
+/// `space_stores` is `None` for the legacy era, which predates the split of
+/// the key source from the space-store write target.
 fn shim_env(
     port: u16,
     public_url: &str,
     db_path: &Path,
     actors: &Path,
+    space_stores: Option<&Path>,
     plc_url: &str,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
         ("SPACEHOST_BIND", format!("127.0.0.1:{port}")),
         ("SPACEHOST_PUBLIC_URL", public_url.to_string()),
         ("SPACEHOST_AUTHORITY_DID", AUTHOR_DID.to_string()),
@@ -164,8 +167,15 @@ fn shim_env(
         ("RUST_LOG", "warn".to_string()),
     ]
     .into_iter()
-    .map(|(key, value)| (key.to_string(), value))
-    .collect()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect::<Vec<(String, String)>>();
+    if let Some(stores) = space_stores {
+        env.push((
+            "SPACEHOST_SPACE_STORE_DIR".to_string(),
+            stores.display().to_string(),
+        ));
+    }
+    env
 }
 
 struct DaemonSetup {
@@ -286,6 +296,7 @@ async fn main() -> Result<()> {
             &shim_url,
             &host_db,
             &legacy_actors,
+            None,
             &directory.url(),
         ),
         &run_dir.join("shim-legacy.log"),
@@ -431,7 +442,8 @@ async fn main() -> Result<()> {
             shim_port,
             &shim_url,
             &host_db,
-            &converged_actors,
+            &legacy_actors,
+            Some(&converged_actors),
             &directory.url(),
         ),
         &run_dir.join("shim-converged.log"),
