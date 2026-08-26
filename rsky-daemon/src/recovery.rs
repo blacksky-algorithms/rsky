@@ -10,7 +10,7 @@ use rsky_space::lthash::{element, LtHash};
 
 use crate::engine::{CommitKeyResolver, SyncOutcome};
 use crate::error::{DaemonError, Result};
-use crate::index::SpaceIndex;
+use crate::index::{IndexMutation, SpaceIndex};
 use crate::repohost::RepoHostClient;
 
 /// Recover an author's repo from a full-state CAR: verify the commit with the
@@ -43,6 +43,7 @@ pub async fn recover_repo(
     let mut lth = LtHash::new();
     let mut keep: HashSet<String> = HashSet::with_capacity(records.len());
     let mut changed = 0usize;
+    let mut mutations: Vec<IndexMutation> = Vec::new();
     for (path, cid, bytes) in &records {
         let (collection, rkey) = path
             .split_once('/')
@@ -60,6 +61,13 @@ pub async fn recover_repo(
                 )
                 .await?;
             changed += 1;
+            mutations.push(IndexMutation::Upsert {
+                collection: collection.to_string(),
+                rkey: rkey.to_string(),
+                cid: cid.clone(),
+                rev: commit.rev.clone(),
+                value: Some(bytes.clone()),
+            });
         }
         lth.add(&element(collection, rkey, &cid));
         keep.insert(path.clone());
@@ -68,8 +76,10 @@ pub async fn recover_repo(
         if !keep.contains(&format!("{collection}/{rkey}")) {
             index.delete(did, &collection, &rkey).await?;
             changed += 1;
+            mutations.push(IndexMutation::Delete { collection, rkey });
         }
     }
+    index.journal_batch(did, &commit.rev, &mutations).await?;
     index.save_head(did, &commit.rev, &lth).await?;
     tracing::info!(did, rev = %commit.rev, changed, "recovered repo from full-state CAR");
     Ok(SyncOutcome {

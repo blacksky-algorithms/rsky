@@ -5,7 +5,7 @@
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use crate::engine::CommitKeyResolver;
 use crate::error::{DaemonError, Result};
 use crate::index::SpaceIndex;
+use crate::spaces::SpaceRegistry;
 
 /// A queued `(space, did)` write notice for the runner to pull.
 pub type WriteNotice = (String, String);
@@ -88,10 +89,11 @@ pub fn decode_claims(jwt: &str) -> Result<ServiceAuthClaims> {
 #[derive(Clone)]
 pub struct NotifyState {
     pub space_uri: String,
-    /// The authority (space host) DID whose key signs inbound notifications.
-    pub authority_did: String,
+    pub registry: SpaceRegistry,
     /// This syncer's service identity: the required `aud` on inbound tokens.
     pub service_identity: String,
+    pub service_signing_key_hex: String,
+    pub notify_endpoint: String,
     pub resolver: Arc<dyn CommitKeyResolver>,
     pub index: Arc<dyn SpaceIndex>,
     pub tx: mpsc::Sender<WriteNotice>,
@@ -100,6 +102,7 @@ pub struct NotifyState {
 
 pub fn router(state: NotifyState) -> Router {
     Router::new()
+        .route("/.well-known/did.json", get(well_known))
         .route("/xrpc/com.atproto.space.notifyWrite", post(notify_write))
         .route(
             "/xrpc/com.atproto.space.notifySpaceDeleted",
@@ -108,11 +111,60 @@ pub fn router(state: NotifyState) -> Router {
         .with_state(state)
 }
 
+fn service_multikey(signing_key_hex: &str) -> Result<String> {
+    let bytes = hex::decode(signing_key_hex.trim())
+        .map_err(|error| DaemonError::Xrpc(error.to_string()))?;
+    let secret = secp256k1::SecretKey::from_slice(&bytes)
+        .map_err(|error| DaemonError::Xrpc(error.to_string()))?;
+    let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
+    let did_key = rsky_crypto::utils::encode_did_key(&public);
+    Ok(did_key
+        .strip_prefix("did:key:")
+        .expect("rsky did:key encoder always includes its prefix")
+        .to_string())
+}
+
+async fn well_known(State(state): State<NotifyState>) -> (StatusCode, Json<Value>) {
+    let multikey = match service_multikey(&state.service_signing_key_hex) {
+        Ok(multikey) => multikey,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_body("InternalServerError", error),
+            )
+        }
+    };
+    let did = state.service_identity;
+    let notify_endpoint = state.notify_endpoint;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "@context": [
+                "https://www.w3.org/ns/did/v1",
+                "https://w3id.org/security/multikey/v1"
+            ],
+            "id": did,
+            "verificationMethod": [{
+                "id": format!("{did}#atproto"),
+                "type": "Multikey",
+                "controller": did,
+                "publicKeyMultibase": multikey
+            }],
+            "service": [{
+                "id": format!("{did}#atproto_space_syncer"),
+                "type": "AtprotoSpaceService",
+                "serviceEndpoint": notify_endpoint
+            }]
+        })),
+    )
+}
+
 fn error_body(error: &str, message: impl std::fmt::Display) -> Json<Value> {
     Json(json!({ "error": error, "message": message.to_string() }))
 }
 
-async fn authenticate(headers: &HeaderMap, state: &NotifyState) -> Result<()> {
+async fn authenticate(headers: &HeaderMap, state: &NotifyState, space_uri: &str) -> Result<()> {
+    let authority = rsky_space::space_id::SpaceId::parse(space_uri)?.authority;
     let jwt = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -122,10 +174,10 @@ async fn authenticate(headers: &HeaderMap, state: &NotifyState) -> Result<()> {
                 "missing bearer token".into(),
             ))
         })?;
-    let did_key = state.resolver.signing_key(&state.authority_did).await?;
+    let did_key = state.resolver.signing_key(&authority).await?;
     verify_service_auth(
         jwt,
-        &state.authority_did,
+        &authority,
         &state.service_identity,
         &did_key,
         (state.now_fn)(),
@@ -137,16 +189,16 @@ async fn notify_write(
     headers: HeaderMap,
     Json(input): Json<NotifyWriteInput>,
 ) -> (StatusCode, Json<Value>) {
-    if let Err(e) = authenticate(&headers, &state).await {
-        return (
-            StatusCode::UNAUTHORIZED,
-            error_body("AuthenticationRequired", e),
-        );
-    }
-    if input.space != state.space_uri {
+    if !state.registry.contains(&input.space) {
         return (
             StatusCode::BAD_REQUEST,
             error_body("InvalidRequest", "space is not synced by this daemon"),
+        );
+    }
+    if let Err(e) = authenticate(&headers, &state, &input.space).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            error_body("AuthenticationRequired", e),
         );
     }
     tracing::debug!(space = %input.space, repo = %input.repo, rev = %input.rev, "write notice");
@@ -164,16 +216,16 @@ async fn notify_space_deleted(
     headers: HeaderMap,
     Json(input): Json<NotifySpaceDeletedInput>,
 ) -> (StatusCode, Json<Value>) {
-    if let Err(e) = authenticate(&headers, &state).await {
-        return (
-            StatusCode::UNAUTHORIZED,
-            error_body("AuthenticationRequired", e),
-        );
-    }
-    if input.space != state.space_uri {
+    if !state.registry.contains(&input.space) {
         return (
             StatusCode::BAD_REQUEST,
             error_body("InvalidRequest", "space is not synced by this daemon"),
+        );
+    }
+    if let Err(e) = authenticate(&headers, &state, &input.space).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            error_body("AuthenticationRequired", e),
         );
     }
     tracing::warn!(space = %input.space, "space deleted; purging all synced data");
@@ -200,6 +252,8 @@ mod tests {
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
     const AUTHORITY: &str = "did:plc:authority";
     const SYNCER: &str = "did:web:syncer.blacksky.community";
+    const SYNCER_ENDPOINT: &str = "https://syncer.blacksky.community";
+    const SYNCER_KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
     const NOW: u64 = 1_000_000;
 
     fn host_key() -> (SecretKey, String) {
@@ -243,13 +297,84 @@ mod tests {
     ) -> NotifyState {
         NotifyState {
             space_uri: SPACE.to_string(),
-            authority_did: AUTHORITY.to_string(),
+            registry: {
+                let registry = SpaceRegistry::new();
+                registry.insert(SPACE);
+                registry
+            },
             service_identity: SYNCER.to_string(),
+            service_signing_key_hex: SYNCER_KEY.to_string(),
+            notify_endpoint: SYNCER_ENDPOINT.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,
             tx,
             now_fn: fixed_now,
         }
+    }
+
+    #[tokio::test]
+    async fn well_known_publishes_the_service_identity() {
+        let (_secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let app = router(state(&did_key, Arc::new(InMemoryIndex::new()), tx));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/did.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let document: Value = serde_json::from_slice(&body).unwrap();
+        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&Secp256k1::new(), &secret);
+        let expected = rsky_crypto::utils::encode_did_key(&public)
+            .strip_prefix("did:key:")
+            .unwrap()
+            .to_string();
+
+        assert_eq!(document["id"], SYNCER);
+        assert_eq!(
+            document["verificationMethod"][0]["id"],
+            format!("{SYNCER}#atproto")
+        );
+        assert_eq!(document["verificationMethod"][0]["type"], "Multikey");
+        assert_eq!(document["verificationMethod"][0]["controller"], SYNCER);
+        assert_eq!(
+            document["verificationMethod"][0]["publicKeyMultibase"],
+            expected
+        );
+        assert_eq!(document["service"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            document["service"][0]["id"],
+            format!("{SYNCER}#atproto_space_syncer")
+        );
+        assert_eq!(document["service"][0]["type"], "AtprotoSpaceService");
+        assert_eq!(document["service"][0]["serviceEndpoint"], SYNCER_ENDPOINT);
+    }
+
+    #[tokio::test]
+    async fn well_known_rejects_an_invalid_signing_key() {
+        let (_secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut notify_state = state(&did_key, Arc::new(InMemoryIndex::new()), tx);
+        notify_state.service_signing_key_hex = "not-hex".to_string();
+        let response = router(notify_state)
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/did.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -486,6 +611,75 @@ mod tests {
             .await
             .unwrap();
         idx.list_paths("d").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notifications_verify_against_each_space_authority() {
+        use std::collections::BTreeMap;
+        struct KeyMap(BTreeMap<String, String>);
+        #[async_trait]
+        impl CommitKeyResolver for KeyMap {
+            async fn signing_key(&self, did: &str) -> Result<String> {
+                self.0
+                    .get(did)
+                    .cloned()
+                    .ok_or_else(|| DaemonError::KeyResolution(format!("unknown did {did}")))
+            }
+        }
+
+        let other_space = "at://did:plc:authority2/space/community.blacksky.feed/main";
+        let (secret_a, key_a) = host_key();
+        let secret_b = SecretKey::from_slice(&[0x66u8; 32]).unwrap();
+        let key_b = rsky_crypto::utils::encode_did_key(&PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &secret_b,
+        ));
+        let registry = SpaceRegistry::new();
+        registry.insert(SPACE);
+        registry.insert(other_space);
+        let (tx, mut rx) = mpsc::channel(4);
+        let app = router(NotifyState {
+            space_uri: SPACE.to_string(),
+            registry,
+            service_identity: SYNCER.to_string(),
+            service_signing_key_hex: SYNCER_KEY.to_string(),
+            notify_endpoint: SYNCER_ENDPOINT.to_string(),
+            resolver: Arc::new(KeyMap(BTreeMap::from([
+                (AUTHORITY.to_string(), key_a),
+                ("did:plc:authority2".to_string(), key_b),
+            ]))),
+            index: Arc::new(InMemoryIndex::new()),
+            tx,
+            now_fn: fixed_now,
+        });
+
+        // Each authority's key opens only its own space's notifications.
+        let jwt_b = service_jwt(&secret_b, "did:plc:authority2", SYNCER, NOW + 60);
+        let resp = app
+            .clone()
+            .oneshot(request(
+                "/xrpc/com.atproto.space.notifyWrite",
+                Some(&jwt_b),
+                json!({ "space": other_space, "repo": "did:plc:w2", "rev": "3krev" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (other_space.to_string(), "did:plc:w2".to_string())
+        );
+
+        let jwt_a_for_b = service_jwt(&secret_a, AUTHORITY, SYNCER, NOW + 60);
+        let resp = app
+            .oneshot(request(
+                "/xrpc/com.atproto.space.notifyWrite",
+                Some(&jwt_a_for_b),
+                json!({ "space": other_space, "repo": "did:plc:w2", "rev": "3krev" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

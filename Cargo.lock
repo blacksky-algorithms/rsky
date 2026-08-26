@@ -7978,13 +7978,41 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "regex",
- "rsky-identity",
+ "rsky-identity 0.2.0",
  "secp256k1",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
  "sha2 0.10.9",
  "temp-env",
+ "thiserror 2.0.16",
+ "tracing",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
+name = "rsky-common"
+version = "0.1.3"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "chrono",
+ "cid",
+ "futures",
+ "indexmap 1.9.3",
+ "multihash",
+ "multihash-codetable",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "regex",
+ "rsky-identity 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "secp256k1",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.16",
  "tracing",
  "url",
@@ -8004,8 +8032,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-crypto"
+version = "0.2.0"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "multibase",
+ "p256 0.13.2",
+ "secp256k1",
+ "unsigned-varint 0.8.0",
+]
+
+[[package]]
 name = "rsky-daemon"
-version = "0.4.0"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -8016,13 +8056,13 @@ dependencies = [
  "hex",
  "rand 0.8.5",
  "reqwest 0.12.23",
- "rsky-common",
- "rsky-crypto",
- "rsky-identity",
- "rsky-lexicon",
- "rsky-oauth",
- "rsky-space",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-identity 0.2.0",
+ "rsky-lexicon 0.10.2",
+ "rsky-oauth 0.3.2",
+ "rsky-space 0.4.2",
+ "rsky-syntax 0.1.0",
  "rusqlite",
  "secp256k1",
  "serde",
@@ -8055,8 +8095,8 @@ dependencies = [
  "reqwest 0.11.27",
  "rocket",
  "rocket_sync_db_pools",
- "rsky-common",
- "rsky-lexicon",
+ "rsky-common 0.1.3",
+ "rsky-lexicon 0.10.2",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -8083,7 +8123,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.11.27",
  "retry",
- "rsky-lexicon",
+ "rsky-lexicon 0.10.2",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -8106,12 +8146,29 @@ dependencies = [
  "hickory-resolver 0.24.4",
  "multibase",
  "reqwest 0.12.23",
- "rsky-crypto",
+ "rsky-crypto 0.2.0",
  "secp256k1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
+name = "rsky-identity"
+version = "0.2.0"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hickory-resolver 0.24.4",
+ "reqwest 0.12.23",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "url",
  "urlencoding",
 ]
@@ -8125,7 +8182,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "reqwest 0.11.27",
- "rsky-lexicon",
+ "rsky-lexicon 0.10.2",
  "serde",
  "serde_derive",
  "serde_json",
@@ -8155,8 +8212,8 @@ dependencies = [
  "parking_lot",
  "reqwest 0.12.23",
  "retry",
- "rsky-common",
- "rsky-lexicon",
+ "rsky-common 0.1.3",
+ "rsky-lexicon 0.10.2",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -8191,6 +8248,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsky-lexicon"
+version = "0.10.2"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "cid",
+ "derive_builder 0.12.0",
+ "miette 5.10.0",
+ "parking_lot",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "serde_derive",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rsky-oauth"
 version = "0.3.2"
 dependencies = [
@@ -8199,13 +8277,32 @@ dependencies = [
  "hex",
  "hmac",
  "p256 0.13.2",
- "rsky-crypto",
+ "rsky-crypto 0.2.0",
  "secp256k1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.16",
  "tokio",
+ "url",
+]
+
+[[package]]
+name = "rsky-oauth"
+version = "0.3.2"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "hmac",
+ "p256 0.13.2",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.16",
  "url",
 ]
 
@@ -8250,15 +8347,15 @@ dependencies = [
  "reqwest 0.12.23",
  "rocket",
  "rocket_ws",
- "rsky-common",
- "rsky-crypto",
- "rsky-identity",
- "rsky-lexicon",
- "rsky-oauth",
- "rsky-repo",
- "rsky-space",
- "rsky-space-host",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-identity 0.2.0",
+ "rsky-lexicon 0.10.2",
+ "rsky-oauth 0.3.2",
+ "rsky-repo 0.0.6",
+ "rsky-space 0.4.2",
+ "rsky-space-host 0.7.10",
+ "rsky-syntax 0.1.0",
  "rusqlite",
  "secp256k1",
  "serde",
@@ -8270,6 +8367,75 @@ dependencies = [
  "serde_repr",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "rsky-pds"
+version = "0.13.17"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "askama",
+ "async-event-emitter",
+ "async-trait",
+ "atrium-api 0.24.10",
+ "atrium-xrpc-client",
+ "aws-config",
+ "aws-sdk-s3",
+ "base64 0.22.1",
+ "base64-url",
+ "base64ct",
+ "chrono",
+ "cid",
+ "data-encoding",
+ "dotenvy",
+ "email_address",
+ "event-emitter-rs",
+ "futures",
+ "hex",
+ "hickory-resolver 0.24.4",
+ "image",
+ "indexmap 1.9.3",
+ "infer 0.15.0",
+ "ipld-core",
+ "jwt-simple",
+ "lazy_static",
+ "lru 0.14.0",
+ "mailchecker",
+ "mailgun-rs",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "regex",
+ "reqwest 0.12.23",
+ "rocket",
+ "rocket_ws",
+ "rsky-common 0.1.3 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-identity 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-lexicon 0.10.2 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-oauth 0.3.2 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-repo 0.0.6 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-space 0.4.1",
+ "rsky-space-host 0.5.1",
+ "rsky-syntax 0.1.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rusqlite",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "serde_derive",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "serde_repr",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "time",
  "tokio",
@@ -8310,8 +8476,8 @@ dependencies = [
  "p256 0.13.2",
  "reqwest 0.12.23",
  "rs-car-sync",
- "rsky-common",
- "rsky-identity",
+ "rsky-common 0.1.3",
+ "rsky-identity 0.2.0",
  "rtrb",
  "rusqlite",
  "rustls 0.23.31",
@@ -8356,10 +8522,44 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "regex",
- "rsky-common",
- "rsky-crypto",
- "rsky-lexicon",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-lexicon 0.10.2",
+ "rsky-syntax 0.1.0",
+ "secp256k1",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "serde_derive",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "rsky-repo"
+version = "0.0.6"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
+dependencies = [
+ "anyhow",
+ "async-recursion",
+ "async-stream",
+ "async-trait",
+ "cid",
+ "futures",
+ "integer-encoding",
+ "ipld-core",
+ "iroh-car",
+ "lazy_static",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "regex",
+ "rsky-common 0.1.3 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-lexicon 0.10.2 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-syntax 0.1.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
  "secp256k1",
  "serde",
  "serde_bytes",
@@ -8396,6 +8596,7 @@ dependencies = [
 [[package]]
 name = "rsky-space"
 version = "0.4.1"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -8404,10 +8605,35 @@ dependencies = [
  "hkdf",
  "hmac",
  "iroh-car",
+ "rsky-common 0.1.3 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-syntax 0.1.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "rsky-space"
+version = "0.4.2"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "cid",
+ "hex",
+ "hkdf",
+ "hmac",
+ "ipld-core",
+ "iroh-car",
  "p256 0.13.2",
- "rsky-common",
- "rsky-crypto",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-syntax 0.1.0",
  "secp256k1",
  "serde",
  "serde_bytes",
@@ -8422,6 +8648,7 @@ dependencies = [
 [[package]]
 name = "rsky-space-host"
 version = "0.5.1"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
 dependencies = [
  "async-trait",
  "axum",
@@ -8429,17 +8656,49 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "rand 0.8.5",
+ "reqwest 0.12.23",
+ "rsky-common 0.1.3 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-crypto 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-identity 0.2.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-lexicon 0.10.2 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-oauth 0.3.2 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-space 0.4.1",
+ "rsky-syntax 0.1.0 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rusqlite",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rsky-space-host"
+version = "0.7.10"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "cid",
+ "clap",
+ "hex",
+ "hmac",
  "http-body-util",
  "p256 0.13.2",
  "rand 0.8.5",
  "reqwest 0.12.23",
- "rsky-common",
- "rsky-crypto",
- "rsky-identity",
- "rsky-lexicon",
- "rsky-oauth",
- "rsky-space",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-identity 0.2.0",
+ "rsky-lexicon 0.10.2",
+ "rsky-oauth 0.3.2",
+ "rsky-space 0.4.2",
+ "rsky-syntax 0.1.0",
  "rusqlite",
  "secp256k1",
  "serde",
@@ -8449,14 +8708,55 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tower 0.4.13",
+ "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "zeroize",
+]
+
+[[package]]
+name = "rsky-spaces-parity"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "hmac",
+ "reqwest 0.12.23",
+ "rsky-crypto 0.2.0",
+ "rsky-oauth 0.3.2",
+ "rsky-pds 0.13.17 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
+ "rsky-space 0.4.1",
+ "rsky-space 0.4.2",
+ "rsky-space-host 0.7.10",
+ "rusqlite",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
 name = "rsky-syntax"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lazy_static",
+ "regex",
+ "serde",
+ "serde_derive",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
+name = "rsky-syntax"
+version = "0.1.0"
+source = "git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738#7ebd21ae788c550ee8510034d94eb19ede148738"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8491,7 +8791,7 @@ dependencies = [
  "prometheus",
  "rand 0.8.5",
  "reqwest 0.12.23",
- "rsky-syntax",
+ "rsky-syntax 0.1.0",
  "rustls 0.23.31",
  "sec1 0.7.3",
  "serde",
@@ -8538,12 +8838,12 @@ dependencies = [
  "prometheus",
  "rand 0.8.5",
  "reqwest 0.12.23",
- "rsky-common",
- "rsky-crypto",
- "rsky-identity",
- "rsky-lexicon",
- "rsky-repo",
- "rsky-syntax",
+ "rsky-common 0.1.3",
+ "rsky-crypto 0.2.0",
+ "rsky-identity 0.2.0",
+ "rsky-lexicon 0.10.2",
+ "rsky-repo 0.0.6",
+ "rsky-syntax 0.1.0",
  "rtrb",
  "rusqlite",
  "rustls 0.23.31",

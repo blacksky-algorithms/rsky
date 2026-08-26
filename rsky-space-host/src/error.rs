@@ -22,6 +22,24 @@ pub enum HostError {
     Resolution(String),
     #[error("store error: {0}")]
     Store(String),
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("space not hosted here: {0}")]
+    SpaceNotFound(String),
+    #[error("account not hosted here: {0}")]
+    AccountNotHosted(String),
+    #[error("repo not found")]
+    RepoNotFound,
+    #[error("record already exists: {0}")]
+    RecordExists(String),
+    #[error("record not found: {0}")]
+    RecordNotFound(String),
+    #[error("swap cid did not match")]
+    InvalidSwap,
+    #[error("requested history is no longer available")]
+    HistoryUnavailable,
+    #[error("not implemented")]
+    Unimplemented,
     #[error(transparent)]
     Space(#[from] rsky_space::SpaceError),
 }

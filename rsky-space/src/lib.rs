@@ -13,6 +13,7 @@
 //!   signature/MAC verification.
 //! - [`credential`] — delegation tokens, space credentials, and client
 //!   attestations (the JWT envelope + verification).
+//! - [`record`] — shape-agnostic permissioned-record encoding (DAG-CBOR).
 //! - [`jwk`] — minimal EC JWK (P-256) verification for ES256 client
 //!   attestations.
 //! - [`space_id`] — space and permissioned-record `at://.../space/...`
@@ -29,6 +30,7 @@ pub mod credential;
 pub mod error;
 pub mod jwk;
 pub mod lthash;
+pub mod record;
 pub mod space_id;
 pub mod types;
 
@@ -36,5 +38,6 @@ pub use car::{repo_car_bytes, write_repo_car, RepoCarValidator};
 pub use error::{Result, SpaceError};
 pub use jwk::{verify_es256, EcJwk, JwkSet};
 pub use lthash::LtHash;
+pub use record::{dag_cbor_cid, decode_record, encode_record};
 pub use space_id::{is_space_uri, RecordId, SpaceId};
 pub use types::{RepoOp, RepoRef, SignedCommit};

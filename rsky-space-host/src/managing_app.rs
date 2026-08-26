@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::error::{HostError, Result};
 use crate::keys::{service_endpoint_from_doc, DocSource};
-use crate::service_jwt;
+use crate::service_jwt::{ServiceJwtIssuer, SignerIssuer};
 use crate::signing::Signer;
 
 pub const CHECK_USER_ACCESS_LXM: &str = "com.atproto.simplespace.checkUserAccess";
@@ -55,8 +55,7 @@ pub(crate) fn require_https(url: &str) -> Result<()> {
 /// its DID document and calls `checkUserAccess` with authority service auth.
 pub struct HttpManagingApp {
     service_id: String,
-    authority_did: String,
-    signer: Signer,
+    issuer: Arc<dyn ServiceJwtIssuer>,
     docs: Arc<dyn DocSource>,
     http: reqwest::Client,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -93,14 +92,41 @@ impl HttpManagingApp {
         jti: Arc<dyn Fn() -> String + Send + Sync>,
         timeout: Duration,
     ) -> Self {
+        Self::with_issuer_and_timeout(
+            service_id,
+            Arc::new(SignerIssuer::new(authority_did, signer)),
+            docs,
+            now,
+            jti,
+            timeout,
+        )
+    }
+
+    pub fn with_issuer(
+        service_id: String,
+        issuer: Arc<dyn ServiceJwtIssuer>,
+        docs: Arc<dyn DocSource>,
+        now: Arc<dyn Fn() -> u64 + Send + Sync>,
+        jti: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Self {
+        Self::with_issuer_and_timeout(service_id, issuer, docs, now, jti, DEFAULT_TIMEOUT)
+    }
+
+    pub fn with_issuer_and_timeout(
+        service_id: String,
+        issuer: Arc<dyn ServiceJwtIssuer>,
+        docs: Arc<dyn DocSource>,
+        now: Arc<dyn Fn() -> u64 + Send + Sync>,
+        jti: Arc<dyn Fn() -> String + Send + Sync>,
+        timeout: Duration,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .expect("reqwest client");
         Self {
             service_id,
-            authority_did,
-            signer,
+            issuer,
             docs,
             http,
             now,
@@ -126,9 +152,7 @@ impl ManagingAppClient for HttpManagingApp {
         client_id: Option<&str>,
     ) -> Result<bool> {
         let endpoint = self.endpoint().await?;
-        let token = service_jwt::mint(
-            &self.signer,
-            &self.authority_did,
+        let token = self.issuer.mint(
             &self.service_id,
             CHECK_USER_ACCESS_LXM,
             (self.now)(),
@@ -265,6 +289,64 @@ mod tests {
             .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(payload["jti"], "jti-fixed");
+    }
+
+    #[tokio::test]
+    async fn check_user_access_is_signed_with_the_authority_account_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"allowed": true})),
+            )
+            .mount(&server)
+            .await;
+
+        const AUTHORITY: &str = "did:plc:auth";
+        let secret = [9u8; 32];
+        let directory = crate::pds_seam::test_actor_store(AUTHORITY, secret);
+        let seam = Arc::new(crate::pds_seam::PdsSeam::open(directory.path()).unwrap());
+        let app = HttpManagingApp::with_issuer(
+            format!("{APP_DID}#managing_app"),
+            Arc::new(crate::pds_seam::PdsServiceJwtIssuer::new(
+                seam,
+                AUTHORITY.to_string(),
+            )),
+            Arc::new(AppDoc(server.uri())),
+            Arc::new(|| 1000),
+            Arc::new(|| "jti-fixed".to_string()),
+        );
+        assert!(app
+            .check_user_access(SPACE, "did:plc:member", None)
+            .await
+            .unwrap());
+
+        let requests = server.received_requests().await.unwrap();
+        let auth = requests[0].headers.get("authorization").unwrap();
+        let jwt = auth.to_str().unwrap().strip_prefix("Bearer ").unwrap();
+
+        // The account key — what a managing app resolves as `#atproto`.
+        let account_key =
+            crate::signing::Signer::from_secret(secp256k1::SecretKey::from_slice(&secret).unwrap());
+        let claims = crate::service_jwt::verify(
+            jwt,
+            &[&format!("{APP_DID}#managing_app")],
+            CHECK_USER_ACCESS_LXM,
+            account_key.did_key(),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(claims.iss, AUTHORITY);
+
+        // The space key must NOT verify it: that mismatch is what a managing app
+        // rejects with a 401.
+        assert!(crate::service_jwt::verify(
+            jwt,
+            &[&format!("{APP_DID}#managing_app")],
+            CHECK_USER_ACCESS_LXM,
+            test_signer().did_key(),
+            1000,
+        )
+        .is_err());
     }
 
     #[tokio::test]

@@ -100,6 +100,31 @@ impl HttpSpaceHost {
     fn url(&self, nsid: &str) -> String {
         format!("{}/xrpc/{nsid}", self.base_url)
     }
+
+    pub async fn mint_internal_credential(
+        &self,
+        space: &str,
+        service_jwt: &str,
+        mint_token: &str,
+    ) -> Result<String> {
+        let url = format!("{}/admin/mintCredential", self.base_url);
+        let out: GetSpaceCredentialOutput = check(
+            self.http
+                .post(&url)
+                .header("Authorization", format!("Bearer {service_jwt}"))
+                .header("X-Spacehost-Mint-Token", mint_token)
+                .header("DPoP", self.dpop.proof("POST", &url, None)?)
+                .query(&[("space", space)])
+                .send()
+                .await
+                .map_err(net_err)?,
+        )
+        .await?
+        .json()
+        .await
+        .map_err(net_err)?;
+        Ok(out.credential)
+    }
 }
 
 #[async_trait]

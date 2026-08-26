@@ -9,8 +9,31 @@ use clap::Parser;
 )]
 pub struct Config {
     /// The space to sync: `at://{authority}/space/{type}/{skey}`.
-    #[arg(long, env = "DAEMON_SPACE_URI")]
+    #[arg(long, env = "DAEMON_SPACE_URI", default_value = "")]
     pub space_uri: String,
+
+    /// Managing-app base URL for dynamic space discovery.
+    #[arg(long, env = "DAEMON_SPACES_URL", default_value = "")]
+    pub spaces_url: String,
+    /// Managing-app API key for dynamic space discovery.
+    #[arg(
+        long,
+        env = "DAEMON_SPACES_API_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub spaces_api_key: String,
+    /// Optional authority filter for dynamic discovery; unset, the daemon
+    /// accepts spaces from every authority the managing app serves.
+    #[arg(long, env = "DAEMON_AUTHORITY_DID", default_value = "")]
+    pub authority_did: String,
+    /// Space type accepted from the managing app.
+    #[arg(
+        long,
+        env = "DAEMON_SPACE_TYPE",
+        default_value = "community.blacksky.feed"
+    )]
+    pub space_type: String,
 
     /// The space host (authority) base URL, for listRepos + credential mint.
     #[arg(long, env = "DAEMON_SPACE_HOST_URL")]
@@ -48,6 +71,39 @@ pub struct Config {
     )]
     pub static_credential: String,
 
+    #[arg(
+        long,
+        env = "DAEMON_SPACE_HOST_MINT_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub space_host_mint_token: String,
+    #[arg(long, env = "DAEMON_DPOP_KEY_PATH", default_value = "")]
+    pub dpop_key_path: String,
+    #[arg(
+        long,
+        env = "DAEMON_SERVICE_SIGNING_KEY_HEX",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub service_signing_key_hex: String,
+
+    /// Feed service base URL for record projection; empty leaves the daemon
+    /// index-only.
+    #[arg(long, env = "DAEMON_FEEDS_URL", default_value = "")]
+    pub feeds_url: String,
+    /// The `aud` the feed service requires on projection calls.
+    #[arg(long, env = "DAEMON_FEEDS_SERVICE_DID", default_value = "")]
+    pub feeds_service_did: String,
+
+    /// Appview base URL for record projection; empty leaves the daemon
+    /// index-only.
+    #[arg(long, env = "DAEMON_APPVIEW_URL", default_value = "")]
+    pub appview_url: String,
+    /// The `aud` the appview requires on projection calls.
+    #[arg(long, env = "DAEMON_APPVIEW_SERVICE_DID", default_value = "")]
+    pub appview_service_did: String,
+
     /// Bind address for the notify listener.
     #[arg(long, env = "DAEMON_NOTIFY_BIND", default_value = "127.0.0.1:8055")]
     pub notify_bind: String,
@@ -64,9 +120,61 @@ pub struct Config {
     /// Seconds between writer-set sweeps (self-healing when notifications drop).
     #[arg(long, env = "DAEMON_SWEEP_INTERVAL_SECS", default_value_t = 300)]
     pub sweep_interval_secs: u64,
+
+    /// Sweeps a batch refused with "author is not admitted" is re-attempted
+    /// for before it is parked. Admission can arrive late; it can also never
+    /// arrive, so the retry is slow but finite.
+    #[arg(
+        long,
+        env = "DAEMON_DENIAL_PARK_AFTER",
+        default_value_t = crate::journal::DENIAL_PARK_AFTER
+    )]
+    pub denial_park_after: u32,
+
+    /// PLC directory to resolve DIDs against. Empty uses the public one,
+    /// which cannot know about a local or staging network.
+    #[arg(long, env = "DAEMON_PLC_URL", default_value = "")]
+    pub plc_url: String,
 }
 
 impl Config {
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.space_uri.is_empty() && self.spaces_url.is_empty() {
+            return Err("DAEMON_SPACE_URI or DAEMON_SPACES_URL is required".into());
+        }
+        if !self.spaces_url.is_empty() && self.spaces_api_key.is_empty() {
+            return Err("DAEMON_SPACES_API_KEY is required with DAEMON_SPACES_URL".into());
+        }
+        if !self.feeds_url.is_empty() && self.feeds_service_did.is_empty() {
+            return Err("DAEMON_FEEDS_SERVICE_DID is required with DAEMON_FEEDS_URL".into());
+        }
+        if !self.appview_url.is_empty() && self.appview_service_did.is_empty() {
+            return Err("DAEMON_APPVIEW_SERVICE_DID is required with DAEMON_APPVIEW_URL".into());
+        }
+        Ok(())
+    }
+
+    /// `(base url, audience)` for the feed service, or `None` when the daemon
+    /// is configured index-only.
+    pub fn feeds_projection(&self) -> Option<(&str, &str)> {
+        (!self.feeds_url.is_empty())
+            .then_some((self.feeds_url.as_str(), self.feeds_service_did.as_str()))
+    }
+
+    /// `(base url, audience)` for the appview, or `None` when the daemon is
+    /// configured index-only.
+    pub fn appview_projection(&self) -> Option<(&str, &str)> {
+        (!self.appview_url.is_empty())
+            .then_some((self.appview_url.as_str(), self.appview_service_did.as_str()))
+    }
+
+    pub fn authority_filter(&self) -> Option<String> {
+        (!self.authority_did.is_empty()).then(|| self.authority_did.clone())
+    }
+
+    pub fn plc_url(&self) -> Option<String> {
+        (!self.plc_url.is_empty()).then(|| self.plc_url.clone())
+    }
     pub fn repo_host_url(&self) -> &str {
         if self.repo_host_url.is_empty() {
             &self.space_host_url
@@ -108,6 +216,7 @@ mod tests {
 
         let cfg = Config::try_parse_from(REQUIRED).unwrap();
         assert_eq!(cfg.sweep_interval_secs, 300);
+        assert_eq!(cfg.denial_park_after, crate::journal::DENIAL_PARK_AFTER);
         assert_eq!(cfg.index_db_path, "");
         assert_eq!(cfg.notify_bind, "127.0.0.1:8055");
         assert_eq!(cfg.repo_host_url(), "https://host.example");
@@ -115,6 +224,9 @@ mod tests {
         assert_eq!(cfg.pds_url, "");
         assert_eq!(cfg.pds_access_token, "");
         assert_eq!(cfg.static_credential, "");
+        assert_eq!(cfg.plc_url(), None);
+        assert_eq!(cfg.feeds_projection(), None);
+        assert_eq!(cfg.appview_projection(), None);
 
         let mut cfg = Config::try_parse_from(REQUIRED.into_iter().chain([
             "--repo-host-url",
@@ -140,6 +252,12 @@ mod tests {
             ("DAEMON_NOTIFY_BIND", "0.0.0.0:9000"),
             ("DAEMON_INDEX_DB_PATH", "/data/space.sqlite"),
             ("DAEMON_SWEEP_INTERVAL_SECS", "60"),
+            ("DAEMON_DENIAL_PARK_AFTER", "7"),
+            ("DAEMON_PLC_URL", "http://localhost:2582"),
+            ("DAEMON_FEEDS_URL", "http://localhost:8080"),
+            ("DAEMON_FEEDS_SERVICE_DID", "did:web:feeds.example"),
+            ("DAEMON_APPVIEW_URL", "http://localhost:2584"),
+            ("DAEMON_APPVIEW_SERVICE_DID", "did:web:appview.example"),
         ];
         for (k, v) in env {
             std::env::set_var(k, v);
@@ -154,8 +272,85 @@ mod tests {
         assert_eq!(cfg.pds_access_token, "access.jwt");
         assert_eq!(cfg.static_credential, "sc.jwt");
         assert_eq!(cfg.notify_bind, "0.0.0.0:9000");
+        assert_eq!(cfg.plc_url(), Some("http://localhost:2582".to_string()));
         assert_eq!(cfg.notify_endpoint(), "http://0.0.0.0:9000");
         assert_eq!(cfg.index_db_path, "/data/space.sqlite");
         assert_eq!(cfg.sweep_interval_secs, 60);
+        assert_eq!(cfg.denial_park_after, 7);
+        assert_eq!(
+            cfg.feeds_projection(),
+            Some(("http://localhost:8080", "did:web:feeds.example"))
+        );
+        assert_eq!(
+            cfg.appview_projection(),
+            Some(("http://localhost:2584", "did:web:appview.example"))
+        );
+        assert!(cfg.validate().is_ok());
+
+        let mut audienceless = Config::try_parse_from(
+            REQUIRED
+                .into_iter()
+                .chain(["--feeds-url", "http://localhost:8080"]),
+        )
+        .unwrap();
+        assert!(audienceless.validate().is_err());
+        audienceless
+            .try_update_from(["rsky-daemon", "--appview-url", "http://localhost:2584"])
+            .unwrap();
+        assert!(audienceless.validate().is_err());
+
+        let discovery_only = Config::try_parse_from([
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+            "--spaces-api-key",
+            "key",
+            "--authority-did",
+            "did:plc:authority",
+        ])
+        .unwrap();
+        assert!(discovery_only.validate().is_ok());
+        assert_eq!(
+            discovery_only.authority_filter().as_deref(),
+            Some("did:plc:authority")
+        );
+        let all_authorities = Config::try_parse_from([
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+            "--spaces-api-key",
+            "key",
+        ])
+        .unwrap();
+        assert!(all_authorities.validate().is_ok());
+        assert!(all_authorities.authority_filter().is_none());
+        let keyless_discovery = Config::try_parse_from([
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+        ])
+        .unwrap();
+        assert!(keyless_discovery.validate().is_err());
+        let neither = Config::try_parse_from([
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+        ])
+        .unwrap();
+        assert!(neither.validate().is_err());
     }
 }

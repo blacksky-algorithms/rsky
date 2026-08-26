@@ -68,6 +68,34 @@ pub trait RegistrationStore: Send + Sync {
     async fn endpoints(&self, space_uri: &str, now: u64) -> Result<Vec<Subscriber>>;
 }
 
+/// The spaces registered with this host (via `community.blacksky.space.register`),
+/// grouped by authority, so a restart re-serves them.
+#[async_trait]
+pub trait HostedSpaceStore: Send + Sync {
+    async fn record_space(&self, authority_did: &str, space_uri: &str) -> Result<()>;
+    async fn hosted_spaces(&self) -> Result<Vec<(String, String)>>;
+}
+
+#[derive(Default)]
+pub struct InMemoryHostedSpaces {
+    spaces: Mutex<BTreeMap<(String, String), ()>>,
+}
+
+#[async_trait]
+impl HostedSpaceStore for InMemoryHostedSpaces {
+    async fn record_space(&self, authority_did: &str, space_uri: &str) -> Result<()> {
+        self.spaces
+            .lock()
+            .unwrap()
+            .insert((authority_did.to_string(), space_uri.to_string()), ());
+        Ok(())
+    }
+
+    async fn hosted_spaces(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.spaces.lock().unwrap().keys().cloned().collect())
+    }
+}
+
 fn next_cursor(page: &[RepoRef], limit: u32) -> Option<String> {
     if page.len() == limit as usize {
         page.last().map(|r| r.did.clone())
@@ -194,6 +222,11 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS used_jti (
                 jti TEXT PRIMARY KEY,
                 exp INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hosted_space (
+                authority_did TEXT NOT NULL,
+                space_uri TEXT NOT NULL,
+                PRIMARY KEY (authority_did, space_uri)
             );",
         )
         .map_err(sql_err)?;
@@ -307,6 +340,36 @@ impl RegistrationStore for SqliteStore {
                     service: row.get(1)?,
                 })
             })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)
+    }
+}
+
+#[async_trait]
+impl HostedSpaceStore for SqliteStore {
+    async fn record_space(&self, authority_did: &str, space_uri: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO hosted_space (authority_did, space_uri) VALUES (?1, ?2)",
+                rusqlite::params![authority_did, space_uri],
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn hosted_spaces(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT authority_did, space_uri FROM hosted_space
+                 ORDER BY authority_did ASC, space_uri ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(sql_err)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sql_err)
@@ -449,6 +512,36 @@ mod tests {
             .consume("jti-1", 100 + JTI_PURGE_GRACE_SECS)
             .await
             .unwrap());
+    }
+
+    async fn exercise_hosted_spaces(store: &dyn HostedSpaceStore) {
+        store.record_space("did:plc:auth", SPACE).await.unwrap();
+        store.record_space("did:plc:auth", SPACE).await.unwrap();
+        store
+            .record_space("did:plc:auth", OTHER_SPACE)
+            .await
+            .unwrap();
+        store
+            .record_space("did:plc:other", "at://did:plc:other/space/t/main")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.hosted_spaces().await.unwrap(),
+            vec![
+                ("did:plc:auth".to_string(), SPACE.to_string()),
+                ("did:plc:auth".to_string(), OTHER_SPACE.to_string()),
+                (
+                    "did:plc:other".to_string(),
+                    "at://did:plc:other/space/t/main".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_spaces_round_trip() {
+        exercise_hosted_spaces(&InMemoryHostedSpaces::default()).await;
+        exercise_hosted_spaces(&SqliteStore::open_in_memory().unwrap()).await;
     }
 
     #[tokio::test]

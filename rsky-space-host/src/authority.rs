@@ -8,31 +8,136 @@ use rsky_space::credential::{
     self, Confirmation, JwtHeader, SpaceClaims, CREDENTIAL_TTL_SECS, CREDENTIAL_TYP,
 };
 use rsky_space::space_id::SpaceId;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock};
 
 use crate::appaccess::AppAccess;
 use crate::attestation::{verify_client_attestation, JtiStore, MetadataFetcher};
 use crate::error::{HostError, Result};
+use crate::notify::Notifier;
 use crate::policy::Policy;
+use crate::registration::LifecycleAcker;
 use crate::signing::Signer;
+
+/// Everything derived from one space authority: the authority itself plus the
+/// collaborators that mint, verify, or sign in its name.
+pub struct AuthorityContext {
+    pub authority: Arc<Authority>,
+    pub policy: Arc<Policy>,
+    pub notifier: Arc<dyn Notifier>,
+    pub lifecycle_acker: Option<Arc<dyn LifecycleAcker>>,
+}
+
+impl AuthorityContext {
+    pub fn authority_did(&self) -> &str {
+        self.authority.authority_did()
+    }
+}
+
+/// Builds the [`AuthorityContext`] for an authority first seen at
+/// registration time; fails when the authority's signing key is unavailable.
+pub type AuthorityFactory = Arc<dyn Fn(&SpaceId) -> Result<Arc<AuthorityContext>> + Send + Sync>;
+
+/// The authorities this host answers for, keyed by authority DID.
+#[derive(Default)]
+pub struct AuthorityRegistry {
+    contexts: RwLock<BTreeMap<String, Arc<AuthorityContext>>>,
+}
+
+impl AuthorityRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, context: Arc<AuthorityContext>) {
+        self.contexts
+            .write()
+            .expect("authority registry")
+            .insert(context.authority_did().to_string(), context);
+    }
+
+    /// Insert unless the authority is already present; returns the context
+    /// that ends up registered either way.
+    pub fn insert_if_absent(&self, context: Arc<AuthorityContext>) -> Arc<AuthorityContext> {
+        self.contexts
+            .write()
+            .expect("authority registry")
+            .entry(context.authority_did().to_string())
+            .or_insert(context)
+            .clone()
+    }
+
+    pub fn authority(&self, authority_did: &str) -> Result<Arc<AuthorityContext>> {
+        self.contexts
+            .read()
+            .expect("authority registry")
+            .get(authority_did)
+            .cloned()
+            .ok_or_else(|| HostError::SpaceNotFound(authority_did.to_string()))
+    }
+
+    pub fn for_space(&self, space_uri: &str) -> Result<Arc<AuthorityContext>> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        self.authority(&space.authority)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))
+    }
+
+    pub fn contexts(&self) -> Vec<Arc<AuthorityContext>> {
+        self.contexts
+            .read()
+            .expect("authority registry")
+            .values()
+            .cloned()
+            .collect()
+    }
+}
 
 /// Resolves an account's atproto signing `did:key` (from its DID document), used
 /// to verify a delegation token minted by that user's PDS.
 #[async_trait]
 pub trait KeyResolver: Send + Sync {
-    async fn signing_key(&self, did: &str) -> Result<String>;
+    async fn service_key(&self, did: &str) -> Result<String>;
 }
 
-/// A space authority for a single space.
+/// A space authority for one or more spaces of a single type.
 pub struct Authority {
     pub space: SpaceId,
+    hosted: RwLock<BTreeSet<String>>,
+    registered: RwLock<BTreeSet<String>>,
     pub signer: Signer,
     pub app_access: AppAccess,
 }
 
 impl Authority {
     pub fn new(space: SpaceId, signer: Signer, app_access: AppAccess) -> Self {
+        Self::new_many(
+            space.authority.clone(),
+            space.space_type.clone(),
+            [space.skey.clone()],
+            signer,
+            app_access,
+        )
+    }
+
+    pub fn new_many(
+        authority_did: impl Into<String>,
+        space_type: impl Into<String>,
+        skeys: impl IntoIterator<Item = String>,
+        signer: Signer,
+        app_access: AppAccess,
+    ) -> Self {
+        let authority_did = authority_did.into();
+        let space_type = space_type.into();
+        let hosted: BTreeSet<String> = skeys.into_iter().collect();
+        let first_skey = hosted
+            .first()
+            .expect("space authority needs at least one hosted space")
+            .clone();
         Self {
-            space,
+            space: SpaceId::new(authority_did, space_type, first_skey),
+            registered: RwLock::new(hosted.clone()),
+            hosted: RwLock::new(hosted),
             signer,
             app_access,
         }
@@ -44,6 +149,90 @@ impl Authority {
 
     pub fn space_uri(&self) -> String {
         self.space.uri()
+    }
+
+    pub fn space(&self, skey: &str) -> SpaceId {
+        SpaceId::new(&self.space.authority, &self.space.space_type, skey)
+    }
+
+    pub fn spaces(&self) -> Vec<String> {
+        self.hosted
+            .read()
+            .expect("hosted spaces")
+            .iter()
+            .map(|skey| self.space(skey).uri())
+            .collect()
+    }
+
+    pub fn resolve(&self, space_uri: &str) -> Result<SpaceId> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority == self.space.authority
+            && space.space_type == self.space.space_type
+            && self
+                .hosted
+                .read()
+                .expect("hosted spaces")
+                .contains(&space.skey)
+        {
+            Ok(space)
+        } else {
+            Err(HostError::SpaceNotFound(space_uri.to_string()))
+        }
+    }
+
+    pub fn register(&self, space_uri: &str) -> Result<bool> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority != self.space.authority || space.space_type != self.space.space_type {
+            return Err(HostError::SpaceNotFound(space_uri.to_string()));
+        }
+        let newly_registered = self
+            .registered
+            .write()
+            .expect("registered spaces")
+            .insert(space.skey.clone());
+        self.hosted
+            .write()
+            .expect("hosted spaces")
+            .insert(space.skey);
+        Ok(newly_registered)
+    }
+
+    pub fn resolve_registered(&self, space_uri: &str) -> Result<SpaceId> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority == self.space.authority
+            && space.space_type == self.space.space_type
+            && self
+                .registered
+                .read()
+                .expect("registered spaces")
+                .contains(&space.skey)
+        {
+            Ok(space)
+        } else {
+            Err(HostError::SpaceNotFound(space_uri.to_string()))
+        }
+    }
+
+    pub fn unregister(&self, space_uri: &str) -> Result<bool> {
+        let space = SpaceId::parse(space_uri)
+            .map_err(|_| HostError::SpaceNotFound(space_uri.to_string()))?;
+        if space.authority != self.space.authority || space.space_type != self.space.space_type {
+            return Err(HostError::SpaceNotFound(space_uri.to_string()));
+        }
+        let registered = self
+            .registered
+            .write()
+            .expect("registered spaces")
+            .remove(&space.skey);
+        let hosted = self
+            .hosted
+            .write()
+            .expect("hosted spaces")
+            .remove(&space.skey);
+        Ok(registered || hosted)
     }
 
     /// The simplespace config surfaced by `getSpace`.
@@ -68,7 +257,13 @@ impl Authority {
     /// `dpop_jkt` must come from a DPoP proof this server verified, never from
     /// a request field: a field is an assertion anyone holding a delegation
     /// token can make about a key someone else controls.
-    pub fn mint_credential(&self, now: u64, jti: String, dpop_jkt: &str) -> Result<String> {
+    pub fn mint_credential_for(
+        &self,
+        space: &SpaceId,
+        now: u64,
+        jti: String,
+        dpop_jkt: &str,
+    ) -> Result<String> {
         let header = JwtHeader {
             typ: CREDENTIAL_TYP.to_string(),
             alg: rsky_crypto::constants::SECP256K1_JWT_ALG.to_string(),
@@ -76,7 +271,7 @@ impl Authority {
         };
         let claims = SpaceClaims {
             iss: self.authority_did().to_string(),
-            sub: self.space_uri(),
+            sub: space.uri(),
             aud: None,
             iat: now,
             exp: now + CREDENTIAL_TTL_SECS,
@@ -89,12 +284,17 @@ impl Authority {
         Ok(jwt)
     }
 
+    pub fn mint_credential(&self, now: u64, jti: String, dpop_jkt: &str) -> Result<String> {
+        self.mint_credential_for(&self.space, now, jti, dpop_jkt)
+    }
+
     /// The full `getSpaceCredential` flow: verify the client attestation (when
     /// required or presented), apply appAccess, verify the delegation token,
     /// consult the policy, then mint.
     #[allow(clippy::too_many_arguments)]
-    pub async fn get_space_credential(
+    pub async fn get_space_credential_for(
         &self,
+        space: &SpaceId,
         delegation_jwt: &str,
         attestation_jwt: Option<&str>,
         policy: &Policy,
@@ -125,10 +325,10 @@ impl Authority {
         let decoded =
             credential::decode(delegation_jwt).map_err(|e| HostError::Delegation(e.to_string()))?;
         let user_did = decoded.claims.iss.clone();
-        let user_key = keys.signing_key(&user_did).await?;
+        let user_key = keys.service_key(&user_did).await?;
         let verified_user = credential::verify_delegation_token(
             delegation_jwt,
-            &self.space_uri(),
+            &space.uri(),
             self.authority_did(),
             &user_key,
             now,
@@ -136,16 +336,40 @@ impl Authority {
         .map_err(|e| HostError::Delegation(e.to_string()))?;
         // User axis: the policy decision (member list, public, or managing app).
         if !policy
-            .authorizes(
-                &self.space_uri(),
-                &verified_user,
-                attested_client_id.as_deref(),
-            )
+            .authorizes(&space.uri(), &verified_user, attested_client_id.as_deref())
             .await?
         {
             return Err(HostError::NotAuthorized);
         }
-        self.mint_credential(now, jti, dpop_jkt)
+        self.mint_credential_for(space, now, jti, dpop_jkt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_space_credential(
+        &self,
+        delegation_jwt: &str,
+        attestation_jwt: Option<&str>,
+        policy: &Policy,
+        keys: &dyn KeyResolver,
+        metadata: &dyn MetadataFetcher,
+        jti_store: &dyn JtiStore,
+        now: u64,
+        jti: String,
+        dpop_jkt: &str,
+    ) -> Result<String> {
+        self.get_space_credential_for(
+            &self.space,
+            delegation_jwt,
+            attestation_jwt,
+            policy,
+            keys,
+            metadata,
+            jti_store,
+            now,
+            jti,
+            dpop_jkt,
+        )
+        .await
     }
 }
 
@@ -170,6 +394,16 @@ mod tests {
             "main",
         );
         Authority::new(space, test_signer(), AppAccess::Open)
+    }
+
+    #[test]
+    fn registering_a_space_makes_it_immediately_serveable() {
+        let authority = authority();
+        let space = "at://did:plc:communityauthority/space/community.blacksky.feed/new";
+
+        assert!(authority.register(space).unwrap());
+        assert_eq!(authority.resolve(space).unwrap().skey, "new");
+        assert!(authority.spaces().contains(&space.to_string()));
     }
 
     fn member_policy(dids: &[&str]) -> Policy {
@@ -267,7 +501,7 @@ mod tests {
     struct DenyAllKeys;
     #[async_trait]
     impl KeyResolver for DenyAllKeys {
-        async fn signing_key(&self, _did: &str) -> Result<String> {
+        async fn service_key(&self, _did: &str) -> Result<String> {
             Err(HostError::Membership("no key".into()))
         }
     }
@@ -275,7 +509,7 @@ mod tests {
     struct FixedKey(String);
     #[async_trait]
     impl KeyResolver for FixedKey {
-        async fn signing_key(&self, _did: &str) -> Result<String> {
+        async fn service_key(&self, _did: &str) -> Result<String> {
             Ok(self.0.clone())
         }
     }

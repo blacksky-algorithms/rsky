@@ -5,11 +5,13 @@
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
 use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
+use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -74,6 +76,77 @@ pub struct StaticCredential(pub String);
 impl CredentialSource for StaticCredential {
     async fn credential(&self, _now: u64) -> Result<String> {
         Ok(self.0.clone())
+    }
+}
+
+pub struct InternalCredentialProvider {
+    default_space: String,
+    mint_token: String,
+    issuer: ServiceJwtIssuer,
+    host: Arc<HttpSpaceHost>,
+    cached: Mutex<HashMap<String, (String, u64)>>,
+}
+
+/// Adapts the shared internal provider to one worker's `CredentialSource`.
+pub struct SpaceCredentialSource {
+    provider: Arc<InternalCredentialProvider>,
+    space: String,
+}
+impl SpaceCredentialSource {
+    pub fn new(provider: Arc<InternalCredentialProvider>, space: impl Into<String>) -> Self {
+        Self {
+            provider,
+            space: space.into(),
+        }
+    }
+}
+#[async_trait]
+impl CredentialSource for SpaceCredentialSource {
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.provider.credential_for(&self.space, now).await
+    }
+}
+impl InternalCredentialProvider {
+    pub fn new(
+        space: impl Into<String>,
+        mint_token: impl Into<String>,
+        issuer: ServiceJwtIssuer,
+        host: Arc<HttpSpaceHost>,
+    ) -> Self {
+        Self {
+            default_space: space.into(),
+            mint_token: mint_token.into(),
+            issuer,
+            host,
+            cached: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get a credential bound to this daemon's DPoP key for any discovered
+    /// space. The service identity is shared, but credentials never cross a
+    /// space boundary in the cache.
+    pub async fn credential_for(&self, space: &str, now: u64) -> Result<String> {
+        let mut cached = self.cached.lock().await;
+        if let Some((jwt, exp)) = cached.get(space) {
+            if now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5) {
+                return Ok(jwt.clone());
+            }
+        }
+        let authority = rsky_space::space_id::SpaceId::parse(space)?.authority;
+        let service_jwt = self.issuer.mint(&authority, now, &format!("mint-{now}"))?;
+        let jwt = self
+            .host
+            .mint_internal_credential(space, &service_jwt, &self.mint_token)
+            .await?;
+        let exp = decode(&jwt)?.claims.exp;
+        cached.insert(space.to_string(), (jwt.clone(), exp));
+        Ok(jwt)
+    }
+}
+#[async_trait]
+impl CredentialSource for InternalCredentialProvider {
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.credential_for(&self.default_space, now).await
     }
 }
 
@@ -222,6 +295,33 @@ mod tests {
         let second = provider.credential(6760).await.unwrap();
         assert_eq!(second, credential_jwt(7000));
         assert_eq!(host.mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn internal_credentials_are_cached_per_space() {
+        let a = SPACE;
+        let b = "at://did:plc:authority/space/community.blacksky.feed/other";
+        let provider = InternalCredentialProvider::new(
+            a,
+            "mint-token",
+            ServiceJwtIssuer::from_hex("did:plc:daemon", &"11".repeat(32)).unwrap(),
+            Arc::new(HttpSpaceHost::new(
+                "http://127.0.0.1:9",
+                Arc::new(crate::dpop::DpopSigner::generate().unwrap()),
+            )),
+        );
+        provider.cached.lock().await.extend([
+            (a.into(), (credential_jwt(1000), 8200)),
+            (b.into(), (credential_jwt(2000), 9200)),
+        ]);
+        assert_eq!(
+            provider.credential_for(a, 3000).await.unwrap(),
+            credential_jwt(1000)
+        );
+        assert_eq!(
+            provider.credential_for(b, 3000).await.unwrap(),
+            credential_jwt(2000)
+        );
     }
 
     struct GarbageHost;

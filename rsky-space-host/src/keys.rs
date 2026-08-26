@@ -46,14 +46,26 @@ fn fragment_of(id: &str) -> Option<&str> {
     id.rsplit_once('#').map(|(_, frag)| frag)
 }
 
-/// The `did:key` for a doc's signing key: prefer `#atproto_space`, fall back to
-/// `#atproto`.
-pub fn signing_did_key_from_doc(doc: &DidDocument) -> Result<String> {
+/// The `did:key` that verifies a space authority's **credentials**: prefer
+/// `#atproto_space`, fall back to `#atproto` (spec §Space authority).
+pub fn credential_did_key_from_doc(doc: &DidDocument) -> Result<String> {
+    did_key_by_fragment(doc, &["atproto_space", "atproto"])
+}
+
+/// The `did:key` that verifies **service auth and delegation tokens**, which are
+/// keyed on the account's signing key alone. A delegation token's `kid` MUST be
+/// `#atproto` (spec §Delegation token), and inter-service auth uses the same
+/// key, so `#atproto_space` is not accepted here even when published.
+pub fn service_did_key_from_doc(doc: &DidDocument) -> Result<String> {
+    did_key_by_fragment(doc, &["atproto"])
+}
+
+fn did_key_by_fragment(doc: &DidDocument, fragments: &[&str]) -> Result<String> {
     let methods = doc
         .verification_method
         .as_deref()
         .ok_or_else(|| HostError::Resolution(format!("{}: no verification methods", doc.id)))?;
-    let method = ["atproto_space", "atproto"]
+    let method = fragments
         .iter()
         .find_map(|frag| methods.iter().find(|m| fragment_of(&m.id) == Some(frag)))
         .ok_or_else(|| HostError::Resolution(format!("{}: no atproto signing key", doc.id)))?;
@@ -83,7 +95,7 @@ pub fn service_endpoint_from_doc(doc: &DidDocument, fragment: &str) -> Result<St
         .ok_or_else(|| HostError::Resolution(format!("{}: no #{fragment} service", doc.id)))
 }
 
-/// Production [`KeyResolver`]: resolve the DID doc, extract the signing key.
+/// Production [`KeyResolver`]: resolve the DID doc, extract the service key.
 pub struct DocKeyResolver {
     docs: Arc<dyn DocSource>,
 }
@@ -96,9 +108,9 @@ impl DocKeyResolver {
 
 #[async_trait]
 impl KeyResolver for DocKeyResolver {
-    async fn signing_key(&self, did: &str) -> Result<String> {
+    async fn service_key(&self, did: &str) -> Result<String> {
         let doc = self.docs.did_document(did).await?;
-        signing_did_key_from_doc(&doc)
+        service_did_key_from_doc(&doc)
     }
 }
 
@@ -143,24 +155,42 @@ mod tests {
     }
 
     #[test]
-    fn prefers_atproto_space_over_atproto() {
+    fn credential_resolution_prefers_atproto_space_over_atproto() {
         let (space_m, space_key) = multikey_method("did:plc:subject#atproto_space", [0x41; 32]);
         let (atp_m, atp_key) = multikey_method("#atproto", [0x42; 32]);
         let d = doc(vec![atp_m.clone(), space_m], vec![]);
-        assert_eq!(signing_did_key_from_doc(&d).unwrap(), space_key);
+        assert_eq!(credential_did_key_from_doc(&d).unwrap(), space_key);
 
         let d = doc(vec![atp_m], vec![]);
-        assert_eq!(signing_did_key_from_doc(&d).unwrap(), atp_key);
+        assert_eq!(credential_did_key_from_doc(&d).unwrap(), atp_key);
+    }
+
+    #[test]
+    fn service_resolution_ignores_atproto_space_when_both_are_published() {
+        let (space_m, space_key) = multikey_method("did:plc:subject#atproto_space", [0x41; 32]);
+        let (atp_m, atp_key) = multikey_method("#atproto", [0x42; 32]);
+        assert_ne!(space_key, atp_key);
+
+        // An authority publishes both. Service auth and delegation tokens are
+        // keyed on #atproto, so the space key must not be selected.
+        let d = doc(vec![space_m.clone(), atp_m], vec![]);
+        assert_eq!(service_did_key_from_doc(&d).unwrap(), atp_key);
+        assert_eq!(credential_did_key_from_doc(&d).unwrap(), space_key);
+
+        // A doc with only the space key has no service key at all.
+        let d = doc(vec![space_m], vec![]);
+        assert!(service_did_key_from_doc(&d).is_err());
+        assert_eq!(credential_did_key_from_doc(&d).unwrap(), space_key);
     }
 
     #[test]
     fn missing_or_unusable_keys_are_errors() {
         assert!(matches!(
-            signing_did_key_from_doc(&doc(vec![], vec![])),
+            credential_did_key_from_doc(&doc(vec![], vec![])),
             Err(HostError::Resolution(_))
         ));
         let (other, _) = multikey_method("#unrelated", [0x43; 32]);
-        assert!(signing_did_key_from_doc(&doc(vec![other], vec![])).is_err());
+        assert!(credential_did_key_from_doc(&doc(vec![other], vec![])).is_err());
 
         let no_multibase = VerificationMethod {
             id: "#atproto".to_string(),
@@ -168,7 +198,7 @@ mod tests {
             controller: "did:plc:subject".to_string(),
             public_key_multibase: None,
         };
-        assert!(signing_did_key_from_doc(&doc(vec![no_multibase], vec![])).is_err());
+        assert!(credential_did_key_from_doc(&doc(vec![no_multibase], vec![])).is_err());
 
         let bad_multibase = VerificationMethod {
             id: "#atproto".to_string(),
@@ -176,7 +206,7 @@ mod tests {
             controller: "did:plc:subject".to_string(),
             public_key_multibase: Some("!!!".to_string()),
         };
-        assert!(signing_did_key_from_doc(&doc(vec![bad_multibase], vec![])).is_err());
+        assert!(credential_did_key_from_doc(&doc(vec![bad_multibase], vec![])).is_err());
 
         let unknown_type = VerificationMethod {
             id: "#atproto".to_string(),
@@ -184,7 +214,7 @@ mod tests {
             controller: "did:plc:subject".to_string(),
             public_key_multibase: Some("zunknown".to_string()),
         };
-        assert!(signing_did_key_from_doc(&doc(vec![unknown_type], vec![])).is_err());
+        assert!(credential_did_key_from_doc(&doc(vec![unknown_type], vec![])).is_err());
     }
 
     #[test]
@@ -215,7 +245,7 @@ mod tests {
     async fn doc_key_resolver_resolves_signing_key() {
         let (m, key) = multikey_method("#atproto", [0x44; 32]);
         let resolver = DocKeyResolver::new(Arc::new(FixedDoc(doc(vec![m], vec![]))));
-        assert_eq!(resolver.signing_key("did:plc:subject").await.unwrap(), key);
+        assert_eq!(resolver.service_key("did:plc:subject").await.unwrap(), key);
     }
 
     #[tokio::test]
@@ -250,7 +280,7 @@ mod tests {
             did_cache: Arc::new(MemoryCache::new(None, None)),
         }));
         let got = source.did_document(&did).await.unwrap();
-        assert_eq!(signing_did_key_from_doc(&got).unwrap(), key);
+        assert_eq!(credential_did_key_from_doc(&got).unwrap(), key);
 
         // Unresolvable DIDs surface as resolution errors.
         let missing = source.did_document("did:web:localhost%3A1").await;

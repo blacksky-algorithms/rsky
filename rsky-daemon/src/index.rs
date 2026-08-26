@@ -17,6 +17,47 @@ pub struct IndexedRecord {
     pub value: Option<Vec<u8>>,
 }
 
+/// One record change from a synced batch, as journaled for projection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IndexMutation {
+    Upsert {
+        collection: String,
+        rkey: String,
+        cid: String,
+        rev: String,
+        value: Option<Vec<u8>>,
+    },
+    Delete {
+        collection: String,
+        rkey: String,
+    },
+}
+
+impl IndexMutation {
+    pub fn collection(&self) -> &str {
+        match self {
+            Self::Upsert { collection, .. } | Self::Delete { collection, .. } => collection,
+        }
+    }
+    pub fn rkey(&self) -> &str {
+        match self {
+            Self::Upsert { rkey, .. } | Self::Delete { rkey, .. } => rkey,
+        }
+    }
+}
+
+/// A journaled batch a projector has not yet delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournaledBatch {
+    pub author: String,
+    pub rev: String,
+    pub mutations: Vec<IndexMutation>,
+    /// How many times this projector has been told the author is not admitted.
+    /// Non-zero puts the batch in the slow lane: retried once per sweep, never
+    /// on the fast drain.
+    pub denials: u32,
+}
+
 /// Per-author sync state + records the daemon holds for a space.
 #[async_trait]
 pub trait SpaceIndex: Send + Sync {
@@ -40,6 +81,61 @@ pub trait SpaceIndex: Send + Sync {
     async fn delete(&self, did: &str, collection: &str, rkey: &str) -> Result<()>;
     /// Persist the author's new head (rev + accumulator) after a synced batch.
     async fn save_head(&self, did: &str, rev: &str, lthash: &LtHash) -> Result<()>;
+    /// Record a synced batch for later projection, keyed by `(did, rev)`.
+    /// Journaling precedes the head write, so a crash between the two replays
+    /// the batch instead of losing it; the key makes that replay a no-op.
+    async fn journal_batch(
+        &self,
+        _did: &str,
+        _rev: &str,
+        _mutations: &[IndexMutation],
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Batches past this projector's independent `(author, rev)` cursor.
+    async fn pending_batches(&self, _projector: &str) -> Result<Vec<JournaledBatch>> {
+        Ok(Vec::new())
+    }
+    async fn advance_projector_cursor(
+        &self,
+        _projector: &str,
+        _did: &str,
+        _rev: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Returns the durable failure count for this batch, marking it
+    /// dead-lettered once the count reaches `dead_letter_after`.
+    async fn record_projection_failure(
+        &self,
+        _projector: &str,
+        _did: &str,
+        _rev: &str,
+        _error: &str,
+        _dead_letter_after: u32,
+    ) -> Result<u32> {
+        Ok(0)
+    }
+    /// Returns the durable denial count for this batch, parking it once the
+    /// count reaches `park_after`. Denials are counted separately from the
+    /// poison budget: a denial says the space's admission state is not (yet)
+    /// what the batch needs, not that the batch is bad.
+    async fn record_projection_denial(
+        &self,
+        _projector: &str,
+        _did: &str,
+        _rev: &str,
+        _error: &str,
+        _park_after: u32,
+    ) -> Result<u32> {
+        Ok(0)
+    }
+    /// Drop journal rows every one of `projectors` has advanced past, along
+    /// with their retryable failure rows. Dead-lettered and parked batches are
+    /// retained until explicitly cleared.
+    async fn prune_journal(&self, _projectors: &[&str]) -> Result<usize> {
+        Ok(0)
+    }
     /// Enumerate an author's indexed records as `(collection, rkey, cid)`,
     /// used to diff against a recovered full-state CAR.
     async fn list_paths(&self, did: &str) -> Result<Vec<(String, String, String)>>;
@@ -59,10 +155,32 @@ struct AuthorState {
     records: HashMap<String, IndexedRecord>,
 }
 
+#[derive(Default, Clone, Copy)]
+struct FailureState {
+    attempts: u32,
+    dead_lettered: bool,
+    denials: u32,
+    parked: bool,
+}
+
+impl FailureState {
+    fn retired(&self) -> bool {
+        self.dead_lettered || self.parked
+    }
+}
+
+#[derive(Default)]
+struct JournalState {
+    batches: Vec<JournaledBatch>,
+    cursors: HashMap<(String, String), String>,
+    failures: HashMap<(String, String, String), FailureState>,
+}
+
 /// In-memory [`SpaceIndex`] for tests and local runs.
 #[derive(Default)]
 pub struct InMemoryIndex {
     authors: RwLock<HashMap<String, AuthorState>>,
+    journal: RwLock<JournalState>,
 }
 
 impl InMemoryIndex {
@@ -156,6 +274,128 @@ impl SpaceIndex for InMemoryIndex {
         Ok(())
     }
 
+    async fn journal_batch(&self, did: &str, rev: &str, mutations: &[IndexMutation]) -> Result<()> {
+        let mut journal = self.journal.write().unwrap();
+        if journal
+            .batches
+            .iter()
+            .any(|b| b.author == did && b.rev == rev)
+        {
+            return Ok(());
+        }
+        journal.batches.push(JournaledBatch {
+            author: did.to_string(),
+            rev: rev.to_string(),
+            mutations: mutations.to_vec(),
+            denials: 0,
+        });
+        Ok(())
+    }
+
+    async fn pending_batches(&self, projector: &str) -> Result<Vec<JournaledBatch>> {
+        let journal = self.journal.read().unwrap();
+        let failure = |b: &JournaledBatch| {
+            journal
+                .failures
+                .get(&(projector.to_string(), b.author.clone(), b.rev.clone()))
+                .copied()
+                .unwrap_or_default()
+        };
+        let mut pending: Vec<JournaledBatch> = journal
+            .batches
+            .iter()
+            .filter(|b| {
+                journal
+                    .cursors
+                    .get(&(projector.to_string(), b.author.clone()))
+                    .is_none_or(|cursor| b.rev > *cursor)
+                    && !failure(b).retired()
+            })
+            .map(|b| JournaledBatch {
+                denials: failure(b).denials,
+                ..b.clone()
+            })
+            .collect();
+        pending.sort_by(|a, b| (&a.author, &a.rev).cmp(&(&b.author, &b.rev)));
+        Ok(pending)
+    }
+
+    async fn advance_projector_cursor(&self, projector: &str, did: &str, rev: &str) -> Result<()> {
+        self.journal
+            .write()
+            .unwrap()
+            .cursors
+            .insert((projector.to_string(), did.to_string()), rev.to_string());
+        Ok(())
+    }
+
+    async fn record_projection_failure(
+        &self,
+        projector: &str,
+        did: &str,
+        rev: &str,
+        _error: &str,
+        dead_letter_after: u32,
+    ) -> Result<u32> {
+        let mut journal = self.journal.write().unwrap();
+        let entry = journal
+            .failures
+            .entry((projector.to_string(), did.to_string(), rev.to_string()))
+            .or_default();
+        entry.attempts += 1;
+        entry.dead_lettered = entry.attempts >= dead_letter_after;
+        Ok(entry.attempts)
+    }
+
+    async fn record_projection_denial(
+        &self,
+        projector: &str,
+        did: &str,
+        rev: &str,
+        _error: &str,
+        park_after: u32,
+    ) -> Result<u32> {
+        let mut journal = self.journal.write().unwrap();
+        let entry = journal
+            .failures
+            .entry((projector.to_string(), did.to_string(), rev.to_string()))
+            .or_default();
+        entry.denials += 1;
+        entry.parked = entry.denials >= park_after;
+        Ok(entry.denials)
+    }
+
+    async fn prune_journal(&self, projectors: &[&str]) -> Result<usize> {
+        if projectors.is_empty() {
+            return Ok(0);
+        }
+        let mut journal = self.journal.write().unwrap();
+        let JournalState {
+            batches,
+            cursors,
+            failures,
+        } = &mut *journal;
+        let before = batches.len();
+        batches.retain(|b| {
+            let all_passed = projectors.iter().all(|projector| {
+                cursors
+                    .get(&(projector.to_string(), b.author.clone()))
+                    .is_some_and(|cursor| *cursor >= b.rev)
+            });
+            let retired = projectors.iter().any(|projector| {
+                failures
+                    .get(&(projector.to_string(), b.author.clone(), b.rev.clone()))
+                    .is_some_and(FailureState::retired)
+            });
+            !all_passed || retired
+        });
+        let pruned = before - batches.len();
+        failures.retain(|(_, author, rev), state| {
+            state.retired() || batches.iter().any(|b| b.author == *author && b.rev == *rev)
+        });
+        Ok(pruned)
+    }
+
     async fn list_paths(&self, did: &str) -> Result<Vec<(String, String, String)>> {
         Ok(self
             .authors
@@ -176,6 +416,7 @@ impl SpaceIndex for InMemoryIndex {
 
     async fn purge_space(&self) -> Result<()> {
         self.authors.write().unwrap().clear();
+        *self.journal.write().unwrap() = JournalState::default();
         Ok(())
     }
 }

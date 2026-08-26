@@ -18,21 +18,30 @@
 //! `com.atproto.space.*` DTOs from rsky-lexicon, backed by in-memory or SQLite
 //! [stores](store).
 
+pub mod actor_repos;
+pub mod actor_schema;
 pub mod appaccess;
 pub mod attestation;
 pub mod authority;
+pub mod client_jws;
+pub mod commits;
 pub mod config;
+pub mod convert;
 pub mod error;
 pub mod http;
 pub mod keys;
 pub mod managing_app;
 pub mod membership;
 pub mod notify;
+pub mod oauth;
+pub mod pds_seam;
 pub mod policy;
+pub mod registration;
+pub mod repo;
 pub mod service_jwt;
 pub mod signing;
 pub mod store;
 
-pub use authority::{Authority, KeyResolver};
+pub use authority::{Authority, AuthorityContext, AuthorityRegistry, KeyResolver};
 pub use error::{HostError, Result};
 pub use policy::Policy;
