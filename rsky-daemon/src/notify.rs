@@ -5,7 +5,7 @@
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -92,6 +92,7 @@ pub struct NotifyState {
     pub registry: SpaceRegistry,
     /// This syncer's service identity: the required `aud` on inbound tokens.
     pub service_identity: String,
+    pub service_signing_key_hex: String,
     pub resolver: Arc<dyn CommitKeyResolver>,
     pub index: Arc<dyn SpaceIndex>,
     pub tx: mpsc::Sender<WriteNotice>,
@@ -100,12 +101,55 @@ pub struct NotifyState {
 
 pub fn router(state: NotifyState) -> Router {
     Router::new()
+        .route("/.well-known/did.json", get(well_known))
         .route("/xrpc/com.atproto.space.notifyWrite", post(notify_write))
         .route(
             "/xrpc/com.atproto.space.notifySpaceDeleted",
             post(notify_space_deleted),
         )
         .with_state(state)
+}
+
+fn service_multikey(signing_key_hex: &str) -> Result<String> {
+    let bytes = hex::decode(signing_key_hex.trim())
+        .map_err(|error| DaemonError::Xrpc(error.to_string()))?;
+    let secret = secp256k1::SecretKey::from_slice(&bytes)
+        .map_err(|error| DaemonError::Xrpc(error.to_string()))?;
+    let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
+    let did_key = rsky_crypto::utils::encode_did_key(&public);
+    Ok(did_key
+        .strip_prefix("did:key:")
+        .expect("rsky did:key encoder always includes its prefix")
+        .to_string())
+}
+
+async fn well_known(State(state): State<NotifyState>) -> (StatusCode, Json<Value>) {
+    let multikey = match service_multikey(&state.service_signing_key_hex) {
+        Ok(multikey) => multikey,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_body("InternalServerError", error),
+            )
+        }
+    };
+    let did = state.service_identity;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "@context": [
+                "https://www.w3.org/ns/did/v1",
+                "https://w3id.org/security/multikey/v1"
+            ],
+            "id": did,
+            "verificationMethod": [{
+                "id": format!("{did}#atproto"),
+                "type": "Multikey",
+                "controller": did,
+                "publicKeyMultibase": multikey
+            }]
+        })),
+    )
 }
 
 fn error_body(error: &str, message: impl std::fmt::Display) -> Json<Value> {
@@ -201,6 +245,7 @@ mod tests {
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
     const AUTHORITY: &str = "did:plc:authority";
     const SYNCER: &str = "did:web:syncer.blacksky.community";
+    const SYNCER_KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
     const NOW: u64 = 1_000_000;
 
     fn host_key() -> (SecretKey, String) {
@@ -250,11 +295,70 @@ mod tests {
                 registry
             },
             service_identity: SYNCER.to_string(),
+            service_signing_key_hex: SYNCER_KEY.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,
             tx,
             now_fn: fixed_now,
         }
+    }
+
+    #[tokio::test]
+    async fn well_known_publishes_the_service_atproto_multikey() {
+        let (_secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let app = router(state(&did_key, Arc::new(InMemoryIndex::new()), tx));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/did.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let document: Value = serde_json::from_slice(&body).unwrap();
+        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&Secp256k1::new(), &secret);
+        let expected = rsky_crypto::utils::encode_did_key(&public)
+            .strip_prefix("did:key:")
+            .unwrap()
+            .to_string();
+
+        assert_eq!(document["id"], SYNCER);
+        assert_eq!(
+            document["verificationMethod"][0]["id"],
+            format!("{SYNCER}#atproto")
+        );
+        assert_eq!(document["verificationMethod"][0]["type"], "Multikey");
+        assert_eq!(document["verificationMethod"][0]["controller"], SYNCER);
+        assert_eq!(
+            document["verificationMethod"][0]["publicKeyMultibase"],
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn well_known_rejects_an_invalid_signing_key() {
+        let (_secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut notify_state = state(&did_key, Arc::new(InMemoryIndex::new()), tx);
+        notify_state.service_signing_key_hex = "not-hex".to_string();
+        let response = router(notify_state)
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/did.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -522,6 +626,7 @@ mod tests {
             space_uri: SPACE.to_string(),
             registry,
             service_identity: SYNCER.to_string(),
+            service_signing_key_hex: SYNCER_KEY.to_string(),
             resolver: Arc::new(KeyMap(BTreeMap::from([
                 (AUTHORITY.to_string(), key_a),
                 ("did:plc:authority2".to_string(), key_b),

@@ -194,6 +194,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         space_uri: cfg.space_uri.clone(),
         registry: registry.clone(),
         service_identity: cfg.service_identity.clone(),
+        service_signing_key_hex: cfg.service_signing_key_hex.clone(),
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
         tx: notify_tx,
