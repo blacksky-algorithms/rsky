@@ -8354,7 +8354,7 @@ dependencies = [
  "rsky-oauth 0.3.2",
  "rsky-repo 0.0.6",
  "rsky-space 0.4.2",
- "rsky-space-host 0.7.9",
+ "rsky-space-host 0.7.10",
  "rsky-syntax 0.1.0",
  "rusqlite",
  "secp256k1",
@@ -8678,7 +8678,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-space-host"
-version = "0.7.9"
+version = "0.7.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -8708,6 +8708,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tower 0.4.13",
+ "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
  "wiremock",
@@ -8728,7 +8729,7 @@ dependencies = [
  "rsky-pds 0.13.17 (git+https://github.com/blacksky-algorithms/rsky.git?rev=7ebd21ae788c550ee8510034d94eb19ede148738)",
  "rsky-space 0.4.1",
  "rsky-space 0.4.2",
- "rsky-space-host 0.7.9",
+ "rsky-space-host 0.7.10",
  "rusqlite",
  "secp256k1",
  "serde",

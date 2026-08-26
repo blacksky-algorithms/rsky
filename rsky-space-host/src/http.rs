@@ -4,7 +4,8 @@
 //! rsky-lexicon; errors are XRPC-shaped `{error, message}` JSON.
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderName, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,6 +20,8 @@ use rsky_space::credential;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::attestation::{JtiStore, MetadataFetcher};
 use crate::authority::{AuthorityContext, AuthorityFactory, AuthorityRegistry, KeyResolver};
@@ -95,6 +98,19 @@ pub fn router(state: AppState) -> Router {
         .route("/xrpc/com.atproto.space.deleteRecord", post(delete_record))
         .route("/admin/mintCredential", post(mint_credential))
         .with_state(state)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([
+                    HeaderName::from_static("atproto-accept-labelers"),
+                    HeaderName::from_static("atproto-proxy"),
+                    AUTHORIZATION,
+                    CONTENT_TYPE,
+                    HeaderName::from_static("dpop"),
+                ])
+                .max_age(Duration::from_secs(24 * 60 * 60)),
+        )
 }
 
 /// An XRPC-shaped error response: `{error, message}` with a matching status.
@@ -1313,6 +1329,59 @@ mod tests {
             .header("dpop", crate::oauth::tests::proof_with(claims))
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_the_staging_space_write() {
+        let f = fixture(AppAccess::Open, &[]);
+        let response = router(f.state)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/xrpc/com.atproto.space.createRecord")
+                    .header("origin", "https://staging.blacksky.community")
+                    .header("access-control-request-method", "POST")
+                    .header(
+                        "access-control-request-headers",
+                        "atproto-accept-labelers, atproto-proxy, authorization, content-type, dpop",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
+        let methods = response
+            .headers()
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(methods.split(',').any(|method| method.trim() == "POST"));
+        let headers = response
+            .headers()
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        for header in [
+            "atproto-accept-labelers",
+            "atproto-proxy",
+            "authorization",
+            "content-type",
+            "dpop",
+        ] {
+            assert!(headers.split(',').any(|value| value.trim() == header));
+        }
     }
 
     #[tokio::test]
