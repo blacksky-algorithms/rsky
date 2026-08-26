@@ -93,6 +93,7 @@ pub struct NotifyState {
     /// This syncer's service identity: the required `aud` on inbound tokens.
     pub service_identity: String,
     pub service_signing_key_hex: String,
+    pub notify_endpoint: String,
     pub resolver: Arc<dyn CommitKeyResolver>,
     pub index: Arc<dyn SpaceIndex>,
     pub tx: mpsc::Sender<WriteNotice>,
@@ -134,6 +135,7 @@ async fn well_known(State(state): State<NotifyState>) -> (StatusCode, Json<Value
         }
     };
     let did = state.service_identity;
+    let notify_endpoint = state.notify_endpoint;
     (
         StatusCode::OK,
         Json(json!({
@@ -147,6 +149,11 @@ async fn well_known(State(state): State<NotifyState>) -> (StatusCode, Json<Value
                 "type": "Multikey",
                 "controller": did,
                 "publicKeyMultibase": multikey
+            }],
+            "service": [{
+                "id": format!("{did}#atproto_space_syncer"),
+                "type": "AtprotoSpaceService",
+                "serviceEndpoint": notify_endpoint
             }]
         })),
     )
@@ -245,6 +252,7 @@ mod tests {
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
     const AUTHORITY: &str = "did:plc:authority";
     const SYNCER: &str = "did:web:syncer.blacksky.community";
+    const SYNCER_ENDPOINT: &str = "https://syncer.blacksky.community";
     const SYNCER_KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
     const NOW: u64 = 1_000_000;
 
@@ -296,6 +304,7 @@ mod tests {
             },
             service_identity: SYNCER.to_string(),
             service_signing_key_hex: SYNCER_KEY.to_string(),
+            notify_endpoint: SYNCER_ENDPOINT.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,
             tx,
@@ -304,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn well_known_publishes_the_service_atproto_multikey() {
+    async fn well_known_publishes_the_service_identity() {
         let (_secret, did_key) = host_key();
         let (tx, _rx) = mpsc::channel(4);
         let app = router(state(&did_key, Arc::new(InMemoryIndex::new()), tx));
@@ -341,6 +350,13 @@ mod tests {
             document["verificationMethod"][0]["publicKeyMultibase"],
             expected
         );
+        assert_eq!(document["service"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            document["service"][0]["id"],
+            format!("{SYNCER}#atproto_space_syncer")
+        );
+        assert_eq!(document["service"][0]["type"], "AtprotoSpaceService");
+        assert_eq!(document["service"][0]["serviceEndpoint"], SYNCER_ENDPOINT);
     }
 
     #[tokio::test]
@@ -627,6 +643,7 @@ mod tests {
             registry,
             service_identity: SYNCER.to_string(),
             service_signing_key_hex: SYNCER_KEY.to_string(),
+            notify_endpoint: SYNCER_ENDPOINT.to_string(),
             resolver: Arc::new(KeyMap(BTreeMap::from([
                 (AUTHORITY.to_string(), key_a),
                 ("did:plc:authority2".to_string(), key_b),

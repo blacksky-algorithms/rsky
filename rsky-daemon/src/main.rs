@@ -190,11 +190,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let (notify_tx, notify_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let notify_endpoint = cfg.notify_endpoint();
     let notify_state = NotifyState {
         space_uri: cfg.space_uri.clone(),
         registry: registry.clone(),
         service_identity: cfg.service_identity.clone(),
         service_signing_key_hex: cfg.service_signing_key_hex.clone(),
+        notify_endpoint: notify_endpoint.clone(),
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
         tx: notify_tx,
@@ -259,7 +261,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let opts = MultiRunnerOptions {
         refresh_interval_secs: cfg.sweep_interval_secs,
         sweep_interval_secs: cfg.sweep_interval_secs,
-        notify_endpoint: cfg.notify_endpoint(),
+        notify_endpoint,
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
     };

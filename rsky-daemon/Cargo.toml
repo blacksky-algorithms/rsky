@@ -1,6 +1,6 @@
 [package]
 name = "rsky-daemon"
-version = "0.6.2"
+version = "0.6.3"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "atproto permissioned-data syncer daemon: pulls, verifies, and indexes permissioned repos from members' PDSes"
 edition = "2021"
