@@ -1913,7 +1913,8 @@ impl IndexerManager {
             }
         }
 
-        tracing::info!(
+        // Per-batch, same as the timing line above: DEBUG, not INFO.
+        tracing::debug!(
             "batch deletes: total={}ms, n={}, applied={}",
             start.elapsed().as_millis(),
             parsed.len(),
@@ -2265,24 +2266,31 @@ impl IndexerManager {
         let total_ms = batch_start.elapsed().as_millis();
         let applied_count = applied_jobs.len();
 
-        // Log timing breakdown
-        let col_breakdown: String = collection_timings
-            .iter()
-            .map(|(c, ms, n)| format!("{}={}ms({})", c.rsplit('.').next().unwrap_or(c), ms, n))
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Log timing breakdown. One line per batch, so it is DEBUG rather than INFO: a
+        // sharded drain with no sleep floor emits these at the batch rate, which crowds
+        // out every other line and shortens how far back the journal reaches.
+        // `col_breakdown` allocates per collection, so build it inside the level check
+        // rather than before it — otherwise the formatting cost is paid on every batch
+        // whether or not anything records the event.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let col_breakdown: String = collection_timings
+                .iter()
+                .map(|(c, ms, n)| format!("{}={}ms({})", c.rsplit('.').next().unwrap_or(c), ms, n))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-        tracing::info!(
-            "batch timing: total={}ms, parse={}ms, actors={}ms, records={}ms, collections={}ms [{}] | jobs={}, applied={}",
-            total_ms,
-            parse_ms,
-            actors_ms,
-            records_ms,
-            collections_ms,
-            col_breakdown,
-            jobs.len(),
-            applied_count
-        );
+            tracing::debug!(
+                "batch timing: total={}ms, parse={}ms, actors={}ms, records={}ms, collections={}ms [{}] | jobs={}, applied={}",
+                total_ms,
+                parse_ms,
+                actors_ms,
+                records_ms,
+                collections_ms,
+                col_breakdown,
+                jobs.len(),
+                applied_count
+            );
+        }
 
         (results, batch_failed)
     }
