@@ -340,7 +340,7 @@ pub fn session_space_scopes(credentials: &Credentials) -> Option<Vec<SpaceScope>
             .filter_map(|grant| match SpaceScope::parse(grant) {
                 Ok(scope) => Some(scope),
                 Err(error) => {
-                    tracing::debug!(%grant, %error, "ignoring unparseable space scope");
+                    tracing::warn!(%grant, %error, "ignoring unparseable space scope");
                     None
                 }
             })
