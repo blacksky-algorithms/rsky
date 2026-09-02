@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use color_eyre::Result;
-use deadpool_postgres::Pool;
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use iroh_car::CarReader;
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::readable_repo::ReadableRepo;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_syntax::aturi::AtUri;
 use rusqlite::OpenFlags;
+use tokio_postgres::NoTls;
 
 use rsky_wintermute::backfiller::convert_record_to_ipld;
 use rsky_wintermute::config::ingest_collection_allowed;
@@ -159,10 +160,13 @@ async fn main() -> Result<()> {
 
 /// Build the Postgres connection pool.
 fn build_pg_pool(args: &Args) -> Result<Pool> {
-    Ok(rsky_wintermute::config::create_pg_pool(
-        &args.database_url,
-        rsky_wintermute::config::pg_pool_config(args.db_pool_size),
-    )?)
+    let mut cfg = Config::new();
+    cfg.url = Some(args.database_url.clone());
+    cfg.pool = Some(rsky_wintermute::config::pg_pool_config(args.db_pool_size));
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+    Ok(cfg.create_pool(Some(Runtime::Tokio1), NoTls)?)
 }
 
 /// Read a repo's CAR, walk its MST, and build index jobs for allowed collections.

@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::Result;
+use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use iroh_car::CarReader;
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::readable_repo::ReadableRepo;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_syntax::aturi::AtUri;
+use tokio_postgres::NoTls;
 
 use rsky_repo::parse::get_and_parse_record;
 use rsky_wintermute::backfiller::convert_record_to_ipld;
@@ -51,10 +53,13 @@ async fn main() -> Result<()> {
     println!("Will index {} DIDs directly to PostgreSQL", dids.len());
 
     // Setup database pool
-    let pool = rsky_wintermute::config::create_pg_pool(
-        &args.database_url,
-        rsky_wintermute::config::pg_pool_config(16),
-    )?;
+    let mut cfg = Config::new();
+    cfg.url = Some(args.database_url.clone());
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+
+    let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
