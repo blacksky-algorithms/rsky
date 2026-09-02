@@ -1,4 +1,5 @@
 use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::pipethrough::{PRIVILEGED_METHODS, PROTECTED_METHODS};
@@ -6,6 +7,7 @@ use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
 use chrono::DateTime;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_common::time::{from_micros_to_utc, HOUR, MINUTE};
 use rsky_lexicon::com::atproto::server::GetServiceAuthOutput;
 use std::time::SystemTime;
@@ -15,6 +17,7 @@ pub async fn inner_get_service_auth(
     exp: Option<u64>,
     lxm: Option<String>,
     auth: AccessFull,
+    actor_store: &State<ActorStore>,
 ) -> Result<String> {
     let credentials = auth.access.credentials.unwrap();
     let did = credentials.clone().did.unwrap();
@@ -39,13 +42,17 @@ pub async fn inner_get_service_auth(
             bail!("insufficient access to request a service auth token for the following method: {lxm}");
         }
     }
-    create_service_jwt(ServiceJwtParams {
-        iss: did,
-        aud,
-        exp,
-        lxm,
-        jti: None,
-    })
+    let keypair = actor_store.keypair(&did).await?;
+    create_service_jwt(
+        ServiceJwtParams {
+            iss: did,
+            aud,
+            exp,
+            lxm,
+            jti: None,
+        },
+        &keypair,
+    )
     .await
 }
 
@@ -61,8 +68,9 @@ pub async fn get_service_auth(
     // Lexicon (XRPC) method to bind the requested token to
     lxm: Option<String>,
     auth: AccessFull,
+    actor_store: &State<ActorStore>,
 ) -> Result<Json<GetServiceAuthOutput>, ApiError> {
-    match inner_get_service_auth(aud, exp, lxm, auth).await {
+    match inner_get_service_auth(aud, exp, lxm, auth, actor_store).await {
         Ok(token) => Ok(Json(GetServiceAuthOutput { token })),
         Err(error) => {
             tracing::error!("Internal Error: {error}");

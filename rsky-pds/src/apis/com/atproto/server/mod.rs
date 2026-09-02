@@ -1,4 +1,4 @@
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
+use crate::actor_store::ActorStore;
 use crate::{plc, SharedIdResolver};
 use anyhow::{bail, Result};
 use rand::{distributions::Alphanumeric, Rng};
@@ -91,14 +91,18 @@ pub fn validate_handle(handle: &str, service_handle_domains: &[String]) -> bool 
     })
 }
 
-pub async fn is_valid_did_doc_for_service(did: String) -> Result<bool> {
-    match assert_valid_did_documents_for_service(did).await {
+pub async fn is_valid_did_doc_for_service(actor_store: &ActorStore, did: String) -> Result<bool> {
+    match assert_valid_did_documents_for_service(actor_store, did).await {
         Ok(()) => Ok(true),
         Err(_) => Ok(false),
     }
 }
 
-pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
+pub async fn assert_valid_did_documents_for_service(
+    actor_store: &ActorStore,
+    did: String,
+) -> Result<()> {
+    let expected_signing_key = encode_did_key(&actor_store.keypair(&did).await?.public_key());
     if did.starts_with("did:plc") {
         let plc_url = env_str("PDS_DID_PLC_URL").unwrap_or("https://plc.directory".to_owned());
         let plc_client = plc::Client::new(plc_url);
@@ -108,11 +112,14 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
             .get("atproto_pds")
             .map(|service| service.endpoint.clone());
         let signing_key = resolved.verification_methods.get("atproto").cloned();
-        assert_valid_doc_contents(AssertionContents {
-            pds_endpoint,
-            signing_key,
-            rotation_keys: Some(resolved.rotation_keys),
-        })
+        assert_valid_doc_contents(
+            AssertionContents {
+                pds_endpoint,
+                signing_key,
+                rotation_keys: Some(resolved.rotation_keys),
+            },
+            &expected_signing_key,
+        )
         .await?;
     } else if let Some(host) = did.strip_prefix("did:web:") {
         // Bare-host did:web: the document lives at the well-known path. No
@@ -131,11 +138,14 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
         });
         let signing_key = get_verification_material(&doc, "atproto")
             .and_then(|material| get_did_key_from_multibase(material).ok().flatten());
-        assert_valid_doc_contents(AssertionContents {
-            pds_endpoint,
-            signing_key,
-            rotation_keys: None,
-        })
+        assert_valid_doc_contents(
+            AssertionContents {
+                pds_endpoint,
+                signing_key,
+                rotation_keys: None,
+            },
+            &expected_signing_key,
+        )
         .await?;
     } else {
         bail!("Unsupported did method: {did}")
@@ -143,7 +153,10 @@ pub async fn assert_valid_did_documents_for_service(did: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()> {
+pub async fn assert_valid_doc_contents(
+    contents: AssertionContents,
+    expected_signing_key: &str,
+) -> Result<()> {
     let AssertionContents {
         signing_key,
         pds_endpoint,
@@ -169,9 +182,7 @@ pub async fn assert_valid_doc_contents(contents: AssertionContents) -> Result<()
         bail!("DID document atproto_pds service endpoint does not match PDS public url")
     }
 
-    if signing_key.is_none()
-        || signing_key.unwrap() != encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key())
-    {
+    if signing_key.is_none() || signing_key.unwrap() != expected_signing_key {
         bail!("DID document verification method does not match expected signing key")
     }
     Ok(())

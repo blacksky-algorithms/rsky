@@ -1,3 +1,4 @@
+use crate::actor_store::ActorStore;
 use crate::apis::app::bsky::util::get_did_doc;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardSignupQueued;
@@ -23,6 +24,7 @@ pub async fn inner_register_push(
     cfg: &State<ServerConfig>,
     app_view_url: String,
     id_resolver: &State<SharedIdResolver>,
+    actor_store: &State<ActorStore>,
 ) -> Result<()> {
     let RegisterPushInput {
         service_did,
@@ -30,12 +32,14 @@ pub async fn inner_register_push(
         platform,
         app_id,
     } = body.into_inner();
-    let did: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let did: String = auth
+        .access
+        .credentials
+        .and_then(|credentials| credentials.did)
+        .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     let nsid = Ids::AppBskyNotificationRegisterPush.as_str().to_string();
-    let auth_headers = context::service_auth_headers(&did, &service_did, &nsid).await?;
+    let auth_headers =
+        context::service_auth_headers(actor_store, &did, &service_did, &nsid).await?;
 
     let client = ReqwestClientBuilder::new(app_view_url)
         .client(
@@ -110,6 +114,7 @@ pub async fn register_push(
     auth: AccessStandardSignupQueued,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
+    actor_store: &State<ActorStore>,
 ) -> Result<(), ApiError> {
     if !["ios", "android", "web"].contains(&body.platform.as_str()) {
         return Err(ApiError::InvalidRequest("invalid platform".to_string()));
@@ -117,7 +122,15 @@ pub async fn register_push(
     match &cfg.bsky_app_view {
         None => return Err(ApiError::RuntimeError),
         Some(bsky_app_view) => {
-            match inner_register_push(body, auth, cfg, bsky_app_view.url.clone(), id_resolver).await
+            match inner_register_push(
+                body,
+                auth,
+                cfg,
+                bsky_app_view.url.clone(),
+                id_resolver,
+                actor_store,
+            )
+            .await
             {
                 Ok(_) => Ok(()),
                 Err(_) => {

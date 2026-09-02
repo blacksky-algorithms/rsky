@@ -11,7 +11,7 @@ use crate::actor_store::repo::types::SyncEvtData;
 use crate::actor_store::space::SpaceStore;
 use crate::background::BackgroundQueue;
 use crate::config::ActorStoreConfig;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use lexicon_cid::Cid;
 use lru::LruCache;
 use rsky_common;
@@ -35,6 +35,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
 pub mod aws;
@@ -116,6 +117,28 @@ async fn load_key(location: &Path) -> Result<Option<Keypair>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
+}
+
+/// A truncating in-place rewrite of a key file destroys an unrecoverable
+/// secret if the process dies mid-write, so stage and rename instead.
+pub(crate) async fn atomic_write_key(location: &Path, bytes: &[u8]) -> Result<()> {
+    let directory = location
+        .parent()
+        .ok_or_else(|| anyhow!("key location has no parent directory"))?;
+    let file_name = location
+        .file_name()
+        .ok_or_else(|| anyhow!("key location has no file name"))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_location = directory.join(tmp_name);
+    {
+        let mut file = tokio::fs::File::create(&tmp_location).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+    }
+    tokio::fs::rename(&tmp_location, location).await?;
+    tokio::fs::File::open(directory).await?.sync_all().await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +284,15 @@ impl ActorStore {
         let mut cache = self.cache.lock().expect("actor store cache poisoned");
         cache.put(did.to_string(), db);
         Ok(())
+    }
+
+    /// Replace an actor's signing key on disk. Holds the per-DID write lock so
+    /// no commit is signed with the outgoing key part-way through the swap.
+    pub async fn set_keypair(&self, did: &str, keypair: &Keypair) -> Result<()> {
+        let location = self.get_location(did)?;
+        let _guard = self.did_lock(did).lock_owned().await;
+        tokio::fs::create_dir_all(&location.directory).await?;
+        atomic_write_key(&location.key_location, &keypair.secret_bytes()).await
     }
 
     pub async fn destroy(&self, did: &str, blobstore: Arc<dyn BlobStore>) -> Result<()> {

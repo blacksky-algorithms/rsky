@@ -18,7 +18,7 @@ async fn inner_activate_account(
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
-    assert_valid_did_documents_for_service(requester.clone()).await?;
+    assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
 
     let account = account_manager
         .get_account(

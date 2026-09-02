@@ -30,6 +30,7 @@ pub mod pipethrough;
 pub mod plc;
 pub mod read_after_write;
 pub mod repo;
+pub mod rotate_keys;
 pub mod sequencer;
 pub mod space_auth;
 pub mod space_scope;

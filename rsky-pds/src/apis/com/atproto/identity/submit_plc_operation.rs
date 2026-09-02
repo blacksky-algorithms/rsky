@@ -1,10 +1,10 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use rocket::serde::json::Json;
@@ -34,6 +34,7 @@ async fn validate_plc_request(
     did: &str,
     op: &Operation,
     public_endpoint: &str,
+    actor_store: &ActorStore,
     account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
     let public_rotation_key = encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key());
@@ -43,7 +44,13 @@ async fn validate_plc_request(
         ));
     }
 
-    let public_signing_key = encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key());
+    let public_signing_key = match actor_store.keypair(did).await {
+        Ok(keypair) => encode_did_key(&keypair.public_key()),
+        Err(error) => {
+            tracing::error!("Failed to load signing key for {did}\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
     match op.verification_methods.get("atproto") {
         None => {
             return Err(ApiError::InvalidRequest(
@@ -162,6 +169,7 @@ pub async fn submit_plc_operation(
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = get_requester_did(&auth)?;
@@ -174,6 +182,7 @@ pub async fn submit_plc_operation(
         did.as_str(),
         &op,
         server_config.service.public_url.as_str(),
+        actor_store,
         &account_manager,
     )
     .await?;

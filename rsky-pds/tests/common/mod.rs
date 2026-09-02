@@ -8,10 +8,19 @@ use rsky_pds::config::{ServerConfig, ServiceDbConfig};
 use rsky_pds::{build_rocket, RocketConfig};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use tempfile::TempDir;
 
 static INIT_ENV: Once = Once::new();
+
+/// The `atproto` verification method the mock directory serves from
+/// `/{did}/data`. Tests that exercise DID-document validation set it.
+static PUBLISHED_SIGNING_KEY: Mutex<Option<String>> = Mutex::new(None);
+
+#[allow(dead_code)] // only the signing-key test binary drives this
+pub fn set_published_signing_key(signing_key: Option<String>) {
+    *PUBLISHED_SIGNING_KEY.lock().unwrap() = signing_key;
+}
 
 /// Serves DID documents for any did requested, claiming the handle of the
 /// account created by `create_account`. Keeps DID resolution hermetic.
@@ -38,11 +47,33 @@ fn start_mock_plc_directory() -> u16 {
             // Every doc claims a PDS service endpoint pointing back at this
             // mock, which answers 200 to any request. This lets best-effort
             // notification fan-out resolve and deliver hermetically.
-            let body = format!(
-                "{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"],\
-                 \"service\":[{{\"id\":\"#atproto_pds\",\"type\":\"AtprotoPersonalDataServer\",\
-                 \"serviceEndpoint\":\"http://127.0.0.1:{port}\"}}]}}"
-            );
+            // `/{did}/data` is the PLC document-data shape an account's own
+            // DID document is validated against.
+            let body = if let Some(did) = did.strip_suffix("/data") {
+                let hostname =
+                    std::env::var("PDS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                let rotation_key = rsky_crypto::utils::encode_did_key(
+                    &rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR.public_key(),
+                );
+                let signing_key = PUBLISHED_SIGNING_KEY
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default();
+                format!(
+                    "{{\"did\":\"{did}\",\"rotationKeys\":[\"{rotation_key}\"],\
+                     \"verificationMethods\":{{\"atproto\":\"{signing_key}\"}},\
+                     \"alsoKnownAs\":[\"at://foo{domain}\"],\
+                     \"services\":{{\"atproto_pds\":{{\"type\":\"AtprotoPersonalDataServer\",\
+                     \"endpoint\":\"https://{hostname}\"}}}}}}"
+                )
+            } else {
+                format!(
+                    "{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"],\
+                     \"service\":[{{\"id\":\"#atproto_pds\",\"type\":\"AtprotoPersonalDataServer\",\
+                     \"serviceEndpoint\":\"http://127.0.0.1:{port}\"}}]}}"
+                )
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
