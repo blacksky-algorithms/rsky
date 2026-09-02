@@ -27,6 +27,13 @@ readonly METRICS_URL="http://localhost:9090"
 readonly HEALTH_TIMEOUT=30
 readonly HEALTH_INTERVAL=2
 readonly METRIC_CHECK_AFTER=10
+readonly INDEXER_SAMPLE_GAP=5
+
+# Scrape a single unlabelled counter out of /metrics.
+metric() {
+    curl -sf "${METRICS_URL}/metrics" 2>/dev/null \
+        | awk -v m="$1" '$1 == m { print int($2); exit }'
+}
 
 BRANCH="${1:-}"
 
@@ -147,6 +154,42 @@ if [[ "$healthy" != "true" ]]; then
     rollback
     exit 1
 fi
+
+# --- 5b. Indexer progress ---
+#
+# Everything above proves the process is up and READING the firehose. It does
+# not prove anything is being written. A connection-level fault -- the wrong
+# schema on the pool, staging tables missing from a connection -- leaves the
+# ingester consuming happily and /_health at 200 while every indexed write
+# fails, so the checks above pass and nothing rolls back. Verify the indexer is
+# actually committing records, and that the journal is free of the errors those
+# faults produce.
+log "=== Phase 5b: Indexer progress ==="
+
+INDEXED_A=$(metric indexer_records_processed_total)
+INDEXED_A=${INDEXED_A:-0}
+sleep "$INDEXER_SAMPLE_GAP"
+INDEXED_B=$(metric indexer_records_processed_total)
+INDEXED_B=${INDEXED_B:-0}
+
+if (( INDEXED_B <= INDEXED_A )); then
+    log "FAIL: indexer committed no records in ${INDEXER_SAMPLE_GAP}s (${INDEXED_A} -> ${INDEXED_B})"
+    rollback
+    exit 1
+fi
+log "indexer progress: ${INDEXED_A} -> ${INDEXED_B} records"
+
+# These surface as ordinary query errors, not a crash, so only a log check sees them.
+SINCE=$(( elapsed + INDEXER_SAMPLE_GAP + 5 ))
+if journalctl -u "$SERVICE" --since "${SINCE} seconds ago" --no-pager 2>/dev/null \
+     | grep -qiE 'does not exist|undefined_table'; then
+    log "FAIL: missing-relation errors since restart"
+    journalctl -u "$SERVICE" --since "${SINCE} seconds ago" --no-pager 2>/dev/null \
+        | grep -iE 'does not exist|undefined_table' | head -5 | sed 's/^/[deploy]   /'
+    rollback
+    exit 1
+fi
+log "no missing-relation errors since restart"
 
 if [[ "$metrics_checked" != "true" ]]; then
     log "WARNING: firehose metric not confirmed, but health endpoint is 200"
