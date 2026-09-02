@@ -6,6 +6,7 @@ mod backfiller_tests {
     use crate::storage::Storage;
     use crate::types::{BackfillJob, WintermuteError};
     use serde_json::json;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn setup_test_storage() -> (Storage, TempDir) {
@@ -123,7 +124,12 @@ mod backfiller_tests {
         assert!(storage.firehose_backfill_len().unwrap() > 0);
     }
 
+    // Enqueues BACKFILLER_OUTPUT_HIGH_WATER_MARK records one at a time, so its
+    // runtime scales with a production tuning constant that defaults to 100k.
+    // Ignored by default and run in CI with a small mark, the same way the video
+    // crate handles its ffmpeg-dependent tests.
     #[tokio::test]
+    #[ignore = "runtime scales with BACKFILLER_OUTPUT_HIGH_WATER_MARK; set a small mark and run with --ignored"]
     async fn test_backpressure_metric_tracking() {
         use crate::config::BACKFILLER_OUTPUT_HIGH_WATER_MARK;
         use crate::types::IndexJob;
@@ -387,7 +393,11 @@ mod backfiller_tests {
         }
     }
 
+    // Mutates the process-global SHUTDOWN flag, so it must not run beside the
+    // other tests that do: their reset lands while this one's run() is still
+    // looping on the flag, and that loop then never exits.
     #[test]
+    #[serial(shutdown_flag)]
     fn test_run_creates_runtime() {
         use std::sync::Arc;
 
@@ -406,6 +416,7 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_process_loop_exits_on_shutdown() {
         use std::sync::Arc;
 
@@ -423,6 +434,7 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_process_loop_handles_empty_queue() {
         use std::sync::Arc;
         use std::time::Duration;
