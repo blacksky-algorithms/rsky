@@ -114,6 +114,8 @@ jobs:
   build-and-test:
     needs: [determine-workspace-members, check]
     runs-on: ubuntu-latest
+    # A test that hangs otherwise burns the 6-hour runner cap before failing.
+    timeout-minutes: 45
     if: ${{ needs.determine-workspace-members.outputs.workspace_members != '[]' }}
     strategy:
       fail-fast: false
@@ -138,12 +140,41 @@ jobs:
           shared-key: ${{ matrix.package }}
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
+      # rsky-wintermute's pool tests need a live Postgres. The staging-table DDL
+      # is self-contained, so a stock image with no migrations is enough to
+      # prove a pool was built through config::create_pg_pool; the tests that
+      # need the appview schema are gated separately.
+      - name: Start Postgres for rsky-wintermute
+        if: matrix.package == 'rsky-wintermute'
+        run: |
+          docker run -d --name wintermute-pg \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=bsky_test \
+            -p 5432:5432 postgres:17
+          for _ in $(seq 1 30); do
+            if docker exec wintermute-pg pg_isready -U postgres -d bsky_test; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Postgres did not become ready" >&2
+          docker logs wintermute-pg >&2
+          exit 1
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test --release -p ${{ matrix.package }}
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bsky_test
       # The transcode e2e tests are #[ignore]d so plain `cargo test` doesn't
       # require ffmpeg on every dev machine; CI installs it and runs them
       # explicitly, otherwise the video normalization fix has zero coverage
       # in the green build.
+      # Ignored by default because its runtime scales with the production high
+      # water mark. A small mark exercises the same assertion in seconds.
+      - name: Run rsky-wintermute backpressure test
+        if: matrix.package == 'rsky-wintermute'
+        env:
+          BACKFILLER_OUTPUT_HIGH_WATER_MARK: "100"
+        run: cargo test --release -p rsky-wintermute -- --ignored backpressure
       - name: Install ffmpeg for rsky-video e2e tests
         if: matrix.package == 'rsky-video'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
