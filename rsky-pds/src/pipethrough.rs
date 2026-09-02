@@ -1,3 +1,4 @@
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::{ServerConfig, ServiceConfig};
@@ -43,6 +44,7 @@ pub struct ProxyRequest<'r> {
     pub method: Method,
     pub id_resolver: &'r State<SharedIdResolver>,
     pub cfg: &'r State<ServerConfig>,
+    pub actor_store: &'r State<ActorStore>,
 }
 
 #[rocket::async_trait]
@@ -72,6 +74,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     method: req.method(),
                     id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+                    actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                 };
                 match pipethrough(
                     &proxy_req,
@@ -131,6 +134,7 @@ impl<'r> FromRequest<'r> for ProxyRequest<'r> {
             method: req.method(),
             id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
             cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+            actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
         })
     }
 }
@@ -286,7 +290,9 @@ pub async fn format_headers(
     requester: Option<String>,
 ) -> Result<HeaderMap> {
     let mut headers: HeaderMap = match requester {
-        Some(requester) => context::service_auth_headers(&requester, &aud, &lxm).await?,
+        Some(requester) => {
+            context::service_auth_headers(req.actor_store, &requester, &aud, &lxm).await?
+        }
         None => HeaderMap::new(),
     };
     // forward select headers to upstream services

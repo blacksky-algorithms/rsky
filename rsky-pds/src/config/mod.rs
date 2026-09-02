@@ -1,8 +1,10 @@
-use crate::context;
+use crate::account_manager::helpers::auth::ServiceJwtParams;
+use crate::xrpc_server::auth::create_service_auth_headers;
 use anyhow::{bail, Result};
 use reqwest::header::HeaderMap;
 use rsky_common::env::{env_bool, env_int, env_list, env_str};
 use rsky_common::time::{DAY, HOUR, SECOND};
+use secp256k1::Keypair;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
@@ -252,11 +254,28 @@ pub fn env_to_cfg() -> ServerConfig {
 }
 
 impl ServerConfig {
-    pub async fn appview_auth_headers(&self, did: &str, lxm: &str) -> Result<HeaderMap> {
+    /// `keypair` must be the signing key of `did`, the account the token is
+    /// issued on behalf of.
+    pub async fn appview_auth_headers(
+        &self,
+        did: &str,
+        lxm: &str,
+        keypair: &Keypair,
+    ) -> Result<HeaderMap> {
         match &self.bsky_app_view {
             None => bail!("No appview configured."),
             Some(bsky_app_view) => {
-                context::service_auth_headers(did, &bsky_app_view.did, lxm).await
+                create_service_auth_headers(
+                    ServiceJwtParams {
+                        iss: did.to_owned(),
+                        aud: bsky_app_view.did.clone(),
+                        exp: None,
+                        lxm: Some(lxm.to_owned()),
+                        jti: None,
+                    },
+                    keypair,
+                )
+                .await
             }
         }
     }
@@ -334,16 +353,56 @@ mod tests {
         );
 
         // no appview configured means no auth headers
-        let mut no_appview = cfg;
+        let mut no_appview = cfg.clone();
         no_appview.bsky_app_view = None;
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
+        let secret = secp256k1::SecretKey::from_slice(&[0x29u8; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
         assert!(rt
-            .block_on(
-                no_appview.appview_auth_headers("did:example:alice", "app.bsky.feed.getTimeline")
-            )
+            .block_on(no_appview.appview_auth_headers(
+                "did:example:alice",
+                "app.bsky.feed.getTimeline",
+                &keypair
+            ))
             .is_err());
+
+        // with one configured, the header is signed by the key it was handed
+        let mut with_appview = cfg;
+        with_appview.bsky_app_view = Some(ServiceConfig {
+            url: "https://appview.example.com".to_owned(),
+            did: "did:web:appview.example.com".to_owned(),
+            cdn_url_pattern: None,
+        });
+        let headers = rt
+            .block_on(with_appview.appview_auth_headers(
+                "did:example:alice",
+                "app.bsky.feed.getTimeline",
+                &keypair,
+            ))
+            .unwrap();
+        let jwt = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_prefix("Bearer ")
+            .unwrap()
+            .to_owned();
+        let did_key = rsky_crypto::utils::encode_did_key(&keypair.public_key());
+        let payload = rt
+            .block_on(crate::xrpc_server::auth::verify_jwt(
+                jwt,
+                Some("did:web:appview.example.com".to_owned()),
+                Some("app.bsky.feed.getTimeline"),
+                move |_iss, _refresh| {
+                    let did_key = did_key.clone();
+                    async move { Ok(did_key) }
+                },
+            ))
+            .unwrap();
+        assert_eq!(payload.iss, "did:example:alice");
     }
 
     #[test]

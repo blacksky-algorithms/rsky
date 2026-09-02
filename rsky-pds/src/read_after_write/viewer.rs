@@ -135,16 +135,24 @@ impl LocalViewer {
     }
 
     pub async fn service_auth_headers(&self, did: &str, lxm: &str) -> Result<HeaderMap> {
+        // the token is signed by this viewer's actor key, so it can only be
+        // issued on that actor's behalf
+        if did != self.did {
+            bail!("Cannot issue a service token for {did} from {}", self.did);
+        }
         match &self.appview_did {
             None => bail!("Could not find bsky appview did"),
             Some(appview_did) => {
-                create_service_auth_headers(ServiceJwtParams {
-                    iss: did.to_owned(),
-                    aud: appview_did.clone(),
-                    exp: None,
-                    lxm: Some(lxm.to_owned()),
-                    jti: None,
-                })
+                create_service_auth_headers(
+                    ServiceJwtParams {
+                        iss: did.to_owned(),
+                        aud: appview_did.clone(),
+                        exp: None,
+                        lxm: Some(lxm.to_owned()),
+                        jti: None,
+                    },
+                    &self.actor_store.keypair().await?,
+                )
                 .await
             }
         }

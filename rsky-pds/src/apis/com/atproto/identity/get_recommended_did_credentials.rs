@@ -1,10 +1,10 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
+use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_crypto::utils::encode_did_key;
@@ -16,6 +16,7 @@ use serde_json::json;
 pub async fn get_recommended_did_credentials(
     auth: AccessStandard,
     cfg: &State<ServerConfig>,
+    actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<GetRecommendedDidCredentialsResponse>, ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
@@ -36,7 +37,13 @@ pub async fn get_recommended_did_credentials(
         }
     }
 
-    let signing_key = encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key());
+    let signing_key = match actor_store.keypair(&requester).await {
+        Ok(keypair) => encode_did_key(&keypair.public_key()),
+        Err(error) => {
+            tracing::error!("Failed to load signing key for {requester}\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
     let verification_methods = json!({
         "atproto": signing_key
     });

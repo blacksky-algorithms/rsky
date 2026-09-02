@@ -18,29 +18,29 @@ async fn inner_check_account_status(
 ) -> Result<CheckAccountStatusOutput> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
-    let mut actor_store = actor_store
+    let mut reader = actor_store
         .read(
             requester.clone(),
             blobstore_factory.blobstore(requester.clone()),
         )
         .await?;
     let repo_root = {
-        let storage_guard = actor_store.storage.read().await;
+        let storage_guard = reader.storage.read().await;
         storage_guard.get_root_detailed().await?
     };
     let repo_blocks = {
-        let storage_guard = actor_store.storage.read().await;
+        let storage_guard = reader.storage.read().await;
         storage_guard.count_blocks().await?
     };
     let (indexed_records, imported_blobs, expected_blobs) = try_join!(
-        actor_store.record.record_count(),
-        actor_store.blob.blob_count(),
-        actor_store.blob.record_blob_count(),
+        reader.record.record_count(),
+        reader.blob.blob_count(),
+        reader.blob.record_blob_count(),
     )?;
 
     let (activated, valid_did) = try_join!(
         account_manager.is_account_activated(&requester),
-        is_valid_did_doc_for_service(requester.clone())
+        is_valid_did_doc_for_service(actor_store, requester.clone())
     )?;
 
     Ok(CheckAccountStatusOutput {

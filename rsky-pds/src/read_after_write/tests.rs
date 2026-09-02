@@ -662,3 +662,72 @@ async fn external_embeds_format_thumb_to_blob_url() {
     assert_eq!(view.external.uri, "https://example.com");
     assert!(view.external.thumb.unwrap().contains(TEST_CID));
 }
+
+/// The viewer signs with its own actor's key, so it may only issue tokens
+/// for that actor.
+#[tokio::test]
+async fn service_auth_headers_refuse_another_accounts_did() {
+    let (_dir, viewer) = test_viewer().await;
+    let error = viewer
+        .service_auth_headers(OTHER_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        format!("Cannot issue a service token for {OTHER_DID} from {TEST_DID}")
+    );
+
+    // the requester's own did gets past the guard
+    let error = viewer
+        .service_auth_headers(TEST_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Could not find bsky appview did");
+}
+
+#[tokio::test]
+async fn service_auth_headers_are_signed_with_the_actors_key() {
+    let (dir, viewer) = test_viewer().await;
+    let viewer = LocalViewer::new(
+        viewer.actor_store,
+        viewer.account_manager,
+        TEST_HOSTNAME.to_owned(),
+        None,
+        None,
+        Some("did:web:appview.test".to_owned()),
+        None,
+    );
+    let headers = viewer
+        .service_auth_headers(TEST_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap();
+    let jwt = headers
+        .get(reqwest::header::AUTHORIZATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+
+    let secp = secp256k1::Secp256k1::new();
+    let secret = secp256k1::SecretKey::from_slice(&hex::decode(TEST_SECRET_HEX).unwrap()).unwrap();
+    let did_key = rsky_crypto::utils::encode_did_key(
+        &secp256k1::Keypair::from_secret_key(&secp, &secret).public_key(),
+    );
+    let payload = crate::xrpc_server::auth::verify_jwt(
+        jwt,
+        Some("did:web:appview.test".to_owned()),
+        Some("app.bsky.feed.getTimeline"),
+        move |_iss, _refresh| {
+            let did_key = did_key.clone();
+            async move { Ok(did_key) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload.iss, TEST_DID);
+    drop(dir);
+}

@@ -119,6 +119,12 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_OAUTH_SIGNUP_URL` | Signup URL shown on the authorization page |
 | `PDS_OAUTH_TRUSTED_CLIENTS` | Comma-separated client IDs shown by name on the consent page |
 
+## Upgrading to 1.0
+
+Every account now signs its repo with its own key. New accounts get one automatically; existing
+accounts keep using the previously shared key until an operator runs `rotate-keys`, which publishes
+a PLC operation per account. See [MIGRATING-1.0.md](MIGRATING-1.0.md).
+
 ## License
 
 rsky is released under the [Apache License 2.0](../LICENSE).

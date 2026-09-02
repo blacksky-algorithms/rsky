@@ -1,5 +1,4 @@
 use crate::auth_verifier::{AuthScope, PDS_JWT_KEYPAIR};
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::db::sqlite::Db;
 use crate::models;
 use anyhow::Result;
@@ -7,7 +6,7 @@ use chrono::DateTime;
 use jwt_simple::prelude::*;
 use rsky_common::{get_random_str, json_to_b64url, RFC3339_VARIANT};
 use rusqlite::{params, OptionalExtension};
-use secp256k1::Message;
+use secp256k1::{Keypair, Message};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -143,7 +142,9 @@ pub fn create_refresh_token(opts: CreateTokensOpts) -> Result<String> {
     PDS_JWT_KEYPAIR.sign(claims)
 }
 
-pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
+/// `keypair` must be the signing key of the account named in `params.iss`:
+/// verifiers resolve `iss` to its DID document and check the signature there.
+pub async fn create_service_jwt(params: ServiceJwtParams, keypair: &Keypair) -> Result<String> {
     let ServiceJwtParams { iss, aud, .. } = params;
     // `exp` is seconds since the epoch (RFC 7519 §4.1.4).
     let now = SystemTime::now()
@@ -171,7 +172,7 @@ pub async fn create_service_jwt(params: ServiceJwtParams) -> Result<String> {
     );
     let hash = Sha256::digest(to_sign_str.clone());
     let message = Message::from_digest_slice(hash.as_ref())?;
-    let mut sig = PDS_REPO_SIGNING_KEYPAIR.secret_key().sign_ecdsa(message);
+    let mut sig = keypair.secret_key().sign_ecdsa(message);
     // Convert to low-s
     sig.normalize_s();
     // ASN.1 encoded per decode_dss_signature

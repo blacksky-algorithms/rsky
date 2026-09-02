@@ -512,13 +512,17 @@ async fn auth_helper_edge_cases() {
         .is_none());
 
     // service jwts look like three dot-separated segments
-    let service_jwt = auth::create_service_jwt(auth::ServiceJwtParams {
-        iss: "did:web:pds.test".to_owned(),
-        aud: "did:web:appview.test".to_owned(),
-        exp: None,
-        lxm: Some("com.atproto.repo.uploadBlob".to_owned()),
-        jti: None,
-    })
+    let keypair = secp256k1::Keypair::new(&secp256k1::Secp256k1::new(), &mut rand::thread_rng());
+    let service_jwt = auth::create_service_jwt(
+        auth::ServiceJwtParams {
+            iss: "did:web:pds.test".to_owned(),
+            aud: "did:web:appview.test".to_owned(),
+            exp: None,
+            lxm: Some("com.atproto.repo.uploadBlob".to_owned()),
+            jti: None,
+        },
+        &keypair,
+    )
     .await
     .unwrap();
     assert_eq!(service_jwt.split('.').count(), 3);

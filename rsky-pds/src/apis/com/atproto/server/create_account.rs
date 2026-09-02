@@ -7,7 +7,6 @@ use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::config::ServerConfig;
-use crate::context::PDS_REPO_SIGNING_KEYPAIR;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
@@ -20,9 +19,10 @@ use rocket::State;
 use rsky_common::env::env_str;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::server::{CreateAccountInput, CreateAccountOutput};
+use secp256k1::{Keypair, Secp256k1};
 use std::env;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Clone)]
 pub struct TransformedCreateAccountInput {
     pub email: String,
     pub handle: String,
@@ -31,6 +31,8 @@ pub struct TransformedCreateAccountInput {
     pub password: String,
     pub plc_op: Option<Operation>,
     pub deactivated: bool,
+    /// Generated per account, and already named by `plc_op` when there is one.
+    pub signing_key: Keypair,
 }
 
 //TODO: Potential for taking advantage of async better
@@ -67,6 +69,7 @@ pub async fn server_create_account(
         password,
         deactivated,
         plc_op,
+        signing_key,
     } = validate_inputs_for_local_pds(
         cfg,
         id_resolver,
@@ -79,7 +82,7 @@ pub async fn server_create_account(
 
     // Create new actor repo TODO: Proper rollback
     let blobstore = blobstore_factory.blobstore(did.clone());
-    if let Err(error) = actor_store.create(&did, &PDS_REPO_SIGNING_KEYPAIR).await {
+    if let Err(error) = actor_store.create(&did, &signing_key).await {
         tracing::error!("Failed to create actor store\n{:?}", error);
         return Err(ApiError::RuntimeError);
     }
@@ -318,6 +321,10 @@ pub async fn validate_inputs_for_local_pds(
         Some(ref pass) => pass.clone(),
     };
 
+    // One key per account, generated before the PLC create op so the op and
+    // the actor store's key file name the same key.
+    let signing_key = Keypair::new(&Secp256k1::new(), &mut rand::thread_rng());
+
     match input.did {
         Some(input_did) => {
             if !is_admin && Some(&input_did) != requester.as_ref() {
@@ -330,7 +337,7 @@ pub async fn validate_inputs_for_local_pds(
             deactivated = true;
         }
         None => {
-            let res = format_did_and_plc_op(input).await?;
+            let res = format_did_and_plc_op(input, &signing_key).await?;
             did = res.0;
             plc_op = Some(res.1);
             deactivated = false;
@@ -345,11 +352,15 @@ pub async fn validate_inputs_for_local_pds(
         password,
         plc_op,
         deactivated,
+        signing_key,
     })
 }
 
 #[tracing::instrument(skip_all)]
-async fn format_did_and_plc_op(input: CreateAccountInput) -> Result<(String, Operation), ApiError> {
+async fn format_did_and_plc_op(
+    input: CreateAccountInput,
+    signing_key: &Keypair,
+) -> Result<(String, Operation), ApiError> {
     let mut rotation_keys: Vec<String> = Vec::new();
 
     //Add user provided rotation key
@@ -363,7 +374,7 @@ async fn format_did_and_plc_op(input: CreateAccountInput) -> Result<(String, Ope
     //Build PLC Create Operation
 
     let create_op_input = CreateAtprotoOpInput {
-        signing_key: encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key()),
+        signing_key: encode_did_key(&signing_key.public_key()),
         handle: input.handle,
         pds: format!(
             "https://{}",

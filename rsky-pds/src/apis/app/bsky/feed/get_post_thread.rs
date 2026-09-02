@@ -53,10 +53,11 @@ pub async fn inner_get_post_thread(
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
-    let requester: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let requester: String = auth
+        .access
+        .credentials
+        .and_then(|credentials| credentials.did)
+        .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     match res {
         Ok(res) => {
             let read_afer_write_response = handle_read_after_write(
@@ -402,8 +403,12 @@ pub async fn read_after_write_not_found(
                                                 let nsid = Ids::AppBskyFeedGetPostThread
                                                     .as_str()
                                                     .to_string();
+                                                let keypair =
+                                                    local_viewer.actor_store.keypair().await?;
                                                 let headers = cfg
-                                                    .appview_auth_headers(&requester, &nsid)
+                                                    .appview_auth_headers(
+                                                        &requester, &nsid, &keypair,
+                                                    )
                                                     .await?;
                                                 let client = ReqwestClientBuilder::new(
                                                     bsky_app_view.url.clone(),

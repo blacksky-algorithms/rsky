@@ -1,3 +1,4 @@
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::{AccessOutput, AccessStandard};
 use crate::config::ServerConfig;
@@ -112,6 +113,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                                         .await
                                         .unwrap(),
                                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+                                    actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                                 };
                                 match pipethrough(
                                     &proxy_req,

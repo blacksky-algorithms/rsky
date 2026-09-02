@@ -4,6 +4,8 @@ use rsky_repo::types::PreparedDelete;
 
 const TEST_DID: &str = "did:example:alice";
 const TEST_SECRET_HEX: &str = "1d2f8064213bd212453fa93943c084dbbf42104d02f1f02b23a638f9a48f925a";
+const REPLACEMENT_SECRET_HEX: &str =
+    "5d2f8064213bd212453fa93943c084dbbf42104d02f1f02b23a638f9a48f925a";
 
 fn cid(value: &str) -> Cid {
     Cid::from_str(value).unwrap()
@@ -762,4 +764,67 @@ async fn moved_record_keeps_shared_blocks() {
         .unwrap()
         .unwrap();
     assert_eq!(got.cid, original.cid.to_string());
+}
+
+#[tokio::test]
+async fn set_keypair_replaces_the_key_and_the_next_commit_uses_it() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    {
+        let actor_txn = store
+            .transact(TEST_DID.to_owned(), blobstore())
+            .await
+            .unwrap();
+        actor_txn.create_repo(Vec::new()).await.unwrap();
+    }
+
+    let replacement = import_keypair(&hex::decode(REPLACEMENT_SECRET_HEX).unwrap()).unwrap();
+    store.set_keypair(TEST_DID, &replacement).await.unwrap();
+
+    assert_eq!(
+        store.keypair(TEST_DID).await.unwrap().secret_bytes(),
+        replacement.secret_bytes()
+    );
+    // the transactor snapshots the key at open time, so it picks up the swap
+    let actor_txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    assert_eq!(actor_txn.keypair.secret_bytes(), replacement.secret_bytes());
+}
+
+#[tokio::test]
+async fn set_keypair_leaves_no_temp_file_behind() {
+    let (_dir, store) = test_store(10);
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let location = store.get_location(TEST_DID).unwrap();
+    store
+        .set_keypair(
+            TEST_DID,
+            &import_keypair(&hex::decode(REPLACEMENT_SECRET_HEX).unwrap()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut entries = tokio::fs::read_dir(&location.directory).await.unwrap();
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    assert!(names.contains(&"key".to_owned()), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.ends_with(".tmp")),
+        "{names:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_keypair_rejects_an_unsafe_did() {
+    let (_dir, store) = test_store(10);
+    assert!(store.set_keypair("bad/did", &test_keypair()).await.is_err());
+}
+
+#[tokio::test]
+async fn atomic_write_key_rejects_a_pathless_location() {
+    assert!(atomic_write_key(Path::new("/"), b"bytes").await.is_err());
 }
