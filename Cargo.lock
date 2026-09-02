@@ -8339,7 +8339,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-repo"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -8353,6 +8353,7 @@ dependencies = [
  "ipld-core",
  "iroh-car",
  "lazy_static",
+ "p256 0.13.2",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "regex",
