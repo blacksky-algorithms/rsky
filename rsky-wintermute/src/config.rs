@@ -261,19 +261,21 @@ pub fn pg_pool_config(max_size: usize) -> deadpool_postgres::PoolConfig {
     }
 }
 
-/// The libpq `options` string every Postgres pool in this crate shares.
+/// Session setup run once per pooled connection, before any staging DDL.
 ///
 /// `client_min_messages=warning` is required because the bulk indexer issues
-/// `CREATE TEMP TABLE IF NOT EXISTS` for its staging tables on every batch, while pools
-/// recycle with `RecyclingMethod::Fast` and so never discard them. Every batch after the
-/// first therefore raises a `duplicate_table` NOTICE, which tokio-postgres logs at INFO;
-/// that stream dominates the journal and collapses log retention. Suppressing it at the
-/// server means the notice is never generated or transmitted, which a client-side log
+/// `CREATE TEMP TABLE IF NOT EXISTS` for its staging tables, while pools recycle with
+/// `RecyclingMethod::Fast` and so never discard them. Every batch after the first
+/// therefore raises a `duplicate_table` NOTICE, which tokio-postgres logs at INFO; that
+/// stream dominates the journal and collapses log retention. Setting it on the session
+/// means the server never generates or transmits the notice, which a client-side log
 /// filter cannot achieve.
-#[must_use]
-pub fn pg_connect_options() -> String {
-    "-c client_min_messages=warning".to_owned()
-}
+///
+/// This is a `SET` rather than a libpq `options` string on purpose. `Config::options`
+/// replaces whatever the connection URL carried, and the URL is where the deployment
+/// supplies `-csearch_path=...`; setting it here would silently drop the schema and
+/// resolve every unqualified name against `public`.
+pub const SESSION_SETUP_SQL: &str = "SET client_min_messages TO warning;";
 
 /// Build a pool whose connections are ready for `indexer::bulk`.
 ///
@@ -288,7 +290,6 @@ pub fn create_pg_pool(
 
     let mut cfg = deadpool_postgres::Config::new();
     cfg.url = Some(database_url.to_owned());
-    cfg.options = Some(pg_connect_options());
     cfg.manager = Some(deadpool_postgres::ManagerConfig {
         recycling_method: deadpool_postgres::RecyclingMethod::Fast,
     });
@@ -300,7 +301,10 @@ pub fn create_pg_pool(
         .post_create(deadpool_postgres::Hook::async_fn(|client, _| {
             Box::pin(async move {
                 client
-                    .batch_execute(crate::indexer::bulk::BULK_STAGING_DDL)
+                    .batch_execute(&format!(
+                        "{SESSION_SETUP_SQL}{}",
+                        crate::indexer::bulk::BULK_STAGING_DDL
+                    ))
                     .await
                     .map_err(|e| {
                         deadpool_postgres::HookError::message(format!(
@@ -527,17 +531,15 @@ mod tests {
     }
 
     #[test]
-    fn pg_connect_options_suppresses_notices() {
-        let opts = pg_connect_options();
-        assert_eq!(opts, "-c client_min_messages=warning");
+    fn session_setup_sets_client_min_messages() {
+        assert!(SESSION_SETUP_SQL.contains("client_min_messages"));
+        assert!(SESSION_SETUP_SQL.trim_end().ends_with(';'));
     }
 
     #[test]
-    fn pg_connect_options_is_accepted_by_deadpool_config() {
-        let mut cfg = deadpool_postgres::Config::new();
-        cfg.url = Some("postgres://u@127.0.0.1:1/d".to_owned());
-        cfg.options = Some(pg_connect_options());
-        let pg = cfg.get_pg_config().expect("config builds");
-        assert_eq!(pg.get_options(), Some("-c client_min_messages=warning"));
+    fn session_setup_does_not_touch_search_path() {
+        // Config::options replaces what the URL carried, and the URL is where the
+        // deployment supplies -csearch_path. This must never move back there.
+        assert!(!SESSION_SETUP_SQL.contains("search_path"));
     }
 }
