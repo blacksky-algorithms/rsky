@@ -3,7 +3,7 @@ use crate::actor_store::space::SpaceDefRow;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::simplespace::{merge_config, require_manage, space_error};
 use crate::apis::com::atproto::space::host::{APP_ACCESS_OPEN, POLICY_MEMBER_LIST};
-use crate::apis::com::atproto::space::{valid_key_part, valid_nsid};
+use crate::apis::com::atproto::space::valid_key_part;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
@@ -12,6 +12,7 @@ use rocket::State;
 use rsky_common::tid::TID;
 use rsky_lexicon::com::atproto::simplespace::{CreateSpaceInput, CreateSpaceOutput};
 use rsky_space::space_id::SpaceId;
+use rsky_syntax::nsid::ensure_valid_nsid;
 
 /// Create a space anchored on the caller's DID: the caller becomes the
 /// authority. Defaults: `member-list` policy, `open` app access.
@@ -34,7 +35,7 @@ pub async fn simplespace_create_space(
     } = body.into_inner();
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
-    if !valid_nsid(&space_type) {
+    if ensure_valid_nsid(&space_type).is_err() {
         return Err(ApiError::InvalidRequest(format!(
             "invalid space type: {space_type}"
         )));

@@ -16,6 +16,7 @@
 //! wildcard space type has no declaration to draw from, so its default stays
 //! empty and confers no write targets, per spec.
 
+use rsky_syntax::nsid::ensure_valid_nsid;
 use std::fmt;
 
 pub const SPACE_SCOPE_PREFIX: &str = "space:";
@@ -89,11 +90,6 @@ pub struct SpaceScope {
     pub manage: Vec<ManageOp>,
 }
 
-fn valid_nsid(s: &str) -> bool {
-    // an NSID has at least two dots and non-empty segments
-    s.matches('.').count() >= 2 && s.split('.').all(|seg| !seg.is_empty())
-}
-
 impl SpaceScope {
     pub fn parse(scope: &str) -> Result<Self, ScopeParseError> {
         let rest = scope
@@ -103,7 +99,7 @@ impl SpaceScope {
             Some((st, q)) => (st, Some(q)),
             None => (rest, None),
         };
-        if space_type != "*" && !valid_nsid(space_type) {
+        if space_type != "*" && ensure_valid_nsid(space_type).is_err() {
             return Err(ScopeParseError(format!(
                 "space type `{space_type}` is not an NSID or `*`"
             )));
@@ -143,7 +139,7 @@ impl SpaceScope {
                         skey = Some(value.to_string());
                     }
                     "collection" => {
-                        if value != "*" && !valid_nsid(value) {
+                        if value != "*" && ensure_valid_nsid(value).is_err() {
                             return Err(ScopeParseError(format!(
                                 "collection `{value}` is not an NSID or `*`"
                             )));
@@ -320,6 +316,10 @@ mod tests {
         SpaceScope::parse(s).unwrap()
     }
 
+    fn rejects(s: &str) -> bool {
+        SpaceScope::parse(s).is_err()
+    }
+
     fn allowed(s: &str, authority: &str, request: &SpaceRequest) -> bool {
         authorize(&[scope(s)], SELF_DID, authority, FORUM, "default", request)
     }
@@ -379,6 +379,67 @@ mod tests {
         assert!(SpaceScope::parse(&long_skey).is_err());
         let ok_skey = format!("space:com.example.forum?skey={}", "a".repeat(512));
         assert!(SpaceScope::parse(&ok_skey).is_ok());
+    }
+
+    // Spec-invalid NSIDs must fail at the scope parser, not at the route.
+    // Cases drawn from the atproto-interop-tests nsid syntax vectors.
+    #[test]
+    fn parse_enforces_spec_nsid_syntax() {
+        let long_label = format!("com.{}.foo", "o".repeat(64));
+        let bad = [
+            "com.example.foo-bar",
+            "com.example.3",
+            "a-0.b-1.c-3",
+            "com.example-.foo",
+            "0two.example.foo",
+            "1.0.0.127.record",
+            "com.exa\u{1f4a9}ple.thing",
+            "com.atproto.feed.p_st",
+            "com.atproto.feed.p@st",
+            "com.example",
+            "one.two.three ",
+            long_label.as_str(),
+        ];
+        for nsid in bad {
+            let as_type = format!("space:{nsid}");
+            assert!(rejects(&as_type), "{as_type} should fail");
+            let as_coll = format!("space:{FORUM}?collection={nsid}");
+            assert!(rejects(&as_coll), "{as_coll} should fail");
+        }
+    }
+
+    // The permission spec allows a bare `*` but no partial wildcard.
+    #[test]
+    fn parse_rejects_partial_nsid_wildcards() {
+        for bad in [
+            "com.atmoboards.*",
+            "com.atmoboards.for*",
+            "*.atmoboards.forum",
+        ] {
+            let as_type = format!("space:{bad}");
+            assert!(rejects(&as_type), "{as_type} should fail");
+            let as_coll = format!("space:{FORUM}?collection={bad}");
+            assert!(rejects(&as_coll), "{as_coll} should fail");
+        }
+        assert!(SpaceScope::parse("space:*").is_ok());
+        assert!(SpaceScope::parse(&format!("space:{FORUM}?collection=*")).is_ok());
+    }
+
+    #[test]
+    fn parse_accepts_spec_valid_nsids() {
+        for good in [
+            "com.example.fooBar",
+            "com.example.fooBarV2",
+            "a.b.c",
+            "a-0.b-1.c",
+            "cn.8.lex.stuff",
+            "net.users.bob.ping",
+        ] {
+            let as_type = format!("space:{good}");
+            assert!(!rejects(&as_type), "{as_type} should parse");
+            let as_coll = format!("space:{FORUM}?collection={good}");
+            assert!(!rejects(&as_coll), "{as_coll} should parse");
+        }
     }
 
     // §Examples: `space:com.example.bookmarks`

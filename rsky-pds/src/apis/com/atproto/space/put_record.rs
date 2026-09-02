@@ -3,7 +3,7 @@ use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, space_error,
-    valid_key_part, valid_nsid,
+    valid_key_part,
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
@@ -13,6 +13,7 @@ use crate::space_scope::{SpaceAction, SpaceRequest};
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::space::{PutRecordInput, PutRecordOutput};
+use rsky_syntax::nsid::ensure_valid_nsid;
 
 /// Create or update a record in the caller's permissioned repo.
 #[tracing::instrument(skip_all)]
@@ -37,7 +38,7 @@ pub async fn space_put_record(
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
     require_repo_matches_subject(&repo, &did)?;
-    if !valid_nsid(&collection) {
+    if ensure_valid_nsid(&collection).is_err() {
         return Err(ApiError::InvalidRequest(format!(
             "invalid collection: {collection}"
         )));

@@ -1,6 +1,6 @@
 [package]
 name = "rsky-wintermute"
-version = "0.9.6"
+version = "0.9.4"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Monolithic indexer combining ingester, backfiller, and indexer"
@@ -87,5 +87,6 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 
 [dev-dependencies]
 mockito = "1.7.0"
+serial_test = { version = "3.2", features = ["async"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
