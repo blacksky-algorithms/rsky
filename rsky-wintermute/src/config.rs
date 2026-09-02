@@ -261,6 +261,63 @@ pub fn pg_pool_config(max_size: usize) -> deadpool_postgres::PoolConfig {
     }
 }
 
+/// Session setup run once per pooled connection, before any staging DDL.
+///
+/// `client_min_messages=warning` is required because the bulk indexer issues
+/// `CREATE TEMP TABLE IF NOT EXISTS` for its staging tables, while pools recycle with
+/// `RecyclingMethod::Fast` and so never discard them. Every batch after the first
+/// therefore raises a `duplicate_table` NOTICE, which tokio-postgres logs at INFO; that
+/// stream dominates the journal and collapses log retention. Setting it on the session
+/// means the server never generates or transmits the notice, which a client-side log
+/// filter cannot achieve.
+///
+/// This is a `SET` rather than a libpq `options` string on purpose. `Config::options`
+/// replaces whatever the connection URL carried, and the URL is where the deployment
+/// supplies `-csearch_path=...`; setting it here would silently drop the schema and
+/// resolve every unqualified name against `public`.
+pub const SESSION_SETUP_SQL: &str = "SET client_min_messages TO warning;";
+
+/// Build a pool whose connections are ready for `indexer::bulk`.
+///
+/// The staging-table DDL runs once per connection in a `post_create` hook instead of on
+/// every batch. Pools that reach those functions must be built here or they fail with
+/// `undefined_table`; a pool built any other way has no staging tables.
+pub fn create_pg_pool(
+    database_url: &str,
+    pool_config: deadpool_postgres::PoolConfig,
+) -> Result<deadpool_postgres::Pool, crate::types::WintermuteError> {
+    use crate::types::WintermuteError;
+
+    let mut cfg = deadpool_postgres::Config::new();
+    cfg.url = Some(database_url.to_owned());
+    cfg.manager = Some(deadpool_postgres::ManagerConfig {
+        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+    });
+    cfg.pool = Some(pool_config);
+
+    cfg.builder(deadpool_postgres::tokio_postgres::NoTls)
+        .map_err(|e| WintermuteError::Other(format!("pool config invalid: {e}")))?
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .post_create(deadpool_postgres::Hook::async_fn(|client, _| {
+            Box::pin(async move {
+                client
+                    .batch_execute(&format!(
+                        "{SESSION_SETUP_SQL}{}",
+                        crate::indexer::bulk::BULK_STAGING_DDL
+                    ))
+                    .await
+                    .map_err(|e| {
+                        deadpool_postgres::HookError::message(format!(
+                            "bulk staging DDL failed: {e}"
+                        ))
+                    })?;
+                Ok(())
+            })
+        }))
+        .build()
+        .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
+}
+
 // Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
 // This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
 pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
@@ -471,5 +528,18 @@ mod tests {
         assert_eq!(cfg.timeouts.wait, pg_pool_timeouts().wait);
         assert_eq!(cfg.timeouts.create, pg_pool_timeouts().create);
         assert_eq!(cfg.timeouts.recycle, pg_pool_timeouts().recycle);
+    }
+
+    #[test]
+    fn session_setup_sets_client_min_messages() {
+        assert!(SESSION_SETUP_SQL.contains("client_min_messages"));
+        assert!(SESSION_SETUP_SQL.trim_end().ends_with(';'));
+    }
+
+    #[test]
+    fn session_setup_does_not_touch_search_path() {
+        // Config::options replaces what the URL carried, and the URL is where the
+        // deployment supplies -csearch_path. This must never move back there.
+        assert!(!SESSION_SETUP_SQL.contains("search_path"));
     }
 }

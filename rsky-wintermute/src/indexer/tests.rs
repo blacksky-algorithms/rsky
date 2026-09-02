@@ -11,10 +11,9 @@ mod indexer_tests {
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
     use crate::types::{BackfillJob, LabelEvent, WriteAction};
-    use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+    use deadpool_postgres::Pool;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio_postgres::NoTls;
 
     fn setup_test_storage() -> (Storage, TempDir) {
         let temp_dir = TempDir::with_prefix("indexer_test_").unwrap();
@@ -28,13 +27,8 @@ mod indexer_tests {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
         });
 
-        let mut pg_config = Config::new();
-        pg_config.url = Some(database_url);
-        pg_config.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-
-        pg_config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap()
+        crate::config::create_pg_pool(&database_url, crate::config::pg_pool_config(16))
+            .expect("test pool builds")
     }
 
     async fn cleanup_test_data(pool: &Pool, did: &str) {
