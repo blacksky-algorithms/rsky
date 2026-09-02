@@ -50,6 +50,12 @@ rsky-firehose = {path = "rsky-firehose", version = "0.2.1"}
 [profile.release]
 debug = false
 
+# Release codegen plus symbols, for heap profiling. Separate from `release` so a
+# profiling build never changes what ships.
+[profile.profiling]
+inherits = "release"
+debug = 1
+
 [profile.wasm-dev]
 inherits = "dev"
 opt-level = 1

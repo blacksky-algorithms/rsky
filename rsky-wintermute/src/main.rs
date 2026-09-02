@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use color_eyre::Result;
+#[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 use signal_hook::consts::{SIGINT, TERM_SIGNALS};
 use signal_hook::flag;
@@ -19,6 +20,15 @@ use rsky_wintermute::ingester::IngesterManager;
 use rsky_wintermute::metrics;
 use rsky_wintermute::storage::Storage;
 
+// dhat is itself the allocator, so profiling replaces mimalloc rather than wrapping
+// it. Worth remembering when reading a profile: mimalloc's page-retention behaviour --
+// freed memory held in thread-local heaps and purged lazily -- is absent from a dhat
+// build, so RSS shapes caused by retention will not reproduce here.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(not(feature = "dhat-heap"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -40,6 +50,11 @@ pub struct Args {
 }
 
 fn main() -> Result<()> {
+    // Must stay alive for all of main: the profile is written when this drops, which
+    // only happens on a graceful exit. SIGKILL produces no output.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();

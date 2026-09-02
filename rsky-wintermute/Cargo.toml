@@ -33,6 +33,10 @@ path = "src/bin/car_loader.rs"
 name = "cleanup_stale_deactivated"
 path = "src/bin/cleanup_stale_deactivated.rs"
 
+[features]
+# Replace mimalloc with dhat's allocator and write dhat-heap.json on exit.
+dhat-heap = ["dep:dhat"]
+
 [dependencies]
 base64 = "0.22"
 bytes = "1"
@@ -47,6 +51,9 @@ heed = "0.20"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 iroh-car = "0.5.1"
 mimalloc = "0.1"
+# Heap profiler, swapped in for mimalloc behind --features dhat-heap. Optional so a
+# default build carries neither the dependency nor its allocator.
+dhat = { version = "0.3", optional = true }
 rtrb = "0.3"
 serde = { workspace = true }
 serde_bytes = "0.11"
