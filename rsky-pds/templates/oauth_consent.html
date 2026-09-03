@@ -7,16 +7,28 @@
   {% include "oauth_base_style.html" %}
 </head>
 <body>
-  <main>
-    <h1>Authorize {{ client_display }}</h1>
+  <main class="card">
+    <p class="eyebrow">Requesting access</p>
+    <h1>{{ client_display }}</h1>
     <p class="client">{{ client_id }}</p>
-    <p>Signed in as <strong>{{ account_label }}</strong></p>
-    <p class="muted">This app is requesting permission to:</p>
+    <p class="identity"><span class="dot"></span>Signed in as <strong>{{ account_label }}</strong></p>
+
+    <p class="section-label">This app is requesting permission to:</p>
     <ul class="scopes">
       {% for item in scopes %}
-      <li>{{ item.description }}<code>{{ item.scope }}</code></li>
+      <li>
+        <span class="dot"></span>
+        <span class="scope-body">
+          <span class="scope-title">{{ item.title }}</span>
+          {% if let Some(detail) = item.detail %}
+          <span class="scope-detail">{{ detail }}</span>
+          {% endif %}
+          <code class="scope-raw">{{ item.scope }}</code>
+        </span>
+      </li>
       {% endfor %}
     </ul>
+
     <form method="post" action="/oauth/authorize/accept">
       <input type="hidden" name="request_uri" value="{{ request_uri }}">
       <input type="hidden" name="client_id" value="{{ client_id }}">
@@ -28,8 +40,9 @@
       <input type="hidden" name="request_uri" value="{{ request_uri }}">
       <input type="hidden" name="client_id" value="{{ client_id }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button type="submit">Deny</button>
+      <button type="submit" class="ghost">Deny</button>
     </form>
+    <p class="note">You can revoke this access at any time from your account settings.</p>
   </main>
 </body>
 </html>

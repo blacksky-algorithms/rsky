@@ -1,31 +1,198 @@
 <style>
-  :root { color-scheme: light dark; }
+  /*
+   * Token system borrowed from blacksky.community's product palette
+   * (src/alf/themes.ts: DEFAULT_BRAND + its derived neutral/primary/positive
+   * scales) and its web font fallback stack (src/alf/fonts.ts:
+   * WEB_FONT_FAMILIES). This page ships to end users of any rsky-pds
+   * deployment, not just blacksky's own, so only the *aesthetic* is carried
+   * over here -- no literal brand name, logo, or copy. Deliberately no
+   * webfont request: an OAuth consent screen is a security-sensitive page
+   * served by arbitrary self-hosted PDSes, some behind networks that can't
+   * reach a third-party font CDN, so typography uses the same system-font
+   * stack the product itself falls back to on web.
+   */
+  :root {
+    color-scheme: light dark;
+
+    --paper: #F8FAF9;
+    --surface: color-mix(in srgb, #6060E9 3%, #FFFFFF);
+    --ink: #070C0C;
+    --ink-muted: #4F5050;
+    --ink-faint: #6A6A6A;
+    --border: #DFE1E1;
+    --border-strong: #C8CAC9;
+
+    --accent: #6060E9;
+    --accent-ink: #F8FAF9;
+    --accent-tint: #EAEBFC;
+
+    --good-dot: #61C554;
+
+    --danger: #C00A32;
+    --danger-tint: #FFE5EC;
+
+    --radius: 0.75rem;
+    --radius-sm: 0.5rem;
+
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+      Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+    --fs-eyebrow: 0.75rem;
+    --fs-headline: 1.5rem;
+    --fs-body: 0.9375rem;
+    --fs-detail: 0.8125rem;
+    --fs-code: 0.75rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #070C0C;
+      --surface: color-mix(in srgb, #8686FF 6%, #121313);
+      --ink: #F8FAF9;
+      --ink-muted: #C8CAC9;
+      --ink-faint: #9C9E9E;
+      --border: #292A2A;
+      --border-strong: #4F5050;
+
+      --accent: #8686FF;
+      --accent-ink: #070C0C;
+      --accent-tint: #464985;
+
+      --good-dot: #D2FC51;
+
+      --danger: #FF7396;
+      --danger-tint: #35030D;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    margin: 0; padding: 2rem 1rem; display: flex; justify-content: center;
-    background: Canvas; color: CanvasText;
+    font-family: var(--font-sans);
+    margin: 0; padding: 3rem 1.25rem;
+    display: flex; justify-content: center;
+    background: var(--paper); color: var(--ink);
+    font-size: var(--fs-body); line-height: 1.5;
   }
-  main { width: 100%; max-width: 24rem; }
-  h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
-  .client { font-size: 0.9rem; opacity: 0.8; word-break: break-all; margin-bottom: 1.5rem; }
+
+  main.card {
+    width: 100%; max-width: 26rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.75rem 1.75rem 1.5rem;
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent),
+      0 8px 24px color-mix(in srgb, var(--ink) 8%, transparent);
+  }
+
+  .eyebrow {
+    font-size: var(--fs-eyebrow); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-faint); margin: 0 0 0.4rem;
+  }
+
+  h1 {
+    font-size: var(--fs-headline); font-weight: 700;
+    margin: 0 0 0.25rem; text-wrap: balance;
+  }
+
+  .client {
+    font-family: var(--font-mono); font-size: var(--fs-code);
+    color: var(--ink-faint); word-break: break-all; margin: 0 0 1.25rem;
+  }
+
+  .identity {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.6rem 0.75rem; margin: 0 0 1.25rem;
+    background: var(--accent-tint); border-radius: var(--radius-sm);
+    font-size: var(--fs-body); color: var(--ink);
+  }
+  .identity .dot {
+    flex: none; width: 0.5rem; height: 0.5rem; border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .section-label {
+    font-size: var(--fs-eyebrow); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ink-faint); margin: 0 0 0.6rem;
+  }
+
+  ul.scopes {
+    list-style: none; margin: 0 0 1.35rem; padding: 0;
+    display: flex; flex-direction: column; gap: 0.5rem;
+  }
+  ul.scopes li {
+    display: flex; gap: 0.6rem; align-items: flex-start;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+  }
+  ul.scopes .dot {
+    flex: none; width: 0.5rem; height: 0.5rem; border-radius: 50%;
+    background: var(--good-dot); margin-top: 0.45rem;
+  }
+  ul.scopes .scope-body { flex: 1; min-width: 0; }
+  ul.scopes .scope-title {
+    display: block; font-weight: 600; font-size: var(--fs-body); color: var(--ink);
+  }
+  ul.scopes .scope-detail {
+    display: block; font-size: var(--fs-detail); color: var(--ink-muted); margin-top: 0.15rem;
+  }
+  ul.scopes .scope-raw {
+    display: block; font-family: var(--font-mono); font-size: var(--fs-code);
+    color: var(--ink-faint); word-break: break-all; margin-top: 0.3rem;
+  }
+
+  .sessions { margin: 0 0 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .muted { font-size: var(--fs-body); color: var(--ink-muted); }
+  .note { font-size: var(--fs-detail); color: var(--ink-faint); text-align: center; margin: 1rem 0 0; }
+
   form { margin: 0; }
-  label { display: block; font-size: 0.85rem; margin: 0.75rem 0 0.25rem; }
+  form + form { margin-top: 0.6rem; }
+
+  label {
+    display: block; font-size: var(--fs-detail); font-weight: 600;
+    color: var(--ink-muted); letter-spacing: 0.02em; margin: 0.9rem 0 0.3rem;
+  }
   input[type="text"], input[type="password"] {
-    width: 100%; box-sizing: border-box; padding: 0.5rem;
-    border: 1px solid color-mix(in srgb, CanvasText 30%, Canvas); border-radius: 0.375rem;
-    background: Canvas; color: CanvasText; font-size: 1rem;
+    width: 100%; padding: 0.65rem 0.75rem; font-size: var(--fs-body);
+    font-family: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   }
+  input[type="text"]:focus, input[type="password"]:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-tint);
+  }
+
   button {
-    margin-top: 1rem; width: 100%; padding: 0.6rem; font-size: 1rem;
-    border: 1px solid color-mix(in srgb, CanvasText 30%, Canvas); border-radius: 0.375rem;
-    cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); color: CanvasText;
+    width: 100%; padding: 0.7rem 1rem; margin-top: 0.6rem;
+    font-family: inherit; font-size: var(--fs-body); font-weight: 600;
+    color: var(--ink); background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, filter 0.15s ease, transform 0.05s ease;
   }
-  button.primary { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
-  .error { color: #b91c1c; font-size: 0.9rem; margin: 0.75rem 0; }
-  ul.scopes { list-style: none; padding: 0; margin: 1rem 0; }
-  ul.scopes li { padding: 0.5rem 0; border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, Canvas); }
-  ul.scopes code { font-size: 0.75rem; opacity: 0.7; display: block; }
-  .sessions { margin-bottom: 1.5rem; }
-  .muted { font-size: 0.85rem; opacity: 0.8; }
-  a { color: #1d4ed8; }
+  button:first-child { margin-top: 0; }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.primary:hover { filter: brightness(1.06); }
+
+  button.ghost:hover { border-color: var(--danger); color: var(--danger); }
+
+  .error {
+    background: var(--danger-tint); color: var(--danger);
+    border: 1px solid var(--danger); border-radius: var(--radius-sm);
+    padding: 0.6rem 0.75rem; font-size: var(--fs-body); margin: 0 0 1rem;
+  }
+
+  a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  a:hover { text-decoration: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
 </style>
