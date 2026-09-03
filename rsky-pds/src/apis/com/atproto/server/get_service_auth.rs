@@ -1,7 +1,8 @@
 use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessStandard;
+use crate::oauth_scope::GrantedScopes;
 use crate::pipethrough::{PRIVILEGED_METHODS, PROTECTED_METHODS};
 use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
@@ -29,7 +30,30 @@ use std::time::SystemTime;
 /// any method, privileged or not.
 fn ensure_lxm_access(lxm: &str, is_privileged: bool) -> Result<()> {
     if PRIVILEGED_METHODS.contains(lxm) && !is_privileged {
-        bail!("insufficient access to request a service auth token for the following method: {lxm}");
+        bail!(
+            "insufficient access to request a service auth token for the following method: {lxm}"
+        );
+    }
+    Ok(())
+}
+
+/// Denies an OAuth session a token its grants do not cover. A session
+/// without granted scopes (app password, legacy login) is governed by the
+/// privilege check alone. `transition:generic` covers every method outside
+/// `chat.bsky.*`, `transition:chat.bsky` covers that surface, and a granular
+/// session needs a matching `rpc:` grant (upstream `allowsRpc`).
+fn ensure_rpc_grant(granted: Option<&[String]>, aud: &str, lxm: Option<&str>) -> Result<()> {
+    let Some(granted) = granted else {
+        return Ok(());
+    };
+    let lxm = lxm.unwrap_or("*");
+    let is_chat = lxm.starts_with("chat.bsky.");
+    let scopes = GrantedScopes::parse(granted);
+    let allowed = (scopes.has_transition("generic") && !is_chat)
+        || (scopes.has_transition("chat.bsky") && is_chat)
+        || scopes.allows_rpc(lxm, aud);
+    if !allowed {
+        bail!("insufficient access to request a service auth token for {lxm} at {aud}");
     }
     Ok(())
 }
@@ -39,16 +63,15 @@ fn ensure_lxm_access(lxm: &str, is_privileged: bool) -> Result<()> {
 /// matching the upstream check `isAtprotoDid(aud) || isAtprotoDidRefAbsolute(aud)`.
 fn ensure_valid_aud(aud: &str) -> Result<()> {
     let did_part = aud.split('#').next().unwrap_or(aud);
-    ensure_valid_did(did_part).map_err(|_| {
-        anyhow::anyhow!("aud must be a valid atproto DID or did#serviceId reference")
-    })
+    ensure_valid_did(did_part)
+        .map_err(|_| anyhow::anyhow!("aud must be a valid atproto DID or did#serviceId reference"))
 }
 
 pub async fn inner_get_service_auth(
     aud: String,
     exp: Option<u64>,
     lxm: Option<String>,
-    auth: AccessFull,
+    auth: AccessStandard,
     actor_store: &State<ActorStore>,
 ) -> Result<String> {
     let credentials = auth.access.credentials.unwrap();
@@ -73,6 +96,7 @@ pub async fn inner_get_service_auth(
         }
         ensure_lxm_access(lxm.as_str(), credentials.is_privileged.unwrap_or(false))?;
     }
+    ensure_rpc_grant(credentials.granted_scopes.as_deref(), &aud, lxm.as_deref())?;
     let keypair = actor_store.keypair(&did).await?;
     create_service_jwt(
         ServiceJwtParams {
@@ -98,7 +122,7 @@ pub async fn get_service_auth(
     exp: Option<u64>,
     // Lexicon (XRPC) method to bind the requested token to
     lxm: Option<String>,
-    auth: AccessFull,
+    auth: AccessStandard,
     actor_store: &State<ActorStore>,
 ) -> Result<Json<GetServiceAuthOutput>, ApiError> {
     match inner_get_service_auth(aud, exp, lxm, auth, actor_store).await {
@@ -159,6 +183,50 @@ mod tests {
         // privilege level.
         assert!(ensure_lxm_access(NON_PRIVILEGED_LXM, false).is_ok());
         assert!(ensure_lxm_access(NON_PRIVILEGED_LXM, true).is_ok());
+    }
+
+    // --- ensure_rpc_grant ---
+
+    const VIDEO_AUD: &str = "did:web:video.invalid";
+    const VIDEO_LXM: &str = "app.bsky.video.getUploadLimits";
+
+    fn scopes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn sessions_without_granted_scopes_are_governed_by_privilege_alone() {
+        assert!(ensure_rpc_grant(None, VIDEO_AUD, Some(VIDEO_LXM)).is_ok());
+        assert!(ensure_rpc_grant(None, VIDEO_AUD, None).is_ok());
+    }
+
+    #[test]
+    fn transition_generic_covers_everything_but_chat() {
+        let granted = scopes(&["atproto", "transition:generic"]);
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(VIDEO_LXM)).is_ok());
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, None).is_ok());
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(CHAT_LXM)).is_err());
+    }
+
+    #[test]
+    fn transition_chat_covers_only_chat() {
+        let granted = scopes(&["atproto", "transition:chat.bsky"]);
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(CHAT_LXM)).is_ok());
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(VIDEO_LXM)).is_err());
+    }
+
+    #[test]
+    fn granular_sessions_need_a_matching_rpc_grant() {
+        let granted = scopes(&[
+            "atproto",
+            "rpc:app.bsky.video.getUploadLimits?aud=did:web:video.invalid",
+        ]);
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(VIDEO_LXM)).is_ok());
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, Some(NON_PRIVILEGED_LXM)).is_err());
+        assert!(
+            ensure_rpc_grant(Some(&granted), "did:web:other.invalid", Some(VIDEO_LXM)).is_err()
+        );
+        assert!(ensure_rpc_grant(Some(&granted), VIDEO_AUD, None).is_err());
     }
 
     // --- ensure_valid_aud ---

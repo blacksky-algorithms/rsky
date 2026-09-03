@@ -68,8 +68,24 @@ fn start_mock_plc_directory() -> u16 {
                      \"endpoint\":\"https://{hostname}\"}}}}}}"
                 )
             } else {
+                // The published key, when set, is also the document's
+                // `#atproto` verification method so service tokens the
+                // account signs verify against it.
+                let verification_methods = PUBLISHED_SIGNING_KEY
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .and_then(|key| key.strip_prefix("did:key:"))
+                    .map(|multibase| {
+                        format!(
+                            "{{\"id\":\"{did}#atproto\",\"type\":\"Multikey\",\
+                             \"controller\":\"{did}\",\"publicKeyMultibase\":\"{multibase}\"}}"
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
                     "{{\"id\":\"{did}\",\"alsoKnownAs\":[\"at://foo{domain}\"],\
+                     \"verificationMethod\":[{verification_methods}],\
                      \"service\":[{{\"id\":\"#atproto_pds\",\"type\":\"AtprotoPersonalDataServer\",\
                      \"serviceEndpoint\":\"http://127.0.0.1:{port}\"}}]}}"
                 )

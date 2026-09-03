@@ -269,6 +269,77 @@ async fn activate_test_account(client: &Client) {
         .unwrap();
 }
 
+/// Fetches a DPoP-bound resource, taking the server's nonce challenge on the
+/// first attempt and retrying with it.
+async fn dpop_get(client: &Client, key: &Jwk, access_token: &str, path: &str) -> (Status, Value) {
+    let htu = format!("{}{}", public_url(client), path.split('?').next().unwrap());
+    let response = client
+        .get(path)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "GET", &htu, None, Some(access_token)),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+    let nonce = response
+        .headers()
+        .get_one("DPoP-Nonce")
+        .expect("nonce challenge on resource request")
+        .to_string();
+    let response = client
+        .get(path)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "GET", &htu, Some(&nonce), Some(access_token)),
+        ))
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    (status, body)
+}
+
+/// An OAuth session with `transition:generic` can mint a service token for
+/// a non-privileged method, the way an app password can, but not for the
+/// chat surface it was never granted.
+#[tokio::test]
+async fn oauth_session_can_mint_service_auth_tokens() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let key = dpop_key();
+
+    let (request_uri, nonce) = run_par(&client, &key).await;
+    let session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let tokens = exchange_code(&client, &key, &code, &nonce).await;
+    let access_token = tokens["access_token"].as_str().unwrap().to_string();
+
+    let (status, body) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.getServiceAuth\
+         ?aud=did:web:video.invalid&lxm=app.bsky.video.getUploadLimits",
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(body["token"].as_str().is_some());
+
+    let (status, _) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.getServiceAuth\
+         ?aud=did:web:chat.invalid&lxm=chat.bsky.convo.getMessages",
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
+}
+
 #[tokio::test]
 async fn oauth_well_known_documents() {
     let (_dir, client) = get_oauth_client().await;

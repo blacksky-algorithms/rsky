@@ -6,7 +6,10 @@ use crate::permission_set::SharedPermissionSets;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedIdResolver;
 use anyhow::{bail, Result};
-use base64::{engine::general_purpose::STANDARD as base64pad, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as base64pad, URL_SAFE_NO_PAD as base64url},
+    Engine as _,
+};
 use jwt_simple::claims::Audiences;
 use jwt_simple::prelude::*;
 use rocket::http::Status;
@@ -593,46 +596,108 @@ pub struct UserDidAuth {
     pub access: AccessOutput,
 }
 
+/// Verifies a service JWT addressed to this PDS and signed by the issuing
+/// account's own key.
+async fn verify_user_service_jwt(req: &Request<'_>) -> Result<VerifiedServiceJwt> {
+    let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
+    verify_service_jwt(
+        req,
+        id_resolver,
+        ServiceJwtOpts {
+            aud: Some(env::var("PDS_SERVICE_DID").unwrap()),
+            iss: None,
+        },
+    )
+    .await
+}
+
+fn service_jwt_credentials(
+    r#type: &str,
+    did: Option<String>,
+    jwt: VerifiedServiceJwt,
+) -> AccessOutput {
+    AccessOutput {
+        credentials: Some(Credentials {
+            r#type: r#type.to_string(),
+            granted_scopes: None,
+            did,
+            scope: None,
+            audience: None,
+            token_id: None,
+            aud: Some(jwt.aud),
+            iss: Some(jwt.iss),
+            is_privileged: None,
+        }),
+        artifacts: None,
+    }
+}
+
+fn bad_jwt_outcome<T>(req: &Request<'_>, error: anyhow::Error) -> Outcome<T, AuthError> {
+    let error = AuthError::BadJwt(error.to_string());
+    req.local_cache(|| Some(ApiError::from(&error)));
+    Outcome::Error((Status::BadRequest, error))
+}
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for UserDidAuth {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
-        match verify_service_jwt(
-            req,
-            id_resolver,
-            ServiceJwtOpts {
-                aud: Some(env::var("PDS_SERVICE_DID").unwrap()),
-                iss: None,
-            },
-        )
-        .await
-        {
-            Ok(payload) => Outcome::Success(UserDidAuth {
-                access: AccessOutput {
-                    credentials: Some(Credentials {
-                        r#type: "user_did".to_string(),
-                        granted_scopes: None,
-                        did: None,
-                        scope: None,
-                        audience: None,
-                        token_id: None,
-                        aud: Some(payload.aud),
-                        iss: Some(payload.iss),
-                        is_privileged: None,
-                    }),
-                    artifacts: None,
-                },
+        match verify_user_service_jwt(req).await {
+            Ok(jwt) => Outcome::Success(UserDidAuth {
+                access: service_jwt_credentials("user_did", None, jwt),
             }),
-            Err(error) => {
-                req.local_cache(|| {
-                    Some(ApiError::InvalidRequest(
-                        AuthError::BadJwt(error.to_string()).to_string(),
-                    ))
+            Err(error) => bad_jwt_outcome(req, error),
+        }
+    }
+}
+
+/// Whether a JWT payload carries the `lxm` claim only service tokens have.
+/// The payload is decoded, not verified; the caller verifies.
+fn jwt_names_method(jwt: &str) -> bool {
+    jwt.split('.')
+        .nth(1)
+        .and_then(|payload| {
+            base64url
+                .decode(payload)
+                .or_else(|_| base64pad.decode(payload))
+                .ok()
+        })
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|payload| payload.get("lxm").is_some_and(|lxm| !lxm.is_null()))
+}
+
+fn is_definitely_service_auth(req: &Request<'_>) -> bool {
+    matches!(bearer_token_from_req(req), Ok(Some(jwt)) if jwt_names_method(&jwt))
+}
+
+/// Auth for methods a remote service may call on an account's behalf with a
+/// token the account minted through `getServiceAuth`, such as a video
+/// service uploading the transcoded blob. A bearer token naming a method is
+/// service auth; anything else is an ordinary session. `did` is the acting
+/// account either way.
+#[derive(Clone)]
+pub struct AccessOrUserServiceAuth {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessOrUserServiceAuth {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if !is_definitely_service_auth(req) {
+            return AccessStandardCheckTakedown::from_request(req)
+                .await
+                .map(|session| AccessOrUserServiceAuth {
+                    access: session.access,
                 });
-                Outcome::Error((Status::BadRequest, AuthError::BadJwt(error.to_string())))
-            }
+        }
+        match verify_user_service_jwt(req).await {
+            Ok(jwt) => Outcome::Success(AccessOrUserServiceAuth {
+                access: service_jwt_credentials("user_service_auth", Some(jwt.iss.clone()), jwt),
+            }),
+            Err(error) => bad_jwt_outcome(req, error),
         }
     }
 }
@@ -1328,6 +1393,29 @@ mod tests {
 
     // base64("admin:password")
     const CREDS: &str = "YWRtaW46cGFzc3dvcmQ=";
+
+    fn jwt_with_payload(payload: &str) -> String {
+        format!("eyJhbGciOiJFUzI1NksifQ.{}.sig", base64url.encode(payload))
+    }
+
+    #[test]
+    fn only_a_payload_naming_a_method_is_service_auth() {
+        assert!(jwt_names_method(&jwt_with_payload(
+            r#"{"iss":"did:web:a.invalid","lxm":"com.atproto.repo.uploadBlob"}"#
+        )));
+        assert!(!jwt_names_method(&jwt_with_payload(r#"{"lxm":null}"#)));
+        assert!(!jwt_names_method(&jwt_with_payload(
+            r#"{"sub":"did:web:a.invalid","scope":"com.atproto.access"}"#
+        )));
+        // standard base64 payloads from older builds are still decoded
+        assert!(jwt_names_method(&format!(
+            "h.{}.s",
+            base64pad.encode(r#"{"lxm":"com.example.a"}"#)
+        )));
+        assert!(!jwt_names_method(&jwt_with_payload("not json")));
+        assert!(!jwt_names_method("h.%%%.s"));
+        assert!(!jwt_names_method("no-dots"));
+    }
 
     #[test]
     fn oauth_scope_mapping_follows_transition_semantics() {

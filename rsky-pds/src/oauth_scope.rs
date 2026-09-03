@@ -55,37 +55,50 @@ pub enum RepoAction {
     Delete,
 }
 
+/// Split a scope suffix into its positional value and `key=value` params,
+/// percent-decoding each value so a `did:` or `#fragment` survives the trip
+/// through the scope string.
+fn split_scope_suffix(suffix: &str) -> (Option<String>, Vec<(String, String)>) {
+    let (positional, params) = match suffix.split_once('?') {
+        Some((positional, params)) => (positional, Some(params)),
+        None => (suffix, None),
+    };
+    let decode = |value: &str| {
+        urlencoding::decode(value).map_or_else(|_| value.to_string(), |v| v.into_owned())
+    };
+    let positional = Some(positional).filter(|p| !p.is_empty()).map(decode);
+    let params = params
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key.to_string(), decode(value))
+        })
+        .collect();
+    (positional, params)
+}
+
 /// Parse a `repo:` scope suffix into its collections and actions, applying
 /// the proposal's defaults (no collection = all, no action = all three).
 fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
-    let (positional, params) = match suffix.find('?') {
-        Some(pos) => (
-            Some(&suffix[..pos]).filter(|p| !p.is_empty()),
-            Some(&suffix[pos + 1..]),
-        ),
-        None => (Some(suffix).filter(|p| !p.is_empty()), None),
-    };
+    let (positional, params) = split_scope_suffix(suffix);
     let mut collections: Vec<String> = Vec::new();
     if let Some(nsid) = positional {
-        collections.push(nsid.to_string());
+        collections.push(nsid);
     }
     let mut actions: Vec<RepoAction> = Vec::new();
-    if let Some(params) = params {
-        for pair in params.split('&') {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match key {
-                "collection" if !value.is_empty() => collections.push(value.to_string()),
-                "action" => match value {
-                    "create" => actions.push(RepoAction::Create),
-                    "update" => actions.push(RepoAction::Update),
-                    "delete" => actions.push(RepoAction::Delete),
-                    "*" => {
-                        actions.extend([RepoAction::Create, RepoAction::Update, RepoAction::Delete])
-                    }
-                    _ => {}
-                },
-                _ => {}
+    for (key, value) in params {
+        match (key.as_str(), value.as_str()) {
+            ("collection", "") => {}
+            ("collection", collection) => collections.push(collection.to_string()),
+            ("action", "create") => actions.push(RepoAction::Create),
+            ("action", "update") => actions.push(RepoAction::Update),
+            ("action", "delete") => actions.push(RepoAction::Delete),
+            ("action", "*") => {
+                actions.extend([RepoAction::Create, RepoAction::Update, RepoAction::Delete])
             }
+            _ => {}
         }
     }
     if collections.is_empty() {
@@ -95,6 +108,29 @@ fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
         actions.extend([RepoAction::Create, RepoAction::Update, RepoAction::Delete]);
     }
     (collections, actions)
+}
+
+/// Parse an `rpc:` scope suffix into its methods and audience. The
+/// positional value or `lxm=` names methods and `aud=` the service; `*`
+/// wildcards either but never both, and a grant naming no audience is
+/// malformed (upstream `RpcPermission`).
+fn parse_rpc_scope(suffix: &str) -> Option<(Vec<String>, String)> {
+    let (positional, params) = split_scope_suffix(suffix);
+    let mut methods: Vec<String> = positional.into_iter().collect();
+    let mut aud = None;
+    for (key, value) in params {
+        match key.as_str() {
+            "lxm" if !value.is_empty() => methods.push(value),
+            "aud" if !value.is_empty() => aud = Some(value),
+            _ => {}
+        }
+    }
+    let aud = aud?;
+    let any_method = methods.iter().any(|m| m == "*");
+    if methods.is_empty() || (aud == "*" && any_method) {
+        return None;
+    }
+    Some((methods, aud))
 }
 
 impl OAuthScope {
@@ -110,6 +146,9 @@ impl OAuthScope {
         }
         if let Some(rest) = token.strip_prefix("repo?") {
             return OAuthScope::Repo(format!("?{rest}"));
+        }
+        if let Some(rest) = token.strip_prefix("rpc?") {
+            return OAuthScope::Rpc(format!("?{rest}"));
         }
         for (prefix, ctor) in [
             (
@@ -227,6 +266,21 @@ impl GrantedScopes {
         })
     }
 
+    /// Whether some granted `rpc:` scope permits minting a service token
+    /// for `lxm` at `aud` (`*` in the request matches only a wildcard grant).
+    #[must_use]
+    pub fn allows_rpc(&self, lxm: &str, aud: &str) -> bool {
+        self.scopes.iter().any(|s| match s {
+            OAuthScope::Rpc(suffix) => {
+                parse_rpc_scope(suffix).is_some_and(|(methods, granted_aud)| {
+                    (granted_aud == "*" || granted_aud == aud)
+                        && methods.iter().any(|m| m == "*" || m == lxm)
+                })
+            }
+            _ => false,
+        })
+    }
+
     /// The `space:` grant strings, for [`crate::space_scope`] to evaluate.
     #[must_use]
     pub fn space_grants(&self) -> Vec<String> {
@@ -249,6 +303,61 @@ impl GrantedScopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_grants_default_to_every_collection_and_action() {
+        let granted = GrantedScopes::parse(&["repo".to_string()]);
+        for action in [RepoAction::Create, RepoAction::Update, RepoAction::Delete] {
+            assert!(granted.allows_repo("app.bsky.feed.post", action));
+        }
+        let granted = GrantedScopes::parse(&[
+            "repo:app.bsky.feed.like?action=update&action=delete&action=nonsense&collection="
+                .to_string(),
+            "repo?action=*&collection=app.bsky.feed.repost".to_string(),
+        ]);
+        assert!(!granted.allows_repo("app.bsky.feed.like", RepoAction::Create));
+        assert!(granted.allows_repo("app.bsky.feed.like", RepoAction::Update));
+        assert!(granted.allows_repo("app.bsky.feed.like", RepoAction::Delete));
+        assert!(granted.allows_repo("app.bsky.feed.repost", RepoAction::Create));
+        assert!(!granted.allows_repo("app.bsky.feed.post", RepoAction::Create));
+    }
+
+    #[test]
+    fn rpc_grants_match_method_and_audience() {
+        let granted = GrantedScopes::parse(&[
+            "atproto".to_string(),
+            "rpc:app.bsky.video.getUploadLimits?aud=did%3Aweb%3Avideo.invalid".to_string(),
+            "rpc:*?aud=did:web:appview.invalid#bsky_appview".to_string(),
+            "rpc?lxm=com.example.a&lxm=com.example.b&aud=*".to_string(),
+        ]);
+        assert!(granted.allows_rpc("app.bsky.video.getUploadLimits", "did:web:video.invalid"));
+        assert!(!granted.allows_rpc("app.bsky.video.uploadVideo", "did:web:video.invalid"));
+        assert!(!granted.allows_rpc("app.bsky.video.getUploadLimits", "did:web:other.invalid"));
+        assert!(granted.allows_rpc("anything.at.all", "did:web:appview.invalid#bsky_appview"));
+        assert!(granted.allows_rpc("*", "did:web:appview.invalid#bsky_appview"));
+        assert!(!granted.allows_rpc("*", "did:web:video.invalid"));
+        assert!(granted.allows_rpc("com.example.b", "did:web:anyone.invalid"));
+        assert!(!granted.allows_rpc("com.example.c", "did:web:anyone.invalid"));
+    }
+
+    #[test]
+    fn malformed_rpc_grants_permit_nothing() {
+        for scope in [
+            "rpc:com.example.a",
+            "rpc?aud=did:web:a.invalid",
+            "rpc:*?aud=*",
+            "rpc:com.example.a?aud=",
+            "rpc:com.example.a?aud=%zz",
+        ] {
+            let granted = GrantedScopes::parse(&["atproto".to_string(), scope.to_string()]);
+            assert!(
+                !granted.allows_rpc("com.example.a", "did:web:a.invalid"),
+                "{scope}"
+            );
+        }
+        assert!(!GrantedScopes::parse(&["repo:com.example.a".to_string()])
+            .allows_rpc("com.example.a", "did:web:a.invalid"));
+    }
 
     #[test]
     fn parses_each_scope_form() {
