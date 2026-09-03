@@ -57,7 +57,11 @@ pub enum RepoAction {
 
 /// Parse a `repo:` scope suffix into its collections and actions, applying
 /// the proposal's defaults (no collection = all, no action = all three).
-fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
+///
+/// `pub(crate)` rather than private: the OAuth consent screen (see
+/// `crate::oauth::templates`) reuses this to describe a `repo:` grant in
+/// plain language instead of duplicating the parse.
+pub(crate) fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
     let (positional, params) = match suffix.find('?') {
         Some(pos) => (
             Some(&suffix[..pos]).filter(|p| !p.is_empty()),

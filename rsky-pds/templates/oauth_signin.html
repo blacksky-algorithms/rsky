@@ -7,15 +7,15 @@
   {% include "oauth_base_style.html" %}
 </head>
 <body>
-  <main>
-    <h1>Sign in</h1>
-    <p class="client">to continue to <strong>{{ client_display }}</strong></p>
+  <main class="card">
+    <p class="eyebrow">Sign in</p>
+    <h1>Continue to {{ client_display }}</h1>
     {% if let Some(error) = error %}
     <p class="error">{{ error }}</p>
     {% endif %}
     {% if !sessions.is_empty() %}
     <div class="sessions">
-      <p class="muted">Continue with a signed-in account:</p>
+      <p class="section-label">Continue with a signed-in account:</p>
       {% for session in sessions %}
       <form method="post" action="/oauth/authorize/select">
         <input type="hidden" name="request_uri" value="{{ request_uri }}">
@@ -38,7 +38,7 @@
       <button type="submit" class="primary">Sign in</button>
     </form>
     {% if let Some(signup_url) = signup_url %}
-    <p class="muted">New here? <a href="{{ signup_url }}">Create an account</a></p>
+    <p class="note">New here? <a href="{{ signup_url }}">Create an account</a></p>
     {% endif %}
   </main>
 </body>
