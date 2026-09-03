@@ -1,5 +1,10 @@
 mod tests;
 
+pub mod hubble;
+pub mod runner;
+pub mod source;
+pub mod state;
+
 use crate::SHUTDOWN;
 use crate::config::{WORKERS_BACKFILLER, backfiller_timeout};
 use crate::storage::Storage;
@@ -278,15 +283,37 @@ impl BackfillerManager {
         Ok(())
     }
 
+    /// Parse an in-memory CAR. Thin wrapper over [`Self::process_car_reader`].
+    /// The `Cursor` borrows, where this previously did `car_bytes.to_vec()` and
+    /// held a second full copy of the repo for the life of the parse.
     pub async fn process_car_bytes(
         storage: &Storage,
         did: &str,
         car_bytes: &[u8],
         priority: bool,
     ) -> Result<usize, WintermuteError> {
+        Self::process_car_reader(storage, did, Cursor::new(car_bytes), priority).await
+    }
+
+    /// Parse a CAR off a reader, so a fetch can stream into this rather than
+    /// buffering the whole archive first.
+    ///
+    /// The remaining bound is honest: `MemoryBlockstore` still materialises
+    /// every block, so peak is one whole repo. What this removes is holding it
+    /// *three* times over (`Bytes`, then `to_vec()`, then the `BlockMap`), and
+    /// buffering an 87 MB body while waiting on a DB connection.
+    pub async fn process_car_reader<R>(
+        storage: &Storage,
+        did: &str,
+        car_reader: R,
+        priority: bool,
+    ) -> Result<usize, WintermuteError>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send,
+    {
         use crate::metrics;
 
-        let mut reader = match CarReader::new(Cursor::new(car_bytes.to_vec())).await {
+        let mut reader = match CarReader::new(car_reader).await {
             Ok(r) => r,
             Err(e) => {
                 metrics::BACKFILLER_CAR_PARSE_ERRORS_TOTAL.inc();

@@ -30,6 +30,10 @@ name = "car_loader"
 path = "src/bin/car_loader.rs"
 
 [[bin]]
+name = "hubble_backfill"
+path = "src/bin/hubble_backfill.rs"
+
+[[bin]]
 name = "cleanup_stale_deactivated"
 path = "src/bin/cleanup_stale_deactivated.rs"
 
@@ -43,6 +47,7 @@ color-eyre = "0.6"
 dashmap = "6"
 derive_more = { version = "2", features = ["full"] }
 fjall = "2"
+governor = "0.10"
 heed = "0.20"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 iroh-car = "0.5.1"
@@ -71,6 +76,7 @@ http-body-util = "0.1"
 
 rusqlite = { workspace = true }
 num_cpus = "1"
+tempfile = "3"
 
 rsky-common = { workspace = true }
 rsky-crypto = { workspace = true }
@@ -88,5 +94,4 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 [dev-dependencies]
 mockito = "1.7.0"
 serial_test = { version = "3.2", features = ["async"] }
-tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
