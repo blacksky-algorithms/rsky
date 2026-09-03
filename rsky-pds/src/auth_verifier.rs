@@ -80,6 +80,14 @@ impl AuthScope {
             _ => bail!("Invalid AuthScope: `{scope:?}` is not a valid auth scope"),
         }
     }
+
+    /// Whether a session carrying this scope is "privileged" -- i.e. allowed
+    /// to request service-auth tokens for privileged methods
+    /// (`chat.bsky.*`, `com.atproto.server.createAccount`). True only for a
+    /// full `Access` session or an `AppPassPrivileged` app password.
+    pub fn is_privileged(&self) -> bool {
+        matches!(self, AuthScope::Access | AuthScope::AppPassPrivileged)
+    }
 }
 
 pub enum RoleStatus {
@@ -860,7 +868,7 @@ pub async fn validate_bearer_access_token(
         audience,
         ..
     } = validate_bearer_token(request, scopes, Some(options))?;
-    let is_privileged = [AuthScope::Access, AuthScope::AppPassPrivileged].contains(&scope);
+    let is_privileged = scope.is_privileged();
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -1049,6 +1057,7 @@ async fn validate_dpop_access_token(
         check_deactivated.unwrap_or(false),
     )
     .await?;
+    let is_privileged = scope.is_privileged();
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "oauth".to_string(),
@@ -1059,7 +1068,7 @@ async fn validate_dpop_access_token(
             token_id: Some(verified.token_id),
             aud: None,
             iss: None,
-            is_privileged: None,
+            is_privileged: Some(is_privileged),
         }),
         artifacts: Some(token),
     })
@@ -1146,6 +1155,7 @@ pub async fn validate_access_token(
         check_deactivated.unwrap_or(false),
     )
     .await?;
+    let is_privileged = scope.is_privileged();
     Ok(AccessOutput {
         credentials: Some(Credentials {
             r#type: "access".to_string(),
@@ -1156,7 +1166,7 @@ pub async fn validate_access_token(
             token_id: None,
             aud: None,
             iss: None,
-            is_privileged: None,
+            is_privileged: Some(is_privileged),
         }),
         artifacts: Some(token),
     })
