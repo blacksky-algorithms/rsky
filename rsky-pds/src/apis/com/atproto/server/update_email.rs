@@ -66,6 +66,11 @@ pub async fn update_email(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
+    crate::apis::assert_account_scope(
+        &auth.access.credentials,
+        "email",
+        crate::oauth_scope::AccountAction::Manage,
+    )?;
     match inner_update_email(body, auth, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {

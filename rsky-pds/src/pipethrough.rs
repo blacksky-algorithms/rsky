@@ -56,6 +56,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
         match AccessStandard::from_request(req).await {
             Outcome::Success(output) => {
                 let AccessOutput { credentials, .. } = output.access;
+                let granted_scopes = credentials.as_ref().and_then(|c| c.granted_scopes.clone());
                 let requester: Option<String> = match credentials {
                     None => None,
                     Some(credentials) => credentials.did,
@@ -76,6 +77,13 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                     actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                 };
+                if let Err(api_error) = assert_rpc_scope(&granted_scopes, &proxy_req).await {
+                    req.local_cache(|| Some(api_error));
+                    return Outcome::Error((
+                        Status::Forbidden,
+                        anyhow::anyhow!("InsufficientScope"),
+                    ));
+                }
                 match pipethrough(
                     &proxy_req,
                     requester,
@@ -222,6 +230,38 @@ pub async fn pipethrough_procedure_post(
         .await
         .map_err(|error| pipethrough_error(&error))?;
     Ok(parse_proxy_res(res).await?)
+}
+
+/// Enforce a granular OAuth session's `rpc:` scope before a call is proxied
+/// to another service, mirroring [`crate::apis::assert_repo_scope`]'s shape
+/// at the seam every pipethrough request passes through (`bsky_api_get_forwarder`
+/// and friends all resolve to [`HandlerPipeThrough`]).
+///
+/// If the destination service can't be resolved, enforcement is skipped and
+/// the ordinary pipethrough call is left to surface that failure -- a scope
+/// check only makes sense once we know which service the call is bound for.
+pub async fn assert_rpc_scope(
+    granted_scopes: &Option<Vec<String>>,
+    req: &ProxyRequest<'_>,
+) -> Result<(), ApiError> {
+    let Some(granted) = granted_scopes else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_rpc_session() {
+        return Ok(());
+    }
+    let lxm = parse_req_nsid(req);
+    let Ok(UrlAndAud { aud, .. }) = format_url_and_aud(req, None).await else {
+        return Ok(());
+    };
+    if scopes.allows_rpc(&lxm, &aud) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit calling {lxm} on {aud}"
+        )))
+    }
 }
 
 // Request setup/formatting

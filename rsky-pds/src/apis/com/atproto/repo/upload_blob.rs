@@ -99,6 +99,7 @@ pub async fn upload_blob(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
 ) -> Result<Json<BlobOutput>, ApiError> {
+    crate::apis::assert_blob_scope(&auth.access.credentials, &content_type.name)?;
     match inner_upload_blob(auth, blob, content_type, blobstore_factory, actor_store).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

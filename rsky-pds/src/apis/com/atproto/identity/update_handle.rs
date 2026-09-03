@@ -95,6 +95,7 @@ pub async fn update_handle(
     auth: AccessStandardCheckTakedown,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
+    crate::apis::assert_identity_scope(&auth.access.credentials, "handle")?;
     match inner_update_handle(
         body,
         sequencer,

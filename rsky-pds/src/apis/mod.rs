@@ -2,8 +2,8 @@ use crate::auth_verifier::{AccessStandard, AuthError, AuthScope, Credentials};
 use crate::handle;
 use crate::handle::errors::ErrorKind;
 use crate::pipethrough::{
-    pipethrough_error, pipethrough_procedure, pipethrough_procedure_post, ProxyRequest,
-    PRIVILEGED_METHODS,
+    assert_rpc_scope, pipethrough_error, pipethrough_procedure, pipethrough_procedure_post,
+    ProxyRequest, PRIVILEGED_METHODS,
 };
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
@@ -83,6 +83,82 @@ pub fn assert_repo_scope(
     }
 }
 
+/// Enforce a granular OAuth session's `blob:` scope on a blob upload.
+///
+/// Same shape as [`assert_repo_scope`]: a session carrying `blob:` grants but
+/// no `transition:generic` is confined to the accepted mime patterns those
+/// grants name. Legacy transition sessions and app passwords carry no
+/// `blob:` grant and are unaffected.
+pub fn assert_blob_scope(credentials: &Option<Credentials>, mime: &str) -> Result<(), ApiError> {
+    let Some(granted) = credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()) else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_blob_session() {
+        return Ok(());
+    }
+    if scopes.allows_blob(mime) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit uploading blobs of type {mime}"
+        )))
+    }
+}
+
+/// Enforce a granular OAuth session's `identity:` scope on an identity write
+/// (e.g. `com.atproto.identity.updateHandle`).
+///
+/// Same shape as [`assert_repo_scope`]: a session carrying `identity:`
+/// grants but no `transition:generic` is confined to the attributes those
+/// grants name.
+pub fn assert_identity_scope(
+    credentials: &Option<Credentials>,
+    attr: &str,
+) -> Result<(), ApiError> {
+    let Some(granted) = credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()) else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_identity_session() {
+        return Ok(());
+    }
+    if scopes.allows_identity(attr) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit changing identity attribute {attr}"
+        )))
+    }
+}
+
+/// Enforce a granular OAuth session's `account:` scope on an account-level
+/// mutation (email, deactivation/activation, PLC rotation).
+///
+/// Same shape as [`assert_repo_scope`]: a session carrying `account:` grants
+/// but no `transition:generic` is confined to the attribute/action pairs
+/// those grants name.
+pub fn assert_account_scope(
+    credentials: &Option<Credentials>,
+    attr: &str,
+    action: crate::oauth_scope::AccountAction,
+) -> Result<(), ApiError> {
+    let Some(granted) = credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()) else {
+        return Ok(());
+    };
+    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
+    if !scopes.is_granular_account_session() {
+        return Ok(());
+    }
+    if scopes.allows_account(attr, action) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit {action:?} on account attribute {attr}"
+        )))
+    }
+}
+
 // Lower ranks have higher presidence
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
@@ -94,6 +170,12 @@ pub async fn bsky_api_get_forwarder(
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
     assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
+    let granted_scopes = auth
+        .access
+        .credentials
+        .as_ref()
+        .and_then(|c| c.granted_scopes.clone());
+    assert_rpc_scope(&granted_scopes, &req).await?;
     let requester: Option<String> = match auth.access.credentials {
         None => None,
         Some(credentials) => credentials.did,
@@ -126,6 +208,12 @@ pub async fn bsky_api_post_forwarder(
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
     assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
+    let granted_scopes = auth
+        .access
+        .credentials
+        .as_ref()
+        .and_then(|c| c.granted_scopes.clone());
+    assert_rpc_scope(&granted_scopes, &req).await?;
     let requester: Option<String> = match auth.access.credentials {
         None => None,
         Some(credentials) => credentials.did,
@@ -587,3 +675,92 @@ impl From<handle::errors::Error> for ApiError {
 pub mod app;
 pub mod com;
 pub mod community;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn creds(granted: &[&str]) -> Option<Credentials> {
+        Some(Credentials {
+            r#type: "oauth".to_string(),
+            did: Some("did:plc:test".to_string()),
+            scope: Some(AuthScope::AppPass),
+            granted_scopes: Some(granted.iter().map(|s| s.to_string()).collect()),
+            audience: None,
+            token_id: None,
+            aud: None,
+            iss: None,
+            is_privileged: None,
+        })
+    }
+
+    #[test]
+    fn blob_scope_allows_and_denies_by_mime() {
+        let allowed = creds(&["atproto", "blob:image/*"]);
+        assert!(assert_blob_scope(&allowed, "image/png").is_ok());
+        assert!(matches!(
+            assert_blob_scope(&allowed, "video/mp4"),
+            Err(ApiError::InsufficientScope(_))
+        ));
+
+        // No `blob:` grant at all: enforcement is opt-in per resource, so
+        // this passes through unrestricted (same as `assert_repo_scope`).
+        let no_blob_grant = creds(&["atproto", "repo:app.bsky.feed.post"]);
+        assert!(assert_blob_scope(&no_blob_grant, "video/mp4").is_ok());
+
+        // Legacy app-password sessions carry no `granted_scopes` at all.
+        assert!(assert_blob_scope(&None, "video/mp4").is_ok());
+    }
+
+    #[test]
+    fn identity_scope_allows_and_denies_by_attribute() {
+        let allowed = creds(&["atproto", "identity:handle"]);
+        assert!(assert_identity_scope(&allowed, "handle").is_ok());
+
+        let wrong_attr = creds(&["atproto", "identity:invalid"]);
+        assert!(matches!(
+            assert_identity_scope(&wrong_attr, "handle"),
+            Err(ApiError::InsufficientScope(_))
+        ));
+
+        let no_identity_grant = creds(&["atproto", "repo:app.bsky.feed.post"]);
+        assert!(assert_identity_scope(&no_identity_grant, "handle").is_ok());
+    }
+
+    #[test]
+    fn account_scope_allows_and_denies_by_attribute_and_action() {
+        let manage = creds(&["atproto", "account:email?action=manage"]);
+        assert!(
+            assert_account_scope(&manage, "email", crate::oauth_scope::AccountAction::Manage)
+                .is_ok()
+        );
+
+        let read_only = creds(&["atproto", "account:email"]);
+        assert!(matches!(
+            assert_account_scope(
+                &read_only,
+                "email",
+                crate::oauth_scope::AccountAction::Manage
+            ),
+            Err(ApiError::InsufficientScope(_))
+        ));
+
+        let wrong_attr = creds(&["atproto", "account:status?action=manage"]);
+        assert!(matches!(
+            assert_account_scope(
+                &wrong_attr,
+                "email",
+                crate::oauth_scope::AccountAction::Manage
+            ),
+            Err(ApiError::InsufficientScope(_))
+        ));
+
+        let no_account_grant = creds(&["atproto", "repo:app.bsky.feed.post"]);
+        assert!(assert_account_scope(
+            &no_account_grant,
+            "email",
+            crate::oauth_scope::AccountAction::Manage
+        )
+        .is_ok());
+    }
+}

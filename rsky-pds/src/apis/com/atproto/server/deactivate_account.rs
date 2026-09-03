@@ -16,6 +16,11 @@ pub async fn deactivate_account(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
+    crate::apis::assert_account_scope(
+        &auth.access.credentials,
+        "status",
+        crate::oauth_scope::AccountAction::Manage,
+    )?;
     let did = auth.access.credentials.unwrap().did.unwrap();
     let DeactivateAccountInput { delete_after } = body.into_inner();
     match account_manager.deactivate_account(&did, delete_after).await {

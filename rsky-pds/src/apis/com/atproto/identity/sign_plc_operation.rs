@@ -22,6 +22,11 @@ pub async fn sign_plc_operation(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<Json<Operation>, ApiError> {
+    crate::apis::assert_account_scope(
+        &auth.access.credentials,
+        "repo",
+        crate::oauth_scope::AccountAction::Manage,
+    )?;
     let did = auth.access.credentials.unwrap().did.unwrap();
     let request = body.into_inner();
     let token = request.token.clone();

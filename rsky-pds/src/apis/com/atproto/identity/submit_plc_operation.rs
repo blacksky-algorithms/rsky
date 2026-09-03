@@ -172,6 +172,11 @@ pub async fn submit_plc_operation(
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
+    crate::apis::assert_account_scope(
+        &auth.access.credentials,
+        "repo",
+        crate::oauth_scope::AccountAction::Manage,
+    )?;
     let did = get_requester_did(&auth)?;
 
     //Validate and transform request
