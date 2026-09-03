@@ -3,7 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::{AccessStandard, AccountRepoScopedAccess};
 use crate::config::ServerConfig;
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
@@ -13,7 +13,7 @@ use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::SubmitPlcOperationRequest;
 
 #[tracing::instrument(skip_all)]
-fn get_requester_did(auth: &AccessStandard) -> Result<String, ApiError> {
+fn get_requester_did(auth: &AccountRepoScopedAccess<AccessStandard>) -> Result<String, ApiError> {
     match &auth.access.credentials {
         None => {
             tracing::error!("Failed to find access credentials");
@@ -165,18 +165,15 @@ fn validate_operation_body(request: SubmitPlcOperationRequest) -> Result<Operati
 #[tracing::instrument(skip_all)]
 pub async fn submit_plc_operation(
     body: Json<SubmitPlcOperationRequest>,
-    auth: AccessStandard,
+    // `AccessStandard` (its pre-existing tier, app passwords included) named
+    // explicitly since it differs from the guard's default `Base`.
+    auth: AccountRepoScopedAccess<AccessStandard>,
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    crate::apis::assert_account_scope(
-        &auth.access.credentials,
-        "repo",
-        crate::oauth_scope::AccountAction::Manage,
-    )?;
     let did = get_requester_did(&auth)?;
 
     //Validate and transform request

@@ -2,7 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandardCheckTakedown;
+use crate::auth_verifier::HandleScopedAccess;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::{plc, SharedIdResolver, SharedSequencer};
@@ -18,7 +18,7 @@ async fn inner_update_handle(
     sequencer: &State<SharedSequencer>,
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
-    auth: AccessStandardCheckTakedown,
+    auth: HandleScopedAccess,
     account_manager: AccountManager,
 ) -> Result<()> {
     let UpdateHandleInput { handle } = body.into_inner();
@@ -92,10 +92,9 @@ pub async fn update_handle(
     sequencer: &State<SharedSequencer>,
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
-    auth: AccessStandardCheckTakedown,
+    auth: HandleScopedAccess,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    crate::apis::assert_identity_scope(&auth.access.credentials, "handle")?;
     match inner_update_handle(
         body,
         sequencer,

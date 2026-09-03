@@ -14,6 +14,18 @@ mod common;
 const LOOPBACK_CLIENT_ID: &str =
     "http://localhost?scope=atproto%20transition%3Ageneric&redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fcb";
 const REDIRECT_URI: &str = "http://127.0.0.1:8080/cb";
+
+/// A loopback client_id requesting exactly `scope` -- the loopback client's
+/// metadata is derived from its own URL, so `allowed_scopes` is exactly what
+/// this embeds and the PAR request below must ask for the same string.
+#[allow(dead_code)] // only the scoped-access-guard tests drive non-default scopes
+fn loopback_client_id(scope: &str) -> String {
+    format!(
+        "http://localhost?scope={}&redirect_uri={}",
+        url::form_urlencoded::byte_serialize(scope.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>(),
+    )
+}
 const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
@@ -90,12 +102,12 @@ fn form_encode(pairs: &[(&str, &str)]) -> String {
     serializer.finish()
 }
 
-fn par_body(state: &str) -> String {
+fn par_body(client_id: &str, scope: &str, state: &str) -> String {
     form_encode(&[
-        ("client_id", LOOPBACK_CLIENT_ID),
+        ("client_id", client_id),
         ("response_type", "code"),
         ("redirect_uri", REDIRECT_URI),
-        ("scope", "atproto transition:generic"),
+        ("scope", scope),
         ("state", state),
         ("code_challenge", PKCE_CHALLENGE),
         ("code_challenge_method", "S256"),
@@ -105,6 +117,24 @@ fn par_body(state: &str) -> String {
 /// PAR with the standard `use_dpop_nonce` retry dance; returns the
 /// request_uri and the fresh server nonce.
 async fn run_par(client: &Client, key: &Jwk) -> (String, String) {
+    run_par_scoped(
+        client,
+        key,
+        LOOPBACK_CLIENT_ID,
+        "atproto transition:generic",
+    )
+    .await
+}
+
+/// [`run_par`], but for a client_id/scope other than the default loopback
+/// client, so a scoped-access-guard test can request a narrow grant (e.g.
+/// `atproto blob:image/*`) instead of `transition:generic`.
+async fn run_par_scoped(
+    client: &Client,
+    key: &Jwk,
+    client_id: &str,
+    scope: &str,
+) -> (String, String) {
     let htu = format!("{}/oauth/par", public_url(client));
     let response = client
         .post("/oauth/par")
@@ -113,7 +143,7 @@ async fn run_par(client: &Client, key: &Jwk) -> (String, String) {
             "DPoP",
             dpop_proof(key, "POST", &htu, None, None),
         ))
-        .body(par_body("state-123"))
+        .body(par_body(client_id, scope, "state-123"))
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::BadRequest);
@@ -132,7 +162,7 @@ async fn run_par(client: &Client, key: &Jwk) -> (String, String) {
             "DPoP",
             dpop_proof(key, "POST", &htu, Some(&nonce), None),
         ))
-        .body(par_body("state-123"))
+        .body(par_body(client_id, scope, "state-123"))
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::Created);
@@ -150,13 +180,10 @@ fn extract_csrf(html: &str) -> String {
     html[start..end].to_string()
 }
 
-fn authorize_path(request_uri: &str) -> String {
+fn authorize_path(client_id: &str, request_uri: &str) -> String {
     format!(
         "/oauth/authorize?{}",
-        form_encode(&[
-            ("client_id", LOOPBACK_CLIENT_ID),
-            ("request_uri", request_uri),
-        ])
+        form_encode(&[("client_id", client_id), ("request_uri", request_uri)])
     )
 }
 
@@ -167,7 +194,19 @@ struct AuthorizeSession {
 
 /// GET /oauth/authorize, returning the device cookie and csrf token.
 async fn open_authorize_page(client: &Client, request_uri: &str) -> AuthorizeSession {
-    let response = client.get(authorize_path(request_uri)).dispatch().await;
+    open_authorize_page_scoped(client, LOOPBACK_CLIENT_ID, request_uri).await
+}
+
+/// [`open_authorize_page`] for a non-default client_id.
+async fn open_authorize_page_scoped(
+    client: &Client,
+    client_id: &str,
+    request_uri: &str,
+) -> AuthorizeSession {
+    let response = client
+        .get(authorize_path(client_id, request_uri))
+        .dispatch()
+        .await;
     assert_eq!(response.status(), Status::Ok);
     let cookie = response
         .cookies()
@@ -189,13 +228,23 @@ async fn sign_in_and_accept(
     request_uri: &str,
     session: &AuthorizeSession,
 ) -> String {
+    sign_in_and_accept_scoped(client, LOOPBACK_CLIENT_ID, request_uri, session).await
+}
+
+/// [`sign_in_and_accept`] for a non-default client_id.
+async fn sign_in_and_accept_scoped(
+    client: &Client,
+    client_id: &str,
+    request_uri: &str,
+    session: &AuthorizeSession,
+) -> String {
     let response = client
         .post("/oauth/authorize/sign-in")
         .header(ContentType::Form)
         .cookie(("device-id", session.cookie.clone()))
         .body(form_encode(&[
             ("request_uri", request_uri),
-            ("client_id", LOOPBACK_CLIENT_ID),
+            ("client_id", client_id),
             ("csrf", &session.csrf),
             ("identifier", "foo@example.com"),
             ("password", "password"),
@@ -214,7 +263,7 @@ async fn sign_in_and_accept(
         .cookie(("device-id", session.cookie.clone()))
         .body(form_encode(&[
             ("request_uri", request_uri),
-            ("client_id", LOOPBACK_CLIENT_ID),
+            ("client_id", client_id),
             ("csrf", &session.csrf),
             ("did", "did:plc:khvyd3oiw46vif5gm7hijslk"),
         ]))
@@ -237,6 +286,17 @@ async fn sign_in_and_accept(
 }
 
 async fn exchange_code(client: &Client, key: &Jwk, code: &str, nonce: &str) -> Value {
+    exchange_code_scoped(client, LOOPBACK_CLIENT_ID, key, code, nonce).await
+}
+
+/// [`exchange_code`] for a non-default client_id.
+async fn exchange_code_scoped(
+    client: &Client,
+    client_id: &str,
+    key: &Jwk,
+    code: &str,
+    nonce: &str,
+) -> Value {
     let htu = format!("{}/oauth/token", public_url(client));
     let response = client
         .post("/oauth/token")
@@ -248,7 +308,7 @@ async fn exchange_code(client: &Client, key: &Jwk, code: &str, nonce: &str) -> V
         .body(form_encode(&[
             ("grant_type", "authorization_code"),
             ("code", code),
-            ("client_id", LOOPBACK_CLIENT_ID),
+            ("client_id", client_id),
             ("redirect_uri", REDIRECT_URI),
             ("code_verifier", PKCE_VERIFIER),
         ]))
@@ -503,6 +563,7 @@ async fn oauth_authorize_error_pages() {
 
     let response = client
         .get(authorize_path(
+            LOOPBACK_CLIENT_ID,
             "urn:ietf:params:oauth:request_uri:req-00000000000000000000000000000000",
         ))
         .dispatch()
@@ -597,7 +658,7 @@ async fn oauth_account_picker_select_flow() {
     // second round shows the signed-in account and supports select
     let (request_uri, _) = run_par(&client, &key).await;
     let response = client
-        .get(authorize_path(&request_uri))
+        .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
         .cookie(("device-id", session.cookie.clone()))
         .dispatch()
         .await;
@@ -651,7 +712,7 @@ async fn oauth_device_cookie_with_stale_session_is_replaced() {
     // a cookie naming a real device but a stale session id gets replaced
     let (request_uri, _) = run_par(&client, &key).await;
     let response = client
-        .get(authorize_path(&request_uri))
+        .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
         .cookie(("device-id", format!("{device_id}.ses-forged")))
         .dispatch()
         .await;
@@ -667,7 +728,7 @@ async fn oauth_device_cookie_with_stale_session_is_replaced() {
     // malformed cookies (no separator) are also replaced
     let (request_uri, _) = run_par(&client, &key).await;
     let response = client
-        .get(authorize_path(&request_uri))
+        .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
         .cookie(("device-id", "garbage-cookie"))
         .dispatch()
         .await;
@@ -723,4 +784,270 @@ async fn oauth_endpoint_edge_cases() {
     assert_eq!(response.status(), Status::BadRequest);
     let html = response.into_string().await.unwrap();
     assert!(html.contains("invalid CSRF token"));
+}
+
+// Scoped-access guard tests
+// ---------------------
+//
+// These prove the combinator guards in `auth_verifier.rs`
+// (`BlobScopedAccess`, `HandleScopedAccess`, `EmailScopedAccess`,
+// `AccountStatusScopedAccess`, `AccountRepoScopedAccess`) enforce their
+// resource scope through a real dispatched request over the full Rocket
+// stack -- DPoP verification, session lookup, and all -- rather than just
+// exercising the `assert_*_scope` helper in isolation. That is the point of
+// folding the assertion into the guard: a route that takes one of these
+// guards cannot get a `did` without the check having already run, so there
+// is no separate call in the handler body left to accidentally skip.
+//
+// `BlobScopedAccess` and `HandleScopedAccess` wrap `AccessStandardCheckTakedown`
+// and `AccountRepoScopedAccess<AccessStandard>` wraps `AccessStandard`, both
+// of which accept an OAuth session mapped to `AppPass`/`AppPassPrivileged` --
+// exactly what a granular-scope grant maps to (see
+// `auth_verifier::oauth_scopes_to_auth_scope`), so a real PAR/authorize/token
+// flow can reach them. `EmailScopedAccess`, `AccountStatusScopedAccess`, and
+// the default (`AccessFull`) `AccountRepoScopedAccess` wrap `AccessFull`,
+// which requires `AuthScope::Access` -- a scope only the legacy plain-JWT
+// `createSession` token type carries, and that token type always sets
+// `granted_scopes: None`. No OAuth grant can ever produce `AuthScope::Access`
+// (`oauth_scopes_to_auth_scope` only ever returns `AppPass`/`AppPassPrivileged`
+// or rejects), so those three guards' scope check is presently unreachable
+// through any live request; per-endpoint test coverage for them stays at the
+// `apis::tests` level added alongside `assert_account_scope` itself, which
+// exercises the identical helper this guard calls.
+
+/// Runs the full PAR -> authorize -> sign-in -> accept -> token-exchange
+/// dance for a fresh loopback client requesting exactly `scope`, returning a
+/// real DPoP-bound access token and the key it is bound to.
+async fn granular_access_token(client: &Client, scope: &str) -> (String, Jwk) {
+    let key = dpop_key();
+    let client_id = loopback_client_id(scope);
+    let (request_uri, nonce) = run_par_scoped(client, &key, &client_id, scope).await;
+    let session = open_authorize_page_scoped(client, &client_id, &request_uri).await;
+    let code = sign_in_and_accept_scoped(client, &client_id, &request_uri, &session).await;
+    let tokens = exchange_code_scoped(client, &client_id, &key, &code, &nonce).await;
+    (tokens["access_token"].as_str().unwrap().to_string(), key)
+}
+
+/// Dispatches an authenticated POST, retrying once with the server's DPoP
+/// nonce the same way a real client would (RFC 9449 §8), and returns the
+/// final status and parsed JSON body.
+async fn dispatch_scoped_post(
+    client: &Client,
+    path: &str,
+    access_token: &str,
+    key: &Jwk,
+    content_type: ContentType,
+    body: Vec<u8>,
+) -> (Status, Value) {
+    let htu = format!("{}{}", public_url(client), path);
+    let first = client
+        .post(path)
+        .header(content_type.clone())
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "POST", &htu, None, Some(access_token)),
+        ))
+        .body(body.clone())
+        .dispatch()
+        .await;
+    let response = if first.status() == Status::Unauthorized {
+        match first.headers().get_one("DPoP-Nonce").map(str::to_string) {
+            Some(nonce) => {
+                client
+                    .post(path)
+                    .header(content_type)
+                    .header(Header::new("Authorization", format!("DPoP {access_token}")))
+                    .header(Header::new(
+                        "DPoP",
+                        dpop_proof(key, "POST", &htu, Some(&nonce), Some(access_token)),
+                    ))
+                    .body(body)
+                    .dispatch()
+                    .await
+            }
+            None => first,
+        }
+    } else {
+        first
+    };
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    let json_body = serde_json::from_str(&text).unwrap_or(Value::Null);
+    (status, json_body)
+}
+
+fn handle_domain(client: &Client) -> String {
+    client
+        .rocket()
+        .state::<rsky_pds::config::ServerConfig>()
+        .unwrap()
+        .identity
+        .service_handle_domains
+        .first()
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+async fn blob_scoped_access_allows_matching_mime_and_denies_mismatch() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+
+    // A `blob:image/*` grant permits uploading a png.
+    let (access_token, key) = granular_access_token(&client, "atproto blob:image/*").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.repo.uploadBlob",
+        &access_token,
+        &key,
+        ContentType::PNG,
+        vec![0x89, 0x50, 0x4e, 0x47],
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert!(
+        body["blob"]["mimeType"].as_str().is_some(),
+        "body was {body}"
+    );
+
+    // The same grant does not cover a mismatched mime type.
+    let (access_token, key) = granular_access_token(&client, "atproto blob:image/*").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.repo.uploadBlob",
+        &access_token,
+        &key,
+        ContentType::Plain,
+        b"not an image".to_vec(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+#[tokio::test]
+async fn handle_scoped_access_allows_handle_and_denies_other_attr() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let domain = handle_domain(&client);
+
+    // An `identity:handle` grant clears `HandleScopedAccess` and reaches the
+    // handler, which then talks to the mock PLC directory to rotate the
+    // did:plc handle -- that mock only serves DID documents, not the PLC
+    // operation-log shape `plc::Client::update_handle` needs, so the request
+    // still fails past the guard. What matters here is that it is NOT
+    // rejected by the scope check.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:handle").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.updateHandle",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "handle": format!("bar{domain}") })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_ne!(status, Status::Forbidden, "body was {body}");
+    assert_ne!(body["error"], "InsufficientScope", "body was {body}");
+
+    // An `identity:` grant for an attribute this server does not recognise
+    // (this parser only accepts `handle`/`*`) is still a granular identity
+    // session -- it engages restriction -- but permits nothing.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:invalid").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.updateHandle",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "handle": format!("baz{domain}") })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+#[tokio::test]
+async fn account_repo_scoped_access_covers_submit_plc_operation() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+
+    // `account:repo?action=manage` clears `AccountRepoScopedAccess<AccessStandard>`
+    // and reaches the handler's own request-body validation, which rejects
+    // this empty operation -- proving the guard let the request through
+    // rather than stopping it at the scope check.
+    let (access_token, key) =
+        granular_access_token(&client, "atproto account:repo?action=manage").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.submitPlcOperation",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "operation": {} }).to_string().into_bytes(),
+    )
+    .await;
+    assert_ne!(body["error"], "InsufficientScope", "body was {body}");
+    assert_eq!(status, Status::BadRequest, "body was {body}");
+
+    // `account:repo` alone defaults to `action=read`, which does not satisfy
+    // the `Manage` check `submitPlcOperation` requires.
+    let (access_token, key) = granular_access_token(&client, "atproto account:repo").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.submitPlcOperation",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "operation": {} }).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// `EmailScopedAccess`, `AccountStatusScopedAccess`, and the default
+/// `AccountRepoScopedAccess` all wrap `AccessFull`, which requires
+/// `AuthScope::Access` -- a scope only a legacy plain-JWT `createSession`
+/// token carries (see the module doc above). This is a regression check that
+/// the refactor did not break that, the only path currently able to reach
+/// them: a legacy session still clears `EmailScopedAccess` exactly as it
+/// cleared the plain `AccessFull` guard before this change.
+#[tokio::test]
+async fn email_scoped_access_still_accepts_a_legacy_session() {
+    let (_dir, client) = get_oauth_client().await;
+    let (identifier, password) = common::create_account(&client).await;
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(json!({ "identifier": identifier, "password": password }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let session: Value = response.into_json().await.expect("session json");
+    let access_jwt = session["accessJwt"]
+        .as_str()
+        .expect("accessJwt")
+        .to_string();
+
+    let response = client
+        .post("/xrpc/com.atproto.server.updateEmail")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {access_jwt}")))
+        .body(json!({ "email": "new-address@example.com" }).to_string())
+        .dispatch()
+        .await;
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert_ne!(body["error"], "InsufficientScope", "body was {body}");
 }
