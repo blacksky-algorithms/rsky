@@ -150,6 +150,14 @@ async fn app_password_session_can_mint_service_auth_for_a_video_service() {
     assert_eq!(status, Status::Ok);
     assert!(!service_jwt.is_empty());
 
+    // a method-less token is allowed too
+    let response = client
+        .get("/xrpc/com.atproto.server.getServiceAuth?aud=did:web:video.invalid")
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
     // protected methods are never delegated
     let (status, _) = service_auth(
         &client,
