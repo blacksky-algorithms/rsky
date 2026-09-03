@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"
@@ -74,6 +74,8 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 url = "2.5.2"
 ws = { package = "rocket_ws", version = "0.1.1" }
+scrypt = { version = "0.12.0", default-features = false }
+subtle = "2.6.1"
 
 
 [dev-dependencies]

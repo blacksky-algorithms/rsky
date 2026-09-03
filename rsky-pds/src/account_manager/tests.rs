@@ -744,11 +744,16 @@ async fn manages_passwords() {
 
 #[tokio::test]
 async fn password_hash_helpers() {
+    // `gen_salt_and_hash` now always produces a scrypt hash (matching the
+    // reference TS pds's `scrypt.ts`), but `verify` still accepts legacy
+    // Argon2 PHC-string hashes so pre-migration accounts aren't locked out.
+    // See account_manager::helpers::password's own unit tests for
+    // dedicated coverage of the scrypt encoding, cross-implementation
+    // interop, and the Argon2 fallback path.
     let hash = password::gen_salt_and_hash("secret".to_owned()).unwrap();
     assert!(password::verify(&"secret".to_owned(), &hash).unwrap());
     assert!(!password::verify(&"other".to_owned(), &hash).unwrap());
-    assert!(password::verify(&"secret".to_owned(), "not-a-phc-hash").is_err());
-    assert!(password::hash_with_salt(&"secret".to_owned(), "!invalid salt!").is_err());
+    assert!(password::verify(&"secret".to_owned(), "not-a-recognized-hash-format").is_err());
 }
 
 #[tokio::test]
