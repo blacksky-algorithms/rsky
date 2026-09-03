@@ -123,6 +123,13 @@ async fn inner_apply_writes(
                 commit.commit_data.rev,
             )
             .await?;
+        for write in &writes {
+            crate::metrics::record_repo_write(match write {
+                PreparedWrite::Create(_) => "create",
+                PreparedWrite::Update(_) => "update",
+                PreparedWrite::Delete(_) => "delete",
+            });
+        }
         // The lexicon declares a JSON object output; returning an empty body
         // instead makes a client that requires JSON treat a successful write as
         // failed and retry it, duplicating records.

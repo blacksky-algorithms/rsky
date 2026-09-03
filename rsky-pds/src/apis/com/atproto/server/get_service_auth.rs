@@ -71,7 +71,10 @@ pub async fn get_service_auth(
     actor_store: &State<ActorStore>,
 ) -> Result<Json<GetServiceAuthOutput>, ApiError> {
     match inner_get_service_auth(aud, exp, lxm, auth, actor_store).await {
-        Ok(token) => Ok(Json(GetServiceAuthOutput { token })),
+        Ok(token) => {
+            crate::metrics::record_service_token_issued();
+            Ok(Json(GetServiceAuthOutput { token }))
+        }
         Err(error) => {
             tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)

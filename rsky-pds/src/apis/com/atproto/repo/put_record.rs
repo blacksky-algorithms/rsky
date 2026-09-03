@@ -112,6 +112,11 @@ async fn inner_put_record(
             account_manager
                 .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
                 .await?;
+            crate::metrics::record_repo_write(match &write {
+                PreparedWrite::Create(_) => "create",
+                PreparedWrite::Update(_) => "update",
+                PreparedWrite::Delete(_) => "delete",
+            });
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),

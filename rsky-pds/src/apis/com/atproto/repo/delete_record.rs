@@ -85,6 +85,7 @@ async fn inner_delete_record(
             account_manager
                 .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
                 .await?;
+            crate::metrics::record_repo_write("delete");
 
             Ok(())
         }

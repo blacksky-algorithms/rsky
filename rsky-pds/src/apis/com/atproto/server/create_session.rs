@@ -111,7 +111,13 @@ pub async fn create_session(
 ) -> Result<Json<CreateSessionOutput>, ApiError> {
     // @TODO: Add rate limiting
     match inner_create_session(body, account_manager).await {
-        Ok(res) => Ok(Json(res)),
-        Err(error) => Err(error),
+        Ok(res) => {
+            crate::metrics::record_login(true);
+            Ok(Json(res))
+        }
+        Err(error) => {
+            crate::metrics::record_login(false);
+            Err(error)
+        }
     }
 }

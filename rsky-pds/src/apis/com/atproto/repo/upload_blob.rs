@@ -78,6 +78,8 @@ async fn inner_upload_blob(
             .await?;
     }
 
+    crate::metrics::record_blob_upload(blobref.get_size().unwrap_or(0).max(0) as u64);
+
     Ok(BlobOutput {
         blob: Blob {
             r#type: Some("blob".to_string()),

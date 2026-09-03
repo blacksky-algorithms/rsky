@@ -100,6 +100,7 @@ async fn inner_create_record(
         account_manager
             .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
             .await?;
+        crate::metrics::record_repo_write("create");
 
         Ok(CreateRecordOutput {
             uri: write.uri.clone(),

@@ -22,6 +22,7 @@ pub mod handle;
 pub mod image;
 pub mod lexicon;
 pub mod mailer;
+pub mod metrics;
 pub mod models;
 pub mod oauth;
 pub mod oauth_scope;
@@ -311,6 +312,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
+    let metrics_handle = crate::metrics::install_recorder();
+
     rocket::custom(figment)
         .mount(
             "/",
@@ -319,6 +322,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 robots,
                 health,
                 health_live,
+                crate::metrics::metrics_route,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
@@ -449,6 +453,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .attach(CORS)
         .attach(oauth::OAuthHeaders)
         .attach(shield)
+        .attach(crate::metrics::XrpcMetrics)
+        .manage(metrics_handle)
         .manage(sequencer)
         .manage(blobstore_factory)
         .manage(id_resolver)
