@@ -956,8 +956,7 @@ async fn handle_scoped_access_allows_handle_and_denies_other_attr() {
     assert_ne!(body["error"], "InsufficientScope", "body was {body}");
 
     // An `identity:` grant for an attribute this server does not recognise
-    // (this parser only accepts `handle`/`*`) is still a granular identity
-    // session -- it engages restriction -- but permits nothing.
+    // (this parser only accepts `handle`/`*`) permits nothing.
     let (access_token, key) = granular_access_token(&client, "atproto identity:invalid").await;
     let (status, body) = dispatch_scoped_post(
         &client,
@@ -972,6 +971,97 @@ async fn handle_scoped_access_allows_handle_and_denies_other_attr() {
     .await;
     assert_eq!(status, Status::Forbidden, "body was {body}");
     assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// The defect these guards were carrying: enforcement used to engage only
+/// when the session already held a grant of the resource's own kind, so a
+/// granular session scoped to one collection and nothing else got
+/// *unrestricted* access to every other resource. Absence of a grant is now a
+/// denial, proven here over the full stack.
+#[tokio::test]
+async fn a_repo_only_grant_is_denied_the_resources_it_does_not_name() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let domain = handle_domain(&client);
+    const REPO_ONLY: &str = "atproto repo:app.bsky.feed.post";
+
+    // No `blob:` grant: the upload is refused rather than waved through.
+    let (access_token, key) = granular_access_token(&client, REPO_ONLY).await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.repo.uploadBlob",
+        &access_token,
+        &key,
+        ContentType::PNG,
+        vec![0x89, 0x50, 0x4e, 0x47],
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+
+    // No `identity:` grant: the handle change is refused.
+    let (access_token, key) = granular_access_token(&client, REPO_ONLY).await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.updateHandle",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "handle": format!("qux{domain}") })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+
+    // No `account:` grant: the PLC submission is refused.
+    let (access_token, key) = granular_access_token(&client, REPO_ONLY).await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.submitPlcOperation",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "operation": {} }).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// The companion fail-open on the same path: `assert_rpc_scope` used to
+/// return `Ok(())` when the destination service could not be resolved, so an
+/// audience-resolution error allowed the proxied call outright. An `rpc:`
+/// grant is bound to an audience, so an unresolvable one has to deny.
+///
+/// This mock appview is on loopback, which `is_safe_url` refuses outside dev
+/// mode -- so the aud never resolves here, and the request is refused with
+/// that failure rather than proxied. Before the fix a repo-only session got
+/// through this seam twice over: once for holding no `rpc:` grant, and again
+/// for the resolution error.
+#[tokio::test]
+async fn an_unresolvable_proxy_audience_denies_the_proxied_call() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+
+    let (access_token, key) =
+        granular_access_token(&client, "atproto repo:app.bsky.feed.post").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/app.bsky.graph.muteActor",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "actor": "did:plc:someoneelse" })
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest, "body was {body}");
+    assert_eq!(body["error"], "InvalidRequest", "body was {body}");
 }
 
 #[tokio::test]

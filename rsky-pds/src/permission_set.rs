@@ -495,7 +495,8 @@ mod tests {
         assert!(scope.starts_with("repo:?"), "{scope}");
         assert!(scope.contains("collection=app.bulleted.node"), "{scope}");
         assert!(scope.contains("action=create"), "{scope}");
-        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope]).is_granular_repo_session());
+        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
+            .allows_repo("app.bulleted.node", crate::oauth_scope::RepoAction::Create));
 
         let blob = Permission {
             resource: "blob".to_string(),
@@ -553,9 +554,8 @@ mod tests {
     /// The bug this whole file exists to fix: a permission set naming only a
     /// `repo:` grant (no `space:`) used to expand into nothing, so a session
     /// that granted only `include:<nsid>` ended up with no `repo:` scope at
-    /// all and therefore an *unrestricted* repo session
-    /// (`is_granular_repo_session` requires a `Repo(_)` variant to engage
-    /// restriction). Expanding non-space entries closes that hole.
+    /// all. Expanding non-space entries is what gives such a session the
+    /// grants it was actually issued.
     #[tokio::test]
     async fn a_permission_set_only_grant_restricts_rather_than_failing_open() {
         const REPO_ONLY_SET: &str = r#"{
@@ -586,7 +586,6 @@ mod tests {
         let mut granted = vec!["atproto".to_string()];
         granted.extend(scopes);
         let granted_scopes = crate::oauth_scope::GrantedScopes::parse(&granted);
-        assert!(granted_scopes.is_granular_repo_session());
         assert!(granted_scopes
             .allows_repo("app.bsky.feed.post", crate::oauth_scope::RepoAction::Create));
         assert!(!granted_scopes

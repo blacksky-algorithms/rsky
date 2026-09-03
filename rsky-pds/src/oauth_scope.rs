@@ -70,12 +70,12 @@ pub enum OAuthScope {
     /// on a form this server doesn't know about yet.
     ///
     /// It is inert everywhere a grant is evaluated: [`Self::is_permission_grant`]
-    /// excludes it, and every `is_granular_*_session`/`allows_*` check on
-    /// [`GrantedScopes`] matches a specific typed variant, never this one. So
-    /// an unrecognised scope can never be the reason a session ends up with
-    /// *more* access than its recognised scopes alone would grant -- at most
-    /// it does nothing, and a session carrying only unrecognised scopes (no
-    /// `transition:`, no recognised permission grant) is refused by
+    /// excludes it, and every `allows_*` check on [`GrantedScopes`] matches a
+    /// specific typed variant, never this one. So an unrecognised scope can
+    /// never be the reason a session ends up with *more* access than its
+    /// recognised scopes alone would grant -- at most it does nothing, and a
+    /// session carrying only unrecognised scopes (no `transition:`, no
+    /// recognised permission grant) is refused by
     /// [`crate::auth_verifier::oauth_scopes_to_auth_scope`] rather than
     /// silently treated as fully authorised.
     Unknown(String),
@@ -409,16 +409,6 @@ impl GrantedScopes {
         self.scopes.iter().any(OAuthScope::is_permission_grant)
     }
 
-    /// Whether a granular OAuth session (one carrying `repo:`/permission
-    /// grants but no `transition:generic`) governs this write. Legacy
-    /// transition sessions and app passwords are `None` here and enforced by
-    /// the existing scope model instead.
-    #[must_use]
-    pub fn is_granular_repo_session(&self) -> bool {
-        !self.has_transition("generic")
-            && self.scopes.iter().any(|s| matches!(s, OAuthScope::Repo(_)))
-    }
-
     /// Whether some granted `repo:` scope permits `action` on `collection`.
     ///
     /// `repo:<nsid>` is shorthand for `repo?collection=<nsid>`; a missing
@@ -438,14 +428,6 @@ impl GrantedScopes {
         })
     }
 
-    /// Whether a granular OAuth session governs blob uploads, mirroring
-    /// [`Self::is_granular_repo_session`] for the `blob:` resource.
-    #[must_use]
-    pub fn is_granular_blob_session(&self) -> bool {
-        !self.has_transition("generic")
-            && self.scopes.iter().any(|s| matches!(s, OAuthScope::Blob(_)))
-    }
-
     /// Whether some granted `blob:` scope accepts `mime`.
     #[must_use]
     pub fn allows_blob(&self, mime: &str) -> bool {
@@ -453,15 +435,6 @@ impl GrantedScopes {
             OAuthScope::Blob(suffix) => mime_matches(&parse_blob_scope(suffix), mime),
             _ => false,
         })
-    }
-
-    /// Whether a granular OAuth session governs calls proxied to another
-    /// service, mirroring [`Self::is_granular_repo_session`] for the `rpc:`
-    /// resource.
-    #[must_use]
-    pub fn is_granular_rpc_session(&self) -> bool {
-        !self.has_transition("generic")
-            && self.scopes.iter().any(|s| matches!(s, OAuthScope::Rpc(_)))
     }
 
     /// Whether some granted `rpc:` scope permits calling `lxm` on `aud`.
@@ -480,18 +453,6 @@ impl GrantedScopes {
         })
     }
 
-    /// Whether a granular OAuth session governs identity attribute changes,
-    /// mirroring [`Self::is_granular_repo_session`] for the `identity:`
-    /// resource.
-    #[must_use]
-    pub fn is_granular_identity_session(&self) -> bool {
-        !self.has_transition("generic")
-            && self
-                .scopes
-                .iter()
-                .any(|s| matches!(s, OAuthScope::Identity(_)))
-    }
-
     /// Whether some granted `identity:` scope permits acting on `attr`
     /// (`"handle"`, currently the only recognised attribute).
     #[must_use]
@@ -503,18 +464,6 @@ impl GrantedScopes {
             },
             _ => false,
         })
-    }
-
-    /// Whether a granular OAuth session governs account-level mutations,
-    /// mirroring [`Self::is_granular_repo_session`] for the `account:`
-    /// resource.
-    #[must_use]
-    pub fn is_granular_account_session(&self) -> bool {
-        !self.has_transition("generic")
-            && self
-                .scopes
-                .iter()
-                .any(|s| matches!(s, OAuthScope::Account(_)))
     }
 
     /// Whether some granted `account:` scope permits `action` on `attr`
@@ -666,7 +615,6 @@ mod tests {
 
         // A collection-limited grant permits only that collection.
         let g = GrantedScopes::parse(&["atproto".into(), format!("repo:{post}")]);
-        assert!(g.is_granular_repo_session());
         assert!(g.allows_repo(post, RepoAction::Create));
         assert!(g.allows_repo(post, RepoAction::Delete));
         assert!(!g.allows_repo(like, RepoAction::Create));
@@ -680,10 +628,10 @@ mod tests {
         let g = GrantedScopes::parse(&["atproto".into(), "repo:*".into()]);
         assert!(g.allows_repo(like, RepoAction::Update));
 
-        // A legacy transition session is not a granular repo session and is
-        // enforced by the app-password model instead.
+        // A legacy transition session names no `repo:` grant of its own; the
+        // enforcement helper exempts it rather than this parser.
         let g = GrantedScopes::parse(&["atproto".into(), "transition:generic".into()]);
-        assert!(!g.is_granular_repo_session());
+        assert!(!g.allows_repo(post, RepoAction::Create));
 
         // Multi-valued collections in query form.
         let g = GrantedScopes::parse(&[
@@ -749,30 +697,25 @@ mod tests {
     #[test]
     fn identity_scope_enforces_the_granted_attribute() {
         let g = GrantedScopes::parse(&["atproto".into(), "identity:handle".into()]);
-        assert!(g.is_granular_identity_session());
         assert!(g.allows_identity("handle"));
 
         // Wildcard covers every attribute.
         let g = GrantedScopes::parse(&["atproto".into(), "identity:*".into()]);
         assert!(g.allows_identity("handle"));
 
-        // A session without an `identity:` grant is not a granular identity
-        // session (enforcement is opt-in per resource, matching the `repo:`
-        // pattern).
+        // A session holding some other resource's grant permits no identity
+        // attribute.
         let g = GrantedScopes::parse(&["atproto".into(), "repo:app.bsky.feed.post".into()]);
-        assert!(!g.is_granular_identity_session());
+        assert!(!g.allows_identity("handle"));
 
-        // An invalid `identity:` grant is still classified (so it engages
-        // restriction) but permits nothing.
+        // An invalid `identity:` grant permits nothing.
         let g = GrantedScopes::parse(&["atproto".into(), "identity:invalid".into()]);
-        assert!(g.is_granular_identity_session());
         assert!(!g.allows_identity("handle"));
     }
 
     #[test]
     fn account_scope_enforces_attribute_and_action() {
         let g = GrantedScopes::parse(&["atproto".into(), "account:email?action=manage".into()]);
-        assert!(g.is_granular_account_session());
         assert!(g.allows_account("email", AccountAction::Manage));
         assert!(g.allows_account("email", AccountAction::Read)); // manage implies read
         assert!(!g.allows_account("status", AccountAction::Manage));
@@ -786,7 +729,6 @@ mod tests {
     #[test]
     fn blob_scope_enforces_the_granted_mime_pattern() {
         let g = GrantedScopes::parse(&["atproto".into(), "blob:image/*".into()]);
-        assert!(g.is_granular_blob_session());
         assert!(g.allows_blob("image/png"));
         assert!(!g.allows_blob("video/mp4"));
 
@@ -809,7 +751,6 @@ mod tests {
             "atproto".into(),
             "rpc:com.example.method?aud=did:web:example.com".into(),
         ]);
-        assert!(g.is_granular_rpc_session());
         assert!(g.allows_rpc("com.example.method", "did:web:example.com"));
         assert!(!g.allows_rpc("com.example.method", "did:web:other.com"));
         assert!(!g.allows_rpc("com.example.other", "did:web:example.com"));
@@ -837,11 +778,7 @@ mod tests {
             "totally-unrecognised-scope-string".into(),
         ]);
         let without_junk = GrantedScopes::parse(&["atproto".into(), format!("repo:{post}")]);
-        // Identical restriction with or without the unrecognised scope.
-        assert_eq!(
-            with_junk.is_granular_repo_session(),
-            without_junk.is_granular_repo_session()
-        );
+        // Identical grants with or without the unrecognised scope.
         assert_eq!(
             with_junk.allows_repo(post, RepoAction::Create),
             without_junk.allows_repo(post, RepoAction::Create)
@@ -850,23 +787,37 @@ mod tests {
             with_junk.allows_repo("app.bsky.feed.like", RepoAction::Create),
             without_junk.allows_repo("app.bsky.feed.like", RepoAction::Create)
         );
-        // It doesn't unlock any *other* resource's restriction either.
-        assert!(!with_junk.is_granular_blob_session());
-        assert!(!with_junk.is_granular_rpc_session());
-        assert!(!with_junk.is_granular_identity_session());
-        assert!(!with_junk.is_granular_account_session());
+        // It confers nothing on any *other* resource either. Under the
+        // auth-source gate these are outright denials, not the unrestricted
+        // pass-through the old `is_granular_*_session` shape gave them.
+        assert!(!with_junk.allows_blob("image/png"));
+        assert!(!with_junk.allows_rpc("com.example.method", "did:web:example.com"));
+        assert!(!with_junk.allows_identity("handle"));
+        assert!(!with_junk.allows_account("email", AccountAction::Manage));
 
         // A session carrying only unrecognised scopes (plus the mandatory
-        // base scope) is not a valid modern grant and is not a granular
-        // session for any resource either -- it is refused entirely by
-        // `oauth_scopes_to_auth_scope` before it ever reaches these checks.
+        // base scope) is not a valid modern grant -- it is refused entirely by
+        // `oauth_scopes_to_auth_scope` before it ever reaches these checks --
+        // and confers nothing if it somehow did.
         let junk_only =
             GrantedScopes::parse(&["atproto".into(), "totally-unrecognised-scope-string".into()]);
         assert!(!junk_only.has_permission_grant());
-        assert!(!junk_only.is_granular_repo_session());
-        assert!(!junk_only.is_granular_blob_session());
-        assert!(!junk_only.is_granular_rpc_session());
-        assert!(!junk_only.is_granular_identity_session());
-        assert!(!junk_only.is_granular_account_session());
+        assert!(!junk_only.allows_repo(post, RepoAction::Create));
+        assert!(!junk_only.allows_blob("image/png"));
+        assert!(!junk_only.allows_rpc("com.example.method", "did:web:example.com"));
+        assert!(!junk_only.allows_identity("handle"));
+        assert!(!junk_only.allows_account("email", AccountAction::Manage));
+    }
+
+    /// The empty grant: a session holding only the mandatory base scope
+    /// permits nothing at all on any resource.
+    #[test]
+    fn base_scope_alone_confers_no_grant() {
+        let g = GrantedScopes::parse(&["atproto".into()]);
+        assert!(!g.allows_repo("app.bsky.feed.post", RepoAction::Create));
+        assert!(!g.allows_blob("image/png"));
+        assert!(!g.allows_rpc("com.example.method", "did:web:example.com"));
+        assert!(!g.allows_identity("handle"));
+        assert!(!g.allows_account("email", AccountAction::Manage));
     }
 }

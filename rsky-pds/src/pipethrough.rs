@@ -232,28 +232,24 @@ pub async fn pipethrough_procedure_post(
     Ok(parse_proxy_res(res).await?)
 }
 
-/// Enforce a granular OAuth session's `rpc:` scope before a call is proxied
-/// to another service, mirroring [`crate::apis::assert_repo_scope`]'s shape
-/// at the seam every pipethrough request passes through (`bsky_api_get_forwarder`
-/// and friends all resolve to [`HandlerPipeThrough`]).
-///
-/// If the destination service can't be resolved, enforcement is skipped and
-/// the ordinary pipethrough call is left to surface that failure -- a scope
-/// check only makes sense once we know which service the call is bound for.
+/// Enforce an OAuth session's `rpc:` scope before a call is proxied to
+/// another service, at the seam every pipethrough request passes through
+/// (`bsky_api_get_forwarder` and friends all resolve to
+/// [`HandlerPipeThrough`]). Gating and `transition:generic` handling are
+/// [`crate::apis::scoped_session`]'s.
 pub async fn assert_rpc_scope(
     granted_scopes: &Option<Vec<String>>,
     req: &ProxyRequest<'_>,
 ) -> Result<(), ApiError> {
-    let Some(granted) = granted_scopes else {
+    let Some(scopes) = crate::apis::scoped_session(granted_scopes.as_ref(), true) else {
         return Ok(());
     };
-    let scopes = crate::oauth_scope::GrantedScopes::parse(granted);
-    if !scopes.is_granular_rpc_session() {
-        return Ok(());
-    }
     let lxm = parse_req_nsid(req);
-    let Ok(UrlAndAud { aud, .. }) = format_url_and_aud(req, None).await else {
-        return Ok(());
+    // An `rpc:` grant is bound to an audience, so a destination we cannot
+    // resolve is a destination we cannot show the call is scoped for.
+    let aud = match format_url_and_aud(req, None).await {
+        Ok(UrlAndAud { aud, .. }) => aud,
+        Err(error) => return Err(pipethrough_error(&error)),
     };
     if scopes.allows_rpc(&lxm, &aud) {
         Ok(())
