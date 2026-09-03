@@ -1,4 +1,5 @@
 use crate::SHUTDOWN;
+use crate::config::repo_backfill_has_room;
 use crate::storage::Storage;
 use crate::types::{BackfillJob, WintermuteError};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
@@ -52,6 +53,7 @@ pub async fn populate_backfill_queue(
     storage: Arc<Storage>,
     relay_host: String,
     database_url: String,
+    max_queue: usize,
 ) -> Result<(), WintermuteError> {
     use crate::metrics;
 
@@ -127,6 +129,10 @@ pub async fn populate_backfill_queue(
 
     let mut total_enumerated = 0u64;
     let mut last_log_count = 0u64;
+    // Tracked rather than re-read: Fjall's `len()` scans the partition, so polling it
+    // per page would cost more as the queue grows. A concurrent drain only makes this
+    // an overestimate, which errs toward enqueueing less.
+    let mut queue_len = repo_backfill_len;
 
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
@@ -163,6 +169,12 @@ pub async fn populate_backfill_queue(
         let list_response: ListReposResponse = response.json().await?;
 
         for repo in &list_response.repos {
+            if !repo_backfill_has_room(queue_len, max_queue) {
+                tracing::warn!(
+                    "repo_backfill queue at its bound ({queue_len} entries); stopping                      enumeration. Raise REPO_BACKFILL_MAX_QUEUE, or run backfiller                      workers to drain it, to resume."
+                );
+                return Ok(());
+            }
             metrics::INGESTER_BACKFILL_REPOS_FETCHED_TOTAL.inc();
             let job = BackfillJob {
                 did: repo.did.clone(),
@@ -172,6 +184,7 @@ pub async fn populate_backfill_queue(
             storage.enqueue_backfill(&job)?;
             metrics::INGESTER_BACKFILL_REPOS_WRITTEN_TOTAL.inc();
             total_enumerated += 1;
+            queue_len += 1;
         }
 
         if let Some(next_cursor) = list_response.cursor {

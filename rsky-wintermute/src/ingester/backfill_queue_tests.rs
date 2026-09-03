@@ -37,7 +37,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 0).await;
         drop(server);
 
         assert!(
@@ -108,7 +108,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 0).await;
         drop(server);
 
         assert!(
@@ -134,7 +134,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 0).await;
         drop(server);
 
         assert!(result.is_err(), "should fail with HTTP 500");
@@ -163,7 +163,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result = populate_backfill_queue(storage.clone(), server.url(), String::new()).await;
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 0).await;
         drop(server);
 
         assert!(
@@ -218,7 +218,7 @@ mod tests {
 
         let server_url = server.url();
         let result =
-            populate_backfill_queue(storage.clone(), server_url.clone(), String::new()).await;
+            populate_backfill_queue(storage.clone(), server_url.clone(), String::new(), 0).await;
         drop(server);
 
         assert!(
@@ -267,7 +267,7 @@ mod tests {
             .await;
 
         let result =
-            populate_backfill_queue(storage.clone(), server_url.clone(), String::new()).await;
+            populate_backfill_queue(storage.clone(), server_url.clone(), String::new(), 0).await;
         drop(server);
 
         assert!(
@@ -287,6 +287,81 @@ mod tests {
             storage.repo_backfill_len().unwrap(),
             1,
             "should have re-enumerated repos"
+        );
+    }
+
+    /// The enumerator is a producer with no consumer whenever backfiller workers are
+    /// disabled. Without a bound the queue grows for as long as the relay has repos to
+    /// list, which is what drives resident memory up until a restart.
+    #[tokio::test]
+    async fn populate_backfill_queue_stops_at_the_bound() {
+        let (storage, _dir) = setup_test_storage();
+        let mut server = mockito::Server::new_async().await;
+
+        // Two pages of five, and a cursor that never ends: unbounded, this would run
+        // until the mock stopped answering.
+        let body = serde_json::json!({
+            "repos": [
+                {"did": "did:plc:a1"}, {"did": "did:plc:a2"}, {"did": "did:plc:a3"},
+                {"did": "did:plc:a4"}, {"did": "did:plc:a5"}
+            ],
+            "cursor": "keep-going"
+        });
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body.to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 3).await;
+        drop(server);
+
+        assert!(result.is_ok(), "should stop cleanly, not error: {result:?}");
+        assert_eq!(
+            storage.repo_backfill_len().unwrap(),
+            3,
+            "enumeration must stop at the bound, not overshoot it"
+        );
+    }
+
+    /// A queue already past the bound at startup must not grow at all.
+    #[tokio::test]
+    async fn populate_backfill_queue_enqueues_nothing_when_already_over_the_bound() {
+        let (storage, _dir) = setup_test_storage();
+        for i in 0..4 {
+            storage
+                .enqueue_backfill(&crate::types::BackfillJob {
+                    did: format!("did:plc:pre{i}"),
+                    retry_count: 0,
+                    priority: false,
+                })
+                .unwrap();
+        }
+
+        let mut server = mockito::Server::new_async().await;
+        let body = serde_json::json!({
+            "repos": [{"did": "did:plc:new1"}, {"did": "did:plc:new2"}],
+            "cursor": "keep-going"
+        });
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+
+        let result = populate_backfill_queue(storage.clone(), server.url(), String::new(), 3).await;
+        drop(server);
+
+        assert!(result.is_ok(), "should stop cleanly: {result:?}");
+        assert_eq!(
+            storage.repo_backfill_len().unwrap(),
+            4,
+            "an over-full queue must not grow"
         );
     }
 }

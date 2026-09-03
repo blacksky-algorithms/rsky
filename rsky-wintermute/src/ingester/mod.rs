@@ -91,6 +91,7 @@ impl IngesterManager {
                         backfill_storage,
                         backfill_host,
                         backfill_db_url,
+                        *crate::config::REPO_BACKFILL_MAX_QUEUE,
                     )
                     .await
                     {

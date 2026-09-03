@@ -28,6 +28,31 @@ pub const FSYNC_MS: Option<u16> = Some(1000);
 pub const MEMTABLE_SIZE: u32 = 256 * 1024 * 1024; // 256MB (up from 64MB)
 pub const BLOCK_SIZE: u32 = 64 * 1024;
 
+/// Upper bound on the `repo_backfill` queue, in entries. `0` disables the bound.
+///
+/// The relay enumerator is a producer with no consumer whenever
+/// `BACKFILLER_WORKERS=0`, which is the recommended setting where repo backfill is
+/// handled elsewhere. Unbounded, the queue reaches millions of entries within hours;
+/// its Fjall partition grows to gigabytes, and the LSM read and compaction paths
+/// allocate block buffers in proportion. The result reads as a memory leak -- resident
+/// memory climbs steadily and only a restart reclaims it -- when it is really a queue
+/// nothing drains.
+pub static REPO_BACKFILL_MAX_QUEUE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("REPO_BACKFILL_MAX_QUEUE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(250_000)
+});
+
+/// Whether the enumerator may enqueue another repo.
+///
+/// Separate from the enumeration loop so the bound is testable without a relay or a
+/// storage engine.
+#[must_use]
+pub const fn repo_backfill_has_room(queue_len: usize, max_queue: usize) -> bool {
+    max_queue == 0 || queue_len < max_queue
+}
+
 pub const FIREHOSE_PING_INTERVAL: Duration = Duration::from_secs(30);
 
 // Cursor save interval - like indigo/tap's cursorSaveInterval
@@ -541,5 +566,25 @@ mod tests {
         // Config::options replaces what the URL carried, and the URL is where the
         // deployment supplies -csearch_path. This must never move back there.
         assert!(!SESSION_SETUP_SQL.contains("search_path"));
+    }
+
+    #[test]
+    fn repo_backfill_bound_admits_below_the_limit() {
+        assert!(repo_backfill_has_room(0, 10));
+        assert!(repo_backfill_has_room(9, 10));
+    }
+
+    #[test]
+    fn repo_backfill_bound_rejects_at_and_above_the_limit() {
+        assert!(!repo_backfill_has_room(10, 10));
+        assert!(!repo_backfill_has_room(11, 10));
+        // A queue already past the bound when the process starts must not grow further.
+        assert!(!repo_backfill_has_room(5_000_000, 250_000));
+    }
+
+    #[test]
+    fn repo_backfill_bound_of_zero_means_unbounded() {
+        assert!(repo_backfill_has_room(0, 0));
+        assert!(repo_backfill_has_room(usize::MAX, 0));
     }
 }
