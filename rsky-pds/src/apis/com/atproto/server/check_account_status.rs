@@ -3,6 +3,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::is_valid_did_doc_for_service;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::auth_verifier::AccessFull;
 use anyhow::Result;
 use futures::try_join;
@@ -11,12 +12,12 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::CheckAccountStatusOutput;
 
 async fn inner_check_account_status(
-    auth: AccessFull,
+    auth: Scoped<NoScopeRequired, AccessFull>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<CheckAccountStatusOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
 
     let mut reader = actor_store
         .read(
@@ -59,7 +60,7 @@ async fn inner_check_account_status(
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.checkAccountStatus")]
 pub async fn check_account_status(
-    auth: AccessFull,
+    auth: Scoped<NoScopeRequired, AccessFull>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,

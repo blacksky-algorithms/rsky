@@ -1,5 +1,5 @@
 use crate::apis::{ApiError, ProxyResponder};
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::pipethrough::{pipethrough_error, pipethrough_procedure, ProxyRequest};
 use rocket::http::Header;
 use rocket::serde::json::Json;
@@ -24,12 +24,12 @@ pub fn validate_report_input(input: &CreateReportInput) -> Result<(), ApiError> 
 )]
 pub async fn create_report(
     body: Json<CreateReportInput>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
     let input = body.into_inner();
     validate_report_input(&input)?;
-    let requester: Option<String> = auth.access.credentials.and_then(|c| c.did);
+    let requester: Option<String> = auth.did_opt().await?;
     match pipethrough_procedure(&req, requester, Some(input)).await {
         Ok(res) => {
             let content_length = Header::new("content-length", res.buffer.len().to_string());

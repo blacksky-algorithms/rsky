@@ -2,6 +2,7 @@ use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::gen_invite_codes;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessFull;
 use anyhow::{bail, Result};
 use chrono::NaiveDateTime;
@@ -84,10 +85,10 @@ fn calculate_codes_to_create(opts: CalculateCodesToCreateOpts) -> Result<(usize,
 async fn inner_get_account_invite_codes(
     include_used: bool,
     create_available: bool,
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<GetAccountInviteCodesOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
     let account = account_manager.get_account(&requester, None).await?;
     let mut user_codes = account_manager.get_account_invite_codes(&requester).await?;
 
@@ -147,7 +148,7 @@ async fn inner_get_account_invite_codes(
 pub async fn get_account_invite_codes(
     includeUsed: bool,
     createAvailable: bool,
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<Json<GetAccountInviteCodesOutput>, ApiError> {
     match inner_get_account_invite_codes(includeUsed, createAvailable, auth, account_manager).await

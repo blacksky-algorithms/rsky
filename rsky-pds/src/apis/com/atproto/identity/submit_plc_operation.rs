@@ -3,7 +3,8 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
-use crate::auth_verifier::{AccessStandard, AccountRepoScopedAccess};
+use crate::auth_verifier::scope::{AccountRepo, Scoped};
+use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::{plc, SharedIdResolver, SharedSequencer};
@@ -11,23 +12,6 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_crypto::utils::encode_did_key;
 use rsky_lexicon::com::atproto::identity::SubmitPlcOperationRequest;
-
-#[tracing::instrument(skip_all)]
-fn get_requester_did(auth: &AccountRepoScopedAccess<AccessStandard>) -> Result<String, ApiError> {
-    match &auth.access.credentials {
-        None => {
-            tracing::error!("Failed to find access credentials");
-            Err(ApiError::RuntimeError)
-        }
-        Some(res) => match &res.did {
-            None => {
-                tracing::error!("Failed to find did");
-                Err(ApiError::RuntimeError)
-            }
-            Some(did) => Ok(did.clone()),
-        },
-    }
-}
 
 #[tracing::instrument(skip_all)]
 async fn validate_plc_request(
@@ -167,14 +151,14 @@ pub async fn submit_plc_operation(
     body: Json<SubmitPlcOperationRequest>,
     // `AccessStandard` (its pre-existing tier, app passwords included) named
     // explicitly since it differs from the guard's default `Base`.
-    auth: AccountRepoScopedAccess<AccessStandard>,
+    auth: Scoped<AccountRepo, AccessStandard>,
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let did = get_requester_did(&auth)?;
+    let did = auth.did().await?;
 
     //Validate and transform request
     let op = validate_operation_body(body.into_inner())?;

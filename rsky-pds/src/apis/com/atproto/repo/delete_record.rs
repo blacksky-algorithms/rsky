@@ -3,6 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::repo::prepare::{prepare_delete, PrepareDeleteOpts};
 use crate::SharedSequencer;
@@ -17,7 +18,7 @@ use std::str::FromStr;
 
 async fn inner_delete_record(
     body: Json<DeleteRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    requester: String,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
@@ -44,7 +45,7 @@ async fn inner_delete_record(
         Some(account) if account.deactivated_at.is_some() => bail!("Account is deactivated"),
         Some(account) => {
             let did = account.did;
-            if did != auth.access.credentials.unwrap().did.unwrap() {
+            if did != requester {
                 bail!("AuthRequiredError")
             }
 
@@ -99,20 +100,21 @@ async fn inner_delete_record(
 )]
 pub async fn delete_record(
     body: Json<DeleteRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<RepoWrite, AccessStandardIncludeChecks>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Delete,
-    )?;
+    let requester = auth
+        .did_for(&vec![RepoTarget::new(
+            body.collection.clone(),
+            crate::oauth_scope::RepoAction::Delete,
+        )])
+        .await?;
     match inner_delete_record(
         body,
-        auth,
+        requester,
         sequencer,
         blobstore_factory,
         actor_store,

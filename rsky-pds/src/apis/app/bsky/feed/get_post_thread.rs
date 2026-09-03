@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
@@ -45,7 +45,7 @@ pub async fn inner_get_post_thread(
     uri: String,
     depth: u16,
     parentHeight: u16,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: Result<HandlerPipeThrough>,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
@@ -54,9 +54,8 @@ pub async fn inner_get_post_thread(
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
     let requester: String = auth
-        .access
-        .credentials
-        .and_then(|credentials| credentials.did)
+        .did_opt()
+        .await?
         .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     match res {
         Ok(res) => {
@@ -128,7 +127,7 @@ pub async fn get_post_thread(
     uri: String,               // Reference (AT-URI) to post record.
     depth: Option<u16>,        // How many levels of reply depth should be included in response.
     parentHeight: Option<u16>, // How many levels of parent (and grandparent, etc.) post to include.
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: Result<HandlerPipeThrough>,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,

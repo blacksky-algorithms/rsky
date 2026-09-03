@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
@@ -17,17 +17,14 @@ const METHOD_NSID: &str = "app.bsky.actor.getProfiles";
 
 pub async fn inner_get_profiles(
     _actors: Vec<String>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<GetProfilesOutput>, ApiError> {
-    let requester: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
+    let requester: String = auth.did_opt().await?.unwrap_or_default();
     let read_afer_write_response = handle_read_after_write(
         METHOD_NSID.to_string(),
         requester,
@@ -48,7 +45,7 @@ pub async fn inner_get_profiles(
 #[rocket::get("/xrpc/app.bsky.actor.getProfiles?<actors>")]
 pub async fn get_profiles(
     actors: Vec<String>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,

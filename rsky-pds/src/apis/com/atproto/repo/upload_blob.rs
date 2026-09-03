@@ -1,7 +1,8 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::BlobScopedAccess;
+use crate::auth_verifier::scope::{BlobUpload, Scoped};
+use crate::auth_verifier::AccessStandardCheckTakedown;
 use anyhow::Result;
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::Status;
@@ -36,13 +37,13 @@ impl<'r> FromRequest<'r> for ContentType {
 }
 
 async fn inner_upload_blob(
-    auth: BlobScopedAccess,
+    auth: Scoped<BlobUpload, AccessStandardCheckTakedown>,
     blob: Data<'_>,
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
 ) -> Result<BlobOutput> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
 
     let bytes = blob.open(100.mebibytes()).into_bytes().await?.into_inner();
     let actor_store = actor_store
@@ -97,7 +98,7 @@ pub async fn upload_blob(
     // guard's rejection before `BlobScopedAccess` re-reads the same header
     // to run the `blob:` scope check.
     content_type: ContentType,
-    auth: BlobScopedAccess,
+    auth: Scoped<BlobUpload, AccessStandardCheckTakedown>,
     blob: Data<'_>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,

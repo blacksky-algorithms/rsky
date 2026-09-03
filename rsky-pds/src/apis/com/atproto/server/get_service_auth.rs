@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::auth::{create_service_jwt, ServiceJwtParams};
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::pipethrough::{PRIVILEGED_METHODS, PROTECTED_METHODS};
 use anyhow::{bail, Result};
@@ -48,10 +49,10 @@ pub async fn inner_get_service_auth(
     aud: String,
     exp: Option<u64>,
     lxm: Option<String>,
-    auth: AccessFull,
+    auth: Scoped<NoScopeRequired, AccessFull>,
     actor_store: &State<ActorStore>,
 ) -> Result<String> {
-    let credentials = auth.access.credentials.unwrap();
+    let credentials = auth.credentials().await?.clone().unwrap();
     let did = credentials.clone().did.unwrap();
     ensure_valid_aud(&aud)?;
     // `exp` is seconds since the epoch (RFC 7519 §4.1.4).
@@ -98,7 +99,7 @@ pub async fn get_service_auth(
     exp: Option<u64>,
     // Lexicon (XRPC) method to bind the requested token to
     lxm: Option<String>,
-    auth: AccessFull,
+    auth: Scoped<NoScopeRequired, AccessFull>,
     actor_store: &State<ActorStore>,
 ) -> Result<Json<GetServiceAuthOutput>, ApiError> {
     match inner_get_service_auth(aud, exp, lxm, auth, actor_store).await {

@@ -1,7 +1,7 @@
 use crate::actor_store::ActorStore;
 use crate::apis::app::bsky::notification::register_push::get_endpoint;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::config::ServerConfig;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{anyhow, bail, Result};
@@ -12,7 +12,7 @@ use rsky_repo::types::Ids;
 
 pub async fn inner_unregister_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandard,
+    auth: Scoped<NoScopeRequired>,
     cfg: &State<ServerConfig>,
     app_view_url: String,
     id_resolver: &State<SharedIdResolver>,
@@ -20,9 +20,8 @@ pub async fn inner_unregister_push(
 ) -> Result<()> {
     let input = body.into_inner();
     let did: String = auth
-        .access
-        .credentials
-        .and_then(|credentials| credentials.did)
+        .did_opt()
+        .await?
         .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     let nsid = Ids::AppBskyNotificationUnregisterPush.as_str().to_string();
     let auth_headers =
@@ -64,7 +63,7 @@ pub async fn inner_unregister_push(
 )]
 pub async fn unregister_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandard,
+    auth: Scoped<NoScopeRequired>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     actor_store: &State<ActorStore>,

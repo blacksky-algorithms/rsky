@@ -1,9 +1,10 @@
-use crate::auth_verifier::{AccessStandard, AuthError, AuthScope, Credentials};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
+use crate::auth_verifier::{AuthError, AuthScope, Credentials};
 use crate::handle;
 use crate::handle::errors::ErrorKind;
 use crate::pipethrough::{
-    assert_rpc_scope, pipethrough_error, pipethrough_procedure, pipethrough_procedure_post,
-    ProxyRequest, PRIVILEGED_METHODS,
+    pipethrough_error, pipethrough_procedure, pipethrough_procedure_post, ProxyRequest,
+    PRIVILEGED_METHODS,
 };
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
@@ -171,20 +172,11 @@ pub fn assert_account_scope(
 pub async fn bsky_api_get_forwarder(
     nsid: Nsid,
     query: Option<&str>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
-    let granted_scopes = auth
-        .access
-        .credentials
-        .as_ref()
-        .and_then(|c| c.granted_scopes.clone());
-    assert_rpc_scope(&granted_scopes, &req).await?;
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    assert_valid_token_method(&nsid.0, auth.credentials().await?)?;
+    let requester: Option<String> = auth.did_opt().await?;
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(res) => {
             let headers = res.headers.expect("Upstream responded without headers.");
@@ -209,20 +201,11 @@ pub async fn bsky_api_get_forwarder(
 pub async fn bsky_api_post_forwarder(
     body: Data<'_>,
     nsid: Nsid,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
-    let granted_scopes = auth
-        .access
-        .credentials
-        .as_ref()
-        .and_then(|c| c.granted_scopes.clone());
-    assert_rpc_scope(&granted_scopes, &req).await?;
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    assert_valid_token_method(&nsid.0, auth.credentials().await?)?;
+    let requester: Option<String> = auth.did_opt().await?;
 
     let res = pipethrough_procedure_post(&req, requester, Some(body)).await?;
     let headers = res.headers.expect("Upstream responded without headers.");
@@ -267,6 +250,14 @@ pub enum ApiError {
     /// Error passed through from an upstream service: status code, error, message
     UpstreamResponse(u16, String, String),
 }
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 #[derive(Serialize)]
 pub struct ErrorBody {
