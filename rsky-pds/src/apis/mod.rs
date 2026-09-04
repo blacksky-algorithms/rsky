@@ -144,6 +144,13 @@ pub fn assert_identity_scope(
 
 /// Enforce an OAuth session's `account:` scope on an account-level mutation
 /// (email, deactivation/activation, PLC rotation).
+///
+/// Like `identity:`, this takes no `transition:generic` exemption. The OAuth
+/// spec grants that scope "no account management actions: change handle,
+/// change email, delete or deactivate account, migrate account", which is
+/// exactly the surface these guards cover -- every one of them asks for
+/// `Manage`. `transition:email` is unaffected: it confers a `read` on the
+/// address, which no caller here requests.
 pub fn assert_account_scope(
     credentials: &Option<Credentials>,
     attr: &str,
@@ -151,7 +158,7 @@ pub fn assert_account_scope(
 ) -> Result<(), ApiError> {
     assert_scope(
         credentials,
-        true,
+        false,
         |scopes| scopes.allows_account(attr, action),
         || format!("Token scope does not permit {action:?} on account attribute {attr}"),
     )
@@ -826,12 +833,21 @@ mod tests {
     /// change its handle.
     #[test]
     fn a_transition_generic_session_keeps_its_legacy_reach() {
+        // Repo writes, blob uploads and service proxying, per the OAuth spec's
+        // definition of the scope -- and no account management: not the handle,
+        // not the email, not deactivation, not migration.
         let transition = creds(&["atproto", "transition:generic"]);
-        assert_eq!(denials(&transition), [false, false, false, true, false]);
+        assert_eq!(denials(&transition), [false, false, false, true, true]);
 
-        // An explicit `identity:` grant alongside it still works.
+        // Explicit grants alongside it still work.
         let with_identity = creds(&["atproto", "transition:generic", "identity:handle"]);
         assert!(assert_identity_scope(&with_identity, "handle").is_ok());
+        let with_account = creds(&[
+            "atproto",
+            "transition:generic",
+            "account:email?action=manage",
+        ]);
+        assert!(assert_account_scope(&with_account, "email", AccountAction::Manage).is_ok());
     }
 
     /// App passwords and legacy access tokens carry no `granted_scopes`;
