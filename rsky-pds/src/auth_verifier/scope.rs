@@ -114,7 +114,7 @@ pub trait ScopeDecl: Send + Sync + 'static {
 ///
 /// A route that takes a plain access guard authenticates and learns nothing:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0616
 /// use rsky_pds::auth_verifier::AccessStandard;
 ///
 /// fn requester(auth: AccessStandard) -> Option<String> {
@@ -124,7 +124,7 @@ pub trait ScopeDecl: Send + Sync + 'static {
 ///
 /// A deferred declaration's handler cannot skip the value the check needs:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use rsky_pds::auth_verifier::scope::{RepoWrite, Scoped};
 ///
 /// async fn requester(auth: Scoped<RepoWrite>) -> Option<String> {
