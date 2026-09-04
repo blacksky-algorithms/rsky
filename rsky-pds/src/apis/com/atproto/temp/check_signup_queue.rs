@@ -1,4 +1,5 @@
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessStandardSignupQueued;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::temp::CheckSignupQueueOutput;
@@ -8,7 +9,7 @@ use rsky_lexicon::com::atproto::temp::CheckSignupQueueOutput;
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.temp.checkSignupQueue")]
 pub async fn check_signup_queue(
-    _auth: AccessStandardSignupQueued,
+    _auth: Scoped<OAuthForbidden, AccessStandardSignupQueued>,
 ) -> Result<Json<CheckSignupQueueOutput>, ApiError> {
     Ok(Json(CheckSignupQueueOutput {
         activated: true,

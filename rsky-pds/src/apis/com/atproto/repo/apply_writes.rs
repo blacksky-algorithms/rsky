@@ -3,6 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
@@ -23,7 +24,7 @@ use std::str::FromStr;
 
 async fn inner_apply_writes(
     body: Json<ApplyWritesInput>,
-    auth: AccessStandardIncludeChecks,
+    requester: String,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
@@ -51,7 +52,7 @@ async fn inner_apply_writes(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != requester {
             bail!("AuthRequiredError")
         }
         let did: &String = &did;
@@ -164,30 +165,32 @@ async fn inner_apply_writes(
 #[rocket::post("/xrpc/com.atproto.repo.applyWrites", format = "json", data = "<body>")]
 pub async fn apply_writes(
     body: Json<ApplyWritesInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<RepoWrite, AccessStandardIncludeChecks>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
-    for write in &body.writes {
-        let (collection, action) = match write {
+    let targets: Vec<RepoTarget> = body
+        .writes
+        .iter()
+        .map(|write| match write {
             ApplyWritesInputRefWrite::Create(w) => {
-                (&w.collection, crate::oauth_scope::RepoAction::Create)
+                RepoTarget::new(w.collection.clone(), crate::oauth_scope::RepoAction::Create)
             }
             ApplyWritesInputRefWrite::Update(w) => {
-                (&w.collection, crate::oauth_scope::RepoAction::Update)
+                RepoTarget::new(w.collection.clone(), crate::oauth_scope::RepoAction::Update)
             }
             ApplyWritesInputRefWrite::Delete(w) => {
-                (&w.collection, crate::oauth_scope::RepoAction::Delete)
+                RepoTarget::new(w.collection.clone(), crate::oauth_scope::RepoAction::Delete)
             }
-        };
-        crate::apis::assert_repo_scope(&auth.access.credentials, collection, action)?;
-    }
+        })
+        .collect();
+    let requester = auth.did_for(&targets).await?;
     match inner_apply_writes(
         body,
-        auth,
+        requester,
         sequencer,
         blobstore_factory,
         actor_store,

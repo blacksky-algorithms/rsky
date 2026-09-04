@@ -786,34 +786,32 @@ async fn oauth_endpoint_edge_cases() {
     assert!(html.contains("invalid CSRF token"));
 }
 
-// Scoped-access guard tests
-// ---------------------
+// Scope-declaration seam tests
+// ---------------------------
 //
-// These prove the combinator guards in `auth_verifier.rs`
-// (`BlobScopedAccess`, `HandleScopedAccess`, `EmailScopedAccess`,
-// `AccountStatusScopedAccess`, `AccountRepoScopedAccess`) enforce their
-// resource scope through a real dispatched request over the full Rocket
-// stack -- DPoP verification, session lookup, and all -- rather than just
-// exercising the `assert_*_scope` helper in isolation. That is the point of
-// folding the assertion into the guard: a route that takes one of these
-// guards cannot get a `did` without the check having already run, so there
-// is no separate call in the handler body left to accidentally skip.
+// These prove that the declaration a route names in its signature
+// (`Scoped<Decl, Tier>`, see `auth_verifier::scope`) is enforced through a
+// real dispatched request over the full Rocket stack -- DPoP verification,
+// session lookup, and all -- rather than just exercising the `assert_*_scope`
+// helper in isolation. That is the point of the seam: a route cannot get a
+// `did` without the check having already run, so there is no separate call in
+// the handler body left to accidentally skip.
 //
-// `BlobScopedAccess` and `HandleScopedAccess` wrap `AccessStandardCheckTakedown`
-// and `AccountRepoScopedAccess<AccessStandard>` wraps `AccessStandard`, both
-// of which accept an OAuth session mapped to `AppPass`/`AppPassPrivileged` --
-// exactly what a granular-scope grant maps to (see
-// `auth_verifier::oauth_scopes_to_auth_scope`), so a real PAR/authorize/token
-// flow can reach them. `EmailScopedAccess`, `AccountStatusScopedAccess`, and
-// the default (`AccessFull`) `AccountRepoScopedAccess` wrap `AccessFull`,
-// which requires `AuthScope::Access` -- a scope only the legacy plain-JWT
+// Which declarations a real OAuth flow can reach is decided by the tier the
+// route pairs them with. `AccessStandard` and `AccessStandardCheckTakedown`
+// accept an OAuth session mapped to `AppPass`/`AppPassPrivileged` -- exactly
+// what a granular-scope grant maps to (see
+// `auth_verifier::oauth_scopes_to_auth_scope`) -- so `BlobUpload`,
+// `IdentityHandle`, `RepoWrite`, `RpcProxy`, and the `AccessStandard*`
+// pairings of `IdentityFull` and `AccountEmail` are reachable here.
+// `AccessFull` requires `AuthScope::Access`, a scope only the legacy plain-JWT
 // `createSession` token type carries, and that token type always sets
-// `granted_scopes: None`. No OAuth grant can ever produce `AuthScope::Access`
-// (`oauth_scopes_to_auth_scope` only ever returns `AppPass`/`AppPassPrivileged`
-// or rejects), so those three guards' scope check is presently unreachable
-// through any live request; per-endpoint test coverage for them stays at the
-// `apis::tests` level added alongside `assert_account_scope` itself, which
-// exercises the identical helper this guard calls.
+// `granted_scopes: None`. No OAuth grant can ever produce `AuthScope::Access`,
+// so `AccountStatus`, `AccountRepo`, `OAuthForbidden` and the `AccessFull`
+// pairings of `AccountEmail` and `IdentityFull` are presently unreachable
+// through any live OAuth request; their coverage is the declaration-level
+// unit tests in `auth_verifier::scope::tests`, plus the legacy-session
+// regression checks at the end of this file.
 
 /// Runs the full PAR -> authorize -> sign-in -> accept -> token-exchange
 /// dance for a fresh loopback client requesting exactly `scope`, returning a
@@ -890,7 +888,7 @@ fn handle_domain(client: &Client) -> String {
 }
 
 #[tokio::test]
-async fn blob_scoped_access_allows_matching_mime_and_denies_mismatch() {
+async fn blob_upload_declaration_allows_matching_mime_and_denies_mismatch() {
     let (_dir, client) = get_oauth_client().await;
     common::create_account(&client).await;
     activate_test_account(&client).await;
@@ -928,13 +926,13 @@ async fn blob_scoped_access_allows_matching_mime_and_denies_mismatch() {
 }
 
 #[tokio::test]
-async fn handle_scoped_access_allows_handle_and_denies_other_attr() {
+async fn identity_handle_declaration_allows_handle_and_denies_other_attr() {
     let (_dir, client) = get_oauth_client().await;
     common::create_account(&client).await;
     activate_test_account(&client).await;
     let domain = handle_domain(&client);
 
-    // An `identity:handle` grant clears `HandleScopedAccess` and reaches the
+    // An `identity:handle` grant clears the `IdentityHandle` declaration and reaches the
     // handler, which then talks to the mock PLC directory to rotate the
     // did:plc handle -- that mock only serves DID documents, not the PLC
     // operation-log shape `plc::Client::update_handle` needs, so the request
@@ -1065,17 +1063,16 @@ async fn an_unresolvable_proxy_audience_denies_the_proxied_call() {
 }
 
 #[tokio::test]
-async fn account_repo_scoped_access_covers_submit_plc_operation() {
+async fn identity_full_declaration_covers_submit_plc_operation() {
     let (_dir, client) = get_oauth_client().await;
     common::create_account(&client).await;
     activate_test_account(&client).await;
 
-    // `account:repo?action=manage` clears `AccountRepoScopedAccess<AccessStandard>`
-    // and reaches the handler's own request-body validation, which rejects
-    // this empty operation -- proving the guard let the request through
-    // rather than stopping it at the scope check.
-    let (access_token, key) =
-        granular_access_token(&client, "atproto account:repo?action=manage").await;
+    // `identity:*` clears `Scoped<IdentityFull, AccessStandard>` and reaches
+    // the handler's own request-body validation, which rejects this empty
+    // operation -- proving the guard let the request through rather than
+    // stopping it at the scope check.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:*").await;
     let (status, body) = dispatch_scoped_post(
         &client,
         "/xrpc/com.atproto.identity.submitPlcOperation",
@@ -1088,9 +1085,27 @@ async fn account_repo_scoped_access_covers_submit_plc_operation() {
     assert_ne!(body["error"], "InsufficientScope", "body was {body}");
     assert_eq!(status, Status::BadRequest, "body was {body}");
 
-    // `account:repo` alone defaults to `action=read`, which does not satisfy
-    // the `Manage` check `submitPlcOperation` requires.
-    let (access_token, key) = granular_access_token(&client, "atproto account:repo").await;
+    // A PLC operation rewrites the DID document, so the migration scope must
+    // not reach it: `account:repo?action=manage` is what `importRepo` needs,
+    // and a client granted migration capability would otherwise be able to
+    // rotate the signing key and take the account.
+    let (access_token, key) =
+        granular_access_token(&client, "atproto account:repo?action=manage").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.submitPlcOperation",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "operation": {} }).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+
+    // Nor does the narrower identity grant: `identity:handle` permits a handle
+    // change, not full control of the document.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:handle").await;
     let (status, body) = dispatch_scoped_post(
         &client,
         "/xrpc/com.atproto.identity.submitPlcOperation",
@@ -1104,15 +1119,14 @@ async fn account_repo_scoped_access_covers_submit_plc_operation() {
     assert_eq!(body["error"], "InsufficientScope", "body was {body}");
 }
 
-/// `EmailScopedAccess`, `AccountStatusScopedAccess`, and the default
-/// `AccountRepoScopedAccess` all wrap `AccessFull`, which requires
-/// `AuthScope::Access` -- a scope only a legacy plain-JWT `createSession`
-/// token carries (see the module doc above). This is a regression check that
-/// the refactor did not break that, the only path currently able to reach
-/// them: a legacy session still clears `EmailScopedAccess` exactly as it
-/// cleared the plain `AccessFull` guard before this change.
+/// `AccountStatus`, `AccountRepo` and the `AccessFull` pairings of
+/// `AccountEmail` and `IdentityFull` require `AuthScope::Access` -- a scope
+/// only a legacy plain-JWT `createSession` token carries (see the module doc
+/// above). This is a regression check on the only path currently able to
+/// reach them: a legacy session still clears `AccountEmail` exactly as it
+/// cleared the plain `AccessFull` guard before the seam.
 #[tokio::test]
-async fn email_scoped_access_still_accepts_a_legacy_session() {
+async fn account_email_declaration_still_accepts_a_legacy_session() {
     let (_dir, client) = get_oauth_client().await;
     let (identifier, password) = common::create_account(&client).await;
     let response = client
@@ -1133,6 +1147,144 @@ async fn email_scoped_access_still_accepts_a_legacy_session() {
         .header(ContentType::JSON)
         .header(Header::new("Authorization", format!("Bearer {access_jwt}")))
         .body(json!({ "email": "new-address@example.com" }).to_string())
+        .dispatch()
+        .await;
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert_ne!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// Dispatches an authenticated GET, retrying once with the server's DPoP
+/// nonce the same way a real client would.
+async fn dispatch_scoped_get(
+    client: &Client,
+    path: &str,
+    access_token: &str,
+    key: &Jwk,
+) -> (Status, Value) {
+    let htu = format!("{}{}", public_url(client), path);
+    let send = |nonce: Option<String>| {
+        client
+            .get(path)
+            .header(Header::new("Authorization", format!("DPoP {access_token}")))
+            .header(Header::new(
+                "DPoP",
+                dpop_proof(key, "GET", &htu, nonce.as_deref(), Some(access_token)),
+            ))
+            .dispatch()
+    };
+    let first = send(None).await;
+    let response = if first.status() == Status::Unauthorized {
+        match first.headers().get_one("DPoP-Nonce").map(str::to_string) {
+            Some(nonce) => send(Some(nonce)).await,
+            None => first,
+        }
+    } else {
+        first
+    };
+    let status = response.status();
+    let text = response.into_string().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// `com.atproto.repo.createRecord` declares `Scoped<RepoWrite, ...>`, whose
+/// check is deferred: the handler names the collection it is about to write
+/// and only then gets the requester back. A grant covering one collection
+/// must not reach another.
+#[tokio::test]
+async fn repo_write_declaration_confines_the_collection_it_is_given() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let scope = "atproto repo:app.bsky.feed.post";
+
+    // The granted collection reaches the handler.
+    let (access_token, key) = granular_access_token(&client, scope).await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.repo.createRecord",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({
+            "repo": "did:web:missing.invalid",
+            "collection": "app.bsky.feed.post",
+            "record": { "$type": "app.bsky.feed.post", "text": "hi", "createdAt": "2024-01-01T00:00:00Z" }
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    assert_ne!(status, Status::Forbidden, "body was {body}");
+    assert_ne!(body["error"], "InsufficientScope", "body was {body}");
+
+    // A different collection is refused before the handler runs at all.
+    let (access_token, key) = granular_access_token(&client, scope).await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.repo.createRecord",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({
+            "repo": "did:web:missing.invalid",
+            "collection": "app.bsky.feed.like",
+            "record": { "$type": "app.bsky.feed.like" }
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// `com.atproto.server.getSession` declares `Scoped<NoScopeRequired>` -- the
+/// always-allowed opt-out. A session whose only resource grant is unrelated
+/// still reaches it.
+#[tokio::test]
+async fn no_scope_required_declaration_permits_a_narrowly_scoped_session() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+
+    let (access_token, key) = granular_access_token(&client, "atproto blob:image/*").await;
+    let (status, body) = dispatch_scoped_get(
+        &client,
+        "/xrpc/com.atproto.server.getSession",
+        &access_token,
+        &key,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert!(body["did"].as_str().is_some(), "body was {body}");
+}
+
+/// `com.atproto.server.listAppPasswords` declares `Scoped<OAuthForbidden, ...>`.
+/// The declaration must not disturb the legacy sessions that are the only
+/// callers it admits.
+#[tokio::test]
+async fn oauth_forbidden_declaration_still_accepts_a_legacy_session() {
+    let (_dir, client) = get_oauth_client().await;
+    let (identifier, password) = common::create_account(&client).await;
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(json!({ "identifier": identifier, "password": password }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let session: Value = response.into_json().await.expect("session json");
+    let access_jwt = session["accessJwt"]
+        .as_str()
+        .expect("accessJwt")
+        .to_string();
+
+    let response = client
+        .get("/xrpc/com.atproto.server.listAppPasswords")
+        .header(Header::new("Authorization", format!("Bearer {access_jwt}")))
         .dispatch()
         .await;
     let status = response.status();

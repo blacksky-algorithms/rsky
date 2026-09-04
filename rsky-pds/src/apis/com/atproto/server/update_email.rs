@@ -1,7 +1,8 @@
 use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityFlags};
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::apis::ApiError;
-use crate::auth_verifier::EmailScopedAccess;
+use crate::auth_verifier::scope::{AccountEmail, Scoped};
+use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
@@ -9,10 +10,10 @@ use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
 async fn inner_update_email(
     body: Json<UpdateEmailInput>,
-    auth: EmailScopedAccess,
+    auth: Scoped<AccountEmail, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<()> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
         bail!("This email address is not supported, please use a different email.")
@@ -63,7 +64,7 @@ async fn inner_update_email(
 )]
 pub async fn update_email(
     body: Json<UpdateEmailInput>,
-    auth: EmailScopedAccess,
+    auth: Scoped<AccountEmail, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     match inner_update_email(body, auth, account_manager).await {

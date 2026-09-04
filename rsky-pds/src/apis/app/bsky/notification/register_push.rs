@@ -1,6 +1,7 @@
 use crate::actor_store::ActorStore;
 use crate::apis::app::bsky::util::get_did_doc;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RpcCall, RpcTarget, Scoped};
 use crate::auth_verifier::AccessStandardSignupQueued;
 use crate::config::ServerConfig;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
@@ -20,7 +21,7 @@ use rsky_repo::types::Ids;
 
 pub async fn inner_register_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandardSignupQueued,
+    auth: Scoped<RpcCall, AccessStandardSignupQueued>,
     cfg: &State<ServerConfig>,
     app_view_url: String,
     id_resolver: &State<SharedIdResolver>,
@@ -32,12 +33,13 @@ pub async fn inner_register_push(
         platform,
         app_id,
     } = body.into_inner();
-    let did: String = auth
-        .access
-        .credentials
-        .and_then(|credentials| credentials.did)
-        .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     let nsid = Ids::AppBskyNotificationRegisterPush.as_str().to_string();
+    let did: String = auth
+        .did_for(&RpcTarget {
+            lxm: nsid.clone(),
+            aud: service_did.clone(),
+        })
+        .await?;
     let auth_headers =
         context::service_auth_headers(actor_store, &did, &service_did, &nsid).await?;
 
@@ -111,7 +113,7 @@ pub async fn inner_register_push(
 )]
 pub async fn register_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandardSignupQueued,
+    auth: Scoped<RpcCall, AccessStandardSignupQueued>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     actor_store: &State<ActorStore>,

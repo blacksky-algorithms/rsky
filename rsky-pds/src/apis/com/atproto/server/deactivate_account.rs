@@ -1,6 +1,7 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccountStatusScopedAccess;
+use crate::auth_verifier::scope::{AccountStatus, Scoped};
+use crate::auth_verifier::AccessFull;
 use anyhow::Result;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
@@ -13,10 +14,10 @@ use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 )]
 pub async fn deactivate_account(
     body: Json<DeactivateAccountInput>,
-    auth: AccountStatusScopedAccess,
+    auth: Scoped<AccountStatus, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let DeactivateAccountInput { delete_after } = body.into_inner();
     match account_manager.deactivate_account(&did, delete_after).await {
         Ok(()) => Ok(()),

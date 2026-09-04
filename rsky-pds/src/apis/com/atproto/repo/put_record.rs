@@ -3,6 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::repo::prepare::{prepare_create, prepare_update, PrepareCreateOpts, PrepareUpdateOpts};
 use crate::SharedSequencer;
@@ -18,7 +19,7 @@ use std::str::FromStr;
 #[tracing::instrument(skip_all)]
 async fn inner_put_record(
     body: Json<PutRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    requester: String,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
@@ -47,7 +48,7 @@ async fn inner_put_record(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != requester {
             bail!("AuthRequiredError")
         }
         let uri = AtUri::make(did.clone(), Some(collection.clone()), Some(rkey.clone()))?;
@@ -126,26 +127,28 @@ async fn inner_put_record(
 #[rocket::post("/xrpc/com.atproto.repo.putRecord", format = "json", data = "<body>")]
 pub async fn put_record(
     body: Json<PutRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<RepoWrite, AccessStandardIncludeChecks>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug put_record {body:#?}");
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Create,
-    )?;
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Update,
-    )?;
+    let requester = auth
+        .did_for(&vec![
+            RepoTarget::new(
+                body.collection.clone(),
+                crate::oauth_scope::RepoAction::Create,
+            ),
+            RepoTarget::new(
+                body.collection.clone(),
+                crate::oauth_scope::RepoAction::Update,
+            ),
+        ])
+        .await?;
     match inner_put_record(
         body,
-        auth,
+        requester,
         sequencer,
         blobstore_factory,
         actor_store,

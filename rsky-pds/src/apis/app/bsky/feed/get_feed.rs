@@ -1,10 +1,10 @@
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{AccessOutput, AccessStandard};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
-use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError};
+use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::{SharedATPAgent, SharedIdResolver};
 use anyhow::{anyhow, Result};
 use atrium_api::app::bsky::feed::get_feed_generator::{
@@ -32,12 +32,14 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
     type Error = anyhow::Error;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match AccessStandard::from_request(req).await {
-            Outcome::Success(output) => {
-                let AccessOutput { credentials, .. } = output.access;
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
+        match Scoped::<RpcProxy>::from_request(req).await {
+            Outcome::Success(auth) => {
+                let requester: Option<String> = match auth.did_opt().await {
+                    Ok(requester) => requester,
+                    Err(api_error) => {
+                        req.local_cache(|| Some(api_error));
+                        return Outcome::Error((Status::Forbidden, anyhow!("InsufficientScope")));
+                    }
                 };
                 if let Some(limit) = req.query_value::<Option<u8>>("limit") {
                     match limit {
@@ -156,10 +158,7 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
             }
             Outcome::Error(err) => {
                 req.local_cache(|| Some(ApiError::InvalidRequest(err.1.to_string())));
-                Outcome::Error((
-                    Status::BadRequest,
-                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-                ))
+                Outcome::Error((Status::BadRequest, anyhow::Error::new(err.1)))
             }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }

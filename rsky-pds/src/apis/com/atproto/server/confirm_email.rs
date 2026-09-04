@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, ConfirmEmailOpts};
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{AccountEmail, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
@@ -8,10 +9,10 @@ use rsky_lexicon::com::atproto::server::ConfirmEmailInput;
 #[tracing::instrument(skip_all)]
 async fn inner_confirm_email(
     body: Json<ConfirmEmailInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<AccountEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
 
     let user = match account_manager
         .get_account(
@@ -65,7 +66,7 @@ async fn inner_confirm_email(
 )]
 pub async fn confirm_email(
     body: Json<ConfirmEmailInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<AccountEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     match inner_confirm_email(body, auth, account_manager).await {

@@ -1,7 +1,8 @@
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccountRepoScopedAccess;
+use crate::auth_verifier::scope::{IdentityFull, Scoped};
+use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
 use crate::plc;
 use crate::plc::operations::create_update_op;
@@ -20,10 +21,10 @@ use std::collections::BTreeMap;
 pub async fn sign_plc_operation(
     body: Json<SignPlcOperationRequest>,
     // `AccessFull` (its pre-existing tier) via the guard's default `Base`.
-    auth: AccountRepoScopedAccess,
+    auth: Scoped<IdentityFull, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<Json<Operation>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let request = body.into_inner();
     let token = request.token.clone();
 

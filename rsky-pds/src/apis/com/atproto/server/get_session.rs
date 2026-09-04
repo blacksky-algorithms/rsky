@@ -1,6 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::GetSessionOutput;
 use rsky_syntax::handle::INVALID_HANDLE;
@@ -8,10 +8,10 @@ use rsky_syntax::handle::INVALID_HANDLE;
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.getSession")]
 pub async fn get_session(
-    auth: AccessStandard,
+    auth: Scoped<NoScopeRequired>,
     account_manager: AccountManager,
 ) -> Result<Json<GetSessionOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     match account_manager.get_account(&did, None).await {
         Ok(Some(user)) => Ok(Json(GetSessionOutput {
             handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),

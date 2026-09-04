@@ -1,6 +1,6 @@
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{AccessOutput, AccessStandard};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
@@ -53,13 +53,17 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
 
     #[tracing::instrument(skip_all)]
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match AccessStandard::from_request(req).await {
-            Outcome::Success(output) => {
-                let AccessOutput { credentials, .. } = output.access;
-                let granted_scopes = credentials.as_ref().and_then(|c| c.granted_scopes.clone());
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
+        match Scoped::<RpcProxy>::from_request(req).await {
+            Outcome::Success(auth) => {
+                let requester: Option<String> = match auth.did_opt().await {
+                    Ok(requester) => requester,
+                    Err(api_error) => {
+                        req.local_cache(|| Some(api_error));
+                        return Outcome::Error((
+                            Status::Forbidden,
+                            anyhow::anyhow!("InsufficientScope"),
+                        ));
+                    }
                 };
                 let headers = req.headers().clone().into_iter().fold(
                     BTreeMap::new(),
@@ -77,13 +81,6 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                     actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                 };
-                if let Err(api_error) = assert_rpc_scope(&granted_scopes, &proxy_req).await {
-                    req.local_cache(|| Some(api_error));
-                    return Outcome::Error((
-                        Status::Forbidden,
-                        anyhow::anyhow!("InsufficientScope"),
-                    ));
-                }
                 match pipethrough(
                     &proxy_req,
                     requester,
@@ -113,10 +110,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
             }
             Outcome::Error(err) => {
                 req.local_cache(|| Some(ApiError::RuntimeError));
-                Outcome::Error((
-                    Status::BadRequest,
-                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-                ))
+                Outcome::Error((Status::BadRequest, anyhow::Error::new(err.1)))
             }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }

@@ -1,9 +1,10 @@
-use crate::auth_verifier::{AccessStandard, AuthError, AuthScope, Credentials};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
+use crate::auth_verifier::{AuthError, AuthScope, Credentials};
 use crate::handle;
 use crate::handle::errors::ErrorKind;
 use crate::pipethrough::{
-    assert_rpc_scope, pipethrough_error, pipethrough_procedure, pipethrough_procedure_post,
-    ProxyRequest, PRIVILEGED_METHODS,
+    pipethrough_error, pipethrough_procedure, pipethrough_procedure_post, ProxyRequest,
+    PRIVILEGED_METHODS,
 };
 use anyhow::{Error, Result};
 use rocket::http::{ContentType, Header, Status};
@@ -142,6 +143,22 @@ pub fn assert_identity_scope(
     )
 }
 
+/// Enforce an OAuth session's `rpc:` scope on an outbound call to a known
+/// audience, for callers that resolve the audience themselves rather than
+/// through the `atproto-proxy` header.
+pub fn assert_rpc_target(
+    credentials: &Option<Credentials>,
+    lxm: &str,
+    aud: &str,
+) -> Result<(), ApiError> {
+    assert_scope(
+        credentials,
+        true,
+        |scopes| scopes.allows_rpc(lxm, aud),
+        || format!("Token scope does not permit calling {lxm} on {aud}"),
+    )
+}
+
 /// Enforce an OAuth session's `account:` scope on an account-level mutation
 /// (email, deactivation/activation, PLC rotation).
 ///
@@ -171,20 +188,11 @@ pub fn assert_account_scope(
 pub async fn bsky_api_get_forwarder(
     nsid: Nsid,
     query: Option<&str>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
-    let granted_scopes = auth
-        .access
-        .credentials
-        .as_ref()
-        .and_then(|c| c.granted_scopes.clone());
-    assert_rpc_scope(&granted_scopes, &req).await?;
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    assert_valid_token_method(&nsid.0, auth.credentials().await?)?;
+    let requester: Option<String> = auth.did_opt().await?;
     match pipethrough_procedure::<()>(&req, requester, None).await {
         Ok(res) => {
             let headers = res.headers.expect("Upstream responded without headers.");
@@ -209,20 +217,11 @@ pub async fn bsky_api_get_forwarder(
 pub async fn bsky_api_post_forwarder(
     body: Data<'_>,
     nsid: Nsid,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
-    assert_valid_token_method(&nsid.0, &auth.access.credentials)?;
-    let granted_scopes = auth
-        .access
-        .credentials
-        .as_ref()
-        .and_then(|c| c.granted_scopes.clone());
-    assert_rpc_scope(&granted_scopes, &req).await?;
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    assert_valid_token_method(&nsid.0, auth.credentials().await?)?;
+    let requester: Option<String> = auth.did_opt().await?;
 
     let res = pipethrough_procedure_post(&req, requester, Some(body)).await?;
     let headers = res.headers.expect("Upstream responded without headers.");
@@ -267,6 +266,14 @@ pub enum ApiError {
     /// Error passed through from an upstream service: status code, error, message
     UpstreamResponse(u16, String, String),
 }
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 #[derive(Serialize)]
 pub struct ErrorBody {
@@ -848,6 +855,42 @@ mod tests {
             "account:email?action=manage",
         ]);
         assert!(assert_account_scope(&with_account, "email", AccountAction::Manage).is_ok());
+    }
+
+    /// `registerPush` and `unregisterPush` mint service auth and call the
+    /// notification service, so they need the `rpc:` grant that governs
+    /// reaching outward -- against the audience the request body names.
+    #[test]
+    fn an_rpc_target_is_checked_against_the_audience_the_body_names() {
+        let lxm = "app.bsky.notification.registerPush";
+        let aud = "did:web:notif.example.com";
+
+        // The matching grant permits it; a wildcard audience does too.
+        let exact = creds(&["atproto", &format!("rpc:{lxm}?aud={aud}")]);
+        assert!(assert_rpc_target(&exact, lxm, aud).is_ok());
+        let wildcard = creds(&["atproto", &format!("rpc:{lxm}?aud=*")]);
+        assert!(assert_rpc_target(&wildcard, lxm, aud).is_ok());
+
+        // A grant for a different audience does not.
+        let other_aud = creds(&[
+            "atproto",
+            &format!("rpc:{lxm}?aud=did:web:someone-else.example.com"),
+        ]);
+        assert!(assert_rpc_target(&other_aud, lxm, aud).is_err());
+
+        // Nor does a grant for a different method, nor no rpc grant at all.
+        let other_lxm = creds(&[
+            "atproto",
+            &format!("rpc:app.bsky.feed.getTimeline?aud={aud}"),
+        ]);
+        assert!(assert_rpc_target(&other_lxm, lxm, aud).is_err());
+        assert!(
+            assert_rpc_target(&creds(&["atproto", "repo:app.bsky.feed.post"]), lxm, aud).is_err()
+        );
+
+        // Legacy sessions are unaffected, as everywhere else.
+        assert!(assert_rpc_target(&creds(&["atproto", "transition:generic"]), lxm, aud).is_ok());
+        assert!(assert_rpc_target(&None, lxm, aud).is_ok());
     }
 
     /// App passwords and legacy access tokens carry no `granted_scopes`;

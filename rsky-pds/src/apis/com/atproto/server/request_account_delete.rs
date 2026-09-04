@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
@@ -8,10 +9,10 @@ use crate::models::models::EmailTokenPurpose;
 use anyhow::{bail, Result};
 
 async fn inner_request_account_delete(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<()> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let account = account_manager
         .get_account(
             &did,
@@ -39,7 +40,7 @@ async fn inner_request_account_delete(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
 pub async fn request_account_delete(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     match inner_request_account_delete(auth, account_manager).await {
