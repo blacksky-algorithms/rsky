@@ -469,6 +469,36 @@ impl ScopeDecl for RepoWrite {
 /// `rpc:<nsid>`, for the proxied-XRPC surface. The proxy target is rebuilt
 /// from the request here so the check runs before the handler body, matching
 /// where every other declaration runs.
+/// The method and audience an [`RpcCall`] is checked against.
+pub struct RpcTarget {
+    pub lxm: String,
+    pub aud: String,
+}
+
+/// `rpc:<lxm>?aud=<did>` for an outbound call whose audience comes from the
+/// request body rather than the `atproto-proxy` header.
+///
+/// Deferred, because the audience is not known until the body is parsed --
+/// the same reason the reference implementation asserts these in the handler.
+/// [`RpcProxy`] covers the header-routed case instead.
+pub struct RpcCall;
+
+#[rocket::async_trait]
+impl ScopeDecl for RpcCall {
+    type Target = RpcTarget;
+
+    async fn precheck(
+        _req: &Request<'_>,
+        _credentials: &Option<Credentials>,
+    ) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn check(credentials: &Option<Credentials>, target: &RpcTarget) -> Result<(), ApiError> {
+        crate::apis::assert_rpc_target(credentials, &target.lxm, &target.aud)
+    }
+}
+
 pub struct RpcProxy;
 
 #[rocket::async_trait]

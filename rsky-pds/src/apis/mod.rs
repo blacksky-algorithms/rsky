@@ -143,6 +143,22 @@ pub fn assert_identity_scope(
     )
 }
 
+/// Enforce an OAuth session's `rpc:` scope on an outbound call to a known
+/// audience, for callers that resolve the audience themselves rather than
+/// through the `atproto-proxy` header.
+pub fn assert_rpc_target(
+    credentials: &Option<Credentials>,
+    lxm: &str,
+    aud: &str,
+) -> Result<(), ApiError> {
+    assert_scope(
+        credentials,
+        true,
+        |scopes| scopes.allows_rpc(lxm, aud),
+        || format!("Token scope does not permit calling {lxm} on {aud}"),
+    )
+}
+
 /// Enforce an OAuth session's `account:` scope on an account-level mutation
 /// (email, deactivation/activation, PLC rotation).
 ///
@@ -839,6 +855,42 @@ mod tests {
             "account:email?action=manage",
         ]);
         assert!(assert_account_scope(&with_account, "email", AccountAction::Manage).is_ok());
+    }
+
+    /// `registerPush` and `unregisterPush` mint service auth and call the
+    /// notification service, so they need the `rpc:` grant that governs
+    /// reaching outward -- against the audience the request body names.
+    #[test]
+    fn an_rpc_target_is_checked_against_the_audience_the_body_names() {
+        let lxm = "app.bsky.notification.registerPush";
+        let aud = "did:web:notif.example.com";
+
+        // The matching grant permits it; a wildcard audience does too.
+        let exact = creds(&["atproto", &format!("rpc:{lxm}?aud={aud}")]);
+        assert!(assert_rpc_target(&exact, lxm, aud).is_ok());
+        let wildcard = creds(&["atproto", &format!("rpc:{lxm}?aud=*")]);
+        assert!(assert_rpc_target(&wildcard, lxm, aud).is_ok());
+
+        // A grant for a different audience does not.
+        let other_aud = creds(&[
+            "atproto",
+            &format!("rpc:{lxm}?aud=did:web:someone-else.example.com"),
+        ]);
+        assert!(assert_rpc_target(&other_aud, lxm, aud).is_err());
+
+        // Nor does a grant for a different method, nor no rpc grant at all.
+        let other_lxm = creds(&[
+            "atproto",
+            &format!("rpc:app.bsky.feed.getTimeline?aud={aud}"),
+        ]);
+        assert!(assert_rpc_target(&other_lxm, lxm, aud).is_err());
+        assert!(
+            assert_rpc_target(&creds(&["atproto", "repo:app.bsky.feed.post"]), lxm, aud).is_err()
+        );
+
+        // Legacy sessions are unaffected, as everywhere else.
+        assert!(assert_rpc_target(&creds(&["atproto", "transition:generic"]), lxm, aud).is_ok());
+        assert!(assert_rpc_target(&None, lxm, aud).is_ok());
     }
 
     /// App passwords and legacy access tokens carry no `granted_scopes`;
