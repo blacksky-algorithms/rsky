@@ -520,6 +520,227 @@ impl<'r> FromRequest<'r> for AccessStandardCheckTakedown {
     }
 }
 
+// Scoped-access guards
+// ---------------------
+//
+// Each of these folds a proposal-0011 resource-scope assertion into the
+// request guard itself, wrapping one of the plain `Access*` guards above.
+// Before this, a handler took a plain access guard and made a separate
+// `assert_*_scope` call as the first line of its body -- easy to add when a
+// route is first written, just as easy to forget when a route is copied or
+// refactored later, and invisible at the type level either way. A route that
+// asks for one of these can only get a `did` by way of the assertion having
+// already passed, closing the same "guard succeeded, follow-up check silently
+// skipped" failure mode the service-auth fix in PR #252 closed elsewhere.
+//
+// `assert_*_scope` (in `crate::apis`) is unchanged; this only relocates where
+// it is called from.
+
+/// A guard whose only content is an already-verified [`AccessOutput`],
+/// implemented by every plain `Access*` guard above. Lets a scoped-access
+/// guard be generic over which one it wraps instead of duplicating each
+/// guard's own session/takedown/deactivation handling.
+trait AccessGuard {
+    fn into_access(self) -> AccessOutput;
+}
+
+impl AccessGuard for AccessStandard {
+    fn into_access(self) -> AccessOutput {
+        self.access
+    }
+}
+
+impl AccessGuard for AccessStandardCheckTakedown {
+    fn into_access(self) -> AccessOutput {
+        self.access
+    }
+}
+
+impl AccessGuard for AccessFull {
+    fn into_access(self) -> AccessOutput {
+        self.access
+    }
+}
+
+/// Runs `Base`'s own request-guard logic unchanged, then applies `assert` to
+/// the credentials it produces. `assert` failing is the only way this can
+/// still fail once `Base` has already succeeded.
+async fn assert_scoped<'r, Base>(
+    req: &'r Request<'_>,
+    assert: impl FnOnce(&Option<Credentials>) -> Result<(), ApiError>,
+) -> Outcome<AccessOutput, ApiError>
+where
+    Base: AccessGuard + FromRequest<'r, Error = AuthError>,
+{
+    match Base::from_request(req).await {
+        Outcome::Success(base) => {
+            let access = base.into_access();
+            match assert(&access.credentials) {
+                Ok(()) => Outcome::Success(access),
+                Err(api_error) => {
+                    req.local_cache(|| Some(api_error.clone()));
+                    Outcome::Error((Status::Forbidden, api_error))
+                }
+            }
+        }
+        Outcome::Error((status, auth_error)) => {
+            let api_error = ApiError::from(&auth_error);
+            req.local_cache(|| Some(api_error.clone()));
+            Outcome::Error((status, api_error))
+        }
+        Outcome::Forward(level) => Outcome::Forward(level),
+    }
+}
+
+/// [`AccessStandardCheckTakedown`] narrowed by the session's `blob:` scope
+/// (proposal 0011), for `com.atproto.repo.uploadBlob`. Reads the mime type
+/// straight off the request the same way the route's own `ContentType` guard
+/// does; put `ContentType` ahead of this guard in a route's parameter list so
+/// a request with no content type still gets that guard's own rejection
+/// first.
+pub struct BlobScopedAccess {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for BlobScopedAccess {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let mime = req
+            .content_type()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        match assert_scoped::<AccessStandardCheckTakedown>(req, |credentials| {
+            crate::apis::assert_blob_scope(credentials, &mime)
+        })
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(Self { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(level) => Outcome::Forward(level),
+        }
+    }
+}
+
+/// [`AccessStandardCheckTakedown`] narrowed by the session's `identity:handle`
+/// scope, for `com.atproto.identity.updateHandle`.
+pub struct HandleScopedAccess {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for HandleScopedAccess {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match assert_scoped::<AccessStandardCheckTakedown>(req, |credentials| {
+            crate::apis::assert_identity_scope(credentials, "handle")
+        })
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(Self { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(level) => Outcome::Forward(level),
+        }
+    }
+}
+
+/// [`AccessFull`] narrowed by the session's `account:email?action=manage`
+/// scope, for `com.atproto.server.updateEmail`.
+pub struct EmailScopedAccess {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for EmailScopedAccess {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match assert_scoped::<AccessFull>(req, |credentials| {
+            crate::apis::assert_account_scope(
+                credentials,
+                "email",
+                crate::oauth_scope::AccountAction::Manage,
+            )
+        })
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(Self { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(level) => Outcome::Forward(level),
+        }
+    }
+}
+
+/// [`AccessFull`] narrowed by the session's `account:status?action=manage`
+/// scope, for `com.atproto.server.deactivateAccount`.
+pub struct AccountStatusScopedAccess {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccountStatusScopedAccess {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match assert_scoped::<AccessFull>(req, |credentials| {
+            crate::apis::assert_account_scope(
+                credentials,
+                "status",
+                crate::oauth_scope::AccountAction::Manage,
+            )
+        })
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(Self { access }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(level) => Outcome::Forward(level),
+        }
+    }
+}
+
+/// [`AccessFull`] (the default `Base`) or [`AccessStandard`] narrowed by the
+/// session's `account:repo?action=manage` scope, for the two PLC-rotation
+/// endpoints. `Base` is generic rather than fixed because the two endpoints
+/// keep different, pre-existing access tiers -- `signPlcOperation` requires a
+/// full session (`Base = AccessFull`, the default, so it can be named as
+/// plain `AccountRepoScopedAccess`) while `submitPlcOperation` also accepts
+/// app-password sessions (`Base = AccessStandard`, named explicitly). Both
+/// share this one assertion instead of two copies of it, without silently
+/// widening or narrowing either endpoint's tier to match the other's.
+pub struct AccountRepoScopedAccess<Base = AccessFull> {
+    pub access: AccessOutput,
+    _base: std::marker::PhantomData<Base>,
+}
+
+#[rocket::async_trait]
+impl<'r, Base> FromRequest<'r> for AccountRepoScopedAccess<Base>
+where
+    Base: AccessGuard + FromRequest<'r, Error = AuthError>,
+{
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        match assert_scoped::<Base>(req, |credentials| {
+            crate::apis::assert_account_scope(
+                credentials,
+                "repo",
+                crate::oauth_scope::AccountAction::Manage,
+            )
+        })
+        .await
+        {
+            Outcome::Success(access) => Outcome::Success(Self {
+                access,
+                _base: std::marker::PhantomData,
+            }),
+            Outcome::Error(error) => Outcome::Error(error),
+            Outcome::Forward(level) => Outcome::Forward(level),
+        }
+    }
+}
+
 pub struct AccessStandardSignupQueued {
     pub access: AccessOutput,
 }

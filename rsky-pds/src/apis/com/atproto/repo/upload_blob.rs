@@ -1,7 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandardCheckTakedown;
+use crate::auth_verifier::BlobScopedAccess;
 use anyhow::Result;
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::Status;
@@ -36,7 +36,7 @@ impl<'r> FromRequest<'r> for ContentType {
 }
 
 async fn inner_upload_blob(
-    auth: AccessStandardCheckTakedown,
+    auth: BlobScopedAccess,
     blob: Data<'_>,
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,
@@ -93,9 +93,12 @@ async fn inner_upload_blob(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.uploadBlob", data = "<blob>")]
 pub async fn upload_blob(
-    auth: AccessStandardCheckTakedown,
-    blob: Data<'_>,
+    // `content_type` first so a request with no content type gets its own
+    // guard's rejection before `BlobScopedAccess` re-reads the same header
+    // to run the `blob:` scope check.
     content_type: ContentType,
+    auth: BlobScopedAccess,
+    blob: Data<'_>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
 ) -> Result<Json<BlobOutput>, ApiError> {

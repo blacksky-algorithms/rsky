@@ -42,9 +42,9 @@ const SUCCESS_TTL: Duration = Duration::from_secs(3600);
 const FAILURE_TTL: Duration = Duration::from_secs(60);
 
 /// One entry of a published permission set.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Permission {
-    /// `space`, `repo`, `blob`, `rpc`. Only `space` is meaningful here.
+    /// `space`, `repo`, `blob`, `rpc`, `identity`, or `account`.
     #[serde(default)]
     pub resource: String,
     #[serde(rename = "spaceType", default)]
@@ -53,12 +53,32 @@ pub struct Permission {
     pub authority: Option<String>,
     #[serde(default)]
     pub skey: Option<String>,
+    /// `repo` collections (0011 `RepoPermission.collection`).
     #[serde(default)]
     pub collection: Vec<String>,
+    /// Actions for whichever resource names this: `repo`'s create/update/delete,
+    /// or `account`'s read/manage.
     #[serde(default)]
     pub action: Vec<String>,
     #[serde(default, rename = "manage")]
     pub manage: Vec<String>,
+    /// `rpc` methods (0011 `RpcPermission.lxm`).
+    #[serde(default)]
+    pub lxm: Vec<String>,
+    /// `rpc`'s audience. `inherit_aud` is a coarser stand-in for "any
+    /// audience" until this server can resolve the reference implementation's
+    /// "the requesting PDS itself" semantics for `inheritAud`.
+    #[serde(default)]
+    pub aud: Option<String>,
+    #[serde(default, rename = "inheritAud")]
+    pub inherit_aud: bool,
+    /// `blob` mime-type patterns (0011 `BlobPermission.accept`).
+    #[serde(default)]
+    pub accept: Vec<String>,
+    /// `identity`'s attribute (`handle` or `*`) or `account`'s (`email`,
+    /// `repo`, or `status`).
+    #[serde(default)]
+    pub attr: Option<String>,
 }
 
 impl Permission {
@@ -98,6 +118,98 @@ impl Permission {
         }
         Some(scope)
     }
+
+    /// The equivalent scope string for any of the five proposal-0011
+    /// resource kinds this entry names, or `None` when it names none of them
+    /// (an unrecognised `resource`, or one missing the field its kind
+    /// requires).
+    ///
+    /// This is the general form of [`Self::to_space_scope`]: before it
+    /// existed, a permission set's `repo`/`rpc`/`blob`/`identity`/`account`
+    /// entries silently expanded into nothing (only `space` was handled),
+    /// so a client that granted only a permission set -- the mechanism the
+    /// proposal actually expects real clients to use -- ended up with an
+    /// *unrestricted* session instead of the restricted one it asked for.
+    /// Resolving every kind here, and feeding the result through the same
+    /// parser an inline scope goes through, closes that gap.
+    #[must_use]
+    pub fn to_scope_string(&self) -> Option<String> {
+        match self.resource.as_str() {
+            "space" => self.to_space_scope(),
+            "repo" => self.to_repo_scope(),
+            "blob" => self.to_blob_scope(),
+            "rpc" => self.to_rpc_scope(),
+            "identity" => self.to_identity_scope(),
+            "account" => self.to_account_scope(),
+            _ => None,
+        }
+    }
+
+    fn to_repo_scope(&self) -> Option<String> {
+        if self.collection.is_empty() {
+            return None;
+        }
+        let mut params: Vec<String> = self
+            .collection
+            .iter()
+            .map(|c| format!("collection={c}"))
+            .collect();
+        params.extend(self.action.iter().map(|a| format!("action={a}")));
+        Some(format!(
+            "{}?{}",
+            crate::oauth_scope::REPO_PREFIX,
+            params.join("&")
+        ))
+    }
+
+    fn to_blob_scope(&self) -> Option<String> {
+        if self.accept.is_empty() {
+            return None;
+        }
+        let params: Vec<String> = self.accept.iter().map(|a| format!("accept={a}")).collect();
+        Some(format!(
+            "{}?{}",
+            crate::oauth_scope::BLOB_PREFIX,
+            params.join("&")
+        ))
+    }
+
+    fn to_rpc_scope(&self) -> Option<String> {
+        if self.lxm.is_empty() {
+            return None;
+        }
+        let aud = if self.inherit_aud {
+            Some("*".to_string())
+        } else {
+            self.aud.clone()
+        };
+        let aud = aud?;
+        let mut params: Vec<String> = self.lxm.iter().map(|l| format!("lxm={l}")).collect();
+        params.push(format!("aud={aud}"));
+        Some(format!(
+            "{}?{}",
+            crate::oauth_scope::RPC_PREFIX,
+            params.join("&")
+        ))
+    }
+
+    fn to_identity_scope(&self) -> Option<String> {
+        let attr = self.attr.as_deref()?;
+        Some(format!("{}{attr}", crate::oauth_scope::IDENTITY_PREFIX))
+    }
+
+    fn to_account_scope(&self) -> Option<String> {
+        let attr = self.attr.as_deref()?;
+        if self.action.is_empty() {
+            return Some(format!("{}{attr}", crate::oauth_scope::ACCOUNT_PREFIX));
+        }
+        let params: Vec<String> = self.action.iter().map(|a| format!("action={a}")).collect();
+        Some(format!(
+            "{}{attr}?{}",
+            crate::oauth_scope::ACCOUNT_PREFIX,
+            params.join("&")
+        ))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,15 +231,16 @@ struct GetRecordOutput {
     value: SchemaRecord,
 }
 
-/// The `space:` scope strings a permission set confers, extracted from a
-/// fetched `com.atproto.lexicon.schema` record.
-fn space_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
+/// The scope strings a permission set confers -- across all five proposal
+/// 0011 resource kinds, not just `space:` -- extracted from a fetched
+/// `com.atproto.lexicon.schema` record.
+fn resource_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
     record
         .defs
         .values()
         .filter(|def| def.def_type == "permission-set")
         .flat_map(|def| def.permissions.iter())
-        .filter_map(Permission::to_space_scope)
+        .filter_map(Permission::to_scope_string)
         .collect()
 }
 
@@ -148,10 +261,11 @@ impl PermissionSetResolver {
         Self::default()
     }
 
-    /// The `space:` scope strings an `include:<nsid>` confers. Empty when the
-    /// set names no space grants, and also when it could not be resolved --
-    /// the two are the same denial from a caller's point of view.
-    pub async fn space_scopes(&self, nsid: &str) -> Vec<String> {
+    /// The scope strings an `include:<nsid>` confers, across every
+    /// proposal-0011 resource kind the set names. Empty when the set names no
+    /// grants, and also when it could not be resolved -- the two are the same
+    /// denial from a caller's point of view.
+    pub async fn resolved_scopes(&self, nsid: &str) -> Vec<String> {
         if let Some(entry) = self.cache.read().await.get(nsid) {
             if entry.expires > Instant::now() {
                 return entry.scopes.clone();
@@ -197,7 +311,7 @@ impl PermissionSetResolver {
             anyhow::bail!("{url} returned {}", response.status());
         }
         let output: GetRecordOutput = response.json().await?;
-        Ok(space_scopes_from_record(&output.value))
+        Ok(resource_scopes_from_record(&output.value))
     }
 }
 
@@ -248,16 +362,20 @@ pub struct SharedPermissionSets {
     pub resolver: PermissionSetResolver,
 }
 
-/// Expand every `include:` in a session's granted scopes into the `space:`
-/// scope strings it confers, appended to the scopes as granted.
+/// Expand every `include:` in a session's granted scopes into the scope
+/// strings it confers (`repo:`, `blob:`, `rpc:`, `identity:`, `account:`, or
+/// `space:`), appended to the scopes as granted.
 ///
-/// The result is fed to the same parser an inline `space:` goes through, so a
-/// resolved permission behaves identically to one the client wrote out.
+/// The result is fed to the same parser an inline scope of that kind goes
+/// through, so a resolved permission behaves identically to one the client
+/// wrote out. This is what makes a permission-set-only grant (no bare
+/// `repo:`/`blob:`/etc. alongside the `include:`) actually restrict the
+/// session instead of leaving `GrantedScopes` with nothing to enforce.
 pub async fn expand_includes(resolver: &PermissionSetResolver, granted: &[String]) -> Vec<String> {
     let mut expanded = granted.to_vec();
     for scope in granted {
         if let Some(nsid) = scope.strip_prefix(crate::oauth_scope::INCLUDE_PREFIX) {
-            expanded.extend(resolver.space_scopes(nsid).await);
+            expanded.extend(resolver.resolved_scopes(nsid).await);
         }
     }
     expanded
@@ -303,7 +421,7 @@ mod tests {
 
     fn bulleted_scopes() -> Vec<String> {
         let record: SchemaRecord = serde_json::from_str(BULLETED_SPACE_ACCESS).unwrap();
-        space_scopes_from_record(&record)
+        resource_scopes_from_record(&record)
     }
 
     #[test]
@@ -323,12 +441,9 @@ mod tests {
     fn entries_that_are_not_space_grants_are_skipped() {
         let repo_grant = Permission {
             resource: "repo".to_string(),
-            space_type: None,
-            authority: None,
-            skey: None,
             collection: vec!["app.bulleted.node".to_string()],
             action: vec!["create".to_string()],
-            manage: Vec::new(),
+            ..Default::default()
         };
         assert!(repo_grant.to_space_scope().is_none());
         // A space entry with no space type names no spaces, so it grants none.
@@ -345,11 +460,7 @@ mod tests {
         let bare = Permission {
             resource: "space".to_string(),
             space_type: Some("app.bulleted.space".to_string()),
-            authority: None,
-            skey: None,
-            collection: Vec::new(),
-            action: Vec::new(),
-            manage: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(bare.to_space_scope().unwrap(), "space:app.bulleted.space");
     }
@@ -361,9 +472,8 @@ mod tests {
             space_type: Some("app.bulleted.space".to_string()),
             authority: Some("self".to_string()),
             skey: Some("main".to_string()),
-            collection: Vec::new(),
-            action: Vec::new(),
             manage: vec!["create".to_string(), "delete".to_string()],
+            ..Default::default()
         };
         let scope = managing.to_space_scope().unwrap();
         assert_eq!(
@@ -373,11 +483,120 @@ mod tests {
         crate::space_scope::SpaceScope::parse(&scope).unwrap();
     }
 
+    #[test]
+    fn to_scope_string_expands_repo_blob_rpc_identity_and_account() {
+        let repo = Permission {
+            resource: "repo".to_string(),
+            collection: vec!["app.bulleted.node".to_string()],
+            action: vec!["create".to_string()],
+            ..Default::default()
+        };
+        let scope = repo.to_scope_string().unwrap();
+        assert!(scope.starts_with("repo:?"), "{scope}");
+        assert!(scope.contains("collection=app.bulleted.node"), "{scope}");
+        assert!(scope.contains("action=create"), "{scope}");
+        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
+            .allows_repo("app.bulleted.node", crate::oauth_scope::RepoAction::Create));
+
+        let blob = Permission {
+            resource: "blob".to_string(),
+            accept: vec!["image/*".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(blob.to_scope_string().unwrap(), "blob:?accept=image/*");
+
+        let rpc = Permission {
+            resource: "rpc".to_string(),
+            lxm: vec!["com.example.method".to_string()],
+            aud: Some("did:web:example.com".to_string()),
+            ..Default::default()
+        };
+        let scope = rpc.to_scope_string().unwrap();
+        assert!(scope.starts_with("rpc:?"), "{scope}");
+        assert!(scope.contains("lxm=com.example.method"), "{scope}");
+        assert!(scope.contains("aud=did:web:example.com"), "{scope}");
+
+        let identity = Permission {
+            resource: "identity".to_string(),
+            attr: Some("handle".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(identity.to_scope_string().unwrap(), "identity:handle");
+
+        let account = Permission {
+            resource: "account".to_string(),
+            attr: Some("email".to_string()),
+            action: vec!["manage".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            account.to_scope_string().unwrap(),
+            "account:email?action=manage"
+        );
+
+        // Missing the field its kind requires: no grant.
+        assert!(Permission {
+            resource: "rpc".to_string(),
+            lxm: vec!["com.example.method".to_string()],
+            ..Default::default()
+        }
+        .to_scope_string()
+        .is_none());
+        // An unrecognised resource confers nothing.
+        assert!(Permission {
+            resource: "unknown-future-resource".to_string(),
+            ..Default::default()
+        }
+        .to_scope_string()
+        .is_none());
+    }
+
+    /// The bug this whole file exists to fix: a permission set naming only a
+    /// `repo:` grant (no `space:`) used to expand into nothing, so a session
+    /// that granted only `include:<nsid>` ended up with no `repo:` scope at
+    /// all. Expanding non-space entries is what gives such a session the
+    /// grants it was actually issued.
+    #[tokio::test]
+    async fn a_permission_set_only_grant_restricts_rather_than_failing_open() {
+        const REPO_ONLY_SET: &str = r#"{
+          "$type": "com.atproto.lexicon.schema",
+          "lexicon": 1,
+          "id": "app.example.repoAccess",
+          "defs": {
+            "main": {
+              "type": "permission-set",
+              "permissions": [
+                {
+                  "type": "permission",
+                  "resource": "repo",
+                  "action": ["create", "update", "delete"],
+                  "collection": ["app.bsky.feed.post"]
+                }
+              ]
+            }
+          }
+        }"#;
+        let record: SchemaRecord = serde_json::from_str(REPO_ONLY_SET).unwrap();
+        let scopes = resource_scopes_from_record(&record);
+        assert_eq!(scopes.len(), 1);
+
+        // Simulate what `expand_includes` produces for a session that
+        // granted only the permission set: `atproto` plus the resolved
+        // `repo:` scope, no bare `repo:` of its own.
+        let mut granted = vec!["atproto".to_string()];
+        granted.extend(scopes);
+        let granted_scopes = crate::oauth_scope::GrantedScopes::parse(&granted);
+        assert!(granted_scopes
+            .allows_repo("app.bsky.feed.post", crate::oauth_scope::RepoAction::Create));
+        assert!(!granted_scopes
+            .allows_repo("app.bsky.feed.like", crate::oauth_scope::RepoAction::Create));
+    }
+
     #[tokio::test]
     async fn an_unresolvable_set_confers_nothing_and_is_not_retried_immediately() {
         let resolver = PermissionSetResolver::new();
         // `.invalid` is reserved by RFC 2606 and never resolves.
-        let first = resolver.space_scopes("invalid.example.nothing").await;
+        let first = resolver.resolved_scopes("invalid.example.nothing").await;
         assert!(first.is_empty());
         // The failure is remembered, so the next call is a cache hit rather
         // than another DNS lookup.
@@ -395,7 +614,7 @@ mod tests {
     #[ignore = "requires network and a third-party PDS"]
     async fn resolves_the_real_bulleted_permission_set() {
         let resolver = PermissionSetResolver::new();
-        let scopes = resolver.space_scopes("app.bulleted.spaceAccess").await;
+        let scopes = resolver.resolved_scopes("app.bulleted.spaceAccess").await;
         assert_eq!(
             scopes,
             bulleted_scopes(),

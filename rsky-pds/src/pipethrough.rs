@@ -56,6 +56,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
         match AccessStandard::from_request(req).await {
             Outcome::Success(output) => {
                 let AccessOutput { credentials, .. } = output.access;
+                let granted_scopes = credentials.as_ref().and_then(|c| c.granted_scopes.clone());
                 let requester: Option<String> = match credentials {
                     None => None,
                     Some(credentials) => credentials.did,
@@ -76,6 +77,13 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
                     actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                 };
+                if let Err(api_error) = assert_rpc_scope(&granted_scopes, &proxy_req).await {
+                    req.local_cache(|| Some(api_error));
+                    return Outcome::Error((
+                        Status::Forbidden,
+                        anyhow::anyhow!("InsufficientScope"),
+                    ));
+                }
                 match pipethrough(
                     &proxy_req,
                     requester,
@@ -222,6 +230,34 @@ pub async fn pipethrough_procedure_post(
         .await
         .map_err(|error| pipethrough_error(&error))?;
     Ok(parse_proxy_res(res).await?)
+}
+
+/// Enforce an OAuth session's `rpc:` scope before a call is proxied to
+/// another service, at the seam every pipethrough request passes through
+/// (`bsky_api_get_forwarder` and friends all resolve to
+/// [`HandlerPipeThrough`]). Gating and `transition:generic` handling are
+/// [`crate::apis::scoped_session`]'s.
+pub async fn assert_rpc_scope(
+    granted_scopes: &Option<Vec<String>>,
+    req: &ProxyRequest<'_>,
+) -> Result<(), ApiError> {
+    let Some(scopes) = crate::apis::scoped_session(granted_scopes.as_ref(), true) else {
+        return Ok(());
+    };
+    let lxm = parse_req_nsid(req);
+    // An `rpc:` grant is bound to an audience, so a destination we cannot
+    // resolve is a destination we cannot show the call is scoped for.
+    let aud = match format_url_and_aud(req, None).await {
+        Ok(UrlAndAud { aud, .. }) => aud,
+        Err(error) => return Err(pipethrough_error(&error)),
+    };
+    if scopes.allows_rpc(&lxm, &aud) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit calling {lxm} on {aud}"
+        )))
+    }
 }
 
 // Request setup/formatting
