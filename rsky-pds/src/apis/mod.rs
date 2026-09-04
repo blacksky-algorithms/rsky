@@ -159,6 +159,28 @@ pub fn assert_rpc_target(
     )
 }
 
+/// Whether a session may see the account's email address on
+/// `com.atproto.server.getSession`.
+///
+/// Unlike the `assert_*` helpers this degrades the response rather than
+/// refusing the request: the endpoint answers for any session and only the
+/// address is withheld. The OAuth spec confers it through `transition:email`
+/// ("gets included in response to com.atproto.server.getSession") or an
+/// explicit `account:email` grant. `transition:generic` is not one of them.
+#[must_use]
+pub fn allows_email_read(credentials: &Option<Credentials>) -> bool {
+    match scoped_session(
+        credentials.as_ref().and_then(|c| c.granted_scopes.as_ref()),
+        false,
+    ) {
+        None => true,
+        Some(scopes) => {
+            scopes.has_transition("email")
+                || scopes.allows_account("email", crate::oauth_scope::AccountAction::Read)
+        }
+    }
+}
+
 /// Enforce an OAuth session's `account:` scope on an account-level mutation
 /// (email, deactivation/activation, PLC rotation).
 ///
@@ -891,6 +913,43 @@ mod tests {
         // Legacy sessions are unaffected, as everywhere else.
         assert!(assert_rpc_target(&creds(&["atproto", "transition:generic"]), lxm, aud).is_ok());
         assert!(assert_rpc_target(&None, lxm, aud).is_ok());
+    }
+
+    /// The OAuth spec confers the address through `transition:email` or an
+    /// explicit `account:email` grant, and through nothing else.
+    #[test]
+    fn email_is_visible_only_to_a_session_granted_it() {
+        // No granted scopes at all: app password / legacy token, unaffected.
+        assert!(allows_email_read(&None));
+
+        // The two grants the spec names.
+        assert!(allows_email_read(&creds(&["atproto", "transition:email"])));
+        assert!(allows_email_read(&creds(&["atproto", "account:email"])));
+        assert!(allows_email_read(&creds(&[
+            "atproto",
+            "account:email?action=read"
+        ])));
+        // `manage` subsumes `read`.
+        assert!(allows_email_read(&creds(&[
+            "atproto",
+            "account:email?action=manage"
+        ])));
+
+        // Everything else is withheld, transition:generic included.
+        assert!(!allows_email_read(&creds(&["atproto"])));
+        assert!(!allows_email_read(&creds(&[
+            "atproto",
+            "transition:generic"
+        ])));
+        assert!(!allows_email_read(&creds(&[
+            "atproto",
+            "repo:app.bsky.feed.post"
+        ])));
+        assert!(!allows_email_read(&creds(&["atproto", "account:status"])));
+        assert!(!allows_email_read(&creds(&[
+            "atproto",
+            "include:app.example.set"
+        ])));
     }
 
     /// App passwords and legacy access tokens carry no `granted_scopes`;
