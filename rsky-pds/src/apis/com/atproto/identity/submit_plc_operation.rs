@@ -3,7 +3,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
-use crate::auth_verifier::scope::{AccountRepo, Scoped};
+use crate::auth_verifier::scope::{IdentityFull, Scoped};
 use crate::auth_verifier::AccessStandard;
 use crate::config::ServerConfig;
 use crate::plc::types::{OpOrTombstone, Operation};
@@ -151,7 +151,7 @@ pub async fn submit_plc_operation(
     body: Json<SubmitPlcOperationRequest>,
     // `AccessStandard` (its pre-existing tier, app passwords included) named
     // explicitly since it differs from the guard's default `Base`.
-    auth: Scoped<AccountRepo, AccessStandard>,
+    auth: Scoped<IdentityFull, AccessStandard>,
     sequencer: &State<SharedSequencer>,
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,

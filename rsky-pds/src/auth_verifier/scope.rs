@@ -334,6 +334,32 @@ impl ScopeDecl for IdentityHandle {
 }
 
 /// `account:email?action=manage`, for `com.atproto.server.updateEmail`.
+/// `identity:*`, for the PLC operation endpoints.
+///
+/// A PLC operation rewrites the DID document: it can rotate the signing key,
+/// repoint the PDS, and hand the account to someone else irreversibly. The
+/// reference implementation puts that behind the identity wildcard rather than
+/// any `account:` grant, and warns on it at the consent screen. Gating it on
+/// `account:repo?action=manage` -- the scope `importRepo` needs -- would let a
+/// client granted migration capability take the account.
+pub struct IdentityFull;
+
+#[rocket::async_trait]
+impl ScopeDecl for IdentityFull {
+    type Target = ();
+
+    async fn precheck(
+        _req: &Request<'_>,
+        credentials: &Option<Credentials>,
+    ) -> Result<(), ApiError> {
+        crate::apis::assert_identity_scope(credentials, "*")
+    }
+
+    async fn check(_credentials: &Option<Credentials>, _target: &()) -> Result<(), ApiError> {
+        Ok(())
+    }
+}
+
 pub struct AccountEmail;
 
 #[rocket::async_trait]

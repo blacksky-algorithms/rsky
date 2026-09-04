@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
+use crate::auth_verifier::scope::{IdentityFull, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::mailer::{send_plc_operation, TokenParam};
 use crate::models::models::EmailTokenPurpose;
@@ -73,7 +73,7 @@ async fn do_plc_operation(account: &ActorAccount, token: String) -> Result<(), A
 #[rocket::post("/xrpc/com.atproto.identity.requestPlcOperationSignature")]
 #[tracing::instrument(skip_all)]
 pub async fn request_plc_operation_signature(
-    auth: Scoped<NoScopeRequired, AccessFull>,
+    auth: Scoped<IdentityFull, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let requester = auth.did().await?;

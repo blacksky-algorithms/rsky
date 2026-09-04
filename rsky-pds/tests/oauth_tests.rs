@@ -802,12 +802,13 @@ async fn oauth_endpoint_edge_cases() {
 // accept an OAuth session mapped to `AppPass`/`AppPassPrivileged` -- exactly
 // what a granular-scope grant maps to (see
 // `auth_verifier::oauth_scopes_to_auth_scope`) -- so `BlobUpload`,
-// `IdentityHandle`, `RepoWrite` and `AccountRepo` on `AccessStandard` are
-// reachable here. `AccessFull` requires `AuthScope::Access`, a scope only the
-// legacy plain-JWT `createSession` token type carries, and that token type
-// always sets `granted_scopes: None`. No OAuth grant can ever produce
-// `AuthScope::Access`, so `AccountEmail`, `AccountStatus`, `OAuthForbidden`
-// and the `AccessFull` pairing of `AccountRepo` are presently unreachable
+// `IdentityHandle`, `RepoWrite`, `RpcProxy`, and the `AccessStandard*`
+// pairings of `IdentityFull` and `AccountEmail` are reachable here.
+// `AccessFull` requires `AuthScope::Access`, a scope only the legacy plain-JWT
+// `createSession` token type carries, and that token type always sets
+// `granted_scopes: None`. No OAuth grant can ever produce `AuthScope::Access`,
+// so `AccountStatus`, `AccountRepo`, `OAuthForbidden` and the `AccessFull`
+// pairings of `AccountEmail` and `IdentityFull` are presently unreachable
 // through any live OAuth request; their coverage is the declaration-level
 // unit tests in `auth_verifier::scope::tests`, plus the legacy-session
 // regression checks at the end of this file.
@@ -1062,17 +1063,16 @@ async fn an_unresolvable_proxy_audience_denies_the_proxied_call() {
 }
 
 #[tokio::test]
-async fn account_repo_declaration_covers_submit_plc_operation() {
+async fn identity_full_declaration_covers_submit_plc_operation() {
     let (_dir, client) = get_oauth_client().await;
     common::create_account(&client).await;
     activate_test_account(&client).await;
 
-    // `account:repo?action=manage` clears `Scoped<AccountRepo, AccessStandard>`
-    // and reaches the handler's own request-body validation, which rejects
-    // this empty operation -- proving the guard let the request through
-    // rather than stopping it at the scope check.
-    let (access_token, key) =
-        granular_access_token(&client, "atproto account:repo?action=manage").await;
+    // `identity:*` clears `Scoped<IdentityFull, AccessStandard>` and reaches
+    // the handler's own request-body validation, which rejects this empty
+    // operation -- proving the guard let the request through rather than
+    // stopping it at the scope check.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:*").await;
     let (status, body) = dispatch_scoped_post(
         &client,
         "/xrpc/com.atproto.identity.submitPlcOperation",
@@ -1085,9 +1085,27 @@ async fn account_repo_declaration_covers_submit_plc_operation() {
     assert_ne!(body["error"], "InsufficientScope", "body was {body}");
     assert_eq!(status, Status::BadRequest, "body was {body}");
 
-    // `account:repo` alone defaults to `action=read`, which does not satisfy
-    // the `Manage` check `submitPlcOperation` requires.
-    let (access_token, key) = granular_access_token(&client, "atproto account:repo").await;
+    // A PLC operation rewrites the DID document, so the migration scope must
+    // not reach it: `account:repo?action=manage` is what `importRepo` needs,
+    // and a client granted migration capability would otherwise be able to
+    // rotate the signing key and take the account.
+    let (access_token, key) =
+        granular_access_token(&client, "atproto account:repo?action=manage").await;
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/com.atproto.identity.submitPlcOperation",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        json!({ "operation": {} }).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+
+    // Nor does the narrower identity grant: `identity:handle` permits a handle
+    // change, not full control of the document.
+    let (access_token, key) = granular_access_token(&client, "atproto identity:handle").await;
     let (status, body) = dispatch_scoped_post(
         &client,
         "/xrpc/com.atproto.identity.submitPlcOperation",
@@ -1101,10 +1119,10 @@ async fn account_repo_declaration_covers_submit_plc_operation() {
     assert_eq!(body["error"], "InsufficientScope", "body was {body}");
 }
 
-/// `AccountEmail`, `AccountStatus` and the `AccessFull` pairing of
-/// `AccountRepo` sit on `AccessFull`, which requires `AuthScope::Access` -- a
-/// scope only a legacy plain-JWT `createSession` token carries (see the module
-/// doc above). This is a regression check on the only path currently able to
+/// `AccountStatus`, `AccountRepo` and the `AccessFull` pairings of
+/// `AccountEmail` and `IdentityFull` require `AuthScope::Access` -- a scope
+/// only a legacy plain-JWT `createSession` token carries (see the module doc
+/// above). This is a regression check on the only path currently able to
 /// reach them: a legacy session still clears `AccountEmail` exactly as it
 /// cleared the plain `AccessFull` guard before the seam.
 #[tokio::test]
