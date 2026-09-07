@@ -8,6 +8,7 @@ use crate::auth_verifier::UserDidAuthOptional;
 use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
+use crate::metrics::record_account_created;
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
 use crate::sequencer::events::sync_evt_data_from_commit;
@@ -137,6 +138,7 @@ pub async fn server_create_account(
     };
 
     // Create Account
+    let invited = invite_code.is_some();
     let (access_jwt, refresh_jwt);
     match account_manager
         .create_account(CreateAccountOpts {
@@ -153,6 +155,11 @@ pub async fn server_create_account(
     {
         Ok(res) => {
             (access_jwt, refresh_jwt) = res;
+            record_account_created(
+                if is_admin { "admin" } else { "self_service" },
+                invited,
+                deactivated,
+            );
         }
         Err(error) => {
             tracing::error!("Error creating account\n{error}");

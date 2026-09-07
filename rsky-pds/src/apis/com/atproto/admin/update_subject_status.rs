@@ -3,6 +3,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::Moderator;
+use crate::metrics::record_oauth_sessions_revoked;
 use crate::SharedSequencer;
 use anyhow::Result;
 use lexicon_cid::Cid;
@@ -28,9 +29,10 @@ async fn inner_update_subject_status(
     if let Some(takedown) = &takedown {
         match &subject {
             Subject::RepoRef(subject) => {
-                account_manager
+                let oauth_revoked = account_manager
                     .takedown_account(&subject.did, takedown.clone())
                     .await?;
+                record_oauth_sessions_revoked(oauth_revoked);
             }
             Subject::StrongRef(subject) => {
                 let subject_at_uri: AtUri = subject.uri.clone().try_into()?;

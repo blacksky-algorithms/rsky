@@ -383,6 +383,29 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
     let access_token = tokens["access_token"].as_str().unwrap().to_string();
     let refresh_token = tokens["refresh_token"].as_str().unwrap().to_string();
 
+    // The initial authorization_code exchange is both a granted authorization
+    // and a new session. The Prometheus recorder is one process-wide
+    // instance shared by every test in this binary, so only presence is
+    // checked here (not an exact count) -- other tests running concurrently
+    // touch these same counters. The authorization_code-vs-refresh_token
+    // distinction itself is unit-tested directly in
+    // `oauth::routes::tests::is_new_oauth_session_only_true_for_authorization_code`.
+    let metrics_body = client
+        .get("/metrics")
+        .dispatch()
+        .await
+        .into_string()
+        .await
+        .unwrap();
+    assert!(
+        metrics_body.contains("pds_oauth_authorization_grants_total"),
+        "{metrics_body}"
+    );
+    assert!(
+        metrics_body.contains(r#"pds_session_created_total{source="oauth","#),
+        "{metrics_body}"
+    );
+
     // resource request without a nonce is challenged and re-tried
     let session_htu = format!("{}/xrpc/com.atproto.server.getSession", public_url(&client));
     let response = client
@@ -485,6 +508,12 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
     assert_eq!(response.status(), Status::BadRequest);
     let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
     assert_eq!(body["error"], "invalid_grant");
+    // Whether this refresh_token grant (or any other) bumps
+    // pds_session_created_total is proven by
+    // `oauth::routes::tests::is_new_oauth_session_only_true_for_authorization_code`,
+    // not asserted here: the Prometheus recorder is one process-wide
+    // instance shared by every test in this binary, so an exact count isn't
+    // safe to assert on under concurrent test execution.
 }
 
 #[tokio::test]

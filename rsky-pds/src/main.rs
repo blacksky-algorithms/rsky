@@ -10,10 +10,17 @@ async fn main() {
     let _ = &*rsky_pds::auth_verifier::PDS_JWT_KEYPAIR;
     let _ = &*rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 
+    // Only set up an OTLP exporter (and pay its cost) when a collector
+    // endpoint is actually configured; see rsky_pds::telemetry.
+    let otel_layer = rsky_pds::telemetry::layer();
+
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
         .with(Layer::new())
+        .with(otel_layer)
         .init();
 
     let _ = build_rocket(None).await.launch().await;
+
+    rsky_pds::telemetry::shutdown();
 }

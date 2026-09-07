@@ -43,7 +43,8 @@ async fn xrpc_requests_are_counted_by_method_and_status() {
     assert_eq!(health_response.status(), Status::Ok);
 
     // A login attempt against a nonexistent account: exercises the
-    // `pds_auth_login_total{outcome="failure"}` hook in `create_session`.
+    // `pds_session_created_total{source="password",outcome="failure"}` hook
+    // in `create_session`.
     let login_response = client
         .post("/xrpc/com.atproto.server.createSession")
         .header(ContentType::JSON)
@@ -69,12 +70,13 @@ async fn xrpc_requests_are_counted_by_method_and_status() {
         body.contains(r#"method="com.atproto.server.createSession""#),
         "{body}"
     );
+    assert!(body.contains(r#"source="password""#), "{body}");
     assert!(body.contains(r#"outcome="failure""#), "{body}");
     assert!(
         body.contains(r#"reason="invalid_credentials""#),
         "expected the createSession failure to carry a reason label: {body}"
     );
-    assert!(body.contains("pds_auth_login_total"), "{body}");
+    assert!(body.contains("pds_session_created_total"), "{body}");
 }
 
 /// `/oauth/*` isn't behind an `/xrpc/` prefix, but it's a fixed, low-
@@ -93,5 +95,26 @@ async fn oauth_requests_are_counted_too() {
     assert!(
         body.contains(r#"method="/oauth/jwks""#),
         "expected /oauth/jwks to be recorded under the xrpc/oauth request counter: {body}"
+    );
+}
+
+/// `common::create_account` drives `createAccount` with an admin token and
+/// an invite code (mirroring how a real invite-gated PDS provisions
+/// accounts), landing deactivated pending activation -- so the counter
+/// should show `source="admin"`, `invited="true"`, `deactivated="true"`.
+#[rocket::async_test]
+async fn account_created_is_counted_by_source() {
+    let (_dir, client) = common::get_client().await;
+
+    common::create_account(&client).await;
+
+    let metrics_response = client.get("/metrics").dispatch().await;
+    let body = metrics_response.into_string().await.expect("response body");
+
+    assert!(
+        body.contains(
+            r#"pds_accounts_created_total{source="admin",invited="true",deactivated="true"} 1"#
+        ),
+        "{body}"
     );
 }

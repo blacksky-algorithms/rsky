@@ -35,6 +35,7 @@ pub mod rotate_keys;
 pub mod sequencer;
 pub mod space_auth;
 pub mod space_scope;
+pub mod telemetry;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;

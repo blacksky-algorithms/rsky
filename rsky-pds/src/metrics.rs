@@ -35,9 +35,11 @@ use rocket::{Data, Request, Response};
 pub const XRPC_REQUESTS: &str = "pds_xrpc_requests_total";
 /// Request latency in seconds for the same routes as [`XRPC_REQUESTS`].
 pub const XRPC_REQUEST_DURATION_SECONDS: &str = "pds_xrpc_request_duration_seconds";
-/// Login attempts via `com.atproto.server.createSession`, labelled by
-/// `outcome` (success/failure) and, on failure, `reason`.
-pub const AUTH_LOGIN: &str = "pds_auth_login_total";
+/// Sessions created, unified across every auth path (password
+/// `createSession` and OAuth's `authorization_code` token grant), labelled
+/// by `source` (password/oauth), `outcome` (success/failure) and, on
+/// failure, `reason`.
+pub const SESSION_CREATED: &str = "pds_session_created_total";
 /// Service-auth tokens minted via `com.atproto.server.getServiceAuth`.
 pub const AUTH_SERVICE_TOKENS_ISSUED: &str = "pds_auth_service_tokens_issued_total";
 /// Service-auth token requests denied via `com.atproto.server.getServiceAuth`,
@@ -51,6 +53,14 @@ pub const BLOB_UPLOADS: &str = "pds_blob_uploads_total";
 pub const BLOB_UPLOAD_BYTES: &str = "pds_blob_upload_bytes_total";
 /// Currently-connected `com.atproto.sync.subscribeRepos` (firehose) subscribers.
 pub const FIREHOSE_SUBSCRIBERS: &str = "pds_firehose_subscribers";
+/// Accounts created, labelled by `source` (self_service/admin), `invited`
+/// and `deactivated`.
+pub const ACCOUNTS_CREATED: &str = "pds_accounts_created_total";
+/// OAuth authorization grants, labelled by `client_first_party`.
+pub const OAUTH_AUTHORIZATION_GRANTS: &str = "pds_oauth_authorization_grants_total";
+/// OAuth sessions (rows in the `token` table) revoked in bulk for a DID, e.g.
+/// as part of an account takedown or deletion.
+pub const OAUTH_SESSIONS_REVOKED: &str = "pds_oauth_sessions_revoked_total";
 
 /// Register all rsky-pds metrics with descriptions. Idempotent: `describe_*!`
 /// macros just re-set the same description on repeated calls, so this is
@@ -67,9 +77,10 @@ pub fn describe() {
         "XRPC and OAuth request latency, by route and HTTP status"
     );
     describe_counter!(
-        AUTH_LOGIN,
+        SESSION_CREATED,
         Unit::Count,
-        "createSession login attempts, by outcome (success/failure) and, on failure, reason"
+        "Sessions created, by source (password/oauth), outcome (success/failure) and, \
+         on failure, reason"
     );
     describe_counter!(
         AUTH_SERVICE_TOKENS_ISSUED,
@@ -96,6 +107,21 @@ pub fn describe() {
         FIREHOSE_SUBSCRIBERS,
         Unit::Count,
         "Currently-connected subscribeRepos (firehose) subscribers"
+    );
+    describe_counter!(
+        ACCOUNTS_CREATED,
+        Unit::Count,
+        "Accounts created, by source (self_service/admin), invited, and deactivated"
+    );
+    describe_counter!(
+        OAUTH_AUTHORIZATION_GRANTS,
+        Unit::Count,
+        "OAuth authorization grants, by client_first_party"
+    );
+    describe_counter!(
+        OAUTH_SESSIONS_REVOKED,
+        Unit::Count,
+        "OAuth sessions bulk-revoked for a DID (account takedown/deletion)"
     );
 }
 
@@ -187,13 +213,15 @@ pub async fn metrics_route(handle: &rocket::State<PrometheusHandle>) -> (Content
 }
 
 #[inline]
-pub fn record_login_success() {
-    counter!(AUTH_LOGIN, "outcome" => "success", "reason" => "n/a").increment(1);
+pub fn record_login_success(source: &'static str) {
+    counter!(SESSION_CREATED, "source" => source, "outcome" => "success", "reason" => "n/a")
+        .increment(1);
 }
 
 #[inline]
-pub fn record_login_failure(reason: &'static str) {
-    counter!(AUTH_LOGIN, "outcome" => "failure", "reason" => reason).increment(1);
+pub fn record_login_failure(source: &'static str, reason: &'static str) {
+    counter!(SESSION_CREATED, "source" => source, "outcome" => "failure", "reason" => reason)
+        .increment(1);
 }
 
 #[inline]
@@ -225,6 +253,30 @@ pub fn record_firehose_subscriber_connected() {
 #[inline]
 pub fn record_firehose_subscriber_disconnected() {
     gauge!(FIREHOSE_SUBSCRIBERS).decrement(1.0);
+}
+
+#[inline]
+pub fn record_account_created(source: &'static str, invited: bool, deactivated: bool) {
+    counter!(
+        ACCOUNTS_CREATED,
+        "source" => source,
+        "invited" => invited.to_string(),
+        "deactivated" => deactivated.to_string(),
+    )
+    .increment(1);
+}
+
+#[inline]
+pub fn record_oauth_authorization_granted(client_first_party: bool) {
+    counter!(OAUTH_AUTHORIZATION_GRANTS, "client_first_party" => client_first_party.to_string())
+        .increment(1);
+}
+
+#[inline]
+pub fn record_oauth_sessions_revoked(count: u64) {
+    if count > 0 {
+        counter!(OAUTH_SESSIONS_REVOKED).increment(count);
+    }
 }
 
 #[cfg(test)]
@@ -269,12 +321,14 @@ mod tests {
         let handle = recorder.handle();
         with_local_recorder(&recorder, || {
             describe();
-            record_login_success();
-            record_login_success();
-            record_login_failure("invalid_credentials");
+            record_login_success("password");
+            record_login_success("oauth");
+            record_login_failure("password", "invalid_credentials");
         });
         let out = handle.render();
-        assert!(out.contains(AUTH_LOGIN), "missing metric: {out}");
+        assert!(out.contains(SESSION_CREATED), "missing metric: {out}");
+        assert!(out.contains(r#"source="password""#));
+        assert!(out.contains(r#"source="oauth""#));
         assert!(out.contains(r#"outcome="success""#));
         assert!(out.contains(r#"outcome="failure""#));
         assert!(out.contains(r#"reason="invalid_credentials""#));
@@ -352,6 +406,54 @@ mod tests {
         let out = handle.render();
         assert!(out.contains(FIREHOSE_SUBSCRIBERS));
         assert!(out.contains(&format!("{FIREHOSE_SUBSCRIBERS} 1")));
+    }
+
+    #[test]
+    fn record_account_created_uses_source_invited_deactivated_labels() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_account_created("self_service", true, false);
+            record_account_created("admin", false, true);
+        });
+        let out = handle.render();
+        assert!(out.contains(ACCOUNTS_CREATED));
+        assert!(out.contains(r#"source="self_service""#));
+        assert!(out.contains(r#"invited="true""#));
+        assert!(out.contains(r#"deactivated="false""#));
+        assert!(out.contains(r#"source="admin""#));
+    }
+
+    #[test]
+    fn record_oauth_authorization_granted_uses_first_party_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_oauth_authorization_granted(true);
+            record_oauth_authorization_granted(false);
+            record_oauth_authorization_granted(false);
+        });
+        let out = handle.render();
+        assert!(out.contains(OAUTH_AUTHORIZATION_GRANTS));
+        assert!(out.contains(r#"client_first_party="true""#));
+        assert!(out.contains(&format!(
+            "{OAUTH_AUTHORIZATION_GRANTS}{{client_first_party=\"false\"}} 2"
+        )));
+    }
+
+    #[test]
+    fn record_oauth_sessions_revoked_increments_by_count_and_ignores_zero() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_oauth_sessions_revoked(0);
+            record_oauth_sessions_revoked(3);
+        });
+        let out = handle.render();
+        assert!(out.contains(&format!("{OAUTH_SESSIONS_REVOKED} 3")));
     }
 
     #[test]

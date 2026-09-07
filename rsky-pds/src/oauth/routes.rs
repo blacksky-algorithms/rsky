@@ -2,6 +2,7 @@ use super::templates::{
     client_display, scope_items, ConsentPage, ErrorPage, SessionOption, SignInPage,
 };
 use super::{ensure_device_session, now_secs, DeviceSession, SharedOAuthProvider};
+use crate::metrics::{record_login_success, record_oauth_authorization_granted};
 use askama::Template;
 use rocket::form::Form;
 use rocket::http::{ContentType, CookieJar, Header, Status};
@@ -15,6 +16,7 @@ use rsky_common::env::env_str;
 use rsky_oauth::client::ParRequest;
 use rsky_oauth::dpop::DpopRequest;
 use rsky_oauth::store::AccountInfo;
+use rsky_oauth::types::GRANT_AUTHORIZATION_CODE;
 use rsky_oauth::{AuthorizePageData, ClientCredentials, OAuthError, TokenRequest};
 use serde_json::Value;
 use std::io::Cursor;
@@ -197,6 +199,17 @@ pub async fn oauth_par(
     }
 }
 
+/// Only the initial `authorization_code` exchange mints a new session; a
+/// `refresh_token` grant renews an existing one and isn't a fresh "session
+/// created" event -- pulled out as its own function so this distinction is
+/// unit-tested directly rather than only provable by an exact metric count
+/// (the Prometheus recorder is a single process-wide instance, so
+/// integration tests that race concurrently in the same test binary can't
+/// safely assert on it).
+fn is_new_oauth_session(grant_type: &str) -> bool {
+    grant_type == GRANT_AUTHORIZATION_CODE
+}
+
 #[derive(FromForm)]
 pub struct TokenFormData {
     pub grant_type: Option<String>,
@@ -232,6 +245,7 @@ pub async fn oauth_token(
         code_verifier: form.code_verifier.clone(),
         refresh_token: form.refresh_token.clone(),
     };
+    let is_new_session = is_new_oauth_session(&request.grant_type);
     match provider
         .token(
             &credentials,
@@ -241,11 +255,16 @@ pub async fn oauth_token(
         )
         .await
     {
-        Ok(response) => OAuthApiResponse::ok(
-            Status::Ok,
-            serde_json::to_value(response).expect("token response serialization cannot fail"),
-            nonce,
-        ),
+        Ok(response) => {
+            if is_new_session {
+                record_login_success("oauth");
+            }
+            OAuthApiResponse::ok(
+                Status::Ok,
+                serde_json::to_value(response).expect("token response serialization cannot fail"),
+                nonce,
+            )
+        }
         Err(error) => OAuthApiResponse::error(error, nonce),
     }
 }
@@ -529,7 +548,7 @@ pub async fn oauth_authorize_accept(
     let Some(did) = form.did.clone() else {
         return Err(render_error(Status::BadRequest, "did is required"));
     };
-    shared
+    let redirect = shared
         .provider
         .accept(
             &form.client_id,
@@ -539,8 +558,9 @@ pub async fn oauth_authorize_accept(
             now,
         )
         .await
-        .map(Redirect::to)
-        .map_err(oauth_error_page)
+        .map_err(oauth_error_page)?;
+    record_oauth_authorization_granted(shared.provider.is_trusted_client(&form.client_id));
+    Ok(Redirect::to(redirect))
 }
 
 #[tracing::instrument(skip_all)]
@@ -562,4 +582,20 @@ pub async fn oauth_authorize_reject(
         .await
         .map(Redirect::to)
         .map_err(oauth_error_page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_new_oauth_session_only_true_for_authorization_code() {
+        assert!(is_new_oauth_session(
+            rsky_oauth::types::GRANT_AUTHORIZATION_CODE
+        ));
+        assert!(!is_new_oauth_session(
+            rsky_oauth::types::GRANT_REFRESH_TOKEN
+        ));
+        assert!(!is_new_oauth_session("something_else"));
+    }
 }

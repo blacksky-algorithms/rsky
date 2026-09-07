@@ -43,6 +43,14 @@ mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "trace",
+    "http-proto",
+    "reqwest-client",
+] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.33"
 rand = { workspace = true }
 rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
 rand_core = { workspace = true }

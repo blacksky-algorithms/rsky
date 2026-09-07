@@ -129,6 +129,13 @@ impl OAuthProvider {
         &self.store
     }
 
+    /// Whether `client_id` is configured as trusted (first-party) via
+    /// `trusted_clients` -- the same check used to compute
+    /// [`AuthorizePageData::client_trusted`] for the consent-page UI.
+    pub fn is_trusted_client(&self, client_id: &str) -> bool {
+        self.trusted_clients.iter().any(|id| id == client_id)
+    }
+
     /// The value for the `DPoP-Nonce` response header.
     pub fn next_dpop_nonce(&self, now: u64) -> Option<String> {
         self.dpop.next_nonce(now)
@@ -258,7 +265,7 @@ impl OAuthProvider {
             client_name: client.metadata.client_name.clone(),
             client_uri: client.metadata.client_uri.clone(),
             logo_uri: client.metadata.logo_uri.clone(),
-            client_trusted: self.trusted_clients.contains(&client.id),
+            client_trusted: self.is_trusted_client(&client.id),
             scopes: data
                 .parameters
                 .scope

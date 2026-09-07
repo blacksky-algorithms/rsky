@@ -31,7 +31,9 @@ use std::time::SystemTime;
 /// any method, privileged or not.
 fn ensure_lxm_access(lxm: &str, is_privileged: bool) -> Result<()> {
     if PRIVILEGED_METHODS.contains(lxm) && !is_privileged {
-        bail!("insufficient access to request a service auth token for the following method: {lxm}");
+        bail!(
+            "insufficient access to request a service auth token for the following method: {lxm}"
+        );
     }
     Ok(())
 }
@@ -41,9 +43,8 @@ fn ensure_lxm_access(lxm: &str, is_privileged: bool) -> Result<()> {
 /// matching the upstream check `isAtprotoDid(aud) || isAtprotoDidRefAbsolute(aud)`.
 fn ensure_valid_aud(aud: &str) -> Result<()> {
     let did_part = aud.split('#').next().unwrap_or(aud);
-    ensure_valid_did(did_part).map_err(|_| {
-        anyhow::anyhow!("aud must be a valid atproto DID or did#serviceId reference")
-    })
+    ensure_valid_did(did_part)
+        .map_err(|_| anyhow::anyhow!("aud must be a valid atproto DID or did#serviceId reference"))
 }
 
 pub async fn inner_get_service_auth(

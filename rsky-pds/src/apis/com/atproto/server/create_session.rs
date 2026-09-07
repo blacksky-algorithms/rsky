@@ -113,7 +113,7 @@ pub async fn create_session(
     // @TODO: Add rate limiting
     match inner_create_session(body, account_manager).await {
         Ok(res) => {
-            record_login_success();
+            record_login_success("password");
             Ok(Json(res))
         }
         Err(error) => {
@@ -122,7 +122,7 @@ pub async fn create_session(
                 ApiError::AccountTakendown => "account_takedown",
                 _ => "internal_error",
             };
-            record_login_failure(reason);
+            record_login_failure("password", reason);
             Err(error)
         }
     }

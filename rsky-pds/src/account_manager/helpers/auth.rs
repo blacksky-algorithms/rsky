@@ -241,6 +241,19 @@ pub async fn revoke_refresh_tokens_by_did(did: &str, db: &Db) -> Result<bool> {
     .await
 }
 
+/// Revokes every OAuth session (`token` table row) for `did`, e.g. as part
+/// of an account takedown or deletion. `used_refresh_token` rows cascade via
+/// the `token(id)` foreign key. Returns the number of sessions revoked, for
+/// [`crate::metrics::record_oauth_sessions_revoked`].
+pub async fn revoke_oauth_tokens_by_did(did: &str, db: &Db) -> Result<u64> {
+    let did = did.to_owned();
+    db.run(move |conn| {
+        let deleted = conn.execute("DELETE FROM token WHERE did = ?1", params![did])?;
+        Ok(deleted as u64)
+    })
+    .await
+}
+
 pub async fn revoke_app_password_refresh_token(
     did: &str,
     app_pass_name: &str,
