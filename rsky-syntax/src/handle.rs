@@ -201,7 +201,7 @@ mod tests {
                     e.to_string().contains(expected_msg),
                     "Expected error message '{}', got '{}'",
                     expected_msg,
-                    e.to_string()
+                    e
                 );
             }
         }
