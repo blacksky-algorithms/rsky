@@ -2,6 +2,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardCheckTakedown;
+use crate::metrics::record_blob_upload;
 use anyhow::Result;
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::Status;
@@ -78,7 +79,7 @@ async fn inner_upload_blob(
             .await?;
     }
 
-    crate::metrics::record_blob_upload(blobref.get_size().unwrap_or(0).max(0) as u64);
+    record_blob_upload(blobref.get_size().unwrap_or(0).max(0) as u64);
 
     Ok(BlobOutput {
         blob: Blob {

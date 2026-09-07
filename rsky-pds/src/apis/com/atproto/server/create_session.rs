@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::metrics::{record_login_failure, record_login_success};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
@@ -112,11 +113,16 @@ pub async fn create_session(
     // @TODO: Add rate limiting
     match inner_create_session(body, account_manager).await {
         Ok(res) => {
-            crate::metrics::record_login(true);
+            record_login_success();
             Ok(Json(res))
         }
         Err(error) => {
-            crate::metrics::record_login(false);
+            let reason = match &error {
+                ApiError::InvalidLogin => "invalid_credentials",
+                ApiError::AccountTakendown => "account_takedown",
+                _ => "internal_error",
+            };
+            record_login_failure(reason);
             Err(error)
         }
     }

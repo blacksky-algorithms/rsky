@@ -44,6 +44,7 @@ use crate::background::BackgroundQueue;
 use crate::config::{env_to_cfg, ServiceDbConfig};
 use crate::crawlers::Crawlers;
 use crate::did_cache::DidSqliteCache;
+use crate::metrics::{install_recorder, metrics_route, XrpcMetrics};
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
 use rocket::{catch, catchers, get, options, routes, Build, Rocket};
 use std::sync::Arc;
@@ -312,7 +313,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
-    let metrics_handle = crate::metrics::install_recorder();
+    let metrics_handle = install_recorder();
 
     rocket::custom(figment)
         .mount(
@@ -322,7 +323,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 robots,
                 health,
                 health_live,
-                crate::metrics::metrics_route,
+                metrics_route,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
@@ -453,7 +454,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .attach(CORS)
         .attach(oauth::OAuthHeaders)
         .attach(shield)
-        .attach(crate::metrics::XrpcMetrics)
+        .attach(XrpcMetrics)
         .manage(metrics_handle)
         .manage(sequencer)
         .manage(blobstore_factory)

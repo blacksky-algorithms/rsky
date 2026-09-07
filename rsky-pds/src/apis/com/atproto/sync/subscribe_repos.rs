@@ -1,4 +1,7 @@
 use crate::config::ServerConfig;
+use crate::metrics::{
+    record_firehose_subscriber_connected, record_firehose_subscriber_disconnected,
+};
 use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
@@ -31,14 +34,14 @@ struct FirehoseSubscriberGuard;
 
 impl FirehoseSubscriberGuard {
     fn new() -> Self {
-        crate::metrics::record_firehose_subscriber_connected();
+        record_firehose_subscriber_connected();
         FirehoseSubscriberGuard
     }
 }
 
 impl Drop for FirehoseSubscriberGuard {
     fn drop(&mut self) {
-        crate::metrics::record_firehose_subscriber_disconnected();
+        record_firehose_subscriber_disconnected();
     }
 }
 

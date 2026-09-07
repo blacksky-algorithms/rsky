@@ -70,5 +70,28 @@ async fn xrpc_requests_are_counted_by_method_and_status() {
         "{body}"
     );
     assert!(body.contains(r#"outcome="failure""#), "{body}");
+    assert!(
+        body.contains(r#"reason="invalid_credentials""#),
+        "expected the createSession failure to carry a reason label: {body}"
+    );
     assert!(body.contains("pds_auth_login_total"), "{body}");
+}
+
+/// `/oauth/*` isn't behind an `/xrpc/` prefix, but it's a fixed, low-
+/// cardinality route set (see `metrics::route_label`) and should be counted
+/// the same way XRPC requests are.
+#[rocket::async_test]
+async fn oauth_requests_are_counted_too() {
+    let (_dir, client) = common::get_client().await;
+
+    let jwks_response = client.get("/oauth/jwks").dispatch().await;
+    assert_eq!(jwks_response.status(), Status::Ok);
+
+    let metrics_response = client.get("/metrics").dispatch().await;
+    let body = metrics_response.into_string().await.expect("response body");
+
+    assert!(
+        body.contains(r#"method="/oauth/jwks""#),
+        "expected /oauth/jwks to be recorded under the xrpc/oauth request counter: {body}"
+    );
 }

@@ -12,6 +12,11 @@
 //! `method`, the HTTP status as `status`), translated into Prometheus'
 //! label conventions so the two implementations stay comparable side by
 //! side.
+//!
+//! Coverage is not limited to `/xrpc/*`: the `/oauth/*` and
+//! `/.well-known/oauth-*` routes are a fixed, low-cardinality set (no
+//! request-controlled path segments), so [`XrpcMetrics`] records them under
+//! the same `method`/`status` labels -- see [`route_label`].
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -24,14 +29,20 @@ use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::ContentType;
 use rocket::{Data, Request, Response};
 
-/// Count of XRPC requests, labelled by lexicon method (NSID) and HTTP status code.
+/// Count of HTTP requests to `/xrpc/*` and `/oauth/*` routes, labelled by
+/// `method` (the lexicon NSID for XRPC, the literal route path for OAuth)
+/// and HTTP status.
 pub const XRPC_REQUESTS: &str = "pds_xrpc_requests_total";
-/// XRPC request latency in seconds, labelled by lexicon method and HTTP status code.
+/// Request latency in seconds for the same routes as [`XRPC_REQUESTS`].
 pub const XRPC_REQUEST_DURATION_SECONDS: &str = "pds_xrpc_request_duration_seconds";
-/// Login attempts via `com.atproto.server.createSession`, labelled by outcome.
+/// Login attempts via `com.atproto.server.createSession`, labelled by
+/// `outcome` (success/failure) and, on failure, `reason`.
 pub const AUTH_LOGIN: &str = "pds_auth_login_total";
 /// Service-auth tokens minted via `com.atproto.server.getServiceAuth`.
 pub const AUTH_SERVICE_TOKENS_ISSUED: &str = "pds_auth_service_tokens_issued_total";
+/// Service-auth token requests denied via `com.atproto.server.getServiceAuth`,
+/// labelled by `reason`.
+pub const AUTH_SERVICE_TOKENS_DENIED: &str = "pds_auth_service_tokens_denied_total";
 /// Repo writes (record creates/updates/deletes) committed to an actor store.
 pub const REPO_WRITES: &str = "pds_repo_writes_total";
 /// Successful blob uploads via `com.atproto.repo.uploadBlob`.
@@ -48,22 +59,27 @@ pub fn describe() {
     describe_counter!(
         XRPC_REQUESTS,
         Unit::Count,
-        "XRPC requests handled, by lexicon method and HTTP status"
+        "XRPC and OAuth requests handled, by route and HTTP status"
     );
     describe_histogram!(
         XRPC_REQUEST_DURATION_SECONDS,
         Unit::Seconds,
-        "XRPC request latency, by lexicon method and HTTP status"
+        "XRPC and OAuth request latency, by route and HTTP status"
     );
     describe_counter!(
         AUTH_LOGIN,
         Unit::Count,
-        "createSession login attempts, by outcome (success/failure)"
+        "createSession login attempts, by outcome (success/failure) and, on failure, reason"
     );
     describe_counter!(
         AUTH_SERVICE_TOKENS_ISSUED,
         Unit::Count,
         "getServiceAuth service-auth tokens issued"
+    );
+    describe_counter!(
+        AUTH_SERVICE_TOKENS_DENIED,
+        Unit::Count,
+        "getServiceAuth service-auth token requests denied, by reason"
     );
     describe_counter!(
         REPO_WRITES,
@@ -110,9 +126,26 @@ pub fn install_recorder() -> PrometheusHandle {
 
 struct RequestStart(Instant);
 
-/// Rocket fairing that records XRPC request count + latency, labelled by
-/// lexicon method (the NSID segment of the `/xrpc/<nsid>` path) and HTTP
-/// status code.
+/// Derives the `method` label for a request path, or `None` if the path
+/// shouldn't be recorded at all.
+///
+/// `/xrpc/<nsid>` yields the NSID. `/oauth/*` and `/.well-known/oauth-*` are
+/// a fixed, known set of literal routes (no request-controlled path
+/// segments, unlike e.g. a `did` or `rkey` in an XRPC path), so the raw path
+/// is used as-is -- cardinality stays bounded by the route table, not by
+/// caller input.
+fn route_label(path: &str) -> Option<String> {
+    if let Some(nsid) = path.strip_prefix("/xrpc/") {
+        return Some(nsid.to_string());
+    }
+    if path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-") {
+        return Some(path.to_string());
+    }
+    None
+}
+
+/// Rocket fairing that records request count + latency for `/xrpc/*` and
+/// `/oauth/*` routes, labelled by [`route_label`] and HTTP status code.
 pub struct XrpcMetrics;
 
 #[rocket::async_trait]
@@ -130,10 +163,9 @@ impl Fairing for XrpcMetrics {
 
     async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
         let path = request.uri().path();
-        let Some(method) = path.as_str().strip_prefix("/xrpc/") else {
+        let Some(method) = route_label(path.as_str()) else {
             return;
         };
-        let method = method.to_string();
         let status = response.status().code.to_string();
         let start = request.local_cache(|| RequestStart(Instant::now()));
         let elapsed = start.0.elapsed().as_secs_f64();
@@ -155,14 +187,23 @@ pub async fn metrics_route(handle: &rocket::State<PrometheusHandle>) -> (Content
 }
 
 #[inline]
-pub fn record_login(success: bool) {
-    let outcome = if success { "success" } else { "failure" };
-    counter!(AUTH_LOGIN, "outcome" => outcome).increment(1);
+pub fn record_login_success() {
+    counter!(AUTH_LOGIN, "outcome" => "success", "reason" => "n/a").increment(1);
+}
+
+#[inline]
+pub fn record_login_failure(reason: &'static str) {
+    counter!(AUTH_LOGIN, "outcome" => "failure", "reason" => reason).increment(1);
 }
 
 #[inline]
 pub fn record_service_token_issued() {
     counter!(AUTH_SERVICE_TOKENS_ISSUED).increment(1);
+}
+
+#[inline]
+pub fn record_service_token_denied(reason: &'static str) {
+    counter!(AUTH_SERVICE_TOKENS_DENIED, "reason" => reason).increment(1);
 }
 
 #[inline]
@@ -205,19 +246,38 @@ mod tests {
     }
 
     #[test]
+    fn route_label_covers_xrpc_oauth_and_well_known_oauth() {
+        assert_eq!(
+            route_label("/xrpc/com.atproto.server.createSession"),
+            Some("com.atproto.server.createSession".to_string())
+        );
+        assert_eq!(
+            route_label("/oauth/token"),
+            Some("/oauth/token".to_string())
+        );
+        assert_eq!(
+            route_label("/.well-known/oauth-authorization-server"),
+            Some("/.well-known/oauth-authorization-server".to_string())
+        );
+        assert_eq!(route_label("/robots.txt"), None);
+        assert_eq!(route_label("/.well-known/atproto-did"), None);
+    }
+
+    #[test]
     fn record_login_increments_labelled_counter() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         with_local_recorder(&recorder, || {
             describe();
-            record_login(true);
-            record_login(true);
-            record_login(false);
+            record_login_success();
+            record_login_success();
+            record_login_failure("invalid_credentials");
         });
         let out = handle.render();
         assert!(out.contains(AUTH_LOGIN), "missing metric: {out}");
-        assert!(out.contains("outcome=\"success\""));
-        assert!(out.contains("outcome=\"failure\""));
+        assert!(out.contains(r#"outcome="success""#));
+        assert!(out.contains(r#"outcome="failure""#));
+        assert!(out.contains(r#"reason="invalid_credentials""#));
     }
 
     #[test]
@@ -232,6 +292,21 @@ mod tests {
         let out = handle.render();
         assert!(out.contains(AUTH_SERVICE_TOKENS_ISSUED));
         assert!(out.contains(&format!("{AUTH_SERVICE_TOKENS_ISSUED} 2")));
+    }
+
+    #[test]
+    fn record_service_token_denied_uses_reason_label() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        with_local_recorder(&recorder, || {
+            describe();
+            record_service_token_denied("insufficient_privilege");
+            record_service_token_denied("bad_expiration");
+        });
+        let out = handle.render();
+        assert!(out.contains(AUTH_SERVICE_TOKENS_DENIED));
+        assert!(out.contains(r#"reason="insufficient_privilege""#));
+        assert!(out.contains(r#"reason="bad_expiration""#));
     }
 
     #[test]

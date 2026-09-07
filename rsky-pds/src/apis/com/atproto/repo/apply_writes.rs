@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::metrics::record_repo_write;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
@@ -124,7 +125,7 @@ async fn inner_apply_writes(
             )
             .await?;
         for write in &writes {
-            crate::metrics::record_repo_write(match write {
+            record_repo_write(match write {
                 PreparedWrite::Create(_) => "create",
                 PreparedWrite::Update(_) => "update",
                 PreparedWrite::Delete(_) => "delete",
