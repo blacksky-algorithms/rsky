@@ -8143,9 +8143,12 @@ name = "rsky-crypto"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "multibase",
  "p256 0.13.2",
  "secp256k1",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "unsigned-varint 0.8.0",
 ]
@@ -8494,7 +8497,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-repo"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -8508,6 +8511,7 @@ dependencies = [
  "ipld-core",
  "iroh-car",
  "lazy_static",
+ "p256 0.13.2",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "regex",
