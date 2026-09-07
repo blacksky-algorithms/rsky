@@ -8505,8 +8505,6 @@ dependencies = [
  "async-trait",
  "cid",
  "futures",
- "glob",
- "indexmap 2.10.0",
  "integer-encoding",
  "ipld-core",
  "iroh-car",
