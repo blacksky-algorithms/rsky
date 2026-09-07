@@ -263,11 +263,7 @@ mod tests {
         let stored_hash = "aabbccddeeff00112233445566778899:\
 3d2a91e248809343123c0186c87868141ad7be0efcdd1939b28a85c3a9a6f84\
 501a21efec04cedc29e2d7dad96021bf0109d0ffb2c7be13faf3f9eac5adfed25";
-        assert!(verify(
-            &"correct horse battery staple".to_owned(),
-            stored_hash
-        )
-        .unwrap());
+        assert!(verify(&"correct horse battery staple".to_owned(), stored_hash).unwrap());
         assert!(!verify(&"wrong password".to_owned(), stored_hash).unwrap());
     }
 
@@ -278,8 +274,7 @@ mod tests {
     fn legacy_argon2_hash_still_verifies() {
         // A real Argon2id PHC string for the password "secret", generated
         // with the old argon2-based `gen_salt_and_hash`.
-        let stored_hash =
-            "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$\
+        let stored_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$\
 14ukWqiThj4Xz77NYv01V28GbBZHY9AaZwsFswQFO0U";
         assert!(verify(&"secret".to_owned(), stored_hash).unwrap());
         assert!(!verify(&"other".to_owned(), stored_hash).unwrap());
