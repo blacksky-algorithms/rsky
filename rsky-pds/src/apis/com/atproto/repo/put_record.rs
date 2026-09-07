@@ -5,6 +5,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::metrics::record_repo_write;
 use crate::repo::prepare::{prepare_create, prepare_update, PrepareCreateOpts, PrepareUpdateOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -113,6 +114,11 @@ async fn inner_put_record(
             account_manager
                 .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
                 .await?;
+            record_repo_write(match &write {
+                PreparedWrite::Create(_) => "create",
+                PreparedWrite::Update(_) => "update",
+                PreparedWrite::Delete(_) => "delete",
+            });
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),

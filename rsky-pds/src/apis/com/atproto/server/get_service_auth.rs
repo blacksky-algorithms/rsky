@@ -3,6 +3,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::auth_verifier::AccessFull;
+use crate::metrics::{record_service_token_denied, record_service_token_issued};
 use crate::pipethrough::{PRIVILEGED_METHODS, PROTECTED_METHODS};
 use anyhow::{bail, Result};
 use chrono::offset::Utc as UtcOffset;
@@ -88,6 +89,28 @@ pub async fn inner_get_service_auth(
     .await
 }
 
+/// Classifies a denial from [`inner_get_service_auth`] into a small,
+/// low-cardinality reason label for [`record_service_token_denied`].
+///
+/// Matches on the `bail!` message text rather than a typed error, since
+/// `inner_get_service_auth` returns a plain `anyhow::Result`; the messages
+/// matched here are exactly the ones raised above, so this stays in sync by
+/// construction as long as both live in this file. Falls back to
+/// `"internal_error"` for anything unrecognized (e.g. a `keypair`/JWT
+/// signing failure) rather than growing an ever-expanding label set.
+fn deny_reason(err: &anyhow::Error) -> &'static str {
+    let msg = err.to_string();
+    if msg.starts_with("BadExpiration") {
+        "bad_expiration"
+    } else if msg.contains("protected method") {
+        "protected_method"
+    } else if msg.contains("insufficient access") {
+        "insufficient_privilege"
+    } else {
+        "internal_error"
+    }
+}
+
 /// Get a signed token on behalf of the requesting DID for the requested service.
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.getServiceAuth?<aud>&<exp>&<lxm>")]
@@ -103,8 +126,12 @@ pub async fn get_service_auth(
     actor_store: &State<ActorStore>,
 ) -> Result<Json<GetServiceAuthOutput>, ApiError> {
     match inner_get_service_auth(aud, exp, lxm, auth, actor_store).await {
-        Ok(token) => Ok(Json(GetServiceAuthOutput { token })),
+        Ok(token) => {
+            record_service_token_issued();
+            Ok(Json(GetServiceAuthOutput { token }))
+        }
         Err(error) => {
+            record_service_token_denied(deny_reason(&error));
             tracing::error!("Internal Error: {error}");
             Err(ApiError::RuntimeError)
         }
@@ -176,5 +203,31 @@ mod tests {
         assert!(ensure_valid_aud("did:web:example.com").is_ok());
         assert!(ensure_valid_aud("did:plc:7iza6de2dwap2sbkpav7c6c6").is_ok());
         assert!(ensure_valid_aud("did:web:example.com#atproto_labeler").is_ok());
+    }
+
+    // --- deny_reason ---
+
+    #[test]
+    fn deny_reason_classifies_known_bail_messages() {
+        assert_eq!(
+            deny_reason(&anyhow::anyhow!("BadExpiration: expiration is in past")),
+            "bad_expiration"
+        );
+        assert_eq!(
+            deny_reason(&anyhow::anyhow!(
+                "cannot request a service auth token for the following protected method: com.atproto.server.createAccount"
+            )),
+            "protected_method"
+        );
+        assert_eq!(
+            deny_reason(&anyhow::anyhow!(
+                "insufficient access to request a service auth token for the following method: chat.bsky.convo.getMessages"
+            )),
+            "insufficient_privilege"
+        );
+        assert_eq!(
+            deny_reason(&anyhow::anyhow!("some unrelated keypair failure")),
+            "internal_error"
+        );
     }
 }
