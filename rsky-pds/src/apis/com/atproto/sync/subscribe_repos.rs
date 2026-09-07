@@ -1,4 +1,7 @@
 use crate::config::ServerConfig;
+use crate::metrics::{
+    record_firehose_subscriber_connected, record_firehose_subscriber_disconnected,
+};
 use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
@@ -23,6 +26,25 @@ use std::time::SystemTime;
 use tokio::time::{interval, Duration as TokioDuration};
 use ws::Message;
 
+/// Tracks the `pds_firehose_subscribers` gauge for the lifetime of a single
+/// subscribeRepos connection: incremented on connect, decremented on drop
+/// (covers every exit path -- normal completion, an early `return`, a
+/// `break`, or the client simply disconnecting) so the count can never leak.
+struct FirehoseSubscriberGuard;
+
+impl FirehoseSubscriberGuard {
+    fn new() -> Self {
+        record_firehose_subscriber_connected();
+        FirehoseSubscriberGuard
+    }
+}
+
+impl Drop for FirehoseSubscriberGuard {
+    fn drop(&mut self) {
+        record_firehose_subscriber_disconnected();
+    }
+}
+
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
     let mut dt: DateTime<UtcOffset> = system_time.into();
@@ -45,6 +67,7 @@ pub async fn subscribe_repos<'a>(
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
+        let _firehose_subscriber_guard = FirehoseSubscriberGuard::new();
         let sequencer_lock = sequencer.sequencer.read().await.clone();
         let mut outbox = Outbox::new(
             sequencer_lock.clone(),
