@@ -1,5 +1,4 @@
 use rsky_pds::build_rocket;
-use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -16,7 +15,7 @@ async fn main() {
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
-        .with(Layer::new())
+        .with(rsky_pds::telemetry::fmt_layer())
         .with(otel_layer)
         .init();
 
