@@ -41,7 +41,7 @@ pub fn verify_commit_sig(commit: Commit, did_key: &String) -> Result<bool> {
     };
     let encoded = serde_ipld_dagcbor::to_vec(&rest)?;
     let hash = Sha256::digest(&*encoded);
-    rsky_crypto::verify::verify_signature(did_key, hash.as_ref(), sig.as_slice(), None)
+    rsky_crypto::verify::verify_signature_digest(did_key, hash.as_ref(), sig.as_slice(), None)
 }
 
 pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
@@ -302,6 +302,52 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verify_commit_sig hands a precomputed sha256 digest to rsky-crypto. The
+    /// p256 plugin behind verify_signature hashes its input again, so a valid
+    /// ES256 commit signature verified against SHA256(SHA256(bytes)) fails.
+    #[test]
+    fn verify_commit_sig_accepts_p256_signature() {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+        use rsky_crypto::constants::P256_JWT_ALG;
+        use rsky_crypto::did::format_did_key;
+
+        let key = SigningKey::from_slice(&[0x2au8; 32]).unwrap();
+        let did_key = format_did_key(
+            P256_JWT_ALG.to_string(),
+            key.verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+
+        let unsigned = UnsignedCommit {
+            did: "did:plc:p256commitfixture".to_string(),
+            rev: "3kaaaaaaaaa2z".to_string(),
+            data: "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+                .parse()
+                .unwrap(),
+            prev: None,
+            version: 3,
+        };
+        let encoded = serde_ipld_dagcbor::to_vec(&unsigned).unwrap();
+        let sig: Signature = key
+            .sign_prehash(Sha256::digest(&*encoded).as_ref())
+            .unwrap();
+        let sig = sig.normalize_s().unwrap_or(sig);
+
+        let commit = Commit {
+            did: unsigned.did,
+            version: unsigned.version,
+            data: unsigned.data,
+            rev: unsigned.rev,
+            prev: unsigned.prev,
+            sig: sig.to_vec(),
+        };
+        assert!(verify_commit_sig(commit, &did_key).unwrap());
+    }
 
     /// The encode direction: a `Lex::Blob` written to DAG-CBOR must emit a
     /// real tag-42 CID link and re-encode byte-for-byte to what a compliant
