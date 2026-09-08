@@ -519,10 +519,9 @@ impl Server {
     fn host_status(&self, url: &Url) -> Result<GetHostStatus> {
         let mut hostname = None;
         for (key, value) in url.query_pairs() {
-            match key.as_ref() {
-                "hostname" => hostname = Some(value.to_string()),
-                // Ignore unknown query parameters.
-                _ => (),
+            // Ignore unknown query parameters.
+            if key.as_ref() == "hostname" {
+                hostname = Some(value.to_string());
             }
         }
         let hostname = hostname.ok_or_else(|| eyre!("hostname param is required"))?;
