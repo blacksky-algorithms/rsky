@@ -359,6 +359,73 @@ impl RepoStateStore {
         Ok(Upsert::NeedsFetch)
     }
 
+    /// The live path proved this repo is out of sync (a `#commit` whose
+    /// `prevData` did not follow from our root, or a `#sync`): make it
+    /// fetchable again from whatever source already owns it.
+    ///
+    /// `indexed_rev` is cleared so the next enumeration cannot judge the repo
+    /// "unchanged" at the rev it was last indexed, and `rev` only ever
+    /// advances to the live `rev` so [`Self::complete`] and re-enumeration
+    /// keep their meaning. An unknown repo is filed under [`HUBBLE_SOURCE`];
+    /// enumeration moves it to a direct host if one owns it. `reason` lands
+    /// in `last_error` so `backfill status` can see why a row is pending.
+    pub fn request_resync(&self, did: &str, rev: &str, reason: &str) -> Result<(), StateError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO repo (did, source, rev, indexed_rev, state, attempts, cooldown_until,
+                               last_error, updated_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, ?5, ?6)
+             ON CONFLICT(did) DO UPDATE SET
+                 rev            = CASE WHEN excluded.rev > repo.rev THEN excluded.rev
+                                       ELSE repo.rev END,
+                 indexed_rev    = NULL,
+                 state          = excluded.state,
+                 attempts       = 0,
+                 cooldown_until = 0,
+                 last_error     = excluded.last_error,
+                 updated_at     = excluded.updated_at",
+            params![
+                did,
+                HUBBLE_SOURCE,
+                rev,
+                RepoState::Pending.as_str(),
+                format!("resync: {reason}"),
+                now()
+            ],
+        )?;
+        drop(conn);
+        Ok(())
+    }
+
+    /// The live path saw an `#account` frame take this repo out of service:
+    /// write it off so no fetch is spent on a `getRepo` that would 400. The
+    /// source and `indexed_rev` are kept, and `attempts` is zero, so
+    /// enumeration gives it another try as soon as it reports active again
+    /// (the same shape [`Self::upsert`] gives an inactive listing).
+    pub fn write_off(&self, did: &str, status: &str) -> Result<(), StateError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO repo (did, source, rev, state, attempts, cooldown_until, last_error,
+                               updated_at)
+             VALUES (?1, ?2, '', ?3, 0, 0, ?4, ?5)
+             ON CONFLICT(did) DO UPDATE SET
+                 state          = excluded.state,
+                 attempts       = 0,
+                 cooldown_until = 0,
+                 last_error     = excluded.last_error,
+                 updated_at     = excluded.updated_at",
+            params![
+                did,
+                HUBBLE_SOURCE,
+                RepoState::Terminal.as_str(),
+                format!("account: {status}"),
+                now()
+            ],
+        )?;
+        drop(conn);
+        Ok(())
+    }
+
     /// Take up to `limit` repos of one source that are ready to fetch, marking
     /// them claimed. Ordered by `cooldown_until` so a cooled-down row is not
     /// starved behind newly enumerated ones; that is the index order, so a
@@ -1245,5 +1312,129 @@ mod tests {
         assert_eq!(ListState::parse("done"), ListState::Done);
         assert_eq!(ListState::parse("weird"), ListState::Pending);
         assert_eq!(ListState::Unreachable.as_str(), "unreachable");
+    }
+
+    // ------------------------------------------------- live-path hand-off
+
+    fn row(s: &RepoStateStore, did: &str) -> (String, String, Option<String>, String, i64) {
+        let conn = s.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT source, rev, indexed_rev, state, attempts FROM repo WHERE did = ?1",
+            params![did],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_resync_of_an_unknown_repo_is_filed_under_hubble() {
+        let s = store();
+        s.request_resync("did:a", "r5", "sync_event").unwrap();
+        assert_eq!(
+            row(&s, "did:a"),
+            ("hubble".into(), "r5".into(), None, "pending".into(), 0)
+        );
+        assert_eq!(
+            s.claim_for_source(HUBBLE_SOURCE, 10).unwrap(),
+            vec![("did:a".to_owned(), "r5".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_resync_of_an_indexed_repo_keeps_its_source_and_clears_indexed_rev() {
+        let s = store();
+        s.upsert(&repo("did:a", "3lz7gd2xq5c2a"), HOST, false)
+            .unwrap();
+        s.claim_for_source(HOST, 10).unwrap();
+        s.complete("did:a", "3lz7gd2xq5c2a").unwrap();
+        // a couple of failures on record, to prove they are reset
+        s.claim_for_source(HOST, 10).unwrap();
+        s.fail("did:a", true, 60, "boom", None).unwrap();
+
+        s.request_resync("did:a", "3lz7gd2xq5c2c", "prev_mismatch")
+            .unwrap();
+        assert_eq!(
+            row(&s, "did:a"),
+            (
+                HOST.into(),
+                "3lz7gd2xq5c2c".into(),
+                None,
+                "pending".into(),
+                0
+            )
+        );
+        assert_eq!(
+            s.claim_for_source(HOST, 10).unwrap(),
+            vec![("did:a".to_owned(), "3lz7gd2xq5c2c".to_owned())],
+            "claimable at once: the cooldown is cleared"
+        );
+        assert!(s.claim_for_source(HUBBLE_SOURCE, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resync_never_moves_the_listed_rev_backwards() {
+        let s = store();
+        s.upsert(&repo("did:a", "3lz7gd2xq5c2c"), HOST, false)
+            .unwrap();
+        s.request_resync("did:a", "3lz7gd2xq5c2a", "sync_event")
+            .unwrap();
+        assert_eq!(row(&s, "did:a").1, "3lz7gd2xq5c2c");
+        s.request_resync("did:a", "", "sync_event").unwrap();
+        assert_eq!(row(&s, "did:a").1, "3lz7gd2xq5c2c");
+    }
+
+    #[test]
+    fn a_resync_revives_a_written_off_repo() {
+        let s = store();
+        s.upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            s.claim_for_source(HOST, 10).unwrap();
+            s.fail("did:a", true, 0, "boom", None).unwrap();
+        }
+        assert_eq!(s.stats().unwrap().terminal, 1);
+        s.request_resync("did:a", "r2", "sync_event").unwrap();
+        let st = s.stats().unwrap();
+        assert_eq!((st.terminal, st.pending), (0, 1));
+    }
+
+    #[test]
+    fn a_write_off_of_an_unknown_repo_is_terminal_under_hubble() {
+        let s = store();
+        s.write_off("did:a", "deleted").unwrap();
+        assert_eq!(
+            row(&s, "did:a"),
+            ("hubble".into(), String::new(), None, "terminal".into(), 0)
+        );
+        assert!(s.claim_for_source(HUBBLE_SOURCE, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_write_off_keeps_source_and_indexed_rev_and_yields_to_reactivation() {
+        let s = store();
+        s.upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        s.claim_for_source(HOST, 10).unwrap();
+        s.complete("did:a", "r1").unwrap();
+        s.write_off("did:a", "takendown").unwrap();
+        assert_eq!(
+            row(&s, "did:a"),
+            (
+                HOST.into(),
+                "r1".into(),
+                Some("r1".into()),
+                "terminal".into(),
+                0
+            )
+        );
+        // enumeration reporting it active again at the same rev: already
+        // indexed there, so nothing to fetch...
+        assert_eq!(
+            s.upsert(&repo("did:a", "r1"), HOST, false).unwrap(),
+            Upsert::Unchanged
+        );
+        // ...but at a newer rev it is fetchable, not stuck terminal
+        assert_eq!(
+            s.upsert(&repo("did:a", "r2"), HOST, false).unwrap(),
+            Upsert::NeedsFetch
+        );
     }
 }
