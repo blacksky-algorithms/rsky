@@ -116,8 +116,7 @@ pub fn serve(port: u16) -> Result<(), WintermuteError> {
                                 let last_event = metrics::INGESTER_LAST_EVENT_TIME_SECONDS.get();
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-                                    .unwrap_or(0);
+                                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
                                 // gauge at 0 = no event since boot; lag is unknown, not now-0.
                                 // clamped: event times are source-declared and can be skewed
                                 let lag = (last_event > 0).then(|| (now - last_event).max(0));

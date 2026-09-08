@@ -161,10 +161,10 @@ async fn main() -> Result<()> {
     });
 
     // A claim is in-memory work; anything still claimed is from a dead process.
-    if let Ok(n) = state.reset_claimed() {
-        if n > 0 {
-            tracing::info!(recovered = n, "returned claimed rows to pending");
-        }
+    if let Ok(n) = state.reset_claimed()
+        && n > 0
+    {
+        tracing::info!(recovered = n, "returned claimed rows to pending");
     }
 
     match &args.cmd {
@@ -375,16 +375,16 @@ async fn probe(
         "records   {} (+{} filtered by allowlist)",
         receipt.records, receipt.filtered
     );
-    if let Some(h) = r.hubble() {
-        if let Ok(info) = h.repo_info(did).await {
-            println!(
-                "hubble    records={:?} rev={:?} state={:?} pds={:?}",
-                info.archive.as_ref().and_then(|a| a.records),
-                info.sync_state.as_ref().and_then(|s| s.rev.clone()),
-                info.sync_state.as_ref().and_then(|s| s.state.clone()),
-                info.pds,
-            );
-        }
+    if let Some(h) = r.hubble()
+        && let Ok(info) = h.repo_info(did).await
+    {
+        println!(
+            "hubble    records={:?} rev={:?} state={:?} pds={:?}",
+            info.archive.as_ref().and_then(|a| a.records),
+            info.sync_state.as_ref().and_then(|s| s.rev.clone()),
+            info.sync_state.as_ref().and_then(|s| s.state.clone()),
+            info.pds,
+        );
     }
     Ok(())
 }

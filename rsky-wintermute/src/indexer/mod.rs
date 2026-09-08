@@ -62,6 +62,7 @@ fn sanitize_text(s: &str) -> String {
     s.replace('\0', "")
 }
 
+#[allow(clippy::single_option_map)] // keeps the many call sites one-liners
 fn sanitize_opt(s: Option<&str>) -> Option<String> {
     s.map(|v| v.replace('\0', ""))
 }
@@ -719,24 +720,22 @@ impl IndexerManager {
             )
             .await?;
 
-        if !force {
-            if let Some(row) = &actor_row {
-                let current_handle: Option<String> = row.get("handle");
-                let indexed_at: String = row.get("indexedAt");
+        if !force && let Some(row) = &actor_row {
+            let current_handle: Option<String> = row.get("handle");
+            let indexed_at: String = row.get("indexedAt");
 
-                if let Ok(last_indexed) = chrono::DateTime::parse_from_rfc3339(&indexed_at) {
-                    let now = chrono::Utc::now();
-                    let age = now.signed_duration_since(last_indexed);
+            if let Ok(last_indexed) = chrono::DateTime::parse_from_rfc3339(&indexed_at) {
+                let now = chrono::Utc::now();
+                let age = now.signed_duration_since(last_indexed);
 
-                    let reindex_threshold = if current_handle.is_some() {
-                        HANDLE_REINDEX_INTERVAL_VALID
-                    } else {
-                        HANDLE_REINDEX_INTERVAL_INVALID
-                    };
+                let reindex_threshold = if current_handle.is_some() {
+                    HANDLE_REINDEX_INTERVAL_VALID
+                } else {
+                    HANDLE_REINDEX_INTERVAL_INVALID
+                };
 
-                    if age < chrono::Duration::from_std(reindex_threshold).unwrap_or_default() {
-                        return Ok(false);
-                    }
+                if age < chrono::Duration::from_std(reindex_threshold).unwrap_or_default() {
+                    return Ok(false);
                 }
             }
         }
@@ -1994,8 +1993,8 @@ impl IndexerManager {
         if !others.is_empty() {
             let other_start = Instant::now();
             for pj in &others {
-                if let Some(record) = &pj.job.record {
-                    if let Err(e) = Self::process_collection_specific(
+                if let Some(record) = &pj.job.record
+                    && let Err(e) = Self::process_collection_specific(
                         &client,
                         &pj.collection,
                         &pj.did,
@@ -2005,12 +2004,8 @@ impl IndexerManager {
                         &pj.job.indexed_at,
                     )
                     .await
-                    {
-                        tracing::warn!(
-                            "process_collection_specific failed for {}: {e}",
-                            pj.job.uri
-                        );
-                    }
+                {
+                    tracing::warn!("process_collection_specific failed for {}: {e}", pj.job.uri);
                 }
             }
             collection_timings.push((
@@ -2852,18 +2847,18 @@ impl IndexerManager {
                             if feature_type != "app.bsky.richtext.facet#mention" {
                                 continue;
                             }
-                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
-                                if mention_did != pj.did {
-                                    notif_rows.push(bulk::NotificationRow {
-                                        did: mention_did.to_owned(),
-                                        author: pj.did.clone(),
-                                        record_uri: uri.clone(),
-                                        record_cid: pj.job.cid.clone(),
-                                        reason: "mention",
-                                        reason_subject: None,
-                                        sort_at: sort_at.clone(),
-                                    });
-                                }
+                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str())
+                                && mention_did != pj.did
+                            {
+                                notif_rows.push(bulk::NotificationRow {
+                                    did: mention_did.to_owned(),
+                                    author: pj.did.clone(),
+                                    record_uri: uri.clone(),
+                                    record_cid: pj.job.cid.clone(),
+                                    reason: "mention",
+                                    reason_subject: None,
+                                    sort_at: sort_at.clone(),
+                                });
                             }
                         }
                     }
@@ -2965,17 +2960,17 @@ impl IndexerManager {
         if let Some(quoted) = quoted {
             let subject = quoted.get("uri").and_then(|v| v.as_str());
             let subject_cid = quoted.get("cid").and_then(|v| v.as_str());
-            if let (Some(subject), Some(subject_cid)) = (subject, subject_cid) {
-                if subject.contains("/app.bsky.feed.post/") {
-                    quote_data.push((
-                        post_uri.to_owned(),
-                        post_cid.to_owned(),
-                        subject.to_owned(),
-                        subject_cid.to_owned(),
-                        created_at.to_owned(),
-                        indexed_at.to_owned(),
-                    ));
-                }
+            if let (Some(subject), Some(subject_cid)) = (subject, subject_cid)
+                && subject.contains("/app.bsky.feed.post/")
+            {
+                quote_data.push((
+                    post_uri.to_owned(),
+                    post_cid.to_owned(),
+                    subject.to_owned(),
+                    subject_cid.to_owned(),
+                    created_at.to_owned(),
+                    indexed_at.to_owned(),
+                ));
             }
         }
     }
@@ -3000,14 +2995,14 @@ impl IndexerManager {
         }
 
         // Handle app.bsky.embed.recordWithMedia (has nested media)
-        if embed_type == "app.bsky.embed.recordWithMedia" {
-            if let Some(media) = embed.get("media") {
-                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                if media_type == "app.bsky.embed.images" {
-                    Self::extract_images(media, post_uri, embed_image_data);
-                } else if media_type == "app.bsky.embed.video" {
-                    Self::extract_video(media, post_uri, embed_video_data);
-                }
+        if embed_type == "app.bsky.embed.recordWithMedia"
+            && let Some(media) = embed.get("media")
+        {
+            let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+            if media_type == "app.bsky.embed.images" {
+                Self::extract_images(media, post_uri, embed_image_data);
+            } else if media_type == "app.bsky.embed.video" {
+                Self::extract_video(media, post_uri, embed_video_data);
             }
         }
     }
@@ -3195,20 +3190,20 @@ impl IndexerManager {
             .get("via")
             .and_then(|v| v.get("uri"))
             .and_then(|v| v.as_str());
-        if let Some(via_uri_str) = via_uri_str {
-            if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
-                let reposter = via_uri.get_hostname();
-                if reposter != did {
-                    notif_rows.push(bulk::NotificationRow {
-                        did: reposter.to_owned(),
-                        author: did.to_owned(),
-                        record_uri: uri.to_owned(),
-                        record_cid: cid.to_owned(),
-                        reason: via_reason,
-                        reason_subject: Some(via_uri_str.to_owned()),
-                        sort_at: indexed_at.to_owned(),
-                    });
-                }
+        if let Some(via_uri_str) = via_uri_str
+            && let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None)
+        {
+            let reposter = via_uri.get_hostname();
+            if reposter != did {
+                notif_rows.push(bulk::NotificationRow {
+                    did: reposter.to_owned(),
+                    author: did.to_owned(),
+                    record_uri: uri.to_owned(),
+                    record_cid: cid.to_owned(),
+                    reason: via_reason,
+                    reason_subject: Some(via_uri_str.to_owned()),
+                    sort_at: indexed_at.to_owned(),
+                });
             }
         }
     }
@@ -3581,18 +3576,19 @@ impl IndexerManager {
                     for feature in features {
                         let feature_type =
                             feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                        if feature_type == "app.bsky.richtext.facet#mention" {
-                            if let Some(mention_did) = feature.get("did").and_then(|d| d.as_str()) {
-                                if mention_did == did {
-                                    tracing::debug!("skipping self-mention for {}", did);
-                                } else {
-                                    tracing::debug!(
-                                        "inserting mention notification: recipient={}, author={}, uri={}",
-                                        mention_did,
-                                        did,
-                                        uri
-                                    );
-                                    match client
+                        if feature_type == "app.bsky.richtext.facet#mention"
+                            && let Some(mention_did) = feature.get("did").and_then(|d| d.as_str())
+                        {
+                            if mention_did == did {
+                                tracing::debug!("skipping self-mention for {}", did);
+                            } else {
+                                tracing::debug!(
+                                    "inserting mention notification: recipient={}, author={}, uri={}",
+                                    mention_did,
+                                    did,
+                                    uri
+                                );
+                                match client
                                         .execute(
                                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
                                              VALUES ($1, $2, $3, $4, $5, $6)
@@ -3612,7 +3608,6 @@ impl IndexerManager {
                                         ),
                                         Err(e) => tracing::warn!("failed to insert mention notification for {uri}: {e}"),
                                     }
-                                }
                             }
                         }
                     }
@@ -3688,8 +3683,8 @@ impl IndexerManager {
                 let ancestor_uri_str: String = row.get(0);
                 if let Ok(ancestor_uri) = AtUri::new(ancestor_uri_str.clone(), None) {
                     let ancestor_author = ancestor_uri.get_hostname();
-                    if ancestor_author != did {
-                        if let Err(e) = client
+                    if ancestor_author != did
+                        && let Err(e) = client
                             .execute(
                                 "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                  VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -3708,7 +3703,6 @@ impl IndexerManager {
                         {
                             tracing::warn!("failed to insert reply notification for {uri}: {e}");
                         }
-                    }
                 }
             }
 
@@ -3747,8 +3741,8 @@ impl IndexerManager {
                         let anc_uri: String = anc_row.get(0);
                         if let Ok(anc_uri_parsed) = AtUri::new(anc_uri.clone(), None) {
                             let anc_author = anc_uri_parsed.get_hostname();
-                            if anc_author != &desc_creator {
-                                if let Err(e) = client
+                            if anc_author != &desc_creator
+                                && let Err(e) = client
                                     .execute(
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -3767,7 +3761,6 @@ impl IndexerManager {
                                 {
                                     tracing::warn!("failed to insert reply notification for {desc_uri}: {e}");
                                 }
-                            }
                         }
                     }
                 }
@@ -3799,13 +3792,13 @@ impl IndexerManager {
         }
 
         // Handle app.bsky.embed.record (quote post)
-        if embed_type == "app.bsky.embed.record" {
-            if let Some(record) = embed.get("record") {
-                Self::handle_embed_record(
-                    client, record, post_uri, post_cid, creator, created_at, indexed_at,
-                )
-                .await?;
-            }
+        if embed_type == "app.bsky.embed.record"
+            && let Some(record) = embed.get("record")
+        {
+            Self::handle_embed_record(
+                client, record, post_uri, post_cid, creator, created_at, indexed_at,
+            )
+            .await?;
         }
 
         // Handle app.bsky.embed.recordWithMedia (quote post with media)
@@ -4087,11 +4080,13 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 && !subject.is_empty() {
-            if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
-                let subject_author = subject_uri.get_hostname();
-                if subject_author != did {
-                    if let Err(e) = client
+        if row_count > 0
+            && !subject.is_empty()
+            && let Ok(subject_uri) = AtUri::new(subject.to_owned(), None)
+        {
+            let subject_author = subject_uri.get_hostname();
+            if subject_author != did
+                    && let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -4102,14 +4097,14 @@ impl IndexerManager {
                     {
                         tracing::warn!("failed to insert like notification for {uri}: {e}");
                     }
-                }
 
-                // like-via-repost: notify the reposter whose repost was liked through
-                if let Some(via_uri_str) = via {
-                    if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
-                        let reposter = via_uri.get_hostname();
-                        if reposter != did {
-                            drop(
+            // like-via-repost: notify the reposter whose repost was liked through
+            if let Some(via_uri_str) = via
+                && let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None)
+            {
+                let reposter = via_uri.get_hostname();
+                if reposter != did {
+                    drop(
                                 client
                                     .execute(
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
@@ -4119,8 +4114,6 @@ impl IndexerManager {
                                     )
                                     .await,
                             );
-                        }
-                    }
                 }
             }
         }
@@ -4343,11 +4336,13 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 && !subject.is_empty() {
-            if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
-                let subject_author = subject_uri.get_hostname();
-                if subject_author != did {
-                    if let Err(e) = client
+        if row_count > 0
+            && !subject.is_empty()
+            && let Ok(subject_uri) = AtUri::new(subject.to_owned(), None)
+        {
+            let subject_author = subject_uri.get_hostname();
+            if subject_author != did
+                    && let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -4358,14 +4353,14 @@ impl IndexerManager {
                     {
                         tracing::warn!("failed to insert repost notification for {uri}: {e}");
                     }
-                }
 
-                // repost-via-repost: notify the reposter whose repost was re-reposted through
-                if let Some(via_uri_str) = via {
-                    if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
-                        let original_reposter = via_uri.get_hostname();
-                        if original_reposter != did {
-                            drop(
+            // repost-via-repost: notify the reposter whose repost was re-reposted through
+            if let Some(via_uri_str) = via
+                && let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None)
+            {
+                let original_reposter = via_uri.get_hostname();
+                if original_reposter != did {
+                    drop(
                                 client
                                     .execute(
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
@@ -4375,8 +4370,6 @@ impl IndexerManager {
                                     )
                                     .await,
                             );
-                        }
-                    }
                 }
             }
         }
@@ -4530,11 +4523,12 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 {
-            if let Some(starter_pack_uri_str) = joined_via_uri {
-                if let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None) {
-                    let starter_pack_author = starter_pack_uri.get_hostname();
-                    if let Err(e) = client
+        if row_count > 0
+            && let Some(starter_pack_uri_str) = joined_via_uri
+            && let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None)
+        {
+            let starter_pack_author = starter_pack_uri.get_hostname();
+            if let Err(e) = client
                         .execute(
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -4545,8 +4539,6 @@ impl IndexerManager {
                     {
                         tracing::warn!("failed to insert starterpack-joined notification for {uri}: {e}");
                     }
-                }
-            }
         }
 
         Ok(())
@@ -4703,10 +4695,10 @@ impl IndexerManager {
             .unwrap_or(indexed_at);
 
         // Ensure the list item subject also has an actor row
-        if let Some(subj) = subject {
-            if !subj.is_empty() {
-                Self::ensure_actor_exists(client, subj, indexed_at).await?;
-            }
+        if let Some(subj) = subject
+            && !subj.is_empty()
+        {
+            Self::ensure_actor_exists(client, subj, indexed_at).await?;
         }
 
         client
@@ -5000,7 +4992,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn index_chat_declaration(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5022,7 +5014,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn delete_chat_declaration(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5041,7 +5033,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn index_notif_declaration(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5064,7 +5056,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn delete_notif_declaration(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5084,7 +5076,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn index_status(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5104,7 +5096,7 @@ impl IndexerManager {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn delete_status(
         _client: &deadpool_postgres::Client,
         did: &str,
@@ -5121,6 +5113,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn index_verification(
         client: &deadpool_postgres::Client,
         did: &str,
@@ -5162,6 +5155,7 @@ impl IndexerManager {
         Ok(())
     }
 
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // uniform dispatch shape
     async fn delete_verification(
         client: &deadpool_postgres::Client,
         did: &str,

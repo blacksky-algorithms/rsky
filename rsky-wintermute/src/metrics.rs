@@ -1,3 +1,7 @@
+// Metric registration can only fail on a duplicate or malformed name, which is
+// a programming error caught at first scrape; unwrapping here is the intended
+// failure mode.
+#![allow(clippy::unwrap_used)]
 use prometheus::{
     Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder,
     register_histogram, register_int_counter, register_int_counter_vec, register_int_gauge,

@@ -130,8 +130,8 @@ pub static WORKERS_INDEXER: LazyLock<usize> = LazyLock::new(|| {
 });
 
 // Handle resolution: revalidate handles after this duration
-pub const HANDLE_REINDEX_INTERVAL_VALID: Duration = Duration::from_secs(24 * 60 * 60); // 1 day
-pub const HANDLE_REINDEX_INTERVAL_INVALID: Duration = Duration::from_secs(60 * 60); // 1 hour
+pub const HANDLE_REINDEX_INTERVAL_VALID: Duration = Duration::from_hours(24); // 1 day
+pub const HANDLE_REINDEX_INTERVAL_INVALID: Duration = Duration::from_hours(1); // 1 hour
 pub const IDENTITY_RESOLVER_TIMEOUT: Duration = Duration::from_secs(3);
 
 // Handle resolution concurrency - process multiple handles in parallel
@@ -150,17 +150,14 @@ pub static HANDLE_RESOLUTION_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
 });
 
 // Priority window for recently-indexed actors (resolve new actors faster)
-pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
+pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_hours(6); // 6 hours
 
 // Inline processing concurrency for firehose events
 // Should be proportional to DB_POOL_SIZE to avoid excessive connection contention
 /// Live indexing updates aggregates inline (`post_agg`/`profile_agg`). Set `LIVE_AGGREGATES=false`
 /// to defer them (e.g. while a bulk load runs and a full recompute will follow).
-pub static LIVE_AGGREGATES: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("LIVE_AGGREGATES")
-        .map(|v| v != "false" && v != "0")
-        .unwrap_or(true)
-});
+pub static LIVE_AGGREGATES: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("LIVE_AGGREGATES").map_or(true, |v| v != "false" && v != "0"));
 
 /// Jobs drained from the `firehose_live` queue per indexing batch.
 pub static FIREHOSE_LIVE_DRAIN_BATCH: LazyLock<usize> = LazyLock::new(|| {
@@ -183,9 +180,7 @@ pub static FIREHOSE_LIVE_SHARDS: LazyLock<usize> = LazyLock::new(|| {
 /// Serialize live like inserts across shards (the like index is contention-prone).
 /// Set `LIVE_LIKE_SERIALIZE=false` to let shards write likes concurrently.
 pub static LIVE_LIKE_SERIALIZE: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("LIVE_LIKE_SERIALIZE")
-        .map(|v| v != "false" && v != "0")
-        .unwrap_or(true)
+    std::env::var("LIVE_LIKE_SERIALIZE").map_or(true, |v| v != "false" && v != "0")
 });
 
 pub static INLINE_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
@@ -333,9 +328,7 @@ pub fn create_pg_pool(
 /// Stop writing like/follow/repost/block rows to the record table once the
 /// dataplane synthesizes those records from the typed tables.
 pub static RECORD_SKIP_BOILERPLATE: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("RECORD_SKIP_BOILERPLATE")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
+    std::env::var("RECORD_SKIP_BOILERPLATE").is_ok_and(|v| v == "true" || v == "1")
 });
 
 #[must_use]

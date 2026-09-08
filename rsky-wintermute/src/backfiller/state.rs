@@ -298,10 +298,10 @@ impl RepoStateStore {
             } else {
                 // The skip that makes re-enumeration cheap: already indexed at
                 // or past this rev.
-                if let Some(idx) = indexed_rev {
-                    if rev_covers(idx, &repo.rev) {
-                        return Ok(Upsert::Unchanged);
-                    }
+                if let Some(idx) = indexed_rev
+                    && rev_covers(idx, &repo.rev)
+                {
+                    return Ok(Upsert::Unchanged);
                 }
                 // A repo written off for repeated failure stays written off
                 // until its rev moves -- retrying it would fail the same way.
@@ -588,17 +588,17 @@ impl RepoStateStore {
             return Ok(RepoState::Pending);
         }
 
-        if let Some(fb) = fallback {
-            if fb != source {
-                conn.execute(
-                    "UPDATE repo SET source = ?2, state = ?3, attempts = 0, cooldown_until = 0,
+        if let Some(fb) = fallback
+            && fb != source
+        {
+            conn.execute(
+                "UPDATE repo SET source = ?2, state = ?3, attempts = 0, cooldown_until = 0,
                                      last_error = ?4, updated_at = ?5
                       WHERE did = ?1",
-                    params![did, fb, RepoState::Pending.as_str(), err, now()],
-                )?;
-                drop(conn);
-                return Ok(RepoState::Pending);
-            }
+                params![did, fb, RepoState::Pending.as_str(), err, now()],
+            )?;
+            drop(conn);
+            return Ok(RepoState::Pending);
         }
 
         conn.execute(

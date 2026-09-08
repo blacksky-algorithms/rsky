@@ -177,7 +177,7 @@ async fn sync_labeler(
                     total_negations_applied += neg_count;
                     total_skipped += skip_count;
 
-                    if total_events % 10000 == 0 {
+                    if total_events.is_multiple_of(10000) {
                         let elapsed = start.elapsed().as_secs();
                         let rate = if elapsed > 0 {
                             total_events / elapsed

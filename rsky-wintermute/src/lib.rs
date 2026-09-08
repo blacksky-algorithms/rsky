@@ -23,7 +23,6 @@
     clippy::print_stdout,
     clippy::renamed_function_params,
     clippy::str_to_string,
-    clippy::string_to_string,
     clippy::unused_result_ok,
     clippy::unwrap_used
 )]

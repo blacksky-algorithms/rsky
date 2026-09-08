@@ -230,7 +230,7 @@ pub enum RepoBody {
 
 impl RepoBody {
     #[must_use]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         match self {
             Self::Memory(v) => v.len() as u64,
             Self::Spilled { len, .. } => *len,
@@ -238,7 +238,7 @@ impl RepoBody {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 

@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 let n = processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if n % 500 == 0 {
+                if n.is_multiple_of(500) {
                     let c = counters.lock().await.clone();
                     info!(
                         "progress: {}/{} (recovered={}, confirmed={}, deferred={})",

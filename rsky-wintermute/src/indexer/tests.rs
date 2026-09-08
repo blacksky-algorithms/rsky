@@ -986,7 +986,7 @@ mod indexer_tests {
     }
 
     #[tokio::test]
-    #[ignore] // Ignored by default, run with: cargo test -- --ignored test_live_label_stream
+    #[ignore = "reads the live labeler stream; run with: cargo test -- --ignored test_live_label_stream"]
     async fn test_live_label_stream_integration() {
         use futures::stream::StreamExt;
         use tokio::time::{Duration, timeout};

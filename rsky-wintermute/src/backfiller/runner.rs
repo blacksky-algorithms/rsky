@@ -558,10 +558,10 @@ impl<K: RecordSink> Runner<K> {
                 new_limit,
                 "reduced fetch concurrency after consecutive transient errors"
             );
-            if source != HUBBLE_SOURCE {
-                if let Ok(host) = Hostname::new(source) {
-                    self.state.set_host_concurrency(&host, new_limit)?;
-                }
+            if source != HUBBLE_SOURCE
+                && let Ok(host) = Hostname::new(source)
+            {
+                self.state.set_host_concurrency(&host, new_limit)?;
             }
         }
         let transient = class.is_transient();
@@ -1048,7 +1048,7 @@ impl ProgressSnapshot {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::significant_drop_tightening)]
+    #![allow(clippy::significant_drop_tightening, clippy::unused_async_trait_impl)]
     use super::*;
     use crate::backfiller::source::{RepoBody, RepoPage, RepoRef};
     use std::sync::Mutex;

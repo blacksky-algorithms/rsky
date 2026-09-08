@@ -349,10 +349,10 @@ impl IngesterManager {
                 tracing::info!("shutdown requested, closing firehose connection");
                 // Save final cursor before shutdown
                 let final_seq = last_seq.load(Ordering::Relaxed);
-                if final_seq > 0 {
-                    if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await {
-                        tracing::error!("failed to save cursor on shutdown: {e}");
-                    }
+                if final_seq > 0
+                    && let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await
+                {
+                    tracing::error!("failed to save cursor on shutdown: {e}");
                 }
                 metrics::INGESTER_WEBSOCKET_CONNECTIONS
                     .with_label_values(&["firehose"])
@@ -593,10 +593,10 @@ impl IngesterManager {
 
         // Save final cursor before disconnecting
         let final_seq = last_seq.load(Ordering::Relaxed);
-        if final_seq > 0 {
-            if let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await {
-                tracing::error!("failed to save final cursor: {e}");
-            }
+        if final_seq > 0
+            && let Err(e) = set_cursor_in_postgres(pool, &cursor_key, final_seq).await
+        {
+            tracing::error!("failed to save final cursor: {e}");
         }
 
         metrics::INGESTER_WEBSOCKET_CONNECTIONS

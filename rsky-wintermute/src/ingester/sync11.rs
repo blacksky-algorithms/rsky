@@ -207,10 +207,10 @@ pub fn decide(
     if !rev_newer(rev, &stored.rev) {
         return Outcome::Stale;
     }
-    if let Some(prev) = prev_data {
-        if prev != stored.data {
-            return Outcome::Desync;
-        }
+    if let Some(prev) = prev_data
+        && prev != stored.data
+    {
+        return Outcome::Desync;
     }
     if data.is_none() {
         return Outcome::NoData;

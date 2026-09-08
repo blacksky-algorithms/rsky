@@ -319,7 +319,7 @@ async fn main() -> Result<()> {
         }
 
         // Log progress every 100 pages
-        if page_count % 100 == 0 {
+        if page_count.is_multiple_of(100) {
             let elapsed = start.elapsed().as_secs();
             let rate = if elapsed > 0 {
                 total_operations / elapsed
@@ -347,11 +347,11 @@ async fn main() -> Result<()> {
     }
 
     // Flush remaining batch
-    if !batch.is_empty() {
-        if let Some(ref pg) = pg {
-            let updated = copy_update_handles(pg, &batch, args.null_only).await?;
-            total_updated += updated;
-        }
+    if !batch.is_empty()
+        && let Some(ref pg) = pg
+    {
+        let updated = copy_update_handles(pg, &batch, args.null_only).await?;
+        total_updated += updated;
     }
 
     let elapsed = start.elapsed().as_secs();

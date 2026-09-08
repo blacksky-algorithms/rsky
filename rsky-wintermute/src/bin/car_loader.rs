@@ -319,16 +319,16 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
                                 .fetch_add(failures.len() as u64, Ordering::Relaxed);
                             let _ = state_tx.send(StateMsg::RecordsFailed(failures));
                         }
-                        if args.reconcile_deletes {
-                            if let Err(e) = reconcile_stale_records(&pool, &parsed).await {
-                                counters.repos_failed.fetch_add(1, Ordering::Relaxed);
-                                let _ = state_tx.send(StateMsg::RepoFailed {
-                                    did: row.did.clone(),
-                                    path: row.path.clone(),
-                                    error: format!("reconcile failed: {e:#}"),
-                                });
-                                continue;
-                            }
+                        if args.reconcile_deletes
+                            && let Err(e) = reconcile_stale_records(&pool, &parsed).await
+                        {
+                            counters.repos_failed.fetch_add(1, Ordering::Relaxed);
+                            let _ = state_tx.send(StateMsg::RepoFailed {
+                                did: row.did.clone(),
+                                path: row.path.clone(),
+                                error: format!("reconcile failed: {e:#}"),
+                            });
+                            continue;
                         }
                         let _ = parsed_tx.send(parsed).await;
                     }
@@ -624,10 +624,10 @@ fn enqueue_repos(args: &Args, work_tx: &tokio::sync::mpsc::Sender<ManifestRow>) 
         if done.contains(&row.did) {
             continue;
         }
-        if let Some(revs) = &loaded_revs {
-            if !manifest_rev_is_newer(revs.get(row.did.as_str()), &row.rev) {
-                continue;
-            }
+        if let Some(revs) = &loaded_revs
+            && !manifest_rev_is_newer(revs.get(row.did.as_str()), &row.rev)
+        {
+            continue;
         }
         if work_tx.blocking_send(row).is_err() {
             break;

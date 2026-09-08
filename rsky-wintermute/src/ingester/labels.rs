@@ -170,15 +170,14 @@ async fn connect_and_stream(
 
                     // Update cursor in postgres every 20 events (like rsky-firehose)
                     events_since_cursor_update += 1;
-                    if events_since_cursor_update % 20 == 0 {
-                        if let Err(e) =
+                    if events_since_cursor_update.is_multiple_of(20)
+                        && let Err(e) =
                             set_cursor_in_postgres(pool, &cursor_key, label_event.seq).await
-                        {
-                            tracing::error!("failed to set label cursor: {e}");
-                            metrics::INGESTER_ERRORS_TOTAL
-                                .with_label_values(&["label_cursor"])
-                                .inc();
-                        }
+                    {
+                        tracing::error!("failed to set label cursor: {e}");
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["label_cursor"])
+                            .inc();
                     }
 
                     // Update metrics

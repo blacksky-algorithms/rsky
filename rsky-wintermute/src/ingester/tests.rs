@@ -756,7 +756,7 @@ mod ingester_tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "reaches the live network"]
     async fn test_live_firehose_operation_parsing() {
         use futures::stream::StreamExt;
         use tokio::time::{Duration, timeout};
@@ -791,17 +791,17 @@ mod ingester_tests {
                     total_messages += 1;
 
                     // Parse the message
-                    if let Ok(ParseResult::Event(event)) = IngesterManager::parse_message(&data) {
-                        if let Some(commit) = event.commit {
-                            // Count operation types
-                            for op in commit.ops {
-                                total_operations += 1;
-                                match op.action.as_str() {
-                                    "create" => total_creates += 1,
-                                    "update" => total_updates += 1,
-                                    "delete" => total_deletes += 1,
-                                    _ => {}
-                                }
+                    if let Ok(ParseResult::Event(event)) = IngesterManager::parse_message(&data)
+                        && let Some(commit) = event.commit
+                    {
+                        // Count operation types
+                        for op in commit.ops {
+                            total_operations += 1;
+                            match op.action.as_str() {
+                                "create" => total_creates += 1,
+                                "update" => total_updates += 1,
+                                "delete" => total_deletes += 1,
+                                _ => {}
                             }
                         }
                     }
