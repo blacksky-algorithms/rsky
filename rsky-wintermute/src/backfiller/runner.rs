@@ -921,9 +921,12 @@ impl<K: RecordSink> Runner<K> {
                 done = now.done,
                 failed_transient = now.failed_transient,
                 failed_terminal = now.failed_terminal,
-                repos_per_s = format!("{:.1}", (now.fetched - last.fetched) as f64 / dt),
-                records_per_s = format!("{:.0}", (now.records - last.records) as f64 / dt),
-                mb_per_s = format!("{:.2}", (now.bytes - last.bytes) as f64 / dt / 1_048_576.0),
+                fetch_repos_per_s = format!("{:.1}", (now.fetched - last.fetched) as f64 / dt),
+                fetch_records_per_s = format!("{:.0}", (now.records - last.records) as f64 / dt),
+                fetch_mb_per_s =
+                    format!("{:.2}", (now.bytes - last.bytes) as f64 / dt / 1_048_576.0),
+                written_records_per_s = format!("{:.0}", (now.written - last.written) as f64 / dt),
+                written_total = now.written,
                 total_gb = format!("{:.2}", now.bytes as f64 / 1_073_741_824.0),
                 gate_waits = now.gate_waits,
                 uptime_s = started.elapsed().as_secs(),
@@ -996,6 +999,9 @@ struct ProgressSnapshot {
     records: u64,
     bytes: u64,
     gate_waits: u64,
+    /// Records committed by the sink, from the shared counter, since parsed
+    /// records can sit in flight for a long time behind the demand gate.
+    written: u64,
 }
 
 impl ProgressSnapshot {
@@ -1008,6 +1014,7 @@ impl ProgressSnapshot {
             records: p.records.load(Ordering::Relaxed),
             bytes: p.bytes.load(Ordering::Relaxed),
             gate_waits: p.gate_waits.load(Ordering::Relaxed),
+            written: metrics::BACKFILL_RECORDS_WRITTEN_TOTAL.get(),
         }
     }
 }
