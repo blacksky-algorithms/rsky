@@ -1,10 +1,9 @@
 use super::{Leaf, NodeData, NodeEntry, TreeEntry, MST};
 use crate::storage::types::RepoStorage;
 use anyhow::{anyhow, Result};
-use lazy_static::lazy_static;
+use lexicon_cid::multihash::Multihash;
 use lexicon_cid::Cid;
 use rand::{thread_rng, Rng};
-use regex::Regex;
 use rsky_common;
 use rsky_common::ipld::cid_for_cbor;
 use rsky_common::tid::Ticker;
@@ -15,11 +14,23 @@ use std::str;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+const DAG_CBOR_CODEC: u64 = 0x71;
+const SHA2_256_CODE: u64 = 0x12;
+
 fn is_valid_chars(input: &str) -> bool {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"^[a-zA-Z0-9_\-:.]*$").unwrap();
-    }
-    RE.is_match(input)
+    input
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':' | b'.'))
+}
+
+/// CID for an already-encoded DAG-CBOR block, so callers that need both the
+/// bytes and the CID encode once instead of twice.
+pub fn cid_for_dag_cbor_bytes(bytes: &[u8]) -> Result<Cid> {
+    let hash = Sha256::digest(bytes);
+    Ok(Cid::new_v1(
+        DAG_CBOR_CODEC,
+        Multihash::<64>::wrap(SHA2_256_CODE, hash.as_ref())?,
+    ))
 }
 
 // * Restricted to a subset of ASCII characters — the allowed characters are
@@ -27,19 +38,16 @@ fn is_valid_chars(input: &str) -> bool {
 // * Must have at least 1 and at most 512 characters
 // * The specific record key values . and .. are not allowed
 pub fn is_valid_repo_mst_path(key: &str) -> Result<bool> {
-    let split: Vec<&str> = key.split("/").collect();
+    let Some((collection, rkey)) = key.split_once('/') else {
+        return Ok(false);
+    };
 
-    if key.len() <= 256
-        && split.len() == 2
-        && !split[0].is_empty()
-        && !split[1].is_empty()
-        && is_valid_chars(split[0])
-        && is_valid_chars(split[1])
-    {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    // `is_valid_chars` rejects '/', so a third segment fails here too.
+    Ok(key.len() <= 256
+        && !collection.is_empty()
+        && !rkey.is_empty()
+        && is_valid_chars(collection)
+        && is_valid_chars(rkey))
 }
 
 pub fn ensure_valid_mst_key(key: &str) -> Result<()> {
@@ -55,15 +63,8 @@ pub async fn cid_for_entries(entries: &[NodeEntry]) -> Result<Cid> {
     cid_for_cbor(&data)
 }
 
-pub fn count_prefix_len(a: String, b: String) -> Result<usize> {
-    let mut x = 0;
-    for i in 0..a.len() {
-        match (a.chars().nth(i), b.chars().nth(i)) {
-            (Some(a), Some(b)) if a == b => x += 1,
-            _ => break,
-        }
-    }
-    Ok(x)
+pub fn count_prefix_len(a: &str, b: &str) -> Result<usize> {
+    Ok(a.chars().zip(b.chars()).take_while(|(a, b)| a == b).count())
 }
 
 pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
@@ -90,7 +91,7 @@ pub async fn serialize_node_data(entries: &[NodeEntry]) -> Result<NodeData> {
                 i += 1;
             };
             ensure_valid_mst_key(&l.key)?;
-            let prefix_len = count_prefix_len(last_key.to_owned(), l.key.to_owned())?;
+            let prefix_len = count_prefix_len(last_key, &l.key)?;
             data.e.push(TreeEntry {
                 p: u8::try_from(prefix_len)?,
                 k: l.key[prefix_len..].to_owned().into_bytes(),

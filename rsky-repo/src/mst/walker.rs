@@ -66,7 +66,7 @@ impl MstWalker {
                 if let Some(ref mut mst) = p.walking {
                     let entries = mst.get_entries().await?;
                     p.index += 1;
-                    let next = entries.into_iter().nth(p.index);
+                    let next = entries.get(p.index).cloned();
                     if let Some(next) = next {
                         p.curr = next.clone();
                     } else {
