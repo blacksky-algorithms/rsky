@@ -124,6 +124,42 @@ async fn main() -> Result<()> {
     let state = RepoStateStore::open(&cfg.state_db).map_err(|e| eyre!("state: {e}"))?;
     tracing::info!(mode = ?cfg.mode, state_db = %cfg.state_db.display(), "backfill cli");
 
+    // Ctrl-C / SIGTERM: ask the loops to stop so in-flight work settles and
+    // claimed rows are not stranded.
+    tokio::spawn(async {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut term =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!("no SIGTERM handler: {e}");
+                        let _ = ctrl_c.await;
+                        rsky_wintermute::SHUTDOWN.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                };
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+        }
+        tracing::info!("shutdown requested");
+        rsky_wintermute::SHUTDOWN.store(true, Ordering::Relaxed);
+    });
+
+    // A claim is in-memory work; anything still claimed is from a dead process.
+    if let Ok(n) = state.reset_claimed() {
+        if n > 0 {
+            tracing::info!(recovered = n, "returned claimed rows to pending");
+        }
+    }
+
     match &args.cmd {
         Cmd::Status => status(&state),
         Cmd::Probe { did, host } => probe(&cfg, &state, did, host.as_deref()).await,
