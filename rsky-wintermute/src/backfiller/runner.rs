@@ -98,6 +98,11 @@ pub struct RunnerConfig {
     pub hubble_concurrency: usize,
     /// Concurrent per-source workers.
     pub max_workers: usize,
+    /// Archives in flight (downloading or parsing) across all sources. Each
+    /// one holds a whole repo's blocks in memory while it parses, and parsing
+    /// is the CPU cost of backfill, so this is the memory and CPU budget --
+    /// independent of how many hosts there are.
+    pub max_inflight: usize,
     /// Repos claimed per round, as a multiple of the source's concurrency.
     pub claim_multiplier: usize,
     pub page_limit: u32,
@@ -127,6 +132,7 @@ impl Default for RunnerConfig {
             policy: HostPolicy::default(),
             hubble_concurrency: 4,
             max_workers: 128,
+            max_inflight: 64,
             claim_multiplier: 2,
             page_limit: 1000,
             fetch: FetchLimits::default(),
@@ -213,6 +219,7 @@ pub struct Runner<K: RecordSink> {
     state: RepoStateStore,
     client: reqwest::Client,
     hubble: Option<Arc<HubbleSource>>,
+    inflight: Arc<tokio::sync::Semaphore>,
     pub progress: Arc<Progress>,
 }
 
@@ -241,12 +248,14 @@ impl<K: RecordSink> Runner<K> {
                 .max(cfg.policy.generic.concurrency)
                 .max(cfg.hubble_concurrency),
         )?;
+        let inflight = Arc::new(tokio::sync::Semaphore::new(cfg.max_inflight.max(1)));
         Ok(Self {
             cfg,
             sink,
             state,
             client,
             hubble,
+            inflight,
             progress: Arc::new(Progress::default()),
         })
     }
@@ -681,6 +690,15 @@ impl<K: RecordSink> Runner<K> {
                 queue.extend(claimed);
             }
 
+            // The global budget: wait for a slot, settling finished work while
+            // we do so a slow parse elsewhere never deadlocks this host.
+            let Some(permit) = self
+                .acquire_inflight(&mut in_flight, &name, class_label, &health)
+                .await?
+            else {
+                break;
+            };
+
             let Some((did, rev)) = queue.pop_front() else {
                 continue;
             };
@@ -689,6 +707,7 @@ impl<K: RecordSink> Runner<K> {
             metrics::BACKFILL_IN_FLIGHT_FETCHES.inc();
             in_flight.spawn(async move {
                 let outcome = this.fetch_one(&src, &did).await;
+                drop(permit);
                 metrics::BACKFILL_IN_FLIGHT_FETCHES.dec();
                 (did, rev, outcome)
             });
@@ -704,6 +723,31 @@ impl<K: RecordSink> Runner<K> {
         }
         tracing::info!(source = %name, "fetch worker stopped");
         Ok(())
+    }
+
+    /// Wait for a global in-flight slot, settling this source's finished
+    /// fetches meanwhile. `None` on shutdown.
+    async fn acquire_inflight(
+        self: &Arc<Self>,
+        in_flight: &mut JoinSet<(String, String, JobOutcome)>,
+        source: &str,
+        class_label: &'static str,
+        health: &Arc<HostHealth>,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, RunnerError> {
+        loop {
+            if let Ok(p) = Arc::clone(&self.inflight).try_acquire_owned() {
+                return Ok(Some(p));
+            }
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            if let Some(joined) = in_flight.try_join_next() {
+                let (did, rev, outcome) = joined?;
+                self.settle(source, class_label, health, did, rev, outcome)?;
+            } else {
+                tokio::time::sleep(self.cfg.gate_poll).await;
+            }
+        }
     }
 
     fn settle(
@@ -1489,6 +1533,62 @@ mod tests {
         assert_eq!(source_class(HUBBLE_SOURCE), "hubble");
         assert_eq!(source_class(HOST), "bsky");
         assert_eq!(source_class("tiny.example"), "pds");
+    }
+
+    #[tokio::test]
+    async fn the_global_inflight_cap_bounds_concurrent_fetches() {
+        use std::sync::atomic::AtomicUsize as Au;
+        #[derive(Clone)]
+        struct Slow(Arc<Au>, Arc<Au>);
+        impl RepoSource for Slow {
+            fn name(&self) -> &'static str {
+                HOST
+            }
+            async fn list_repos(
+                &self,
+                _c: Option<String>,
+                _l: u32,
+            ) -> Result<RepoPage, SourceError> {
+                Ok(RepoPage::default())
+            }
+            async fn fetch_repo(
+                &self,
+                _d: String,
+                _l: FetchLimits,
+            ) -> Result<RepoBody, SourceError> {
+                let now = self.0.fetch_add(1, Ordering::Relaxed) + 1;
+                self.1.fetch_max(now, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                self.0.fetch_sub(1, Ordering::Relaxed);
+                Ok(RepoBody::Memory(vec![1]))
+            }
+        }
+        let mut c = cfg();
+        c.max_inflight = 3;
+        let r = Arc::new(
+            Runner::new(
+                c,
+                FakeSink::new(true),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        for i in 0..12 {
+            r.state()
+                .upsert(&repo(&format!("did:{i}"), "r1"), HOST, false)
+                .unwrap();
+        }
+        let peak = Arc::new(Au::new(0));
+        let src = Slow(Arc::new(Au::new(0)), Arc::clone(&peak));
+        r.fetch_loop(&src, Arc::new(HostHealth::new(10, 10, false)))
+            .await
+            .unwrap();
+        assert!(
+            peak.load(Ordering::Relaxed) <= 3,
+            "peak {}",
+            peak.load(Ordering::Relaxed)
+        );
+        assert_eq!(r.progress.repos_fetched.load(Ordering::Relaxed), 12);
     }
 
     #[test]

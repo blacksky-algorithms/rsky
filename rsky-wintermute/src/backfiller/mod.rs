@@ -277,6 +277,8 @@ pub struct BackfillConfig {
     /// Concurrent per-source fetch workers (one per host with pending work,
     /// plus hubble).
     pub max_workers: usize,
+    /// Archives downloading or parsing at once, across all sources.
+    pub max_inflight: usize,
     pub fetch: FetchLimits,
     pub pg_sink: PgSinkConfig,
     /// Connections for the backfill's own pool.
@@ -405,6 +407,9 @@ impl BackfillConfig {
             hubble,
             hubble_concurrency: env_or("BACKFILL_HUBBLE_CONCURRENCY", 4usize).max(1),
             max_workers: env_or("BACKFILL_MAX_WORKERS", 128usize).max(1),
+            // Parsing holds a whole repo in memory and costs a core; default to
+            // a few per core so the fetch side cannot starve the writers.
+            max_inflight: env_or("BACKFILL_MAX_INFLIGHT", num_cpus::get().max(2) * 8).max(1),
             fetch,
             pg_sink,
             // Each writer holds one connection and fans out to ~6 more inside
@@ -426,6 +431,7 @@ impl BackfillConfig {
             policy: self.policy.clone(),
             hubble_concurrency: self.hubble_concurrency,
             max_workers: self.max_workers,
+            max_inflight: self.max_inflight,
             fetch: self.fetch.clone(),
             reenumerate_after: self.reenumerate_after,
             user_agent: self.user_agent.clone(),

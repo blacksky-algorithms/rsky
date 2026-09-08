@@ -106,6 +106,7 @@ RUST_LOG=info \
 | `BACKFILL_HUBBLE_RPS` / `BACKFILL_HUBBLE_CONCURRENCY` | `8` / `4` | hubble serves ~119 repos/s at concurrency 16 from nyc3 with a ~28 MB/s byte ceiling; stay well under it |
 | `BACKFILL_USER_AGENT` | `rsky-wintermute/... (+https://blacksky.app; contact)` | Sent on every request; hubble requires a contact |
 | `BACKFILL_MAX_WORKERS` | `128` | Concurrent per-source fetch workers |
+| `BACKFILL_MAX_INFLIGHT` | `8 * CPUs` | Archives downloading or parsing at once across all sources; parsing holds a whole repo in memory and costs a core, so this is the backfill's CPU and memory budget |
 | `BACKFILL_WRITERS` | `4` | Concurrent COPY writers |
 | `BACKFILL_BATCH_JOBS` | `2000` | Records per COPY batch (small repos are batched across repos) |
 | `BACKFILL_QUEUE_REPOS` | `256` | Parsed repos allowed to wait for a writer -- this is the demand gate |
