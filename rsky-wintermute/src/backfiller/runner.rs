@@ -40,6 +40,48 @@ use crate::types::WintermuteError;
 /// resuming: the coordinator should not immediately re-claim and hammer it.
 const LIST_RETRY_COOLDOWN_SECS: u64 = 300;
 
+/// File descriptors per in-flight fetch: one socket, one spill file.
+const NOFILE_PER_FETCH: u64 = 2;
+/// Descriptors for the rest of the process: pools, sqlite, metrics, stdio.
+const NOFILE_SLACK: u64 = 1024;
+
+/// Make sure `RLIMIT_NOFILE` covers every worker at full concurrency.
+///
+/// Raises the soft limit toward the hard one. systemd's default soft limit is
+/// 1024, which ~90 mushrooms at 10 in-flight each blow through in the first
+/// minute -- measured as a burst of `Too many open files` on spill reopen.
+pub fn ensure_nofile(max_workers: usize, max_concurrency: usize) -> Result<(), RunnerError> {
+    let needed = (max_workers as u64) * (max_concurrency as u64) * NOFILE_PER_FETCH + NOFILE_SLACK;
+    let (soft, hard) = rlimit::Resource::NOFILE
+        .get()
+        .map_err(|e| RunnerError::Client(format!("rlimit get: {e}")))?;
+    if soft >= needed {
+        tracing::debug!(soft, hard, needed, "RLIMIT_NOFILE ok");
+        return Ok(());
+    }
+    let target = needed.min(hard);
+    if target > soft {
+        rlimit::Resource::NOFILE
+            .set(target, hard)
+            .map_err(|e| RunnerError::Client(format!("rlimit set: {e}")))?;
+        tracing::info!(
+            from = soft,
+            to = target,
+            hard,
+            "raised RLIMIT_NOFILE soft limit"
+        );
+    }
+    if target < needed {
+        tracing::warn!(
+            hard,
+            needed,
+            "RLIMIT_NOFILE hard limit below what full concurrency needs; \
+             fetches may fail with EMFILE. Raise LimitNOFILE on the unit."
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     /// hubble, if it is a source at all.
@@ -191,6 +233,14 @@ impl<K: RecordSink> Runner<K> {
             .hubble
             .clone()
             .map(|h| Arc::new(HubbleSource::with_client(h, client.clone())));
+        ensure_nofile(
+            cfg.max_workers,
+            cfg.policy
+                .bsky
+                .concurrency
+                .max(cfg.policy.generic.concurrency)
+                .max(cfg.hubble_concurrency),
+        )?;
         Ok(Self {
             cfg,
             sink,
@@ -1439,6 +1489,16 @@ mod tests {
         assert_eq!(source_class(HUBBLE_SOURCE), "hubble");
         assert_eq!(source_class(HOST), "bsky");
         assert_eq!(source_class("tiny.example"), "pds");
+    }
+
+    #[test]
+    fn nofile_preflight_is_idempotent_and_never_lowers() {
+        let (soft_before, hard) = rlimit::Resource::NOFILE.get().unwrap();
+        ensure_nofile(1, 1).unwrap();
+        ensure_nofile(128, 10).unwrap();
+        let (soft_after, _) = rlimit::Resource::NOFILE.get().unwrap();
+        assert!(soft_after >= soft_before.min(hard));
+        assert!(soft_after <= hard);
     }
 
     #[tokio::test]
