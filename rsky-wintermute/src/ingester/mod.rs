@@ -1063,32 +1063,52 @@ impl IngesterManager {
         // recorded on its previous owner until that account's own identity
         // event arrives, and `actor_handle_key` is unique. The indexer's
         // handle sweep clears the old owner first; the live path must too,
-        // or every such event fails and the handle stays stale.
-        if let Some(ref h) = handle {
-            let cleared = client
+        // or every such event fails and the handle stays stale. Two events
+        // swapping handles can still interleave between the clear and the
+        // upsert, so a unique violation gets one retry after clearing again.
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+            if let Some(ref h) = handle {
+                let cleared = client
+                    .execute(
+                        "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
+                        &[&h, &did],
+                    )
+                    .await?;
+                if cleared > 0 {
+                    tracing::info!(
+                        "identity event: handle {} moved to {}; cleared {} previous owner(s)",
+                        h,
+                        did,
+                        cleared
+                    );
+                }
+            }
+
+            let upsert = client
                 .execute(
-                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
-                    &[&h, &did],
+                    "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
+                     ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
+                     \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+                    &[&did, &handle, &timestamp],
                 )
-                .await?;
-            if cleared > 0 {
-                tracing::info!(
-                    "identity event: handle {} moved to {}; cleared {} previous owner(s)",
-                    h,
-                    did,
-                    cleared
-                );
+                .await;
+            match upsert {
+                Ok(_) => break,
+                Err(e)
+                    if attempt < 2
+                        && e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) =>
+                {
+                    tracing::info!(
+                        "identity event: handle {:?} for {} collided mid-swap; retrying once",
+                        handle.as_deref(),
+                        did
+                    );
+                }
+                Err(e) => return Err(e.into()),
             }
         }
-
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
-                 ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
-                 \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &handle, &timestamp],
-            )
-            .await?;
 
         tracing::info!(
             "upserted handle for {} to {:?}",
