@@ -60,7 +60,7 @@ In the report, we ask that you include the following information:
 - The Rust Compiler Version (type `rustc --version` to get the version)
 - If you are able to reliably reproduce this issue, how.
 
-If your bug report is concerning a security vulnerability, we encourage you to email us at rudy@blacksky.app.
+If your bug report is concerning a security vulnerability, please follow the process in [SECURITY.md](SECURITY.md) instead of filing a public issue.
 
 ### Submitting a Feature Request
 Similar to the [Bug Report](#submitting-a-bug-report) section, confirm that you are using the latest version, and that
