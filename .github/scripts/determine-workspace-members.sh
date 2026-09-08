@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eu pipefail
+set -euo pipefail
 
 # Get GitHub event variables from environment
 EVENT_NAME="${GITHUB_EVENT_NAME}"
@@ -7,17 +7,57 @@ PR_BASE_SHA="${PR_BASE_SHA:-}"
 PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/stdout}"
 
+# Workspace members that must never become a `cargo <cmd> -p <entry>` matrix
+# job. Entries are bash glob patterns matched against the member path exactly
+# as it appears in Cargo.toml (or as discovered on disk), so `dir/*` skips
+# everything under that directory.
+#
+# Vendored crates live under `vendor/`. Their member path is a directory, not a
+# package name, so `cargo check -p vendor/<crate>` fails with "package ID
+# specification looks like a file path". The `vendor/*` pattern covers any
+# future vendored crate without editing this list; `vendor/hubble-sync` is the
+# entry that motivated it.
+SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-pdsadmin" "vendor/hubble-sync" "vendor/*")
+
+# Returns 0 when the member matches any SKIP_PACKAGES pattern.
+is_skipped() {
+  local pkg="$1"
+  local pattern
+  for pattern in "${SKIP_PACKAGES[@]}"; do
+    # Unquoted right-hand side so the entry is treated as a glob pattern.
+    if [[ "$pkg" == $pattern ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Appends a member to WORKSPACE_MEMBERS unless it is empty or skipped. Every
+# code path that discovers members must go through this so the skip list is
+# applied uniformly.
+add_member() {
+  local pkg="$1"
+  if [[ -z "$pkg" ]]; then
+    return 0
+  fi
+  if is_skipped "$pkg"; then
+    echo "Skipping workspace member: $pkg"
+    return 0
+  fi
+  WORKSPACE_MEMBERS+=("$pkg")
+}
+
 # Function to convert array to JSON without jq dependency
 array_to_json() {
   local array=("$@")
   local json="["
   local separator=""
-  
-  for item in "${array[@]}"; do
+
+  for item in ${array[@]+"${array[@]}"}; do
     json="${json}${separator}\"${item}\""
     separator=","
   done
-  
+
   json="${json}]"
   echo "$json"
 }
@@ -31,12 +71,16 @@ if grep -q '\[workspace\]' Cargo.toml; then
   # Extract the members section: print from the members key to the closing
   # bracket, regardless of how many lines the array spans
   MEMBERS_SECTION=$(awk '/^[[:space:]]*members[[:space:]]*=/ { in_members=1 } in_members { print; if (index($0, "]")) exit }' Cargo.toml)
-  
+
   # Extract member paths - handle both array and table formats
   if echo "$MEMBERS_SECTION" | grep -q 'members.*=.*\['; then
     # Array format: members = ["pkg1", "pkg2"]
-    MEMBERS_LIST=$(echo "$MEMBERS_SECTION" | grep -o '"[^"]*"' | tr -d '"')
-    readarray -t WORKSPACE_MEMBERS <<< "$MEMBERS_LIST"
+    # `|| true` keeps an empty array from tripping pipefail.
+    MEMBERS_LIST=$(echo "$MEMBERS_SECTION" | grep -o '"[^"]*"' | tr -d '"' || true)
+    # A plain read loop instead of readarray, which bash 3 does not have.
+    while IFS= read -r member; do
+      add_member "$member"
+    done <<< "$MEMBERS_LIST"
   else
     # Fallback: Try to find any directory that contains a Cargo.toml file
     echo "Falling back to finding all directories with Cargo.toml..."
@@ -46,7 +90,7 @@ if grep -q '\[workspace\]' Cargo.toml; then
         pkg_dir=$(dirname "$dir")
         # Remove the leading ./ if present
         pkg_dir=${pkg_dir#./}
-        WORKSPACE_MEMBERS+=("$pkg_dir")
+        add_member "$pkg_dir"
       fi
     done < <(find . -name "Cargo.toml" -type f | sort)
   fi
@@ -58,14 +102,11 @@ if [ ${#WORKSPACE_MEMBERS[@]} -eq 0 ]; then
   for dir in $(find . -maxdepth 1 -type d -name "rsky*"); do
     # Remove the leading ./
     dir=${dir#./}
-    WORKSPACE_MEMBERS+=("$dir")
+    add_member "$dir"
   done
 fi
 
-echo "Found workspace members: ${WORKSPACE_MEMBERS[*]}"
-
-# Define packages to skip
-SKIP_PACKAGES=("cypher/frontend" "cypher/backend" "rsky-pdsadmin")
+echo "Found workspace members: ${WORKSPACE_MEMBERS[*]+"${WORKSPACE_MEMBERS[*]}"}"
 
 # Check if .github directory has changes
 GITHUB_CHANGES=false
@@ -89,7 +130,7 @@ CHANGED_MEMBERS=()
 if [[ "$GITHUB_CHANGES" == "true" ]]; then
     # If .github has changes, include all packages (except skipped ones)
     echo "Changes detected in .github directory, including all packages"
-    for pkg in "${WORKSPACE_MEMBERS[@]}"; do
+    for pkg in ${WORKSPACE_MEMBERS[@]+"${WORKSPACE_MEMBERS[@]}"}; do
         CHANGED_MEMBERS+=("$pkg")
     done
 else
@@ -106,7 +147,7 @@ else
     echo "Changed files:"
     echo "$DIFF_FILES"
 
-    for pkg in "${WORKSPACE_MEMBERS[@]}"; do
+    for pkg in ${WORKSPACE_MEMBERS[@]+"${WORKSPACE_MEMBERS[@]}"}; do
         if echo "$DIFF_FILES" | grep -q "^$pkg/"; then
             CHANGED_MEMBERS+=("$pkg")
             echo "Package with changes: $pkg"
@@ -114,20 +155,9 @@ else
     done
 fi
 
-# Filter out packages to skip
-FILTERED_MEMBERS=()
-for pkg in "${CHANGED_MEMBERS[@]}"; do
-    skip=false
-    for skip_pkg in "${SKIP_PACKAGES[@]}"; do
-        if [[ "$pkg" == "$skip_pkg" ]]; then
-            skip=true
-            break
-        fi
-    done
-    if [[ "$skip" == "false" ]]; then
-        FILTERED_MEMBERS+=("$pkg")
-    fi
-done
+# WORKSPACE_MEMBERS was already filtered through the skip list by add_member,
+# so CHANGED_MEMBERS cannot contain a skipped package.
+FILTERED_MEMBERS=(${CHANGED_MEMBERS[@]+"${CHANGED_MEMBERS[@]}"})
 
 # Always include at least one default package if array is empty
 if [ ${#FILTERED_MEMBERS[@]} -eq 0 ]; then
@@ -137,20 +167,20 @@ if [ ${#FILTERED_MEMBERS[@]} -eq 0 ]; then
         FILTERED_MEMBERS+=("rsky-common")
     else
         # Find the first available Rust package
-        for dir in "${WORKSPACE_MEMBERS[@]}"; do
+        for dir in ${WORKSPACE_MEMBERS[@]+"${WORKSPACE_MEMBERS[@]}"}; do
             if [[ -d "$dir" && -f "$dir/Cargo.toml" ]]; then
                 FILTERED_MEMBERS+=("$dir")
                 break
             fi
         done
     fi
-    
+
     # If still empty, use a hardcoded fallback
     if [ ${#FILTERED_MEMBERS[@]} -eq 0 ]; then
         echo "No valid workspace members found, using default package"
         # Use the first 'rsky-' directory as fallback
         for dir in rsky-*; do
-            if [[ -d "$dir" && -f "$dir/Cargo.toml" ]]; then
+            if [[ -d "$dir" && -f "$dir/Cargo.toml" ]] && ! is_skipped "$dir"; then
                 FILTERED_MEMBERS+=("$dir")
                 break
             fi
@@ -159,6 +189,6 @@ if [ ${#FILTERED_MEMBERS[@]} -eq 0 ]; then
 fi
 
 # Convert to JSON array for matrix - without jq dependency
-JSON_MEMBERS=$(array_to_json "${FILTERED_MEMBERS[@]}")
+JSON_MEMBERS=$(array_to_json ${FILTERED_MEMBERS[@]+"${FILTERED_MEMBERS[@]}"})
 echo "workspace_members=$JSON_MEMBERS" >> "$GITHUB_OUTPUT"
 echo "Found workspace members to process: $JSON_MEMBERS"
