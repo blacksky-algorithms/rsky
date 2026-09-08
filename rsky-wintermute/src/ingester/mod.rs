@@ -1058,6 +1058,29 @@ impl IngesterManager {
         // Identity events arrive before any commit for brand-new accounts,
         // so an update-only write would drop the handle the event carries.
         let client = pool.get().await?;
+
+        // Handle contention: a handle that just moved to this DID is still
+        // recorded on its previous owner until that account's own identity
+        // event arrives, and `actor_handle_key` is unique. The indexer's
+        // handle sweep clears the old owner first; the live path must too,
+        // or every such event fails and the handle stays stale.
+        if let Some(ref h) = handle {
+            let cleared = client
+                .execute(
+                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
+                    &[&h, &did],
+                )
+                .await?;
+            if cleared > 0 {
+                tracing::info!(
+                    "identity event: handle {} moved to {}; cleared {} previous owner(s)",
+                    h,
+                    did,
+                    cleared
+                );
+            }
+        }
+
         client
             .execute(
                 "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
