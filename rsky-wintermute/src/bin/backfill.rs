@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
+use mimalloc::MiMalloc;
 
 use rsky_wintermute::backfiller::host::Hostname;
 use rsky_wintermute::backfiller::runner::Runner;
@@ -27,6 +28,12 @@ use rsky_wintermute::backfiller::sink::{NullSink, PgSink, RecordSink};
 use rsky_wintermute::backfiller::source::RepoSource;
 use rsky_wintermute::backfiller::state::RepoStateStore;
 use rsky_wintermute::backfiller::{BackfillConfig, BackfillMode, SinkKind};
+
+// Same allocator as the daemon. glibc malloc kept ~3.5 GB of freed whale-repo
+// allocations resident across the runtime's threads; mimalloc returns them,
+// and `MIMALLOC_PURGE_DELAY=0` makes it do so promptly on memory-tight hosts.
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Debug, Parser)]
 #[command(name = "backfill", about = "repo backfill: discover, enumerate, drain")]

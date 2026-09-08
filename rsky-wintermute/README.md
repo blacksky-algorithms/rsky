@@ -117,6 +117,7 @@ RUST_LOG=info \
 | `BACKFILL_FETCH_TIMEOUT_SECS` | `300` | Whole-request timeout per archive |
 | `BACKFILL_REENUMERATE_SECS` | `0` | Re-run enumeration this long after a pass completes; `0` enumerates once and then only drains |
 | `BACKFILL_WORKER_THREADS` | CPUs | Tokio threads for the backfill runtime |
+| `MIMALLOC_PURGE_DELAY` | (allocator default) | Set to `0` on memory-tight hosts so freed whale-repo allocations return to the OS promptly; the backfill CLI and daemon both use mimalloc |
 
 ## Utilities
 
