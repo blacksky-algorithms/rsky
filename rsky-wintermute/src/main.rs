@@ -70,6 +70,7 @@ fn main() -> Result<()> {
     flag::register(SIGINT, Arc::clone(&terminate_now))?;
 
     let storage = Arc::new(Storage::new(None)?);
+    rsky_wintermute::procmem::register_storage(&storage);
     let labeler_hosts: Vec<String> = args
         .labeler_hosts
         .into_iter()

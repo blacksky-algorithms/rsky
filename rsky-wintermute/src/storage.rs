@@ -9,6 +9,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// Snapshot of the keyspace counters that bear on resident memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyspaceStats {
+    /// Bytes currently held in memtables across every partition.
+    pub write_buffer_bytes: u64,
+    /// Journal files open. Grows when flushes fall behind.
+    pub journal_count: u64,
+    /// Total on-disk size of the store.
+    pub disk_bytes: u64,
+}
+
 pub struct Storage {
     #[allow(dead_code)] // Kept for Fjall keyspace - partitions reference it internally
     db: Arc<Keyspace>,
@@ -61,7 +72,7 @@ impl Storage {
             "opening Fjall with cache={}GB, write_buffer={}GB, memtable={}MB",
             *CACHE_SIZE / (1024 * 1024 * 1024),
             *WRITE_BUFFER_SIZE / (1024 * 1024 * 1024),
-            MEMTABLE_SIZE / (1024 * 1024)
+            *MEMTABLE_SIZE / (1024 * 1024)
         );
         let db = Config::new(path)
             .cache_size(*CACHE_SIZE)
@@ -82,21 +93,21 @@ impl Storage {
         let firehose_events = db.open_partition(
             "firehose_events",
             PartitionCreateOptions::default()
-                .max_memtable_size(MEMTABLE_SIZE)
+                .max_memtable_size(*MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
         let firehose_live = db.open_partition(
             "firehose_live",
             PartitionCreateOptions::default()
-                .max_memtable_size(MEMTABLE_SIZE)
+                .max_memtable_size(*MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
         let firehose_live_seq = db.open_partition(
             "firehose_live_seq",
             PartitionCreateOptions::default()
-                .max_memtable_size(MEMTABLE_SIZE)
+                .max_memtable_size(*MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
         let live_seq_start = firehose_live_seq.last_key_value()?.map_or(0, |(k, _)| {
@@ -108,11 +119,13 @@ impl Storage {
         let label_live = db.open_partition(
             "label_live",
             PartitionCreateOptions::default()
-                .max_memtable_size(MEMTABLE_SIZE)
+                .max_memtable_size(*MEMTABLE_SIZE)
                 .block_size(BLOCK_SIZE),
         )?;
 
         let cursors = db.open_partition("cursors", PartitionCreateOptions::default())?;
+
+        Self::drop_orphan_partitions(&db);
 
         // Restore the seq read cursor and legacy-drained flag so a restart
         // resumes the forward scan instead of re-walking every tombstone.
@@ -135,6 +148,43 @@ impl Storage {
             legacy_live_drained: AtomicBool::new(legacy_drained),
             live_notify: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Partitions a previous design left on disk that this binary no longer
+    /// opens. Fjall recovers every partition it finds regardless, so an
+    /// abandoned queue keeps its segment metadata and block index resident and
+    /// takes part in compaction until it is explicitly deleted.
+    const ORPHAN_PARTITIONS: [&'static str; 1] = ["repo_backfill"];
+
+    fn drop_orphan_partitions(db: &Keyspace) {
+        for name in Self::ORPHAN_PARTITIONS {
+            if !db.partition_exists(name) {
+                continue;
+            }
+            let dropped = db
+                .open_partition(name, PartitionCreateOptions::default())
+                .and_then(|handle| {
+                    let bytes = handle.disk_space();
+                    db.delete_partition(handle).map(|()| bytes)
+                });
+            match dropped {
+                Ok(bytes) => tracing::info!(
+                    "dropped orphaned Fjall partition {name} ({} MB on disk)",
+                    bytes / (1024 * 1024)
+                ),
+                Err(e) => tracing::warn!("failed to drop orphaned Fjall partition {name}: {e}"),
+            }
+        }
+    }
+
+    /// Point-in-time figures for the memory gauges in `procmem`.
+    #[must_use]
+    pub fn keyspace_stats(&self) -> KeyspaceStats {
+        KeyspaceStats {
+            write_buffer_bytes: self.db.write_buffer_size(),
+            journal_count: self.db.journal_count() as u64,
+            disk_bytes: self.db.disk_space(),
+        }
     }
 
     pub fn write_firehose_event(
@@ -742,6 +792,63 @@ mod tests {
         assert_eq!(second[0].1.uri, "at://did:plc:new/app.bsky.feed.post/n0");
         assert!(storage.legacy_live_drained.load(Ordering::Relaxed));
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn orphaned_repo_backfill_partition_is_dropped_on_open() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        {
+            // Simulate a store written by the previous design: the daemon
+            // keyspace plus the abandoned repo_backfill queue.
+            let storage = Storage::new(Some(db_path.clone())).unwrap();
+            let orphan = storage
+                .db
+                .open_partition("repo_backfill", PartitionCreateOptions::default())
+                .unwrap();
+            orphan.insert(b"did:plc:x", b"queued").unwrap();
+            storage.db.persist(fjall::PersistMode::SyncAll).unwrap();
+            assert!(storage.db.partition_exists("repo_backfill"));
+        }
+
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        assert!(
+            !storage.db.partition_exists("repo_backfill"),
+            "reopen must delete the orphaned partition"
+        );
+        for live in [
+            "firehose_live",
+            "firehose_live_seq",
+            "label_live",
+            "cursors",
+        ] {
+            assert!(storage.db.partition_exists(live), "{live} must survive");
+        }
+        drop(storage);
+
+        // Idempotent: a second open with nothing to drop is fine.
+        let storage = Storage::new(Some(db_path)).unwrap();
+        assert!(!storage.db.partition_exists("repo_backfill"));
+        drop(dir);
+    }
+
+    #[test]
+    fn keyspace_stats_report_live_figures() {
+        let (storage, _dir) = setup_test_storage();
+        let before = storage.keyspace_stats();
+        for i in 0..50 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/s{i}"
+                )))
+                .unwrap();
+        }
+        let after = storage.keyspace_stats();
+        assert!(
+            after.write_buffer_bytes > before.write_buffer_bytes,
+            "enqueued jobs must show up in the memtable figure"
+        );
+        assert!(after.journal_count >= 1);
     }
 
     #[test]

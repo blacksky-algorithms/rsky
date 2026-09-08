@@ -89,6 +89,21 @@ RUST_LOG=info \
 | `RECORD_COLLECTION_ALLOWLIST` | (legacy `app.bsky.,chat.bsky.` for backfill) | Comma-separated NSID prefixes to index |
 | `RECORD_SKIP_BOILERPLATE` | `false` | Skip `record` rows for like/repost/follow/block |
 | `LIVE_AGGREGATES` | `true` | Update `post_agg`/`profile_agg` inline on the live path |
+| `IDENTITY_EVENT_CONCURRENCY` | `64` | Concurrent `#identity` / `#account` / `#sync` tasks (each resolves a DID and handle over the network). When all permits are busy the event is shed and counted in `ingester_identity_tasks_shed_total`; the handle sweep re-verifies the account within a day |
+| `IDENTITY_EVENT_TIMEOUT_SECS` | `15` | Deadline for one such task; expiries are counted in `ingester_identity_task_timeouts_total` |
+
+### Memory Environment Variables
+
+The Fjall store holds short-lived queues (`firehose_live`, `label_live`, cursors): entries are written once and deleted seconds later, so it lives almost entirely in memtables and the block cache only fills when the indexer falls behind. The defaults are sized for that, not for a general-purpose LSM database. The earlier defaults (32 GB cache, 256 MB memtables, 2 GB write buffer) date from when Fjall also held the repo backfill queue, which no longer exists.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FJALL_CACHE_SIZE_GB` | `4` | Block-cache ceiling. Only fills as segments are read, i.e. when the live queue has spilled past the memtable. Raise it on large hosts if `ingester_firehose_live_length` is routinely in the millions |
+| `FJALL_MEMTABLE_MB` | `64` | Per-partition memtable flush threshold (Fjall recommends 8-64 MiB). A partition can transiently hold several memtables while flushes drain, so this multiplies |
+| `FJALL_WRITE_BUFFER_SIZE_GB` | `1` | Total memtable bytes across all partitions before Fjall stalls writers. Never reached in steady state; a backstop if flushing falls behind |
+| `MIMALLOC_PURGE_DELAY` | (allocator default) | `0` makes mimalloc return freed pages to the OS promptly instead of retaining them for reuse. Measured to lower steady-state RSS materially; set it in the service unit on memory-tight hosts |
+
+Resident memory is exported as `wintermute_rss_bytes` / `wintermute_rss_peak_bytes` (from `/proc/self/status`), alongside `wintermute_fjall_write_buffer_bytes`, so it can be watched without a shell on the box. On startup the daemon deletes the orphaned `repo_backfill` partition if a store from the previous design still carries it; Fjall would otherwise keep its segment metadata resident and compact it forever.
 
 ### Backfill Environment Variables
 
@@ -197,6 +212,10 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 - `ingester_label_live_length` - Current label_live queue size
 - `ingester_websocket_connections` - Active WebSocket connections
 - `ingester_errors_total` - Ingestion errors by type
+- `ingester_identity_tasks_in_flight` - Identity/account/sync tasks running (bounded by `IDENTITY_EVENT_CONCURRENCY`)
+- `ingester_identity_task_timeouts_total{kind}` / `ingester_identity_tasks_shed_total{kind}` - Tasks abandoned at the deadline; events dropped because every permit was busy
+- `wintermute_rss_bytes` / `wintermute_rss_peak_bytes` - Resident set size and its high-water mark (Linux; 0 elsewhere)
+- `wintermute_fjall_write_buffer_bytes`, `wintermute_fjall_journal_count`, `wintermute_fjall_disk_bytes` - Fjall memtable bytes, open journals, on-disk size
 - `indexer_records_processed_total` - Total records processed
 - `indexer_records_failed_total` - Failed record indexing
 - `indexer_stale_writes_skipped_total` - Skipped stale writes (older rev)
@@ -251,7 +270,7 @@ Fjall queues and the backfill state file are durable and survive crashes. On res
 
 ### System Requirements
 
-- **Memory**: 8GB minimum, 32GB+ recommended for full network indexing
+- **Memory**: 8GB minimum for the live daemon with the default Fjall settings; the backfill's footprint is governed by `BACKFILL_MAX_INFLIGHT` / `BACKFILL_MAX_RECORDS_IN_FLIGHT` (see the memory settings above)
 - **Storage**: ~7 GB for the backfill state file at full-network scale, plus spill space for large archives
 - **CPU**: 8+ cores recommended for parallel processing
 

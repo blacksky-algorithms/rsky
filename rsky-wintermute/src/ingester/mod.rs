@@ -1,3 +1,4 @@
+pub mod identity_gate;
 pub mod labels;
 mod tests;
 
@@ -398,7 +399,7 @@ impl IngesterManager {
                     let event_did = event.did.clone();
                     let event_time = event.time.clone();
                     let event_handle = event.identity.as_ref().and_then(|i| i.handle.clone());
-                    tokio::spawn(async move {
+                    identity_gate::IDENTITY_GATE.spawn("identity", async move {
                         if let Err(e) = Self::process_identity_event(
                             &pool_clone,
                             &event_did,
@@ -428,7 +429,7 @@ impl IngesterManager {
                         let event_time = event.time.clone();
                         let active = account.active;
                         let status = account.status.clone();
-                        tokio::spawn(async move {
+                        identity_gate::IDENTITY_GATE.spawn("account", async move {
                             if !active && Self::pds_says_active(&event_did).await == Some(true) {
                                 tracing::info!(
                                     "skipped account event for {} (active=false, status={:?}): \
@@ -469,7 +470,7 @@ impl IngesterManager {
                     let pool_clone = Arc::clone(pool);
                     let event_did = event.did.clone();
                     let event_time = event.time.clone();
-                    tokio::spawn(async move {
+                    identity_gate::IDENTITY_GATE.spawn("sync", async move {
                         if let Err(e) =
                             Self::process_identity_event(&pool_clone, &event_did, &event_time, None)
                                 .await
@@ -909,9 +910,6 @@ impl IngesterManager {
         timestamp: &str,
         handle_hint: Option<&str>,
     ) -> Result<(), WintermuteError> {
-        use rsky_identity::IdResolver;
-        use rsky_identity::types::IdentityResolverOpts;
-
         tracing::debug!("processing identity event for {}", did);
 
         // If the event includes the handle, we can use it directly
@@ -920,12 +918,7 @@ impl IngesterManager {
             Some(h.to_lowercase())
         } else {
             // Resolve DID to get current handle from DID document
-            let mut resolver = IdResolver::new(IdentityResolverOpts {
-                timeout: Some(std::time::Duration::from_secs(5)),
-                plc_url: None,
-                did_cache: None,
-                backup_nameservers: None,
-            });
+            let mut resolver = identity_gate::resolver();
 
             match resolver.did.resolve(did.to_owned(), None).await {
                 Ok(Some(doc)) => {
@@ -1064,14 +1057,7 @@ impl IngesterManager {
     /// already migrated away from. The relay forwards them unaware of the migration; the
     /// PLC log is the authoritative answer.
     async fn pds_says_active(did: &str) -> Option<bool> {
-        use rsky_identity::IdResolver;
-        use rsky_identity::types::IdentityResolverOpts;
-        let resolver = IdResolver::new(IdentityResolverOpts {
-            timeout: Some(std::time::Duration::from_secs(5)),
-            plc_url: None,
-            did_cache: None,
-            backup_nameservers: None,
-        });
+        let resolver = identity_gate::resolver();
         let Ok(Some(doc)) = resolver.did.resolve(did.to_owned(), None).await else {
             return None;
         };
