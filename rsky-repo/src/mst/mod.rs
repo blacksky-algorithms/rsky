@@ -1448,21 +1448,68 @@ impl MST {
         Ok(cids)
     }
 
+    /// A covering proof is all MST nodes (leaves excluded) needed to prove the value of a given leaf
+    /// and its siblings to its immediate right and left (if applicable)
+    pub async fn get_covering_proof(&mut self, key: &str) -> Result<BlockMap> {
+        let mut blocks = self.proof_for_key(key).await?;
+        blocks.add_map(self.proof_for_left_sib(key).await?)?;
+        blocks.add_map(self.proof_for_right_sib(key).await?)?;
+        Ok(blocks)
+    }
+
     #[async_recursion(Sync)]
-    pub async fn add_blocks_for_path(&mut self, key: String, blocks: &mut BlockMap) -> Result<()> {
+    pub async fn proof_for_key(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let found = self.at_index(index).await?;
+        let mut blocks = match found {
+            Some(NodeEntry::Leaf(ref leaf)) if leaf.key == key => BlockMap::new(),
+            _ => match self.at_index(index - 1).await? {
+                Some(NodeEntry::MST(mut prev)) => prev.proof_for_key(key).await?,
+                _ => return Ok(BlockMap::new()),
+            },
+        };
         let serialized = self.serialize().await?;
         blocks.set(serialized.cid, serialized.bytes);
-        let index = self.find_gt_or_equal_leaf_index(&key).await?;
-        let found = self.at_index(index).await?;
-        if let Some(NodeEntry::Leaf(found)) = found {
-            if found.key == key {
-                return Ok(());
+        Ok(blocks)
+    }
+
+    #[async_recursion(Sync)]
+    pub async fn proof_for_left_sib(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let mut blocks = match self.at_index(index - 1).await? {
+            Some(NodeEntry::MST(mut prev)) => prev.proof_for_left_sib(key).await?,
+            _ => BlockMap::new(),
+        };
+        let serialized = self.serialize().await?;
+        blocks.set(serialized.cid, serialized.bytes);
+        Ok(blocks)
+    }
+
+    #[async_recursion(Sync)]
+    pub async fn proof_for_right_sib(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let mut found = self.at_index(index).await?;
+        if found.is_none() {
+            found = self.at_index(index - 1).await?;
+        }
+        let mut blocks = match found {
+            None => BlockMap::new(),
+            Some(NodeEntry::MST(mut subtree)) => subtree.proof_for_right_sib(key).await?,
+            Some(NodeEntry::Leaf(leaf)) => {
+                let sib = if leaf.key == key {
+                    self.at_index(index + 1).await?
+                } else {
+                    self.at_index(index - 1).await?
+                };
+                match sib {
+                    Some(NodeEntry::MST(mut sib)) => sib.proof_for_right_sib(key).await?,
+                    _ => BlockMap::new(),
+                }
             }
-        }
-        match self.at_index(index - 1).await? {
-            Some(NodeEntry::MST(mut prev)) => prev.add_blocks_for_path(key, blocks).await,
-            _ => Ok(()),
-        }
+        };
+        let serialized = self.serialize().await?;
+        blocks.set(serialized.cid, serialized.bytes);
+        Ok(blocks)
     }
 
     pub async fn save_mst(&self) -> Result<Cid> {

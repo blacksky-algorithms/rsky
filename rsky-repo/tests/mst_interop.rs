@@ -1,10 +1,12 @@
 use anyhow::Result;
 use lexicon_cid::Cid;
+use rsky_repo::block_map::BlockMap;
 use rsky_repo::mst::util::{count_prefix_len, leading_zeros_on_hash};
 use rsky_repo::mst::MST;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -125,6 +127,112 @@ async fn run_commit_proof_case(case: &CommitProofCase) -> Result<()> {
         .iter()
         .map(|cid| Cid::try_from(cid.as_str()))
         .collect::<Result<Vec<Cid>, _>>()?;
+
+    // The commit's `blocks` are the union of the covering proof taken per write, on the post-write tree.
+    let mut covering_proof = BlockMap::new();
+    for key in case.adds.iter().chain(case.dels.iter()) {
+        covering_proof.add_map(tree.get_covering_proof(key).await?)?;
+    }
+    let produced: BTreeSet<String> = covering_proof
+        .cids()?
+        .into_iter()
+        .map(|cid| cid.to_string())
+        .collect();
+    let expected: BTreeSet<String> = case.blocks_in_proof.iter().cloned().collect();
+    // Per-walk assertions. The union above cannot attribute a block to the walk that should
+    // have produced it, so a bug swapping the sibling walks would pass. These constrain each
+    // walk on its own.
+    let mut by_walk = Vec::new();
+    for name in ["key", "left", "right"] {
+        let mut acc = BlockMap::new();
+        for key in case.adds.iter().chain(case.dels.iter()) {
+            let one = match name {
+                "key" => tree.proof_for_key(key).await?,
+                "left" => tree.proof_for_left_sib(key).await?,
+                _ => tree.proof_for_right_sib(key).await?,
+            };
+            acc.add_map(one)?;
+        }
+        let s: BTreeSet<String> = acc.cids()?.into_iter().map(|c| c.to_string()).collect();
+        assert!(
+            s.is_subset(&expected),
+            "{name} walk produced a block outside blocksInProof [{}]: {:?}",
+            case.comment,
+            s.difference(&expected).collect::<Vec<_>>()
+        );
+        by_walk.push(s);
+    }
+    let (from_key, from_left, from_right) = (&by_walk[0], &by_walk[1], &by_walk[2]);
+
+    // Both sibling walks add their own node at every level, so each always reaches the root.
+    let root_str = root_after.to_string();
+    assert!(
+        from_left.contains(&root_str) && from_right.contains(&root_str),
+        "a sibling walk did not reach the root [{}]",
+        case.comment
+    );
+
+    // Neither sibling walk may be dropped: each fixture below records whether omitting one
+    // still yields blocksInProof. Ablation measured against the upstream vectors.
+    let key_left: BTreeSet<String> = from_key.union(from_left).cloned().collect();
+    let key_right: BTreeSet<String> = from_key.union(from_right).cloned().collect();
+    let (left_removable, right_removable) = match case.comment.as_str() {
+        "add on edge with neighbor two layers down" => (false, true),
+        "merge and split in multi-op commit" => (true, true),
+        _ => (false, false),
+    };
+    assert_eq!(
+        key_right == expected,
+        left_removable,
+        "dropping the left-sibling walk changed the proof unexpectedly [{}]",
+        case.comment
+    );
+    assert_eq!(
+        key_left == expected,
+        right_removable,
+        "dropping the right-sibling walk changed the proof unexpectedly [{}]",
+        case.comment
+    );
+
+    // A walk that cannot be dropped must contribute a block the other two lack. Without this,
+    // a left walk that had been made a duplicate of the right one still satisfies the ablation
+    // above, because that check is symmetric in the two siblings.
+    if !left_removable {
+        assert!(
+            !from_left.is_subset(&key_right),
+            "left-sibling walk contributed nothing the other walks lacked [{}]",
+            case.comment
+        );
+    }
+    if !right_removable {
+        assert!(
+            !from_right.is_subset(&key_left),
+            "right-sibling walk contributed nothing the other walks lacked [{}]",
+            case.comment
+        );
+    }
+
+    // The one fixture whose neighbour sits strictly to the left: the left walk must descend to
+    // it while the right walk finds nothing beyond the spine. A swap of the two fails here.
+    if case.comment == "add on edge with neighbor two layers down" {
+        assert!(
+            from_right.len() < from_left.len() && from_right.is_subset(from_left),
+            "left walk did not out-reach the right walk on a left-hand neighbour [{}]",
+            case.comment
+        );
+    }
+
+    assert_eq!(
+        produced, expected,
+        "covering proof set equality [{}]",
+        case.comment
+    );
+    assert_eq!(
+        produced.len(),
+        case.blocks_in_proof.len(),
+        "covering proof block count [{}]",
+        case.comment
+    );
     let proof_blocks = {
         let storage_guard = storage.read().await;
         storage_guard.get_blocks(proof_cids.clone()).await?
