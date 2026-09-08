@@ -435,6 +435,7 @@ impl BackfillConfig {
             fetch: self.fetch.clone(),
             reenumerate_after: self.reenumerate_after,
             user_agent: self.user_agent.clone(),
+            dry_run: self.sink == SinkKind::Null,
             ..RunnerConfig::default()
         }
     }
@@ -578,6 +579,7 @@ mod tests {
         let rc = cfg.runner_config();
         assert_eq!(rc.hubble.is_some(), cfg.mode.uses_hubble());
         assert_eq!(rc.direct, cfg.mode.uses_direct());
+        assert_eq!(rc.dry_run, cfg.sink == SinkKind::Null);
 
         let cfg = BackfillConfig::from_env(&["https://relay.example/".to_owned()]);
         assert_eq!(cfg.relay_url.as_deref(), Some("https://relay.example/"));

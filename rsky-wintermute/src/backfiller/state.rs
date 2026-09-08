@@ -447,6 +447,34 @@ impl RepoStateStore {
         Ok(())
     }
 
+    /// Record that a dry run fetched and parsed this repo but wrote nothing.
+    /// `indexed_rev` stays NULL, so re-enumeration treats the repo as never
+    /// indexed and [`Self::reset_dry_run`] can hand it back to a real drain.
+    pub fn mark_dry_run(&self, did: &str) -> Result<(), StateError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE repo SET state = ?2, indexed_rev = NULL, attempts = 0,
+                             cooldown_until = 0, last_error = 'dry-run', updated_at = ?3
+              WHERE did = ?1",
+            params![did, RepoState::Done.as_str(), now()],
+        )?;
+        drop(conn);
+        Ok(())
+    }
+
+    /// Return every dry-run completion to pending. Called when a writing drain
+    /// starts, so a measurement pass never masquerades as indexed data.
+    pub fn reset_dry_run(&self) -> Result<u64, StateError> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE repo SET state = ?1, last_error = NULL, updated_at = ?2
+              WHERE state = ?3 AND indexed_rev IS NULL",
+            params![RepoState::Pending.as_str(), now(), RepoState::Done.as_str()],
+        )?;
+        drop(conn);
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     /// Record a failed attempt.
     ///
     /// A transient failure goes back to pending with a cooldown until the
@@ -1016,6 +1044,28 @@ mod tests {
             s.source_of("did:c").unwrap().as_deref(),
             Some(HUBBLE_SOURCE)
         );
+    }
+
+    #[test]
+    fn dry_run_completions_are_not_indexed_and_can_be_reset() {
+        let s = store();
+        s.upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        s.upsert(&repo("did:b", "r1"), HOST, false).unwrap();
+        s.claim_for_source(HOST, 10).unwrap();
+        s.mark_dry_run("did:a").unwrap();
+        s.complete("did:b", "r1").unwrap();
+        assert_eq!(s.stats().unwrap().done, 2);
+        // Re-enumeration does not believe the dry run.
+        assert_eq!(
+            s.upsert(&repo("did:a", "r1"), HOST, false).unwrap(),
+            Upsert::NeedsFetch
+        );
+        s.claim_for_source(HOST, 10).unwrap();
+        s.mark_dry_run("did:a").unwrap();
+        assert_eq!(s.reset_dry_run().unwrap(), 1, "only the dry-run row");
+        let st = s.stats().unwrap();
+        assert_eq!((st.pending, st.done), (1, 1));
+        assert_eq!(s.reset_dry_run().unwrap(), 0);
     }
 
     #[test]

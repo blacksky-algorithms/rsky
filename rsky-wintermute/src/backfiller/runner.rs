@@ -117,6 +117,9 @@ pub struct RunnerConfig {
     pub coordinator_poll: Duration,
     /// Retries for one enumeration page. Losing a page silently skips repos.
     pub list_max_retries: u32,
+    /// The sink writes nothing: record completions as dry-run so they never
+    /// pass for indexed data.
+    pub dry_run: bool,
     pub connect_timeout: Duration,
     /// How often progress is logged and state gauges sampled.
     pub progress_every: Duration,
@@ -142,6 +145,7 @@ impl Default for RunnerConfig {
             idle_exit: Duration::from_secs(30),
             coordinator_poll: Duration::from_secs(2),
             list_max_retries: 10,
+            dry_run: false,
             connect_timeout: Duration::from_secs(15),
             progress_every: Duration::from_secs(30),
         }
@@ -785,11 +789,17 @@ impl<K: RecordSink> Runner<K> {
                 // fetch slot.
                 let this = Arc::clone(self);
                 let source = source.to_owned();
+                let dry_run = self.cfg.dry_run;
                 tokio::spawn(async move {
                     let Receipt { rev, committed, .. } = receipt;
                     match committed.await {
                         Ok(Ok(())) => {
-                            if let Err(e) = this.state.complete(&did, &rev) {
+                            let marked = if dry_run {
+                                this.state.mark_dry_run(&did)
+                            } else {
+                                this.state.complete(&did, &rev)
+                            };
+                            if let Err(e) = marked {
                                 tracing::error!(did, error = %e, "state: complete failed");
                             }
                             this.progress.repos_done.fetch_add(1, Ordering::Relaxed);
@@ -822,6 +832,22 @@ impl<K: RecordSink> Runner<K> {
     }
 
     // ----------------------------------------------------------- coordinator
+
+    /// A writing run takes over anything a dry run only pretended to finish.
+    pub fn recover_dry_runs(&self) -> Result<(), RunnerError> {
+        if self.cfg.dry_run {
+            tracing::warn!(
+                "dry run: repos are fetched and parsed but nothing is written; \
+                 completions are recorded as dry-run and re-queued by the next real drain"
+            );
+            return Ok(());
+        }
+        let n = self.state.reset_dry_run()?;
+        if n > 0 {
+            tracing::info!(recovered = n, "returned dry-run completions to pending");
+        }
+        Ok(())
+    }
 
     /// Which sources are eligible to run right now.
     fn eligible_sources(&self) -> Result<Vec<String>, RunnerError> {
@@ -945,6 +971,7 @@ impl<K: RecordSink> Runner<K> {
         if recovered > 0 {
             tracing::info!(recovered, "returned claimed rows to pending after restart");
         }
+        self.recover_dry_runs()?;
 
         let enumerator = {
             let this = Arc::clone(&self);
@@ -1596,6 +1623,46 @@ mod tests {
             peak.load(Ordering::Relaxed)
         );
         assert_eq!(r.progress.repos_fetched.load(Ordering::Relaxed), 12);
+    }
+
+    #[tokio::test]
+    async fn dry_runs_never_look_indexed_and_a_real_run_takes_them_back() {
+        let mut c = cfg();
+        c.dry_run = true;
+        let r = Arc::new(
+            Runner::new(
+                c,
+                FakeSink::new(true),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        r.recover_dry_runs().unwrap();
+        r.state().upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        let src = FakeSource::new(HOST, vec![], vec![Ok(vec![1])]);
+        r.fetch_loop(&src, Arc::new(HostHealth::new(1, 1, true)))
+            .await
+            .unwrap();
+        settle_all().await;
+        assert_eq!(r.state().stats().unwrap().done, 1);
+        assert_eq!(
+            r.state().upsert(&repo("did:a", "r1"), HOST, false).unwrap(),
+            crate::backfiller::state::Upsert::NeedsFetch,
+            "the dry run proved nothing"
+        );
+
+        let real = runner(FakeSink::new(true));
+        // Same store: rebuild a runner over it via a fresh in-memory copy is not
+        // possible, so exercise recovery on the dry-run runner's store directly.
+        drop(real);
+        let mut c = cfg();
+        c.dry_run = false;
+        let state = r.state().clone();
+        state.claim_for_source(HOST, 10).unwrap();
+        state.mark_dry_run("did:a").unwrap();
+        let r2 = Arc::new(Runner::new(c, FakeSink::new(true), state).unwrap());
+        r2.recover_dry_runs().unwrap();
+        assert_eq!(r2.state().stats().unwrap().pending, 1);
     }
 
     #[test]

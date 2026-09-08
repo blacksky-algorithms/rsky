@@ -95,7 +95,7 @@ RUST_LOG=info \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BACKFILL_MODE` | `off` | `off`, `hubble` (everything via hubble), `direct` (only direct hosts), `hybrid` (direct hosts directly, the rest via hubble) |
-| `BACKFILL_SINK` | `postgres` | `null` fetches and parses without writing: measures the fetch side |
+| `BACKFILL_SINK` | `postgres` | `null` fetches and parses without writing, to measure the fetch side; its completions are recorded as dry-run and re-queued by the next writing drain |
 | `BACKFILL_STATE_DB` | `backfill_state.sqlite` | Per-repo / per-host state file (relative to the working directory) |
 | `BACKFILL_RELAY` | first of `RELAY_HOSTS` | Relay whose `listHosts` discovers PDS hosts |
 | `BACKFILL_DIRECT_HOSTS` | `*.host.bsky.network` | Comma-separated suffix globs or exact hosts to fetch directly |

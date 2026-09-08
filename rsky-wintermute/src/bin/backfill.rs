@@ -228,12 +228,14 @@ async fn main() -> Result<()> {
         Cmd::Drain => match cfg.sink {
             SinkKind::Null => {
                 let r = Arc::new(runner_null(&cfg, state.clone())?);
+                r.recover_dry_runs().map_err(|e| eyre!("{e}"))?;
                 r.progress.enumeration_done.store(true, Ordering::Relaxed);
                 r.drain(true).await.map_err(|e| eyre!("{e}"))?;
                 status(&state)
             }
             SinkKind::Postgres => {
                 let (r, sink) = runner_pg(&args, &cfg, state.clone())?;
+                r.recover_dry_runs().map_err(|e| eyre!("{e}"))?;
                 r.progress.enumeration_done.store(true, Ordering::Relaxed);
                 let result = r.drain(true).await;
                 drop(r);
