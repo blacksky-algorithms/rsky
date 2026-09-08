@@ -7,10 +7,7 @@ use crate::config::{
     HANDLE_REINDEX_INTERVAL_VALID, HANDLE_RESOLUTION_BATCH_SIZE, HANDLE_RESOLUTION_CONCURRENCY,
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
-use crate::config::{
-    FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
-    LIVE_LIKE_SERIALIZE,
-};
+use crate::config::{FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, LIVE_LIKE_SERIALIZE};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
@@ -44,11 +41,14 @@ const ACTOR_CACHE_MAX_SIZE: usize = 2_000_000;
 #[allow(dead_code)]
 pub enum QueueSource {
     FirehoseLive,
-    FirehoseBackfill,
     LabelLive, // Future use for label stream processing
 }
 
 // Type aliases to reduce complexity
+/// Jobs pulled per test-only dequeue helper.
+#[cfg(test)]
+const TEST_DEQUEUE_BATCH: usize = 1000;
+
 #[cfg(test)]
 type IndexJobWithMetadata = (Vec<u8>, IndexJob, QueueSource);
 #[cfg(test)]
@@ -70,10 +70,7 @@ pub struct IndexerManager {
     workers: usize,
     storage: Arc<Storage>,
     pool_live: Pool,
-    pool_backfill: Pool,
     pool_labels: Pool,
-    #[cfg_attr(not(test), allow(dead_code))]
-    semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<IdResolver>,
 }
 
@@ -90,33 +87,31 @@ struct ParsedJob<'a> {
 impl IndexerManager {
     pub fn new(storage: Arc<Storage>, database_url: &str) -> Result<Self, WintermuteError> {
         let pool_size = *DB_POOL_SIZE;
-        // Create separate pools for each stream to prevent starvation
-        // Backfill gets 50% of connections since it's the main bottleneck
-        let backfill_pool_size = pool_size / 2;
+        // Separate pools per stream so one cannot starve the other. Backfill
+        // has its own pool on the backfill thread and is not part of this
+        // budget.
+        //
         // Each live shard can hold up to 8 connections at once and deadpool has
         // no acquire timeout, so the pool must always cover every shard fully.
         let live_shards = *FIREHOSE_LIVE_SHARDS;
         let live_pool_size = if live_shards > 1 {
-            (pool_size / 4).max(live_shards * 8)
+            (pool_size * 3 / 4).max(live_shards * 8)
         } else {
-            pool_size / 4
+            pool_size * 3 / 4
         };
         let labels_pool_size = pool_size / 4;
 
         tracing::info!(
-            "indexer DB pools: live={} (shards={}), backfill={}, labels={}",
+            "indexer DB pools: live={} (shards={}), labels={}",
             live_pool_size,
             live_shards,
-            backfill_pool_size,
             labels_pool_size
         );
 
         let pool_live = Self::create_pool(database_url, live_pool_size.max(5))?;
-        let pool_backfill = Self::create_pool(database_url, backfill_pool_size.max(10))?;
         let pool_labels = Self::create_pool(database_url, labels_pool_size.max(5))?;
 
         crate::metrics::register_pool("indexer_live", &pool_live);
-        crate::metrics::register_pool("indexer_backfill", &pool_backfill);
         crate::metrics::register_pool("indexer_labels", &pool_labels);
 
         let id_resolver = IdResolver::new(IdentityResolverOpts {
@@ -131,10 +126,7 @@ impl IndexerManager {
             workers,
             storage,
             pool_live,
-            pool_backfill,
             pool_labels,
-            // Only backfill gets semaphore; firehose_live and label_live are unbounded
-            semaphore_backfill: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(id_resolver),
         })
     }
@@ -154,17 +146,12 @@ impl IndexerManager {
         let manager = Arc::new(self);
 
         rt.block_on(async {
-            tracing::info!("indexer starting 4 parallel processors");
+            tracing::info!("indexer starting 3 parallel processors");
 
             // Spawn each processor as independent task for true parallelism
             let live_handle = {
                 let mgr = manager.clone();
                 tokio::spawn(async move { Box::pin(mgr.process_firehose_live_loop()).await })
-            };
-
-            let backfill_handle = {
-                let mgr = manager.clone();
-                tokio::spawn(async move { mgr.process_firehose_backfill_loop().await })
             };
 
             let labels_handle = {
@@ -178,8 +165,7 @@ impl IndexerManager {
             };
 
             // Wait for all to complete (they run until shutdown)
-            let _results =
-                tokio::join!(live_handle, backfill_handle, labels_handle, handles_handle);
+            let _results = tokio::join!(live_handle, labels_handle, handles_handle);
         });
 
         Ok(())
@@ -485,183 +471,6 @@ impl IndexerManager {
         .collect()
     }
 
-    async fn process_firehose_backfill_loop(&self) {
-        use std::sync::atomic::AtomicU64;
-
-        let batch_size = *INDEXER_BATCH_SIZE;
-        let num_workers = *INDEXER_BATCH_WORKERS;
-
-        tracing::info!(
-            "firehose_backfill processor started (workers: {}, batch size: {})",
-            num_workers,
-            batch_size
-        );
-
-        // Shared counter for aggregate statistics across all workers
-        let processed_total = Arc::new(AtomicU64::new(0));
-
-        // Spawn worker tasks
-        let mut worker_handles = Vec::with_capacity(num_workers);
-        for worker_id in 0..num_workers {
-            let storage = Arc::clone(&self.storage);
-            let pool = self.pool_backfill.clone();
-            let processed = Arc::clone(&processed_total);
-
-            let handle = tokio::spawn(async move {
-                Box::pin(Self::backfill_worker_loop(
-                    worker_id, storage, pool, batch_size, processed,
-                ))
-                .await;
-            });
-            worker_handles.push(handle);
-        }
-
-        // Logging task - reports aggregate progress
-        let storage_for_logging = Arc::clone(&self.storage);
-        let processed_for_logging = Arc::clone(&processed_total);
-        let logging_handle = tokio::spawn(async move {
-            let mut last_count = 0u64;
-            let mut last_log = std::time::Instant::now();
-
-            loop {
-                if SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                tokio::time::sleep(Duration::from_secs(5)).await;
-
-                let current = processed_for_logging.load(Ordering::Relaxed);
-                let elapsed_secs = last_log.elapsed().as_secs_f64();
-                #[allow(clippy::cast_precision_loss)]
-                let rate = (current - last_count) as f64 / elapsed_secs;
-                let queue_len = storage_for_logging.firehose_backfill_len().unwrap_or(0);
-
-                tracing::info!(
-                    "firehose_backfill: {} indexed ({:.1}/s), {} queued",
-                    current - last_count,
-                    rate,
-                    queue_len
-                );
-
-                last_count = current;
-                last_log = std::time::Instant::now();
-            }
-        });
-
-        // Wait for shutdown
-        for handle in worker_handles {
-            let _result = handle.await;
-        }
-        logging_handle.abort();
-
-        tracing::info!(
-            "firehose_backfill processor stopped, total processed: {}",
-            processed_total.load(Ordering::Relaxed)
-        );
-    }
-
-    async fn backfill_worker_loop(
-        worker_id: usize,
-        storage: Arc<Storage>,
-        pool: Pool,
-        batch_size: usize,
-        processed_count: Arc<std::sync::atomic::AtomicU64>,
-    ) {
-        use std::time::Instant;
-
-        tracing::debug!("firehose_backfill worker {} started", worker_id);
-
-        loop {
-            if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::debug!("firehose_backfill worker {} shutting down", worker_id);
-                break;
-            }
-
-            // Dequeue a batch of jobs using partitioned dequeue for faster access
-            let dequeue_start = Instant::now();
-            let num_workers = *INDEXER_BATCH_WORKERS;
-            let jobs = match storage.dequeue_firehose_backfill_partitioned(
-                worker_id,
-                num_workers,
-                batch_size,
-            ) {
-                Ok(jobs) => jobs,
-                Err(e) => {
-                    // Check if Fjall is poisoned - trigger shutdown for recovery
-                    if e.is_storage_corrupted() {
-                        tracing::error!(
-                            "worker {}: Fjall storage corrupted, triggering shutdown for recovery: {e}",
-                            worker_id
-                        );
-                        SHUTDOWN.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    tracing::error!(
-                        "worker {}: failed to dequeue firehose_backfill jobs: {e}",
-                        worker_id
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-            let dequeue_ms = dequeue_start.elapsed().as_millis();
-
-            if jobs.is_empty() {
-                // No jobs available, wait briefly before retrying
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-
-            let batch_len = jobs.len();
-
-            // Process the entire batch with batch INSERT statements
-            let process_start = Instant::now();
-            let bulk_mode = !*crate::config::LIVE_AGGREGATES;
-            let (results, _batch_failed) = Self::process_jobs_batch(
-                &pool,
-                &jobs,
-                bulk_mode,
-                *crate::config::RECORD_SKIP_BOILERPLATE,
-            )
-            .await;
-            let process_ms = process_start.elapsed().as_millis();
-
-            // Handle results - remove jobs from queue
-            let remove_start = Instant::now();
-            for (key, result) in results {
-                if let Err(e) = &result {
-                    tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
-                }
-                if let Err(e) = storage.remove_firehose_backfill(&key) {
-                    if e.is_storage_corrupted() {
-                        tracing::error!(
-                            "worker {}: Fjall storage corrupted during remove, triggering shutdown: {e}",
-                            worker_id
-                        );
-                        SHUTDOWN.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    tracing::error!(
-                        "worker {}: failed to remove firehose_backfill job: {e}",
-                        worker_id
-                    );
-                }
-            }
-            let remove_ms = remove_start.elapsed().as_millis();
-
-            tracing::info!(
-                "worker {}: dequeue={}ms, process={}ms, remove={}ms, batch={}",
-                worker_id,
-                dequeue_ms,
-                process_ms,
-                remove_ms,
-                batch_len
-            );
-
-            processed_count.fetch_add(batch_len as u64, Ordering::Relaxed);
-        }
-    }
-
     async fn process_labels_loop(&self) {
         let max_concurrent = *INLINE_CONCURRENCY;
 
@@ -783,10 +592,6 @@ impl IndexerManager {
             crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH
                 .set(i64::try_from(live_len).unwrap_or(i64::MAX));
         }
-        if let Ok(backfill_len) = storage.firehose_backfill_len() {
-            crate::metrics::INGESTER_FIREHOSE_BACKFILL_LENGTH
-                .set(i64::try_from(backfill_len).unwrap_or(i64::MAX));
-        }
         if let Ok(label_len) = storage.label_live_len() {
             crate::metrics::INGESTER_LABEL_LIVE_LENGTH
                 .set(i64::try_from(label_len).unwrap_or(i64::MAX));
@@ -796,7 +601,7 @@ impl IndexerManager {
     #[cfg(test)]
     fn dequeue_firehose_live_jobs(&self) -> Vec<IndexJobWithMetadata> {
         let mut jobs = Vec::new();
-        for _ in 0..*INDEXER_BATCH_SIZE {
+        for _ in 0..TEST_DEQUEUE_BATCH {
             match self.storage.dequeue_firehose_live() {
                 Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseLive)),
                 Ok(None) => break,
@@ -810,25 +615,9 @@ impl IndexerManager {
     }
 
     #[cfg(test)]
-    fn dequeue_firehose_backfill_jobs(&self) -> Vec<IndexJobWithMetadata> {
-        let mut jobs = Vec::new();
-        for _ in 0..*INDEXER_BATCH_SIZE {
-            match self.storage.dequeue_firehose_backfill() {
-                Ok(Some((key, job))) => jobs.push((key, job, QueueSource::FirehoseBackfill)),
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::error!("failed to dequeue firehose_backfill job: {e}");
-                    break;
-                }
-            }
-        }
-        jobs
-    }
-
-    #[cfg(test)]
     fn dequeue_label_jobs(&self) -> Vec<LabelJobWithMetadata> {
         let mut label_jobs = Vec::new();
-        for _ in 0..*INDEXER_BATCH_SIZE {
+        for _ in 0..TEST_DEQUEUE_BATCH {
             match self.storage.dequeue_label_live() {
                 Ok(Some((key, label_event))) => {
                     label_jobs.push((key, label_event));
@@ -845,32 +634,23 @@ impl IndexerManager {
 
     #[cfg(test)]
     fn dequeue_prioritized_jobs(&self) -> (Vec<IndexJobWithMetadata>, Vec<LabelJobWithMetadata>) {
-        let mut jobs = self.dequeue_firehose_live_jobs();
-        if jobs.len() < *INDEXER_BATCH_SIZE {
-            jobs.extend(self.dequeue_firehose_backfill_jobs());
-        }
+        let jobs = self.dequeue_firehose_live_jobs();
         let label_jobs = self.dequeue_label_jobs();
         (jobs, label_jobs)
     }
 
     #[cfg(test)]
-    async fn spawn_index_job_tasks(
+    fn spawn_index_job_tasks(
         &self,
         jobs: Vec<(Vec<u8>, IndexJob, QueueSource)>,
-    ) -> Vec<tokio::task::JoinHandle<(Vec<u8>, QueueSource, Result<(), WintermuteError>)>> {
+    ) -> Vec<tokio::task::JoinHandle<JobTaskResult>> {
         let mut tasks = Vec::new();
         for (key, job, source) in jobs {
-            // Use backfill semaphore for tests (most tests use backfill queue)
-            let Ok(permit) = self.semaphore_backfill.clone().acquire_owned().await else {
-                break;
-            };
-
-            let pool = self.pool_backfill.clone();
+            let pool = self.pool_live.clone();
 
             let task = tokio::spawn(async move {
                 let result =
                     Self::process_job(&pool, &job, *crate::config::RECORD_SKIP_BOILERPLATE).await;
-                drop(permit);
                 (key, source, result)
             });
 
@@ -886,9 +666,6 @@ impl IndexerManager {
                 Ok((key, source, Ok(()))) => {
                     let remove_result = match source {
                         QueueSource::FirehoseLive => self.storage.remove_firehose_live(&key),
-                        QueueSource::FirehoseBackfill => {
-                            self.storage.remove_firehose_backfill(&key)
-                        }
                         QueueSource::LabelLive => self.storage.remove_label_live(&key),
                     };
                     if let Err(e) = remove_result {

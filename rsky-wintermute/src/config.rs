@@ -56,33 +56,6 @@ pub static WORKERS_INDEXER: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(16) // Default: 16 concurrent index workers
 });
 
-pub static INDEXER_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("INDEXER_BATCH_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000) // Default: 1000 records per batch
-});
-
-// Number of parallel batch processors for backfill indexing
-// Each worker dequeues and processes batches independently
-// Should be tuned based on DB pool size (e.g., pool_size / 2)
-pub static INDEXER_BATCH_WORKERS: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("INDEXER_BATCH_WORKERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4) // Default: 4 parallel batch workers
-});
-
-// Maximum concurrent indexer tasks for backfill processing
-// Higher values can increase throughput but also increase DB connection contention
-// Should be tuned based on DB pool size and available resources
-pub static INDEXER_MAX_CONCURRENT: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("INDEXER_MAX_CONCURRENT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200) // Default: 200 concurrent tasks (increased from 50)
-});
-
 // Handle resolution: revalidate handles after this duration
 pub const HANDLE_REINDEX_INTERVAL_VALID: Duration = Duration::from_secs(24 * 60 * 60); // 1 day
 pub const HANDLE_REINDEX_INTERVAL_INVALID: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -105,40 +78,6 @@ pub static HANDLE_RESOLUTION_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
 
 // Priority window for recently-indexed actors (resolve new actors faster)
 pub const HANDLE_PRIORITY_WINDOW: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
-
-// Backfiller config - tunable via environment variables for 15B+ record backfills
-pub static WORKERS_BACKFILLER: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_WORKERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(32) // Default: 32 concurrent repo fetches
-});
-
-pub static BACKFILLER_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_BATCH_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000) // Default: dequeue 1000 repos per batch
-});
-
-pub static BACKFILLER_OUTPUT_HIGH_WATER_MARK: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_OUTPUT_HIGH_WATER_MARK")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100_000) // Default: 100k records in output queue before backpressure
-});
-
-pub static BACKFILLER_TIMEOUT_SECS: LazyLock<u64> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120) // Default: 2 minutes per repo fetch
-});
-
-#[must_use]
-pub fn backfiller_timeout() -> Duration {
-    Duration::from_secs(*BACKFILLER_TIMEOUT_SECS)
-}
 
 // Inline processing concurrency for firehose events
 // Should be proportional to DB_POOL_SIZE to avoid excessive connection contention
@@ -317,22 +256,6 @@ pub fn create_pg_pool(
         .build()
         .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
 }
-
-// Backfiller direct write mode - bypass Fjall queue and write directly to PostgreSQL
-// This eliminates the Fjall dequeue bottleneck (~3.5s per batch) for backfill operations
-pub static BACKFILLER_DIRECT_WRITE: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_DIRECT_WRITE")
-        .ok()
-        .is_none_or(|s| s == "true" || s == "1") // Default: enabled (bypass Fjall)
-});
-
-// Backfiller DB pool size - separate from main pool for direct write mode
-pub static BACKFILLER_DB_POOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BACKFILLER_DB_POOL_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(32) // Default: 32 connections for backfiller (matches worker count)
-});
 
 /// Stop writing like/follow/repost/block rows to the record table once the
 /// dataplane synthesizes those records from the typed tables.

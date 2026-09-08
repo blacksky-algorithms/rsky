@@ -1,6 +1,3 @@
-pub mod backfill_queue;
-#[cfg(test)]
-mod backfill_queue_tests;
 pub mod labels;
 mod tests;
 
@@ -80,24 +77,6 @@ impl IngesterManager {
                     Self::run_connection(Arc::clone(&storage), host_clone.clone(), db_url).await;
                 });
                 persistent_tasks.push(firehose_task);
-
-                // Backfill enumeration is a one-shot task -- spawn it independently
-                // so its completion does not affect the ingester's lifetime
-                let backfill_storage = Arc::clone(&self.storage);
-                let backfill_host = host.clone();
-                let backfill_db_url = self.database_url.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = backfill_queue::populate_backfill_queue(
-                        backfill_storage,
-                        backfill_host,
-                        backfill_db_url,
-                    )
-                    .await
-                    {
-                        tracing::error!("backfill queue population failed: {e}");
-                    }
-                    tracing::info!("backfill queue enumeration completed");
-                });
             }
 
             for host in &self.labeler_hosts {
@@ -114,9 +93,7 @@ impl IngesterManager {
                 persistent_tasks.push(task);
             }
 
-            // Only await persistent tasks (firehose + labels).
             // The ingester stays alive as long as any persistent task is running.
-            // Backfill enumeration runs independently and its completion is harmless.
             for task in persistent_tasks {
                 drop(task.await);
             }

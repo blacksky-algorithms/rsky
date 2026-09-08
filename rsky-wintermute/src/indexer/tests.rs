@@ -7,10 +7,11 @@
 
 #[cfg(test)]
 mod indexer_tests {
-    use crate::backfiller::BackfillerManager;
+    use crate::backfiller::hubble::{HubbleConfig, HubbleSource};
+    use crate::backfiller::source::{FetchLimits, RepoSource};
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
-    use crate::types::{BackfillJob, LabelEvent, WriteAction};
+    use crate::types::{IndexJob, LabelEvent, WriteAction};
     use deadpool_postgres::Pool;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -29,6 +30,30 @@ mod indexer_tests {
 
         crate::config::create_pg_pool(&database_url, crate::config::pg_pool_config(16))
             .expect("test pool builds")
+    }
+
+    /// Fetch a repo from hubble, parse it, and write it through the bulk path
+    /// -- the backfill's own pipeline. Returns (records parsed, records written).
+    async fn backfill_repo(pool: &Pool, did: &str) -> (usize, usize) {
+        let hubble = HubbleSource::new(HubbleConfig::default()).unwrap();
+        let body = hubble
+            .fetch_repo(did.to_owned(), FetchLimits::default())
+            .await
+            .expect("hubble getRepo");
+        let parsed = crate::backfiller::parse_body(did, body)
+            .await
+            .expect("parse");
+        let jobs: Vec<(Vec<u8>, IndexJob)> = parsed
+            .jobs
+            .into_iter()
+            .map(|j| (j.uri.clone().into_bytes(), j))
+            .collect();
+        let total = jobs.len();
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(pool, &jobs, true, false).await;
+        assert!(!batch_failed, "batch write failed");
+        let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
+        (total, ok)
     }
 
     async fn cleanup_test_data(pool: &Pool, did: &str) {
@@ -111,86 +136,17 @@ mod indexer_tests {
 
         cleanup_test_data(&pool, test_did).await;
 
-        let job = BackfillJob {
-            did: test_did.to_owned(),
-            retry_count: 0,
-            priority: false,
-        };
-
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
-
-        tracing::info!("processing backfill job for {test_did}");
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
-
-        assert!(result.is_ok(), "backfill job failed: {:?}", result.err());
-
-        let queue_len = storage.firehose_backfill_len().unwrap();
-        tracing::info!("backfill complete, {queue_len} records enqueued for indexing");
+        drop(storage);
+        tracing::info!("backfilling {test_did} through the hubble -> bulk path");
+        let (queue_len, processed) = backfill_repo(&pool, test_did).await;
         assert!(
             queue_len > 5000,
-            "expected more than 5000 records to be enqueued, found {queue_len}"
+            "expected more than 5000 records in the archive, found {queue_len}"
         );
-
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-        });
-        let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
-
-        let mut processed = 0;
-        let batch_size = 100;
-        let mut consecutive_empty = 0;
-
-        while consecutive_empty < 3 {
-            let mut batch_processed = 0;
-
-            for _ in 0..batch_size {
-                match indexer.storage.dequeue_firehose_backfill() {
-                    Ok(Some((key, index_job))) => {
-                        let result =
-                            IndexerManager::process_job(&indexer.pool_backfill, &index_job, false)
-                                .await;
-
-                        match result {
-                            Ok(()) => {
-                                drop(indexer.storage.remove_firehose_backfill(&key));
-                                batch_processed += 1;
-                            }
-                            Err(e) => {
-                                tracing::error!("index job failed for {}: {e:?}", index_job.uri);
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("dequeue failed: {e}");
-                        break;
-                    }
-                }
-            }
-
-            processed += batch_processed;
-
-            if batch_processed == 0 {
-                consecutive_empty += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            } else {
-                consecutive_empty = 0;
-            }
-
-            if processed > 0 && processed % 1000 == 0 {
-                tracing::info!("processed {processed} index jobs");
-            }
-        }
-
         tracing::info!("indexing complete, {processed} records indexed");
 
         #[allow(clippy::cast_precision_loss)]
-        let success_rate = (f64::from(processed) / queue_len as f64) * 100.0;
+        let success_rate = (processed as f64 / queue_len as f64) * 100.0;
         tracing::info!("indexing success rate: {success_rate:.2}%");
 
         #[allow(
@@ -366,52 +322,9 @@ mod indexer_tests {
 
         cleanup_test_data(&pool, test_did).await;
 
-        let job = BackfillJob {
-            did: test_did.to_owned(),
-            retry_count: 0,
-            priority: false,
-        };
-
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
-
-        let result =
-            BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
-                .await;
-        assert!(result.is_ok());
-
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-        });
-        let indexer = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
-
-        let batch_size = 100;
-
-        loop {
-            let mut batch_processed = 0;
-
-            for _ in 0..batch_size {
-                match indexer.storage.dequeue_firehose_backfill() {
-                    Ok(Some((key, index_job))) => {
-                        let result =
-                            IndexerManager::process_job(&indexer.pool_backfill, &index_job, false)
-                                .await;
-
-                        if result.is_ok() {
-                            drop(indexer.storage.remove_firehose_backfill(&key));
-                            batch_processed += 1;
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-            }
-
-            if batch_processed == 0 {
-                break;
-            }
-        }
+        drop(storage);
+        let (_total, ok) = backfill_repo(&pool, test_did).await;
+        assert!(ok > 0, "expected some records to be written");
 
         let client = pool.get().await.unwrap();
 
@@ -1567,51 +1480,6 @@ mod indexer_tests {
     }
 
     #[tokio::test]
-    async fn test_dequeue_prioritized_jobs_firehose_live_priority() {
-        let (storage, _dir) = setup_test_storage();
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
-        });
-        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
-
-        // Add jobs to both queues
-        for i in 0..3 {
-            let job = crate::types::IndexJob {
-                uri: format!("at://did:plc:live/app.bsky.feed.post/test{i}"),
-                cid: "bafylive".to_owned(),
-                action: WriteAction::Create,
-                record: Some(serde_json::json!({"text": "live"})),
-                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
-                rev: "test".to_owned(),
-            };
-            manager.storage.enqueue_firehose_live(&job).unwrap();
-        }
-
-        for i in 0..3 {
-            let job = crate::types::IndexJob {
-                uri: format!("at://did:plc:backfill/app.bsky.feed.post/test{i}"),
-                cid: "bafybackfill".to_owned(),
-                action: WriteAction::Create,
-                record: Some(serde_json::json!({"text": "backfill"})),
-                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
-                rev: "test".to_owned(),
-            };
-            manager.storage.enqueue_firehose_backfill(&job).unwrap();
-        }
-
-        let (jobs, _label_jobs) = manager.dequeue_prioritized_jobs();
-
-        // Should get firehose_live jobs first (dequeue returns same items until removed)
-        assert!(!jobs.is_empty());
-        // First batch should be from firehose_live
-        let first_cid = &jobs[0].1.cid;
-        assert_eq!(
-            first_cid, "bafylive",
-            "should prioritize firehose_live over backfill"
-        );
-    }
-
-    #[tokio::test]
     async fn test_spawn_index_job_tasks_empty() {
         let (storage, _dir) = setup_test_storage();
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -1619,7 +1487,7 @@ mod indexer_tests {
         });
         let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
 
-        let tasks = manager.spawn_index_job_tasks(vec![]).await;
+        let tasks = manager.spawn_index_job_tasks(vec![]);
         assert_eq!(
             tasks.len(),
             0,

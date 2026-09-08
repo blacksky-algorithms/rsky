@@ -27,10 +27,10 @@ printf "  %-20s %15s / %15s  (%5.1f%%)\n" "Likes" "$LIKES" "12,700,000,000" "$(e
 printf "  %-20s %15s / %15s\n" "profile_agg" "$PROFILE_AGG" "42,000,000"
 echo ""
 
-# Queue status (if queue_backfill is available)
-if command -v queue_backfill &>/dev/null; then
+# Backfill state (if the backfill CLI is available)
+if command -v backfill &>/dev/null; then
     echo "--- Queue Status ---"
-    queue_backfill --db-path /data/backfill/backfill_cache status 2>/dev/null || echo "  (queue_backfill not available)"
+    (cd /data/backfill && backfill status 2>/dev/null) || echo "  (backfill state not available)"
     echo ""
 fi
 

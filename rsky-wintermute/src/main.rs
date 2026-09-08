@@ -13,7 +13,7 @@ use signal_hook::iterator::exfiltrator::WithOrigin;
 use tracing_subscriber::EnvFilter;
 
 use rsky_wintermute::SHUTDOWN;
-use rsky_wintermute::backfiller::BackfillerManager;
+use rsky_wintermute::backfiller::{BackfillConfig, BackfillManager};
 use rsky_wintermute::indexer::IndexerManager;
 use rsky_wintermute::ingester::IngesterManager;
 use rsky_wintermute::metrics;
@@ -76,12 +76,15 @@ fn main() -> Result<()> {
         .filter(|h| !h.is_empty())
         .collect();
     let ingester = IngesterManager::new(
-        args.relay_hosts,
+        args.relay_hosts.clone(),
         labeler_hosts,
         Arc::clone(&storage),
         args.database_url.clone(),
     )?;
-    let backfiller = BackfillerManager::new(Arc::clone(&storage))?;
+    let backfill = BackfillManager::new(
+        BackfillConfig::from_env(&args.relay_hosts),
+        args.database_url.clone(),
+    );
     let indexer = IndexerManager::new(Arc::clone(&storage), &args.database_url)?;
 
     let metrics_port = args.metrics_port;
@@ -92,8 +95,8 @@ fn main() -> Result<()> {
                 .name("wintermute-ingester".into())
                 .spawn_scoped(s, move || ingester.run())?,
             thread::Builder::new()
-                .name("wintermute-backfiller".into())
-                .spawn_scoped(s, move || backfiller.run())?,
+                .name("wintermute-backfill".into())
+                .spawn_scoped(s, move || backfill.run())?,
             thread::Builder::new()
                 .name("wintermute-indexer".into())
                 .spawn_scoped(s, move || indexer.run())?,
@@ -102,12 +105,7 @@ fn main() -> Result<()> {
                 .spawn_scoped(
                     s,
                     move || -> Result<(), rsky_wintermute::types::WintermuteError> {
-                        start_metrics_server(metrics_port).map_err(|e| {
-                            rsky_wintermute::types::WintermuteError::Other(format!(
-                                "metrics error: {e}"
-                            ))
-                        })?;
-                        Ok(())
+                        rsky_wintermute::metrics_server::serve(metrics_port)
                     },
                 )?,
         ];
@@ -141,150 +139,4 @@ fn main() -> Result<()> {
         tracing::info!("goodbye for now");
         Ok(())
     })
-}
-
-fn start_metrics_server(port: u16) -> Result<()> {
-    use http_body_util::Full;
-    use hyper::body::Bytes;
-    use hyper::server::conn::http1;
-    use hyper::service::service_fn;
-    use hyper::{Request, Response};
-    use hyper_util::rt::TokioIo;
-    use std::net::SocketAddr;
-    use tokio::net::TcpListener;
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| color_eyre::eyre::eyre!("failed to create tokio runtime: {e}"))?;
-
-    rt.block_on(async move {
-        // Try up to 10 consecutive ports starting from the requested one
-        let mut listener = None;
-        let mut bound_port = port;
-        for offset in 0..10 {
-            let try_port = port.saturating_add(offset);
-            let addr = SocketAddr::from(([0, 0, 0, 0], try_port));
-            match TcpListener::bind(addr).await {
-                Ok(l) => {
-                    if offset > 0 {
-                        tracing::warn!("port {port} in use, using alternate port {try_port}");
-                    }
-                    listener = Some(l);
-                    bound_port = try_port;
-                    break;
-                }
-                Err(e) if offset < 9 => {
-                    tracing::debug!("port {try_port} unavailable: {e}");
-                    continue;
-                }
-                Err(e) => {
-                    return Err(color_eyre::eyre::eyre!(
-                        "failed to bind metrics server on ports {port}-{try_port}: {e}"
-                    ));
-                }
-            }
-        }
-        let listener = listener.unwrap();
-        let addr = SocketAddr::from(([0, 0, 0, 0], bound_port));
-
-        tracing::info!("metrics server listening on http://{addr} (endpoints: /metrics, /_health)");
-
-        loop {
-            if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for metrics server");
-                break;
-            }
-
-            let (stream, _) = tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            tracing::error!("failed to accept connection: {e}");
-                            continue;
-                        }
-                    }
-                }
-                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
-            };
-
-            tokio::task::spawn(async move {
-                let service = service_fn(move |req: Request<hyper::body::Incoming>| async move {
-                    match req.uri().path() {
-                        "/metrics" => match metrics::encode_metrics() {
-                            Ok(body) => Ok::<_, color_eyre::eyre::Error>(
-                                Response::builder()
-                                    .status(200)
-                                    .header("Content-Type", "text/plain; version=0.0.4")
-                                    .body(Full::new(Bytes::from(body)))
-                                    .map_err(|e| {
-                                        color_eyre::eyre::eyre!("failed to build response: {e}")
-                                    })?,
-                            ),
-                            Err(e) => Ok(Response::builder()
-                                .status(500)
-                                .body(Full::new(Bytes::from(format!(
-                                    "Error encoding metrics: {e}"
-                                ))))
-                                .map_err(|e| {
-                                    color_eyre::eyre::eyre!("failed to build response: {e}")
-                                })?),
-                        },
-                        "/_health" => {
-                            let shutting_down = SHUTDOWN.load(Ordering::Relaxed);
-                            if shutting_down {
-                                Ok(Response::builder()
-                                    .status(503)
-                                    .body(Full::new(Bytes::from("shutting_down")))
-                                    .map_err(|e| {
-                                        color_eyre::eyre::eyre!("failed to build response: {e}")
-                                    })?)
-                            } else {
-                                let last_event = metrics::INGESTER_LAST_EVENT_TIME_SECONDS.get();
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0);
-                                // gauge at 0 = no event since boot; lag is unknown, not now-0.
-                                // clamped: event times are source-declared and can be skewed
-                                let lag = (last_event > 0).then(|| (now - last_event).max(0));
-                                let body = serde_json::json!({
-                                    "status": "ok",
-                                    "ingestLagSeconds": lag,
-                                    "indexerQueueLength":
-                                        metrics::INGESTER_FIREHOSE_LIVE_LENGTH.get(),
-                                });
-                                Ok(Response::builder()
-                                    .status(200)
-                                    .header("Content-Type", "application/json")
-                                    .body(Full::new(Bytes::from(body.to_string())))
-                                    .map_err(|e| {
-                                        color_eyre::eyre::eyre!("failed to build response: {e}")
-                                    })?)
-                            }
-                        }
-                        _ => Ok(Response::builder()
-                            .status(404)
-                            .body(Full::new(Bytes::from("Not Found")))
-                            .map_err(|e| {
-                                color_eyre::eyre::eyre!("failed to build response: {e}")
-                            })?),
-                    }
-                });
-
-                if let Err(e) = http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await
-                {
-                    tracing::error!("error serving connection: {e}");
-                }
-            });
-        }
-
-        Ok::<_, color_eyre::eyre::Error>(())
-    })
-    .map_err(|e| color_eyre::eyre::eyre!("metrics server error: {e}"))?;
-
-    Ok(())
 }

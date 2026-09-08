@@ -3,12 +3,12 @@
 
 Wintermute is a monolithic indexer that subscribes to AT Protocol relays, processes the firehose, backfills historical data, and writes to a PostgreSQL database compatible with the bsky app-view dataplane.
 
-Wintermute combines three logical components (ingester, backfiller, indexer) into a single binary for simplified deployment. It uses Fjall (an LSM-tree embedded database) for high-throughput internal queues, avoiding external dependencies like Redis.
+Wintermute combines three logical components (ingester, backfill, indexer) into a single binary for simplified deployment. It uses Fjall (an LSM-tree embedded database) for the live-event queue, avoiding external dependencies like Redis; backfill writes to PostgreSQL directly.
 
 Features and design decisions:
 
 - full-network indexing: processes all repos on the AT Protocol network
-- automatic backfill: fetches historical data from PDSs via `com.atproto.sync.listRepos`
+- full-network backfill: fetches archives directly from Bluesky's PDS fleet and everything else from [hubble](https://hubble.microcosm.blue), the public mirror, under per-host rate budgets
 - label subscription: connects to labeler services to index labels
 - parallel processing: independent queues for live events, backfill, and labels
 - durable queues: Fjall-backed on-disk queues survive restarts
@@ -21,42 +21,28 @@ This tool is designed for operating a bsky app-view that needs to index the enti
 ## Architecture
 
 ```
-                    AT Protocol Relay
-       (Firehose WebSocket + listRepos + Labels endpoint)
-                            |
-           +----------------+----------------+
-           |                |                |
-           v                v                v
-    +-----------+    +-----------+    +-----------+
-    | Firehose  |    | listRepos |    |  Labels   |
-    +-----------+    +-----------+    +-----------+
-           |                |                |
-           |                v                |
-           |         +-------------+         |
-           |         |repo_backfill|         |
-           |         |   (fjall)   |         |
-           |         +------+------+         |
-           |                |                |
-           |                v                |
-           |         +-----------+           |
-           |         | Backfiller|           |
-           |         +-----------+           |
-           |                |                |
-           |                v                |
-           |        +--------------+         |
-           |        |firehose_     |         |
-           |        |backfill(fjall|         |
-           |        +------+-------+         |
-           |               |                 |
-           |    +----------+                 |
-           |    |                            |
-           v    v                            v
-    +------------------+            +------------------+
-    | Inline Indexing  |            | Inline Indexing  |
-    | (firehose+backfill)          |    (labels)      |
-    +--------+---------+            +--------+---------+
-             |                               |
-             v                               v
+       AT Protocol Relay                    PDS hosts (mushrooms)      hubble
+  (firehose + listHosts + labels)          listRepos + getRepo     listRepos + getRepo
+            |                                       |                     |
+   +--------+--------+                              +----------+----------+
+   |                 |                                         |
+   v                 v                                         v
++-----------+  +-----------+                          +-----------------+
+| Firehose  |  |  Labels   |                          |    Backfill     |
++-----------+  +-----------+                          | discover        |
+   |                 |                                | enumerate       |
+   v                 |                                | fetch per host  |
++-------------+      |                                | (rate + demand  |
+|firehose_live|      |                                |  gated)         |
+|  (fjall)    |      |                                +--------+--------+
++------+------+      |                                         |
+       |             |                                         | COPY batches
+       v             v                                         v
++---------------------------+                        +-------------------+
+|   Indexer (live, labels)  |                        | backfill_state    |
++-------------+-------------+                        | (sqlite: per-repo |
+              |                                      |  rev + per-host)  |
+              v                                      +-------------------+
             +---------------------------+
             |        PostgreSQL         |
             |   (bsky dataplane schema) |
@@ -64,9 +50,9 @@ This tool is designed for operating a bsky app-view that needs to index the enti
 ```
 
 **Data flow:**
-- **Firehose (live)**: Events are parsed and indexed inline (directly to PostgreSQL, no queue)
-- **Labels (live)**: Events are parsed and indexed inline (directly to PostgreSQL, no queue)
-- **Backfill**: DIDs queued to `repo_backfill`, backfiller fetches CARs, records queued to `firehose_backfill`, then indexed
+- **Firehose (live)**: Events are parsed into the `firehose_live` queue and indexed in sharded batches
+- **Labels (live)**: Events are parsed and indexed directly to PostgreSQL
+- **Backfill**: hosts are discovered from the relay's `listHosts`; each direct host (by default Bluesky's `*.host.bsky.network` fleet) is enumerated with its own `listRepos`, then hubble is enumerated for everything else. Archives are fetched per source under a per-host rate budget, parsed, and written to PostgreSQL through the bulk COPY path -- only while the writers have room. Per-repo state (`rev` indexed, attempts, cooldown, source) lives in a SQLite file, so re-enumeration only creates work for repos that moved.
 
 ## Quick Start
 
@@ -98,50 +84,81 @@ RUST_LOG=info \
 | `METRICS_PORT` | `9090` | Port for Prometheus metrics endpoint |
 | `RUST_LOG` | (none) | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `INDEXER_WORKERS` | `16` | Concurrent index workers per queue |
-| `INDEXER_BATCH_SIZE` | `1000` | Records per batch (test only) |
-| `BACKFILLER_WORKERS` | `32` | Concurrent repo fetch workers |
-| `BACKFILLER_BATCH_SIZE` | `1000` | Repos to dequeue per batch |
-| `BACKFILLER_OUTPUT_HIGH_WATER_MARK` | `100000` | Max records in firehose_backfill before backpressure |
-| `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
-| `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
-| `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
+| `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for label events |
+| `DB_POOL_SIZE` | `20` | Connections per pool (ingester, labels, indexer live, indexer labels) |
+| `RECORD_COLLECTION_ALLOWLIST` | (legacy `app.bsky.,chat.bsky.` for backfill) | Comma-separated NSID prefixes to index |
+| `RECORD_SKIP_BOILERPLATE` | `false` | Skip `record` rows for like/repost/follow/block |
+| `LIVE_AGGREGATES` | `true` | Update `post_agg`/`profile_agg` inline on the live path |
+
+### Backfill Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKFILL_MODE` | `off` | `off`, `hubble` (everything via hubble), `direct` (only direct hosts), `hybrid` (direct hosts directly, the rest via hubble) |
+| `BACKFILL_SINK` | `postgres` | `null` fetches and parses without writing: measures the fetch side |
+| `BACKFILL_STATE_DB` | `backfill_state.sqlite` | Per-repo / per-host state file (relative to the working directory) |
+| `BACKFILL_RELAY` | first of `RELAY_HOSTS` | Relay whose `listHosts` discovers PDS hosts |
+| `BACKFILL_DIRECT_HOSTS` | `*.host.bsky.network` | Comma-separated suffix globs or exact hosts to fetch directly |
+| `BACKFILL_EXTRA_HOSTS` | (empty) | Hosts to fetch directly even if the relay does not list them (e.g. your own PDS) |
+| `BACKFILL_BSKY_RPS` / `BACKFILL_BSKY_CONCURRENCY` | `10` / `10` | Per-mushroom request rate and in-flight fetches (the PDS global limiter is 3000 req / 5 min per IP) |
+| `BACKFILL_PDS_RPS` / `BACKFILL_PDS_CONCURRENCY` | `3` / `6` | Per-host budget for any other direct host; concurrency steps down 3/4 at a time under transient errors and recovers |
+| `BACKFILL_HUBBLE_URL` | `https://hubble.microcosm.blue` | |
+| `BACKFILL_HUBBLE_RPS` / `BACKFILL_HUBBLE_CONCURRENCY` | `8` / `4` | hubble serves ~119 repos/s at concurrency 16 from nyc3 with a ~28 MB/s byte ceiling; stay well under it |
+| `BACKFILL_USER_AGENT` | `rsky-wintermute/... (+https://blacksky.app; contact)` | Sent on every request; hubble requires a contact |
+| `BACKFILL_MAX_WORKERS` | `128` | Concurrent per-source fetch workers |
+| `BACKFILL_WRITERS` | `4` | Concurrent COPY writers |
+| `BACKFILL_BATCH_JOBS` | `2000` | Records per COPY batch (small repos are batched across repos) |
+| `BACKFILL_QUEUE_REPOS` | `256` | Parsed repos allowed to wait for a writer -- this is the demand gate |
+| `BACKFILL_DB_POOL_SIZE` | `writers * 8` | Connections for the backfill's own pool |
+| `BACKFILL_SPILL_MB` / `BACKFILL_SPILL_DIR` | `1` / `$TMPDIR` | Archives larger than this stream to disk instead of memory |
+| `BACKFILL_MAX_BODY_MB` | `512` | Refuse archives larger than this |
+| `BACKFILL_FETCH_TIMEOUT_SECS` | `300` | Whole-request timeout per archive |
+| `BACKFILL_REENUMERATE_SECS` | `0` | Re-run enumeration this long after a pass completes; `0` enumerates once and then only drains |
+| `BACKFILL_WORKER_THREADS` | CPUs | Tokio threads for the backfill runtime |
 
 ## Utilities
 
-### queue_backfill
+### backfill
 
-Manually queue DIDs for backfill from various sources:
+The backfill exposed as a CLI, so each stage can be run and measured on its own. Reads the same `BACKFILL_*` environment as the daemon; the mode defaults to `hybrid` when unset.
 
 ```bash
-# Queue DIDs from a CSV file
-./target/release/queue_backfill csv --file dids.csv
+# Which hosts will be fetched directly
+./target/release/backfill discover
 
-# Queue all repos from a specific PDS
-./target/release/queue_backfill pds --host blacksky.app
+# Walk listRepos into state (direct hosts first, then hubble); resumable
+./target/release/backfill enumerate
+./target/release/backfill enumerate --source morel.us-east.host.bsky.network --max-pages 5
 
-# Queue specific DIDs
-./target/release/queue_backfill dids --did did:plc:abc123 --did did:plc:def456
+# Counts by state and by source
+./target/release/backfill status
 
-# Show queue status
-./target/release/queue_backfill status
+# Fetch and index everything pending, then exit
+DATABASE_URL=... ./target/release/backfill drain
+
+# Fetch + parse one repo, write nothing
+./target/release/backfill probe --did did:plc:abc123
+./target/release/backfill probe --did did:plc:abc123 --host morel.us-east.host.bsky.network
+
+# Measure the fetch side without a database
+BACKFILL_SINK=null ./target/release/backfill drain
 ```
 
-## Queues
+### direct_index / car_loader
 
-Wintermute uses Fjall for durable backfill queues:
+`direct_index` indexes a handful of repos synchronously (bypassing the state store); `car_loader` bulk-loads CAR files from disk. Both share the backfill's CAR parser.
 
-| Queue | Purpose |
+## Queues and state
+
+| Store | Purpose |
 |-------|---------|
-| `repo_backfill` | DIDs awaiting full repo fetch |
-| `firehose_backfill` | Records extracted from backfilled repos |
+| `firehose_live` (fjall) | Live records awaiting indexing |
+| `label_live` (fjall) | Labels awaiting indexing |
+| `backfill_state.sqlite` | Backfill: per-repo `source`, listed `rev`, `indexed_rev`, state, attempts, cooldown; per-host enumeration cursor, list state, adaptive concurrency floor, cooldown |
 
-**Inline processing (no queue):**
-- **Firehose live events**: Parsed and indexed directly to PostgreSQL with concurrent tasks
-- **Label live events**: Parsed and indexed directly to PostgreSQL with concurrent tasks
+Backfill has no record queue: parsed repos go to the COPY writers through a bounded channel, and fetch workers only claim work while that channel has room.
 
-**Cursor state:** Stored in PostgreSQL `sub_state` table, not Fjall
-
-Backfill uses semaphore-controlled concurrency with backpressure. Live events are never blocked by backfill processing.
+**Cursor state:** Firehose and label cursors are in the PostgreSQL `sub_state` table; backfill enumeration cursors (text, since hubble's are DIDs) are in the state file.
 
 ## Indexed Record Types
 
@@ -174,7 +191,6 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 
 - `ingester_firehose_events_total` - Events received by stream type
 - `ingester_firehose_live_length` - Current firehose_live queue size
-- `ingester_firehose_backfill_length` - Current firehose_backfill queue size
 - `ingester_label_live_length` - Current label_live queue size
 - `ingester_websocket_connections` - Active WebSocket connections
 - `ingester_errors_total` - Ingestion errors by type
@@ -187,9 +203,15 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 - `indexer_repost_events_total` - Reposts indexed
 - `indexer_block_events_total` - Blocks indexed
 - `indexer_profile_events_total` - Profiles indexed
-- `backfiller_repos_processed_total` - Repos backfilled
-- `backfiller_repos_failed_total` - Failed repo backfills
-- `backfiller_records_extracted_total` - Records extracted from repos
+- `backfill_repos_fetched_total{source}` / `backfill_bytes_fetched_total{source}` - Archives fetched, by `hubble` / `bsky` / `pds`
+- `backfill_fetch_failures_total{source,class}` - Fetch failures by class (`rate_limited`, `server_5xx`, `server_5xx_app`, `transport`, `terminal`)
+- `backfill_records_parsed_total` / `backfill_records_written_total` - Records through the parser and committed by the sink
+- `backfill_repos_done_total` / `backfill_repos_terminal_total` - Repos completed, repos written off
+- `backfill_repos_by_state{state}` - State-store rows by `pending` / `claimed` / `done` / `terminal`
+- `backfill_active_workers`, `backfill_in_flight_fetches`, `backfill_sink_queued_repos`, `backfill_sink_records_in_flight` - Where the pipeline is
+- `backfill_gate_waits_total` - Times a fetch worker paused because the writers were full (this is the demand gate working)
+- `backfill_host_reductions_total` / `backfill_host_cooldowns_total` - Adaptive concurrency events
+- `backfill_write_seconds` - Wall time per COPY batch
 
 ## Operations
 
@@ -197,9 +219,11 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 
 Firehose and label cursors are stored in the PostgreSQL `sub_state` table. On restart, wintermute resumes from the last saved cursor position. Cursors are saved every 20 events.
 
-### Backpressure
+### Backfill demand gate and host budgets
 
-The backfiller implements backpressure via `BACKFILLER_OUTPUT_HIGH_WATER_MARK`. When the `firehose_backfill` queue exceeds this threshold, the backfiller pauses repo fetching until the indexer drains the queue. Live events are never affected by backpressure.
+Backfill fetch workers ask the sink for room before claiming a single repo: the channel into the COPY writers is bounded (`BACKFILL_QUEUE_REPOS`), so nothing is pulled from a PDS or hubble that PostgreSQL is not ready to take. Live events are indexed by their own loop and pools and are never blocked by backfill.
+
+Every source has its own worker and token bucket. Bluesky's mushrooms run at a fixed rate and never throttle down. Any other direct host steps its in-flight ceiling down by a quarter after three consecutive transient errors (429, proxy 5xx, connect/timeout), recovers one unit after four quiet minutes, and is parked (honouring `Retry-After`, capped at 300 s) once it exhausts the floor. A repo its own PDS will not serve is handed to hubble with a fresh attempt budget.
 
 ### Handle Resolution
 
@@ -215,9 +239,9 @@ On SIGTERM or SIGINT, wintermute:
 
 ### Recovery
 
-Fjall queues are durable and survive crashes. On restart, wintermute:
+Fjall queues and the backfill state file are durable and survive crashes. On restart, wintermute:
 1. Resumes firehose from saved cursor
-2. Continues processing queued backfill work
+2. Returns any backfill repos claimed by the dead process to pending and resumes enumeration from the persisted per-source cursors
 3. Reprocesses any in-flight records that weren't acknowledged
 
 ## Requirements
@@ -225,7 +249,7 @@ Fjall queues are durable and survive crashes. On restart, wintermute:
 ### System Requirements
 
 - **Memory**: 8GB minimum, 32GB+ recommended for full network indexing
-- **Storage**: 100GB+ for Fjall queues during backfill
+- **Storage**: ~7 GB for the backfill state file at full-network scale, plus spill space for large archives
 - **CPU**: 8+ cores recommended for parallel processing
 
 ### PostgreSQL

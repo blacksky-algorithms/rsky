@@ -1,6 +1,7 @@
 use prometheus::{
-    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder,
+    register_histogram, register_int_counter, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec,
 };
 use std::sync::{LazyLock, Mutex};
 
@@ -68,51 +69,10 @@ pub static INGESTER_FIREHOSE_LIVE_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| 
     .unwrap()
 });
 
-pub static INGESTER_REPO_BACKFILL_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "ingester_repo_backfill_length",
-        "Current length of repo_backfill stream"
-    )
-    .unwrap()
-});
-
 pub static INGESTER_LABEL_LIVE_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
         "ingester_label_live_length",
         "Current length of label_live stream"
-    )
-    .unwrap()
-});
-
-pub static INGESTER_FIREHOSE_BACKFILL_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "ingester_firehose_backfill_length",
-        "Current length of firehose_backfill stream"
-    )
-    .unwrap()
-});
-
-/// Backfill progress
-pub static INGESTER_BACKFILL_REPOS_FETCHED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "ingester_backfill_repos_fetched_total",
-        "Total number of repos fetched for backfill enumeration"
-    )
-    .unwrap()
-});
-
-pub static INGESTER_BACKFILL_REPOS_WRITTEN_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "ingester_backfill_repos_written_total",
-        "Total number of repos written to backfill queue"
-    )
-    .unwrap()
-});
-
-pub static INGESTER_BACKFILL_COMPLETE: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "ingester_backfill_complete",
-        "Whether backfill enumeration is complete (0=in progress, 1=complete)"
     )
     .unwrap()
 });
@@ -161,30 +121,6 @@ pub static INGESTER_ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub static INGESTER_BACKFILL_FETCH_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "ingester_backfill_fetch_errors_total",
-        "Total number of errors fetching repos during backfill enumeration"
-    )
-    .unwrap()
-});
-
-pub static INGESTER_BACKFILL_CURSOR_SKIPS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "ingester_backfill_cursor_skips_total",
-        "Total number of cursor skips during backfill enumeration"
-    )
-    .unwrap()
-});
-
-pub static INGESTER_BACKFILL_CURSOR_RESET_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "ingester_backfill_cursor_reset_total",
-        "Total number of cursor resets due to Fjall data loss detection"
-    )
-    .unwrap()
-});
-
 pub static STORAGE_RECOVERY_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "storage_recovery_total",
@@ -194,113 +130,158 @@ pub static STORAGE_RECOVERY_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
 });
 
 // =============================================================================
-// BACKFILLER METRICS
+// BACKFILL METRICS
 // =============================================================================
 
-/// Repository processing
-pub static BACKFILLER_REPOS_PROCESSED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_repos_processed_total",
-        "Total number of repositories processed by backfiller"
+/// Repos fetched, by where they came from (`hubble`, `bsky`, `pds`).
+pub static BACKFILL_REPOS_FETCHED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "backfill_repos_fetched_total",
+        "Repositories fetched and parsed by the backfill, by source class",
+        &["source"]
     )
     .unwrap()
 });
 
-pub static BACKFILLER_REPOS_FAILED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_repos_failed_total",
-        "Total number of repositories that failed to process"
+/// Wire bytes fetched, by source class.
+pub static BACKFILL_BYTES_FETCHED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "backfill_bytes_fetched_total",
+        "CAR bytes fetched by the backfill, by source class",
+        &["source"]
     )
     .unwrap()
 });
 
-pub static BACKFILLER_REPOS_DEAD_LETTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_repos_dead_lettered_total",
-        "Total number of repositories moved to dead letter queue"
+/// Fetch failures, by source class and failure class.
+pub static BACKFILL_FETCH_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "backfill_fetch_failures_total",
+        "Repository fetches that failed, by source class and failure class",
+        &["source", "class"]
     )
     .unwrap()
 });
 
-pub static BACKFILLER_RETRIES_ATTEMPTED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+pub static BACKFILL_RECORDS_PARSED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
-        "backfiller_retries_attempted_total",
-        "Total number of retry attempts"
+        "backfill_records_parsed_total",
+        "Records extracted from backfilled archives (after the collection allowlist)"
     )
     .unwrap()
 });
 
-/// Record extraction
-pub static BACKFILLER_RECORDS_EXTRACTED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+pub static BACKFILL_RECORDS_FILTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
-        "backfiller_records_extracted_total",
-        "Total number of records extracted from repositories"
+        "backfill_records_filtered_total",
+        "Records dropped from backfilled archives by the collection allowlist"
     )
     .unwrap()
 });
 
-pub static BACKFILLER_RECORDS_FILTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+pub static BACKFILL_RECORDS_WRITTEN_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
-        "backfiller_records_filtered_total",
-        "Total number of records filtered out (non-bsky collections)"
+        "backfill_records_written_total",
+        "Records committed to Postgres by the backfill sink"
     )
     .unwrap()
 });
 
-/// Queue status
-pub static BACKFILLER_OUTPUT_STREAM_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
+pub static BACKFILL_WRITE_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    register_histogram!(
+        "backfill_write_seconds",
+        "Wall time per backfill COPY batch",
+        vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_REPOS_DONE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfill_repos_done_total",
+        "Repositories whose archive was fetched, parsed and committed"
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_REPOS_TERMINAL_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfill_repos_terminal_total",
+        "Repositories written off: inactive upstream, unserveable, or out of attempts"
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_GATE_WAITS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfill_gate_waits_total",
+        "Times a fetch worker paused because the sink had no room"
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_HOST_REDUCTIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfill_host_reductions_total",
+        "Times a host's fetch concurrency was stepped down after transient errors"
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_HOST_COOLDOWNS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "backfill_host_cooldowns_total",
+        "Times a host was parked after exhausting its concurrency floor"
+    )
+    .unwrap()
+});
+
+/// Repo rows by state, sampled from the state store.
+pub static BACKFILL_REPOS_BY_STATE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "backfill_repos_by_state",
+        "Repositories in the backfill state store, by state",
+        &["state"]
+    )
+    .unwrap()
+});
+
+pub static BACKFILL_ACTIVE_WORKERS: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
-        "backfiller_output_stream_length",
-        "Current length of backfiller output stream (firehose_backfill)"
+        "backfill_active_workers",
+        "Fetch workers currently running (one per source with pending work)"
     )
     .unwrap()
 });
 
-pub static BACKFILLER_REPOS_WAITING: LazyLock<IntGauge> = LazyLock::new(|| {
+pub static BACKFILL_IN_FLIGHT_FETCHES: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
-        "backfiller_repos_waiting",
-        "Number of repositories waiting in input queue"
+        "backfill_in_flight_fetches",
+        "Archive downloads currently in progress across all sources"
     )
     .unwrap()
 });
 
-pub static BACKFILLER_REPOS_RUNNING: LazyLock<IntGauge> = LazyLock::new(|| {
+pub static BACKFILL_SINK_QUEUED_REPOS: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
-        "backfiller_repos_running",
-        "Number of repositories currently being processed"
+        "backfill_sink_queued_repos",
+        "Parsed repositories waiting for a Postgres writer"
     )
     .unwrap()
 });
 
-/// Errors
-pub static BACKFILLER_CAR_FETCH_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_car_fetch_errors_total",
-        "Total number of CAR file fetch errors"
+pub static BACKFILL_SINK_RECORDS_IN_FLIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "backfill_sink_records_in_flight",
+        "Records accepted by the sink but not yet committed"
     )
     .unwrap()
 });
 
-pub static BACKFILLER_CAR_PARSE_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_car_parse_errors_total",
-        "Total number of CAR file parse errors"
-    )
-    .unwrap()
-});
-
-pub static BACKFILLER_VERIFICATION_ERRORS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_verification_errors_total",
-        "Total number of repository verification errors"
-    )
-    .unwrap()
-});
-
-pub static BACKFILLER_BACKPRESSURE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "backfiller_backpressure_events_total",
-        "Total number of times backfiller paused due to output stream backpressure"
+pub static BACKFILL_ENUMERATION_COMPLETE: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "backfill_enumeration_complete",
+        "1 once every configured source has been enumerated at least once"
     )
     .unwrap()
 });
@@ -546,9 +527,8 @@ pub fn encode_metrics() -> Result<String, prometheus::Error> {
 pub fn initialize_metrics() {
     // Set initial values for gauge metrics
     INGESTER_BACKPRESSURE_ACTIVE.set(0);
-    INGESTER_BACKFILL_COMPLETE.set(0);
     INGESTER_EVENTS_IN_MEMORY.set(0);
-    BACKFILLER_REPOS_RUNNING.set(0);
+    BACKFILL_ENUMERATION_COMPLETE.set(0);
 }
 
 #[cfg(test)]

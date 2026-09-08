@@ -81,14 +81,6 @@ pub struct RepoOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackfillJob {
-    pub did: String,
-    pub retry_count: u32,
-    #[serde(default)]
-    pub priority: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexJob {
     pub uri: String,
     pub cid: String,

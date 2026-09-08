@@ -1,93 +1,51 @@
 //! [`RepoSource`] backed by hubble, the public whole-network mirror.
 //!
-//! Why this is the default source rather than each repo's own PDS:
+//! hubble is the default source for every host we do not fetch directly. It
+//! takes the DID straight, so there is no DID→PDS resolution, and it serves
+//! archives for hosts that are offline, slow or gone.
 //!
-//! * One host instead of thousands, so there is one rate budget to respect
-//!   rather than a per-host health model to maintain.
-//! * No DID resolution. hubble takes the DID directly, which deletes the
-//!   per-job `IdResolver::new()` (fresh HTTP client, fresh DNS resolver, no
-//!   timeout) that the current backfiller constructs once per repo.
-//! * Measured from nyc3: 9 repos/s at concurrency 1 rising linearly to 119 at
-//!   concurrency 16, with zero 429s across 15,311 requests. The knee is a
-//!   ~28 MB/s byte ceiling, not a request limit.
-//!
-//! That last number is why the defaults here are deliberately far below what
-//! the service will give us. wintermute writes ~521 records/s; hubble at the
-//! knee supplies ~72,000. Pulling anywhere near capacity just moves the
-//! bottleneck into a queue, which is the bug this replaces.
+//! Measured from nyc3: 9 repos/s at concurrency 1 rising linearly to 119 at
+//! concurrency 16, zero 429s across 15,311 requests, then a flat ~28 MB/s byte
+//! ceiling. That ceiling is why the mushroom fleet is fetched directly instead:
+//! 98% of the network through one 28 MB/s pipe is four days of transfer, and it
+//! is somebody else's grant money.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
 
+use super::pds::parse_list_repos;
 use super::source::{
-    RepoBody, RepoPage, RepoRef, RepoSource, SourceError, backoff_secs, classify,
-    parse_retry_after, sleep_secs,
+    FetchLimits, RepoBody, RepoPage, RepoSource, SourceError, read_body, status_error,
 };
 
 /// Public instance. The docs host (`web.hubble.microcosm.blue`) is a different
 /// service and does not serve XRPC.
 pub const DEFAULT_BASE_URL: &str = "https://hubble.microcosm.blue";
 
-/// Identifies this app to hubble, with a contact address.
-///
-/// hubble's policy requires one. Every `reqwest` client in wintermute currently
-/// sends no user-agent at all, which is a violation, not just impoliteness.
+/// Identifies this app to hubble, with a contact address. hubble's policy
+/// requires one; PDSes appreciate one.
 pub const DEFAULT_USER_AGENT: &str =
-    "rsky-wintermute/0.9 (+https://blacksky.app; clinton@blacksky.app)";
+    "rsky-wintermute/0.10 (+https://blacksky.app; clinton@blacksky.app)";
 
 /// `listRepos` caps at 1000.
 pub const MAX_PAGE_LIMIT: u32 = 1000;
 
-/// Default self-imposed request rate, against a service measured serving 119/s
-/// without complaint. Written as a `match` because `unwrap` is not permitted
-/// here and this needs to be a `const`.
+/// Default self-imposed request rate. Written as a `match` because `unwrap` is
+/// not permitted here and this needs to be a `const`.
 pub const DEFAULT_RPS: NonZeroU32 = match NonZeroU32::new(8) {
     Some(v) => v,
     None => NonZeroU32::MIN,
 };
 
-/// Retries for one enumeration page. Losing a page silently skips repos, so
-/// this is more generous than a per-repo fetch, which the caller can revisit
-/// from persisted state.
-const LIST_MAX_RETRIES: u32 = 10;
-
-#[derive(Debug, Deserialize)]
-struct ListReposBody {
-    repos: Vec<ListReposRepo>,
-    cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListReposRepo {
-    did: String,
-    #[serde(default)]
-    rev: String,
-    #[serde(default)]
-    active: Option<bool>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-/// Tunables, all well below measured capacity by intent.
 #[derive(Debug, Clone)]
 pub struct HubbleConfig {
     pub base_url: String,
     pub user_agent: String,
     /// Requests per second, enforced by a token bucket.
     pub rps: NonZeroU32,
-    /// Bodies larger than this spill to a file instead of staying in memory.
-    pub spill_threshold: u64,
-    /// Refuse a body larger than this outright.
-    pub max_body: u64,
-    /// Where spilled bodies go.
-    pub spill_dir: PathBuf,
-    pub request_timeout: Duration,
 }
 
 impl Default for HubbleConfig {
@@ -96,18 +54,11 @@ impl Default for HubbleConfig {
             base_url: DEFAULT_BASE_URL.to_owned(),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             rps: DEFAULT_RPS,
-            // p90 is 135 KiB, so this keeps ~9 repos in 10 off the disk while
-            // capping what a worker can be holding.
-            spill_threshold: 1 << 20,
-            // The largest repo sampled was 87 MB; 512 MiB is a guard against a
-            // pathological or hostile response, not a working limit.
-            max_body: 512 << 20,
-            spill_dir: std::env::temp_dir(),
-            request_timeout: Duration::from_secs(300),
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HubbleSource {
     cfg: HubbleConfig,
     client: reqwest::Client,
@@ -118,15 +69,20 @@ impl HubbleSource {
     pub fn new(cfg: HubbleConfig) -> Result<Self, SourceError> {
         let client = reqwest::Client::builder()
             .user_agent(&cfg.user_agent)
-            .timeout(cfg.request_timeout)
+            .connect_timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| SourceError::Transport(format!("client build: {e}")))?;
+        Ok(Self::with_client(cfg, client))
+    }
+
+    #[must_use]
+    pub fn with_client(cfg: HubbleConfig, client: reqwest::Client) -> Self {
         let limiter = Arc::new(RateLimiter::direct(Quota::per_second(cfg.rps)));
-        Ok(Self {
+        Self {
             cfg,
             client,
             limiter,
-        })
+        }
     }
 
     /// Block until this source's token bucket allows another request.
@@ -138,22 +94,37 @@ impl HubbleSource {
         format!("{}/xrpc/{path}", self.cfg.base_url.trim_end_matches('/'))
     }
 
-    /// Turn a response into a `SourceError` if it is not a success, carrying
-    /// `Retry-After` through so the caller can honour it.
-    fn check_status(resp: &reqwest::Response) -> Result<(), SourceError> {
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(());
+    /// Per-DID metadata without transferring the repo: record count, current
+    /// rev, sync state. Cheap triage.
+    pub async fn repo_info(&self, did: &str) -> Result<RepoInfo, SourceError> {
+        let mut url = url::Url::parse(&self.url("blue.microcosm.hubble.getRepoInfo"))
+            .map_err(|e| SourceError::Decode(format!("bad base url: {e}")))?;
+        url.query_pairs_mut().append_pair("did", did);
+
+        self.wait().await;
+        let resp = self
+            .client
+            .get(url.as_str())
+            .send()
+            .await
+            .map_err(|e| SourceError::Transport(format!("getRepoInfo {did}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(status_error(resp).await);
         }
-        Err(SourceError::Status {
-            status: status.as_u16(),
-            retry_after_secs: parse_retry_after(resp.headers()),
-        })
+        resp.json()
+            .await
+            .map_err(|e| SourceError::Decode(format!("getRepoInfo body: {e}")))
+    }
+}
+
+impl RepoSource for HubbleSource {
+    fn name(&self) -> &'static str {
+        "hubble"
     }
 
-    async fn list_repos_once(
+    async fn list_repos(
         &self,
-        cursor: Option<&str>,
+        cursor: Option<String>,
         limit: u32,
     ) -> Result<RepoPage, SourceError> {
         let mut url = url::Url::parse(&self.url("com.atproto.sync.listRepos"))
@@ -161,7 +132,7 @@ impl HubbleSource {
         {
             let mut q = url.query_pairs_mut();
             q.append_pair("limit", &limit.min(MAX_PAGE_LIMIT).to_string());
-            if let Some(c) = cursor {
+            if let Some(c) = &cursor {
                 q.append_pair("cursor", c);
             }
         }
@@ -173,150 +144,50 @@ impl HubbleSource {
             .send()
             .await
             .map_err(|e| SourceError::Transport(format!("listRepos: {e}")))?;
-        Self::check_status(&resp)?;
-
-        let body: ListReposBody = resp
-            .json()
-            .await
-            .map_err(|e| SourceError::Decode(format!("listRepos body: {e}")))?;
-
-        Ok(RepoPage {
-            repos: body
-                .repos
-                .into_iter()
-                .map(|r| RepoRef {
-                    did: r.did,
-                    rev: r.rev,
-                    // hubble omits `active` for some rows; absent means active,
-                    // matching how the lexicon treats it.
-                    active: r.active.unwrap_or(true),
-                    status: r.status,
-                })
-                .collect(),
-            // An empty cursor string means "done", not "start over" -- a
-            // distinction the current producer does not draw.
-            cursor: body.cursor.filter(|c| !c.is_empty()),
-        })
-    }
-}
-
-impl RepoSource for HubbleSource {
-    fn name(&self) -> &'static str {
-        "hubble"
-    }
-
-    async fn list_repos(&self, cursor: Option<&str>, limit: u32) -> Result<RepoPage, SourceError> {
-        let mut attempt = 0u32;
-        loop {
-            match self.list_repos_once(cursor, limit).await {
-                Ok(page) => return Ok(page),
-                Err(e) if attempt < LIST_MAX_RETRIES && classify(&e).is_transient() => {
-                    attempt += 1;
-                    let delay = super::source::retry_after_secs(&e)
-                        .unwrap_or_else(|| backoff_secs(attempt));
-                    tracing::warn!(
-                        attempt,
-                        max = LIST_MAX_RETRIES,
-                        delay_secs = delay,
-                        error = %e,
-                        "hubble listRepos: transient failure, backing off"
-                    );
-                    sleep_secs(delay).await;
-                }
-                Err(e) => return Err(e),
-            }
+        if !resp.status().is_success() {
+            return Err(status_error(resp).await);
         }
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| SourceError::Transport(format!("listRepos body: {e}")))?;
+        parse_list_repos(&body)
     }
 
-    async fn fetch_repo(
-        &self,
-        did: &str,
-        spill_threshold: u64,
-        cap: u64,
-    ) -> Result<RepoBody, SourceError> {
+    async fn fetch_repo(&self, did: String, limits: FetchLimits) -> Result<RepoBody, SourceError> {
         let mut url = url::Url::parse(&self.url("com.atproto.sync.getRepo"))
             .map_err(|e| SourceError::Decode(format!("bad base url: {e}")))?;
-        url.query_pairs_mut().append_pair("did", did);
+        url.query_pairs_mut().append_pair("did", &did);
 
         self.wait().await;
-        let mut resp = self
+        let resp = self
             .client
             .get(url.as_str())
             // hubble also serves star-lite; we ask for CAR because that is what
             // `rsky-repo` reads.
             .header(reqwest::header::ACCEPT, "application/vnd.ipld.car")
+            .timeout(limits.request_timeout)
             .send()
             .await
             .map_err(|e| SourceError::Transport(format!("getRepo {did}: {e}")))?;
-        Self::check_status(&resp)?;
-
-        // Stream rather than `bytes()`. The p99.9 repo is 24 MiB and the
-        // largest sampled was 87 MB; buffering that whole tail per worker is
-        // what makes the current backfiller's footprint a function of luck.
-        let mut buf: Vec<u8> = Vec::new();
-        let mut spill: Option<(tempfile::NamedTempFile, tokio::fs::File)> = None;
-        let mut total: u64 = 0;
-
-        loop {
-            let chunk = resp
-                .chunk()
-                .await
-                .map_err(|e| SourceError::Transport(format!("getRepo {did} body: {e}")))?;
-            let Some(chunk) = chunk else { break };
-
-            total += chunk.len() as u64;
-            if total > cap {
-                return Err(SourceError::TooLarge { got: total, cap });
-            }
-
-            if let Some((_, file)) = spill.as_mut() {
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
-            } else if total > spill_threshold {
-                // Crossed the threshold: move what we have to disk and keep going.
-                let tmp = tempfile::NamedTempFile::new_in(&self.cfg.spill_dir)
-                    .map_err(|e| SourceError::Transport(format!("spill create: {e}")))?;
-                let handle = tmp
-                    .reopen()
-                    .map_err(|e| SourceError::Transport(format!("spill reopen: {e}")))?;
-                let mut file = tokio::fs::File::from_std(handle);
-                file.write_all(&buf)
-                    .await
-                    .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
-                buf = Vec::new();
-                buf.shrink_to_fit();
-                spill = Some((tmp, file));
-            } else {
-                buf.extend_from_slice(&chunk);
-            }
+        if !resp.status().is_success() {
+            return Err(status_error(resp).await);
         }
-
-        if let Some((tmp, mut file)) = spill {
-            file.flush()
-                .await
-                .map_err(|e| SourceError::Transport(format!("spill flush: {e}")))?;
-            drop(file);
-            return Ok(RepoBody::Spilled {
-                file: tmp,
-                len: total,
-            });
-        }
-        Ok(RepoBody::Memory(buf))
+        read_body(
+            resp,
+            limits.spill_threshold,
+            limits.max_body,
+            &limits.spill_dir,
+        )
+        .await
     }
 }
 
-/// Per-DID metadata without transferring the repo.
-///
-/// hubble's own extension. Useful as cheap triage -- it reports the record
-/// count and current rev, so "is this worth fetching" is answerable for a few
-/// hundred bytes instead of a few hundred kilobytes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoInfo {
     pub did: String,
+    #[serde(default)]
+    pub pds: Option<String>,
     #[serde(default)]
     pub archive: Option<RepoInfoArchive>,
     #[serde(default, rename = "syncState")]
@@ -339,92 +210,104 @@ pub struct RepoInfoSyncState {
     pub state: Option<String>,
 }
 
-impl HubbleSource {
-    pub async fn repo_info(&self, did: &str) -> Result<RepoInfo, SourceError> {
-        let mut url = url::Url::parse(&self.url("blue.microcosm.hubble.getRepoInfo"))
-            .map_err(|e| SourceError::Decode(format!("bad base url: {e}")))?;
-        url.query_pairs_mut().append_pair("did", did);
-
-        self.wait().await;
-        let resp = self
-            .client
-            .get(url.as_str())
-            .send()
-            .await
-            .map_err(|e| SourceError::Transport(format!("getRepoInfo {did}: {e}")))?;
-        Self::check_status(&resp)?;
-        resp.json()
-            .await
-            .map_err(|e| SourceError::Decode(format!("getRepoInfo body: {e}")))
-    }
-}
-
-/// Convenience: whether a status string from enumeration means the archive will
-/// never be fetchable, so the row can go straight to terminal instead of
-/// spending a getRepo that will 400.
-#[must_use]
-pub fn status_is_unfetchable(active: bool, status: Option<&str>) -> bool {
-    if active {
-        return false;
-    }
-    matches!(
-        status,
-        Some("deleted" | "takendown" | "deactivated" | "suspended") | None
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::significant_drop_tightening)]
     use super::*;
+    use crate::backfiller::source::{Class, classify};
 
     #[test]
-    fn config_defaults_sit_well_under_measured_capacity() {
+    fn config_defaults_carry_a_contact_and_sit_under_measured_capacity() {
         let cfg = HubbleConfig::default();
-        // Measured knee was 119 repos/s at concurrency 16; 8 rps is ~7% of that.
-        assert_eq!(cfg.rps.get(), 8);
-        assert!(cfg.spill_threshold < cfg.max_body);
+        assert!(cfg.rps.get() < 119);
         assert!(cfg.user_agent.contains('@'), "must carry a contact address");
+        assert_eq!(cfg.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn url_join_is_stable_with_or_without_trailing_slash() {
-        let cfg = HubbleConfig {
-            base_url: "https://example.test/".into(),
-            ..HubbleConfig::default()
-        };
-        let s = HubbleSource::new(cfg).unwrap();
-        assert_eq!(
-            s.url("com.atproto.sync.listRepos"),
-            "https://example.test/xrpc/com.atproto.sync.listRepos"
+        let a = HubbleSource::with_client(
+            HubbleConfig {
+                base_url: "https://h.example/".into(),
+                ..HubbleConfig::default()
+            },
+            reqwest::Client::new(),
         );
+        let b = HubbleSource::with_client(
+            HubbleConfig {
+                base_url: "https://h.example".into(),
+                ..HubbleConfig::default()
+            },
+            reqwest::Client::new(),
+        );
+        assert_eq!(a.url("x"), b.url("x"));
+        assert_eq!(a.url("x"), "https://h.example/xrpc/x");
+        assert_eq!(a.name(), "hubble");
     }
 
-    #[test]
-    fn inactive_repos_are_recognised_as_unfetchable() {
-        assert!(!status_is_unfetchable(true, None));
-        assert!(!status_is_unfetchable(true, Some("deleted")));
-        assert!(status_is_unfetchable(false, Some("deleted")));
-        assert!(status_is_unfetchable(false, Some("takendown")));
-        assert!(status_is_unfetchable(false, None));
-        // An unknown inactive status is worth one attempt rather than a
-        // permanent write-off.
-        assert!(!status_is_unfetchable(false, Some("something-new")));
-    }
+    #[tokio::test]
+    async fn hubble_round_trip_against_a_fake_instance() {
+        let mut server = mockito::Server::new_async().await;
+        let _list = server
+            .mock("GET", "/xrpc/com.atproto.sync.listRepos")
+            .match_query(mockito::Matcher::UrlEncoded("limit".into(), "1000".into()))
+            .with_status(200)
+            .with_body(
+                r#"{"repos":[{"did":"did:plc:a","rev":"3lx","head":""}],"cursor":"did:plc:a"}"#,
+            )
+            .create_async()
+            .await;
+        let _repo = server
+            .mock("GET", "/xrpc/com.atproto.sync.getRepo")
+            .match_query(mockito::Matcher::Any)
+            .match_header("accept", "application/vnd.ipld.car")
+            .with_status(200)
+            .with_body(vec![9u8; 10])
+            .create_async()
+            .await;
+        let _info = server
+            .mock("GET", "/xrpc/blue.microcosm.hubble.getRepoInfo")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "did".into(),
+                "did:plc:a".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                r#"{"did":"did:plc:a","pds":"https://x","archive":{"available":true,"records":482},
+                    "syncState":{"state":"synchronized","rev":"3lx"}}"#,
+            )
+            .create_async()
+            .await;
+        let _limited = server
+            .mock("GET", "/xrpc/blue.microcosm.hubble.getRepoInfo")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "did".into(),
+                "did:plc:slow".into(),
+            ))
+            .with_status(429)
+            .with_header("retry-after", "5")
+            .create_async()
+            .await;
 
-    #[test]
-    fn list_repos_body_tolerates_hubble_and_relay_shapes() {
-        // hubble: rev present, head empty, active present.
-        let hubble = r#"{"repos":[{"did":"did:plc:a","rev":"3lido2","head":"","active":true}],
-                         "cursor":"did:plc:a"}"#;
-        let b: ListReposBody = serde_json::from_str(hubble).unwrap();
-        assert_eq!(b.repos[0].rev, "3lido2");
-        assert_eq!(b.cursor.as_deref(), Some("did:plc:a"));
+        let s = HubbleSource::new(HubbleConfig {
+            base_url: server.url(),
+            ..HubbleConfig::default()
+        })
+        .unwrap();
 
-        // A relay that omits active/status entirely still parses.
-        let sparse = r#"{"repos":[{"did":"did:plc:b","rev":"3x"}],"cursor":null}"#;
-        let b: ListReposBody = serde_json::from_str(sparse).unwrap();
-        assert_eq!(b.repos[0].did, "did:plc:b");
-        assert!(b.repos[0].active.is_none());
-        assert!(b.cursor.is_none());
+        let page = s.list_repos(None, 1000).await.unwrap();
+        assert_eq!(page.cursor.as_deref(), Some("did:plc:a"), "a DID cursor");
+        let body = s
+            .fetch_repo("did:plc:a".into(), FetchLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 10);
+        let info = s.repo_info("did:plc:a").await.unwrap();
+        assert_eq!(info.archive.unwrap().records, Some(482));
+        assert_eq!(info.sync_state.unwrap().rev.as_deref(), Some("3lx"));
+        assert_eq!(info.pds.as_deref(), Some("https://x"));
+
+        let err = s.repo_info("did:plc:slow").await.unwrap_err();
+        assert_eq!(classify(&err), Class::RateLimited);
     }
 }

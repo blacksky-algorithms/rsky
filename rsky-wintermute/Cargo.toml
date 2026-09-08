@@ -1,17 +1,13 @@
 [package]
 name = "rsky-wintermute"
-version = "0.9.4"
+version = "0.10.0"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
-description = "Monolithic indexer combining ingester, backfiller, and indexer"
+description = "Monolithic indexer combining ingester, backfill, and indexer"
 
 [[bin]]
 name = "wintermute"
 path = "src/main.rs"
-
-[[bin]]
-name = "queue_backfill"
-path = "src/bin/queue_backfill.rs"
 
 [[bin]]
 name = "fix_blob_refs"
@@ -30,8 +26,8 @@ name = "car_loader"
 path = "src/bin/car_loader.rs"
 
 [[bin]]
-name = "hubble_backfill"
-path = "src/bin/hubble_backfill.rs"
+name = "backfill"
+path = "src/bin/backfill.rs"
 
 [[bin]]
 name = "cleanup_stale_deactivated"
@@ -48,7 +44,6 @@ dashmap = "6"
 derive_more = { version = "2", features = ["full"] }
 fjall = "2"
 governor = "0.10"
-heed = "0.20"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 iroh-car = "0.5.1"
 mimalloc = "0.1"

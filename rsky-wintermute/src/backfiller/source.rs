@@ -1,19 +1,19 @@
 //! Where backfill gets its repos: enumeration, and archive fetch.
 //!
-//! The current backfiller hard-wires one answer -- enumerate DIDs from a relay,
-//! resolve each one to a PDS, fetch from there. This splits that into a trait so
-//! hubble and PDS-direct are interchangeable, and so the retry and give-up
-//! policy lives in one tested place instead of inline in the worker loop
-//! (`retry_count < 2`, then dead-letter, with no notion of *why* it failed).
+//! Two sources implement [`RepoSource`]: hubble, the public whole-network
+//! mirror, and a PDS reached directly. The runner is generic over both, and the
+//! retry and give-up policy lives here in one tested place instead of inline in
+//! a worker loop.
 
+use std::path::Path;
 use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
 
 /// One repo, as an enumeration source describes it.
 ///
-/// `rev` is the whole reason this type exists. It is what lets a later
-/// enumeration pass skip a repo whose contents have not moved. The current
-/// producer parses `listRepos` into `{ did }` and throws the rest away, which
-/// is why every pass re-enqueues the entire network.
+/// `rev` is what lets a later enumeration pass skip a repo whose contents have
+/// not moved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRef {
     pub did: String,
@@ -22,12 +22,8 @@ pub struct RepoRef {
     pub status: Option<String>,
 }
 
-/// One page of enumeration results.
-///
-/// `cursor` is a `String`, not an `i64`. Relay cursors are integers; hubble's
-/// are DIDs. The existing producer persists with `parse::<i64>().unwrap_or(0)`,
-/// so against any non-numeric cursor it writes `0` and every restart
-/// re-enumerates from the beginning of the keyspace.
+/// One page of enumeration results. `cursor` is opaque text: relay cursors are
+/// integers, hubble's are DIDs.
 #[derive(Debug, Clone, Default)]
 pub struct RepoPage {
     pub repos: Vec<RepoRef>,
@@ -41,6 +37,10 @@ pub enum SourceError {
     Status {
         status: u16,
         retry_after_secs: Option<u64>,
+        /// The body was an XRPC error envelope (`{"error": ..., "message": ...}`).
+        /// A 500 carrying one is the PDS reporting a per-repo failure, not host
+        /// load, and must not throttle the host.
+        xrpc_error: bool,
     },
     /// No HTTP response at all: DNS, connect, TLS, timeout, read.
     #[error("transport: {0}")]
@@ -55,20 +55,19 @@ pub enum SourceError {
 
 /// What kind of failure this was, which decides whether we back off and retry,
 /// throttle the host, or stop asking.
-///
-/// Ported from `car-dump`'s `Classification`. The distinction that matters:
-/// a 429 or a 502 means "later"; a 400 or a 404 means "never", and retrying it
-/// only burns budget that a recoverable host could have used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// Rate limited. Back off, and respect `Retry-After` if it came with one.
     RateLimited,
-    /// Host-side 5xx. Transient, throttle the host.
+    /// Host-side or proxy 5xx. Transient, throttles the host.
     Server5xx,
-    /// No response. Transient, throttle the host.
+    /// A 500 with an XRPC error body: this repo, not this host. Transient, but
+    /// says nothing about host health.
+    Server5xxApp,
+    /// No response. Transient, throttles the host.
     Transport,
     /// The host will never serve this. Do not retry, do not throttle the host
-    /// for it -- it is this repo that is unserveable, not the host.
+    /// for it.
     Terminal,
 }
 
@@ -76,15 +75,14 @@ impl Class {
     /// Whether this is worth trying again later.
     #[must_use]
     pub const fn is_transient(self) -> bool {
-        matches!(self, Self::RateLimited | Self::Server5xx | Self::Transport)
+        !matches!(self, Self::Terminal)
     }
 
-    /// Whether this outcome should count against the host's health, stepping
-    /// its concurrency down. Terminal per-repo failures must not: a host that
-    /// legitimately 404s a thousand deleted repos is healthy.
+    /// Whether this outcome is evidence about the host, stepping its
+    /// concurrency down. A host that 404s a thousand deleted repos is healthy.
     #[must_use]
     pub const fn throttles_host(self) -> bool {
-        self.is_transient()
+        matches!(self, Self::RateLimited | Self::Server5xx | Self::Transport)
     }
 
     #[must_use]
@@ -92,23 +90,25 @@ impl Class {
         match self {
             Self::RateLimited => "rate_limited",
             Self::Server5xx => "server_5xx",
+            Self::Server5xxApp => "server_5xx_app",
             Self::Transport => "transport",
             Self::Terminal => "terminal",
         }
     }
 }
 
-/// Classify a failure.
-///
-/// 501 and 505 are terminal even though they are 5xx: the host is telling us it
-/// will never implement this, so a retry budget spent on it is wasted.
+/// Classify a failure. 501 and 505 are terminal even though they are 5xx: the
+/// host is telling us it will never implement this.
 #[must_use]
 pub fn classify(err: &SourceError) -> Class {
     match err {
         SourceError::Transport(_) => Class::Transport,
-        SourceError::Status { status, .. } => match *status {
+        SourceError::Status {
+            status, xrpc_error, ..
+        } => match *status {
             429 => Class::RateLimited,
             501 | 505 => Class::Terminal,
+            500 if *xrpc_error => Class::Server5xxApp,
             s if (500..600).contains(&s) => Class::Server5xx,
             _ => Class::Terminal,
         },
@@ -166,10 +166,8 @@ pub const fn cooldown_secs(retry_after: Option<u64>) -> u64 {
     }
 }
 
-/// Parse `Retry-After` in its integer-seconds form.
-///
-/// The HTTP-date form is deliberately not handled: it is rare in practice, and
-/// a miss yields `None`, which falls back to the floor -- the safe direction.
+/// Parse `Retry-After` in its integer-seconds form. The HTTP-date form is not
+/// handled; a miss yields `None`, which falls back to the floor.
 #[must_use]
 pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
@@ -181,13 +179,46 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()
 }
 
+/// True if `body` is the XRPC error envelope: an object with string `error`
+/// and `message` fields.
+#[must_use]
+pub fn is_xrpc_error_body(body: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(body)
+    else {
+        return false;
+    };
+    map.get("error").is_some_and(serde_json::Value::is_string)
+        && map.get("message").is_some_and(serde_json::Value::is_string)
+}
+
+/// Largest error body we bother reading, to classify it.
+const MAX_ERROR_BODY: usize = 2048;
+
+/// Turn a non-2xx response into a [`SourceError::Status`], reading a bounded
+/// slice of the body to tell an XRPC application error from a proxy 5xx.
+pub async fn status_error(resp: reqwest::Response) -> SourceError {
+    let status = resp.status().as_u16();
+    let retry_after_secs = parse_retry_after(resp.headers());
+    let mut body: Vec<u8> = Vec::new();
+    let mut resp = resp;
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        body.extend_from_slice(&chunk);
+        if body.len() >= MAX_ERROR_BODY {
+            break;
+        }
+    }
+    SourceError::Status {
+        status,
+        retry_after_secs,
+        xrpc_error: is_xrpc_error_body(&body),
+    }
+}
+
 /// An archive body. Small repos stay in memory; the fat tail spills to disk.
 ///
-/// The measured distribution justifies the split: p50 is 3 KiB and p90 is
-/// 135 KiB, but p99.9 is 24 MiB and the largest repo sampled was 87 MB. Holding
-/// the tail in memory across N workers is what makes the current backfiller's
-/// footprint unpredictable -- and it holds each one *three* times over
-/// (`Bytes`, then `to_vec()`, then the `BlockMap`).
+/// Measured: p50 is 3 KiB and p90 is 135 KiB, but p99.9 is 24 MiB and the
+/// largest repo sampled was 87 MB. Holding the tail in memory across N workers
+/// is what made the old backfiller's footprint unpredictable.
 #[derive(Debug)]
 pub enum RepoBody {
     Memory(Vec<u8>),
@@ -217,30 +248,134 @@ impl RepoBody {
     }
 }
 
+/// Stream a response body into a [`RepoBody`].
+///
+/// Spills to a file in `spill_dir` once `spill_threshold` bytes have arrived
+/// and refuses past `cap`. Shared by every source so the memory bound is
+/// enforced in one place.
+pub async fn read_body(
+    mut resp: reqwest::Response,
+    spill_threshold: u64,
+    cap: u64,
+    spill_dir: &Path,
+) -> Result<RepoBody, SourceError> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut spill: Option<(tempfile::NamedTempFile, tokio::fs::File)> = None;
+    let mut total: u64 = 0;
+
+    loop {
+        let chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| SourceError::Transport(format!("body: {e}")))?;
+        let Some(chunk) = chunk else { break };
+
+        total += chunk.len() as u64;
+        if total > cap {
+            return Err(SourceError::TooLarge { got: total, cap });
+        }
+
+        if let Some((_, file)) = spill.as_mut() {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
+        } else if total > spill_threshold {
+            let tmp = tempfile::NamedTempFile::new_in(spill_dir)
+                .map_err(|e| SourceError::Transport(format!("spill create: {e}")))?;
+            let handle = tmp
+                .reopen()
+                .map_err(|e| SourceError::Transport(format!("spill reopen: {e}")))?;
+            let mut file = tokio::fs::File::from_std(handle);
+            file.write_all(&buf)
+                .await
+                .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| SourceError::Transport(format!("spill write: {e}")))?;
+            buf = Vec::new();
+            spill = Some((tmp, file));
+        } else {
+            buf.extend_from_slice(&chunk);
+        }
+    }
+
+    if let Some((tmp, mut file)) = spill {
+        file.flush()
+            .await
+            .map_err(|e| SourceError::Transport(format!("spill flush: {e}")))?;
+        drop(file);
+        return Ok(RepoBody::Spilled {
+            file: tmp,
+            len: total,
+        });
+    }
+    Ok(RepoBody::Memory(buf))
+}
+
+/// Fetch tunables shared by every source.
+#[derive(Debug, Clone)]
+pub struct FetchLimits {
+    /// Bodies larger than this spill to a file instead of staying in memory.
+    pub spill_threshold: u64,
+    /// Refuse a body larger than this outright.
+    pub max_body: u64,
+    /// Where spilled bodies go.
+    pub spill_dir: std::path::PathBuf,
+    /// Whole-request timeout for one archive.
+    pub request_timeout: Duration,
+}
+
+impl Default for FetchLimits {
+    fn default() -> Self {
+        Self {
+            // p90 is 135 KiB, so this keeps ~9 repos in 10 off the disk.
+            spill_threshold: 1 << 20,
+            // The largest repo sampled was 87 MB; 512 MiB guards against a
+            // pathological response, it is not a working limit.
+            max_body: 512 << 20,
+            spill_dir: std::env::temp_dir(),
+            request_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
 /// A place backfill can enumerate repos from and fetch archives from.
 ///
-/// Static dispatch: the runner is generic over the source. Runtime switching
-/// between hubble and PDS-direct wants an enum wrapper rather than `dyn`,
-/// because the futures here are opaque.
+/// One attempt per call: retry policy belongs to the runner, which knows
+/// whether it is enumerating (never lose a page) or fetching (the repo can be
+/// revisited from persisted state).
 pub trait RepoSource: Send + Sync {
-    /// Short name for logs and metric labels.
-    fn name(&self) -> &'static str;
+    /// Identifier for state rows, logs and metric labels: `hubble`, or the
+    /// PDS hostname.
+    fn name(&self) -> &str;
 
     /// One page of enumeration. `cursor` is opaque and source-defined.
     fn list_repos(
         &self,
-        cursor: Option<&str>,
+        cursor: Option<String>,
         limit: u32,
     ) -> impl Future<Output = Result<RepoPage, SourceError>> + Send;
 
-    /// Fetch one repo's CAR, spilling to disk past `spill_threshold` and
-    /// refusing past `cap`.
+    /// Fetch one repo's CAR.
     fn fetch_repo(
         &self,
-        did: &str,
-        spill_threshold: u64,
-        cap: u64,
+        did: String,
+        limits: FetchLimits,
     ) -> impl Future<Output = Result<RepoBody, SourceError>> + Send;
+}
+
+/// Whether a `listRepos` status means the archive will never be fetchable, so
+/// the row goes straight to terminal instead of spending a `getRepo` that
+/// will 400.
+#[must_use]
+pub fn status_is_unfetchable(active: bool, status: Option<&str>) -> bool {
+    if active {
+        return false;
+    }
+    matches!(
+        status,
+        Some("deleted" | "takendown" | "deactivated" | "suspended") | None
+    )
 }
 
 /// Sleep helper so the runner's backoff is easy to see at the call site.
@@ -250,12 +385,14 @@ pub async fn sleep_secs(secs: u64) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::significant_drop_tightening)]
     use super::*;
 
     fn status(code: u16) -> SourceError {
         SourceError::Status {
             status: code,
             retry_after_secs: None,
+            xrpc_error: false,
         }
     }
 
@@ -267,6 +404,25 @@ mod tests {
             assert!(classify(&status(code)).is_transient());
         }
         assert!(classify(&SourceError::Transport("dns".into())).is_transient());
+    }
+
+    #[test]
+    fn a_500_with_an_xrpc_body_is_a_repo_problem_not_a_host_problem() {
+        let err = SourceError::Status {
+            status: 500,
+            retry_after_secs: None,
+            xrpc_error: true,
+        };
+        assert_eq!(classify(&err), Class::Server5xxApp);
+        assert!(classify(&err).is_transient());
+        assert!(!classify(&err).throttles_host());
+        // Only 500 gets that reading: a 502 with a JSON body is still a proxy.
+        let proxy = SourceError::Status {
+            status: 502,
+            retry_after_secs: None,
+            xrpc_error: true,
+        };
+        assert_eq!(classify(&proxy), Class::Server5xx);
     }
 
     #[test]
@@ -287,11 +443,12 @@ mod tests {
 
     #[test]
     fn terminal_failures_do_not_throttle_the_host() {
-        // A host serving a thousand 404s for deleted repos is healthy; only
-        // transient failures are evidence about the host itself.
         assert!(!classify(&status(404)).throttles_host());
         assert!(classify(&status(429)).throttles_host());
         assert!(classify(&status(503)).throttles_host());
+        assert!(classify(&SourceError::Transport("x".into())).throttles_host());
+        assert_eq!(Class::Server5xxApp.as_str(), "server_5xx_app");
+        assert_eq!(Class::Terminal.as_str(), "terminal");
     }
 
     #[test]
@@ -335,10 +492,35 @@ mod tests {
         let err = SourceError::Status {
             status: 429,
             retry_after_secs: Some(20),
+            xrpc_error: false,
         };
         assert_eq!(classify(&err), Class::RateLimited);
         assert_eq!(retry_after_secs(&err), Some(20));
+        assert_eq!(retry_after_secs(&SourceError::Transport("x".into())), None);
         assert_eq!(cooldown_secs(retry_after_secs(&err)), 20);
+    }
+
+    #[test]
+    fn xrpc_error_bodies_are_recognised() {
+        assert!(is_xrpc_error_body(
+            br#"{"error":"RepoNotFound","message":"Could not find repo"}"#
+        ));
+        assert!(!is_xrpc_error_body(br#"{"error":"x"}"#));
+        assert!(!is_xrpc_error_body(b"<html>502 bad gateway</html>"));
+        assert!(!is_xrpc_error_body(b""));
+    }
+
+    #[test]
+    fn inactive_repos_are_recognised_as_unfetchable() {
+        assert!(!status_is_unfetchable(true, None));
+        assert!(!status_is_unfetchable(true, Some("takendown")));
+        assert!(status_is_unfetchable(false, Some("deleted")));
+        assert!(status_is_unfetchable(false, Some("takendown")));
+        assert!(status_is_unfetchable(false, Some("deactivated")));
+        assert!(status_is_unfetchable(false, Some("suspended")));
+        assert!(status_is_unfetchable(false, None));
+        assert!(!status_is_unfetchable(false, Some("throttled")));
+        assert!(!status_is_unfetchable(false, Some("desynchronized")));
     }
 
     #[test]
@@ -348,5 +530,72 @@ mod tests {
         assert!(!mem.spilled());
         assert!(!mem.is_empty());
         assert!(RepoBody::Memory(Vec::new()).is_empty());
+        let limits = FetchLimits::default();
+        assert!(limits.spill_threshold < limits.max_body);
+    }
+
+    #[tokio::test]
+    async fn bodies_spill_past_the_threshold_and_refuse_past_the_cap() {
+        let mut server = mockito::Server::new_async().await;
+        let big = vec![7u8; 4096];
+        let _m = server
+            .mock("GET", "/big")
+            .with_status(200)
+            .with_body(big.clone())
+            .create_async()
+            .await;
+        let client = reqwest::Client::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        let resp = client.get(server.url() + "/big").send().await.unwrap();
+        let body = read_body(resp, 1024, 1 << 20, dir.path()).await.unwrap();
+        assert!(body.spilled());
+        assert_eq!(body.len(), 4096);
+        if let RepoBody::Spilled { file, .. } = &body {
+            assert_eq!(std::fs::read(file.path()).unwrap(), big);
+        }
+
+        let resp = client.get(server.url() + "/big").send().await.unwrap();
+        let body = read_body(resp, 1 << 20, 1 << 20, dir.path()).await.unwrap();
+        assert!(!body.spilled());
+        assert_eq!(body.len(), 4096);
+
+        let resp = client.get(server.url() + "/big").send().await.unwrap();
+        let err = read_body(resp, 1024, 2048, dir.path()).await.unwrap_err();
+        assert!(matches!(err, SourceError::TooLarge { cap: 2048, .. }));
+    }
+
+    #[tokio::test]
+    async fn status_errors_carry_retry_after_and_xrpc_shape() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/limited")
+            .with_status(429)
+            .with_header("retry-after", "17")
+            .with_body("slow down")
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("GET", "/broken")
+            .with_status(500)
+            .with_body(r#"{"error":"InternalServerError","message":"repo is broken"}"#)
+            .create_async()
+            .await;
+        let client = reqwest::Client::new();
+
+        let resp = client.get(server.url() + "/limited").send().await.unwrap();
+        let err = status_error(resp).await;
+        assert!(matches!(
+            err,
+            SourceError::Status {
+                status: 429,
+                retry_after_secs: Some(17),
+                xrpc_error: false
+            }
+        ));
+
+        let resp = client.get(server.url() + "/broken").send().await.unwrap();
+        let err = status_error(resp).await;
+        assert_eq!(classify(&err), Class::Server5xxApp);
     }
 }
