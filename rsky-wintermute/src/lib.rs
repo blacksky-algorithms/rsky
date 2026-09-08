@@ -38,6 +38,8 @@
 
 pub mod backfiller;
 pub mod config;
+#[cfg(feature = "hubble-sync")]
+pub mod hubble_sync_surface;
 pub mod indexer;
 pub mod ingester;
 pub mod metrics;

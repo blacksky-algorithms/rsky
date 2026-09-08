@@ -87,6 +87,14 @@ serde_ipld_dagcbor = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "hickory-dns", "http2", "json", "rustls-tls-webpki-roots-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
+# Optional: the vendored hubble-sync (see vendor/hubble-sync/NOTICE.md), for a
+# future sync-1.1 ingester built on it. Nothing in the daemon uses it yet; the
+# feature exists so the crate's public surface is exercised by `cargo check`.
+hubble-sync = { path = "../vendor/hubble-sync", optional = true }
+
+[features]
+hubble-sync = ["dep:hubble-sync"]
+
 [dev-dependencies]
 mockito = "1.7.0"
 serial_test = { version = "3.2", features = ["async"] }

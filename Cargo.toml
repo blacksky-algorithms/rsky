@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "vendor/hubble-sync",
   "palomar-sync",
   "rsky-common",
   "rsky-crypto",
