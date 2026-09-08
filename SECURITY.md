@@ -19,7 +19,7 @@ The preferred way to report a vulnerability is through GitHub's private reportin
 This opens a private conversation with maintainers and keeps the report out of public
 view until it's resolved.
 
-If you'd rather not use GitHub, you can instead email **rudy@blacksky.app**.
+If you'd rather not use GitHub, you can instead email **support@blacksky.app**.
 
 In either case, please include:
 
