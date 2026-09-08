@@ -13,9 +13,11 @@ use signal_hook::iterator::exfiltrator::WithOrigin;
 use tracing_subscriber::EnvFilter;
 
 use rsky_wintermute::SHUTDOWN;
-use rsky_wintermute::backfiller::{BackfillConfig, BackfillManager};
+use rsky_wintermute::backfiller::state::RepoStateStore;
+use rsky_wintermute::backfiller::{BackfillConfig, BackfillManager, BackfillMode};
 use rsky_wintermute::indexer::IndexerManager;
 use rsky_wintermute::ingester::IngesterManager;
+use rsky_wintermute::ingester::sync11::Sync11Config;
 use rsky_wintermute::metrics;
 use rsky_wintermute::storage::Storage;
 
@@ -75,16 +77,24 @@ fn main() -> Result<()> {
         .into_iter()
         .filter(|h| !h.is_empty())
         .collect();
+    // The backfill state store is opened once and shared: the backfill
+    // runner drains it, the ingester files sync 1.1 resync requests into it.
+    // Opened even with BACKFILL_MODE=off so those requests are kept for later.
+    let backfill_cfg = BackfillConfig::from_env(&args.relay_hosts);
+    let state = RepoStateStore::open(&backfill_cfg.state_db).map_err(|e| {
+        color_eyre::eyre::eyre!("backfill state {}: {e}", backfill_cfg.state_db.display())
+    })?;
     let ingester = IngesterManager::new(
         args.relay_hosts.clone(),
         labeler_hosts,
         Arc::clone(&storage),
         args.database_url.clone(),
+        Sync11Config {
+            state: state.clone(),
+            backfill_enabled: backfill_cfg.mode != BackfillMode::Off,
+        },
     )?;
-    let backfill = BackfillManager::new(
-        BackfillConfig::from_env(&args.relay_hosts),
-        args.database_url.clone(),
-    );
+    let backfill = BackfillManager::new(backfill_cfg, args.database_url.clone(), state);
     let indexer = IndexerManager::new(Arc::clone(&storage), &args.database_url)?;
 
     let metrics_port = args.metrics_port;

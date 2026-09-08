@@ -1,4 +1,5 @@
 pub mod labels;
+pub mod sync11;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -13,9 +14,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use sync11::{Msg, PgSyncStore, Sync11Config, Sync11Handle};
 use tokio::time::interval;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
+
+/// Connections for the sync 1.1 tracker: one reader on cache miss, one writer.
+const SYNC11_POOL_SIZE: usize = 2;
 
 #[derive(Debug)]
 enum ConnectionResult {
@@ -39,6 +44,7 @@ pub struct IngesterManager {
     labeler_hosts: Vec<String>,
     storage: Arc<Storage>,
     database_url: String,
+    sync11: Sync11Config,
 }
 
 impl IngesterManager {
@@ -47,6 +53,7 @@ impl IngesterManager {
         labeler_hosts: Vec<String>,
         storage: Arc<Storage>,
         database_url: String,
+        sync11: Sync11Config,
     ) -> Result<Self, WintermuteError> {
         Ok(Self {
             workers: WORKERS_INGESTER,
@@ -54,6 +61,7 @@ impl IngesterManager {
             labeler_hosts,
             storage,
             database_url,
+            sync11,
         })
     }
 
@@ -65,6 +73,23 @@ impl IngesterManager {
             .map_err(|e| WintermuteError::Other(format!("failed to create runtime: {e}")))?;
 
         rt.block_on(async {
+            // One sync 1.1 tracker for every relay connection, so a repo seen
+            // through two relays still has one ordered view. Its own small pool:
+            // it reads on cache miss and writes one batch a second.
+            let sync11_pool = match Self::sync11_pool(&self.database_url) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("failed to create sync11 pool: {e}");
+                    return;
+                }
+            };
+            crate::metrics::register_pool("ingester:sync11", &sync11_pool);
+            let (sync11, sync11_task) = sync11::spawn(
+                Arc::new(PgSyncStore::new(sync11_pool)),
+                self.sync11.state.clone(),
+                self.sync11.backfill_enabled,
+            );
+
             // Long-running tasks that should keep the ingester alive
             let mut persistent_tasks = Vec::new();
 
@@ -72,9 +97,11 @@ impl IngesterManager {
                 let storage = Arc::clone(&self.storage);
                 let host_clone = host.clone();
                 let db_url = self.database_url.clone();
+                let sync11 = sync11.clone();
 
                 let firehose_task = tokio::spawn(async move {
-                    Self::run_connection(Arc::clone(&storage), host_clone.clone(), db_url).await;
+                    Self::run_connection(Arc::clone(&storage), host_clone.clone(), db_url, sync11)
+                        .await;
                 });
                 persistent_tasks.push(firehose_task);
             }
@@ -97,12 +124,34 @@ impl IngesterManager {
             for task in persistent_tasks {
                 drop(task.await);
             }
+
+            // Every connection has dropped its handle: the tracker flushes
+            // its last rows and exits.
+            drop(sync11);
+            drop(sync11_task.await);
         });
 
         Ok(())
     }
 
-    async fn run_connection(storage: Arc<Storage>, hostname: String, database_url: String) {
+    fn sync11_pool(database_url: &str) -> Result<Pool, WintermuteError> {
+        let mut pg_config = Config::new();
+        pg_config.url = Some(database_url.to_owned());
+        pg_config.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        pg_config.pool = Some(crate::config::pg_pool_config(SYNC11_POOL_SIZE));
+        pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .map_err(|e| WintermuteError::Other(format!("sync11 pool: {e}")))
+    }
+
+    async fn run_connection(
+        storage: Arc<Storage>,
+        hostname: String,
+        database_url: String,
+        sync11: Sync11Handle,
+    ) {
         // Create postgres pool for cursor storage AND direct indexing
         let pool_size = *DB_POOL_SIZE;
         tracing::info!("firehose DB pool size: {pool_size}");
@@ -137,7 +186,7 @@ impl IngesterManager {
             }
 
             let connect_start = std::time::Instant::now();
-            match Self::connect_and_stream(&storage, &hostname, &pool).await {
+            match Self::connect_and_stream(&storage, &hostname, &pool, &sync11).await {
                 ConnectionResult::Closed => {
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break;
@@ -190,10 +239,13 @@ impl IngesterManager {
         storage: &Storage,
         hostname: &str,
         pool: &Arc<Pool>,
+        sync11: &Sync11Handle,
     ) -> ConnectionResult {
         use crate::metrics;
 
         let cursor_key = format!("firehose:{hostname}");
+        // The `host` column of repo_sync: shared by every message from here.
+        let sync11_host: Arc<str> = Arc::from(hostname);
 
         // Use AtomicI64 for cheap, lock-free cursor updates (like indigo/tap's lastSeq)
         let last_seq = Arc::new(AtomicI64::new(0));
@@ -428,6 +480,7 @@ impl IngesterManager {
                         let event_time = event.time.clone();
                         let active = account.active;
                         let status = account.status.clone();
+                        let sync11 = sync11.clone();
                         tokio::spawn(async move {
                             if !active && Self::pds_says_active(&event_did).await == Some(true) {
                                 tracing::info!(
@@ -457,6 +510,20 @@ impl IngesterManager {
                                 metrics::INGESTER_ERRORS_TOTAL
                                     .with_label_values(&["account_failed"])
                                     .inc();
+                                return;
+                            }
+                            // Out of service upstream: no backfill fetch will
+                            // succeed, and any sync state we hold is moot.
+                            if crate::backfiller::source::status_is_unfetchable(
+                                active,
+                                status.as_deref(),
+                            ) {
+                                sync11
+                                    .send(Msg::WriteOff {
+                                        did: event_did,
+                                        status: status.unwrap_or_default(),
+                                    })
+                                    .await;
                             }
                         });
                     }
@@ -464,8 +531,13 @@ impl IngesterManager {
                     continue;
                 }
 
-                // Handle sync events (repo recovery - refresh handle like identity events)
+                // Handle sync events: the repo's MST was reset upstream. The
+                // tracker requests a resync; the handle is refreshed as for an
+                // identity event.
                 if event.kind == "sync" {
+                    if let Some(msg) = Msg::from_event(&event, &sync11_host) {
+                        sync11.send(msg).await;
+                    }
                     let pool_clone = Arc::clone(pool);
                     let event_did = event.did.clone();
                     let event_time = event.time.clone();
@@ -486,6 +558,7 @@ impl IngesterManager {
 
                 // Queue to Fjall so live intake never blocks on indexing speed; the
                 // firehose_live processor loop consumes and indexes from the queue.
+                let sync11_msg = Msg::from_event(&event, &sync11_host);
                 match Self::parse_event_to_jobs(&event).await {
                     Ok(jobs) => {
                         for job in jobs {
@@ -503,6 +576,12 @@ impl IngesterManager {
                             .with_label_values(&["parse_failed"])
                             .inc();
                     }
+                }
+
+                // Only after the jobs are durable in fjall: the tracker's
+                // stored state must never run ahead of what will be indexed.
+                if let Some(msg) = sync11_msg {
+                    sync11.send(msg).await;
                 }
 
                 // Atomically update last_seq (cheap, lock-free operation)
@@ -637,13 +716,23 @@ impl IngesterManager {
                     WintermuteError::Serialization(format!("failed to parse sync body: {e}"))
                 })?;
 
-            // Treat sync like identity - refresh the handle
+            // The frame's blocks carry the repo's new commit; its MST root is
+            // what the sync 1.1 tracker records. No ops: nothing to index.
+            let data = sync11::commit_head_from_car(&body.blocks).map(|h| h.data.to_string());
             let event = FirehoseEvent {
                 seq: body.seq,
                 did: body.did,
                 time: body.time.to_rfc3339(),
                 kind: "sync".to_owned(),
-                commit: None,
+                commit: Some(CommitData {
+                    rev: body.rev,
+                    ops: vec![],
+                    blocks: body.blocks,
+                    since: None,
+                    prev_data: None,
+                    data,
+                    too_big: false,
+                }),
                 identity: None,
                 account: None,
             };
@@ -673,6 +762,9 @@ impl IngesterManager {
             })
             .collect();
 
+        // The commit block's MST root, for the sync 1.1 inductive check.
+        let data = sync11::commit_head_from_car(&body.blocks).map(|h| h.data.to_string());
+
         let event = FirehoseEvent {
             seq: body.seq,
             did: body.repo,
@@ -682,6 +774,10 @@ impl IngesterManager {
                 rev: body.rev,
                 ops,
                 blocks: body.blocks,
+                since: body.since,
+                prev_data: body.prev_data.map(|c| c.to_string()),
+                data,
+                too_big: body.too_big,
             }),
             identity: None,
             account: None,

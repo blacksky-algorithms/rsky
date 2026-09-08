@@ -158,6 +158,7 @@ BACKFILL_SINK=null ./target/release/backfill drain
 | `firehose_live` (fjall) | Live records awaiting indexing |
 | `label_live` (fjall) | Labels awaiting indexing |
 | `backfill_state.sqlite` | Backfill: per-repo `source`, listed `rev`, `indexed_rev`, state, attempts, cooldown; per-host enumeration cursor, list state, adaptive concurrency floor, cooldown |
+| `repo_sync` (PostgreSQL) | Live sync 1.1 state: per-repo `rev` and `data_cid` (MST root) of the last commit seen on the firehose, plus the relay `host`. Created by `migrations/create_repo_sync.sql` |
 
 Backfill has no record queue: parsed repos go to the COPY writers through a bounded channel, and fetch workers only claim work while that channel has room.
 
@@ -197,6 +198,9 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 - `ingester_label_live_length` - Current label_live queue size
 - `ingester_websocket_connections` - Active WebSocket connections
 - `ingester_errors_total` - Ingestion errors by type
+- `ingester_sync11_commits_total{outcome}` - Live `#commit` frames checked against stored sync state: `applied`, `first_seen`, `stale`, `lax`, `desync`, `no_data`
+- `ingester_sync11_sync_events_total{outcome}` - Live `#sync` frames: `resync` or `unchanged`
+- `ingester_sync11_resyncs_requested_total{reason}` - Repos handed to backfill for a full resync: `prev_mismatch` or `sync_event`
 - `indexer_records_processed_total` - Total records processed
 - `indexer_records_failed_total` - Failed record indexing
 - `indexer_stale_writes_skipped_total` - Skipped stale writes (older rev)
@@ -227,6 +231,25 @@ Firehose and label cursors are stored in the PostgreSQL `sub_state` table. On re
 Backfill fetch workers ask the sink for room before claiming a single repo: the channel into the COPY writers is bounded (`BACKFILL_QUEUE_REPOS`), so nothing is pulled from a PDS or hubble that PostgreSQL is not ready to take. Live events are indexed by their own loop and pools and are never blocked by backfill.
 
 Every source has its own worker and token bucket. Bluesky's mushrooms run at a fixed rate and never throttle down. Any other direct host steps its in-flight ceiling down by a quarter after three consecutive transient errors (429, proxy 5xx, connect/timeout), recovers one unit after four quiet minutes, and is parked (honouring `Retry-After`, capped at 300 s) once it exhausts the floor. A repo its own PDS will not serve is handed to hubble with a fresh attempt budget.
+
+### Sync 1.1 gap detection
+
+Every `#commit` frame from a sync 1.1 host carries `prevData`, the MST root of the commit it follows. The ingester keeps the last applied `(rev, data)` per repo and checks each frame against it, the same inductive proof hubble-sync applies:
+
+| Frame vs stored state | Outcome | Effect |
+|-----------------------|---------|--------|
+| Nothing stored | `first_seen` | Recorded. History comes from backfill enumeration, not from resyncing every unknown repo |
+| `rev` not newer than stored | `stale` | A replay; state is not advanced (indexing is idempotent and unaffected) |
+| `prevData` present and not equal to the stored root | `desync` | A resync is requested; state resets to this commit so the chain continues |
+| No commit block in the frame (`tooBig`) | `no_data` | Stored state is forgotten rather than left to trip the next frame |
+| No `prevData` (pre-sync-1.1 host) | `lax` | Recorded but unproven; never a resync on its own |
+| `prevData` equals the stored root | `applied` | The proof holds |
+
+A `#sync` frame means the repo's MST was rewritten upstream: unless its commit matches what is stored exactly, a resync is requested and the new root recorded. An `#account` frame taking a repo out of service (`deleted`, `takendown`, `deactivated`, `suspended`) writes the repo off in the backfill state store so no fetch is spent on it, and drops its sync state.
+
+A resync is a row in `backfill_state.sqlite` set back to `pending` with `indexed_rev` cleared (`last_error` says `resync: prev_mismatch` or `resync: sync_event`); the backfill runner's next tick fetches the whole repo through whichever source owns it. With `BACKFILL_MODE=off` requests are still recorded and are fetched once backfill is enabled; the first such request is logged at `info`.
+
+Cost on the live path: the check runs in a single tracker task behind a bounded channel, with a bounded in-memory cache (two generations of 150k repos) in front of `repo_sync`. Postgres is read only on cache miss, one query per drained batch, and written once a second as one `unnest` upsert per repo touched in that second.
 
 ### Handle Resolution
 

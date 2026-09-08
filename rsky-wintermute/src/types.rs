@@ -71,6 +71,21 @@ pub struct CommitData {
     pub rev: String,
     pub ops: Vec<RepoOp>,
     pub blocks: Vec<u8>,
+    /// The `since` field of the `#commit` frame: the rev this commit claims
+    /// to follow. Advisory only (see `ingester::sync11`).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// The `prevData` field of the `#commit` frame: the MST root of the
+    /// previous commit. `None` from a host that does not implement sync 1.1.
+    #[serde(default)]
+    pub prev_data: Option<String>,
+    /// The MST root (`data`) of this commit, decoded from the commit block
+    /// carried in `blocks`. `None` when the frame carried no commit block.
+    #[serde(default)]
+    pub data: Option<String>,
+    /// The frame's `tooBig` flag: the relay omitted blocks.
+    #[serde(default)]
+    pub too_big: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

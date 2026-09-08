@@ -446,12 +446,19 @@ impl BackfillConfig {
 pub struct BackfillManager {
     cfg: BackfillConfig,
     database_url: String,
+    /// Opened by `main` and shared with the ingester, which files live-path
+    /// resync requests into it.
+    state: RepoStateStore,
 }
 
 impl BackfillManager {
     #[must_use]
-    pub const fn new(cfg: BackfillConfig, database_url: String) -> Self {
-        Self { cfg, database_url }
+    pub const fn new(cfg: BackfillConfig, database_url: String, state: RepoStateStore) -> Self {
+        Self {
+            cfg,
+            database_url,
+            state,
+        }
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
@@ -480,8 +487,7 @@ impl BackfillManager {
             .build()
             .map_err(|e| WintermuteError::Other(format!("failed to create runtime: {e}")))?;
 
-        let state = RepoStateStore::open(&self.cfg.state_db)
-            .map_err(|e| WintermuteError::Other(format!("backfill state: {e}")))?;
+        let state = self.state.clone();
 
         rt.block_on(async {
             match self.cfg.sink {
@@ -637,7 +643,8 @@ mod tests {
             ..BackfillConfig::from_env(&[])
         };
         SHUTDOWN.store(true, Ordering::Relaxed);
-        let r = BackfillManager::new(cfg, "postgres://x".into()).run();
+        let state = RepoStateStore::open_in_memory().unwrap();
+        let r = BackfillManager::new(cfg, "postgres://x".into(), state).run();
         SHUTDOWN.store(false, Ordering::Relaxed);
         assert!(r.is_ok());
     }

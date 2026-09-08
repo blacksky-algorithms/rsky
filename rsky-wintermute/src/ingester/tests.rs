@@ -264,6 +264,10 @@ mod ingester_tests {
                 rev: "test-rev-123".to_owned(),
                 ops: vec![],
                 blocks: vec![10, 20, 30],
+                since: None,
+                prev_data: None,
+                data: None,
+                too_big: false,
             }),
             identity: None,
             account: None,
@@ -328,8 +332,17 @@ mod ingester_tests {
         let labeler_hosts = vec!["https://labeler.example.com".to_owned()];
         let database_url = "postgresql://test:test@localhost/test".to_owned();
 
-        let manager =
-            IngesterManager::new(relay_hosts, labeler_hosts, Arc::new(storage), database_url);
+        let sync11 = crate::ingester::sync11::Sync11Config {
+            state: crate::backfiller::state::RepoStateStore::open_in_memory().unwrap(),
+            backfill_enabled: false,
+        };
+        let manager = IngesterManager::new(
+            relay_hosts,
+            labeler_hosts,
+            Arc::new(storage),
+            database_url,
+            sync11,
+        );
 
         assert!(manager.is_ok());
     }
@@ -387,6 +400,10 @@ mod ingester_tests {
                     rev: "rev1".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    since: None,
+                    prev_data: None,
+                    data: None,
+                    too_big: false,
                 }),
                 identity: None,
                 account: None,
@@ -400,6 +417,10 @@ mod ingester_tests {
                     rev: "rev2".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    since: None,
+                    prev_data: None,
+                    data: None,
+                    too_big: false,
                 }),
                 identity: None,
                 account: None,
@@ -413,6 +434,10 @@ mod ingester_tests {
                     rev: "rev3".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    since: None,
+                    prev_data: None,
+                    data: None,
+                    too_big: false,
                 }),
                 identity: None,
                 account: None,
@@ -855,6 +880,10 @@ mod ingester_tests {
                     },
                 ],
                 blocks: vec![],
+                since: None,
+                prev_data: None,
+                data: None,
+                too_big: false,
             }),
             identity: None,
             account: None,
@@ -933,6 +962,10 @@ mod ingester_tests {
                 rev: "rev-abc".to_owned(),
                 ops: vec![], // No operations
                 blocks: vec![],
+                since: None,
+                prev_data: None,
+                data: None,
+                too_big: false,
             }),
             identity: None,
             account: None,

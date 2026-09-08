@@ -112,6 +112,39 @@ pub static INGESTER_OPS_FILTERED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| 
 });
 
 /// Errors
+/// Sync 1.1 inductive check on live `#commit` frames, by outcome:
+/// `applied`, `first_seen`, `stale`, `lax`, `desync`, `no_data`.
+pub static INGESTER_SYNC11_COMMITS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "ingester_sync11_commits_total",
+        "Live #commit frames checked against stored (rev, data) state, by outcome",
+        &["outcome"]
+    )
+    .unwrap()
+});
+
+/// Live `#sync` frames: `resync` when the announced MST differs from what we
+/// hold, `unchanged` when it does not.
+pub static INGESTER_SYNC11_SYNC_EVENTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "ingester_sync11_sync_events_total",
+        "Live #sync frames, by outcome",
+        &["outcome"]
+    )
+    .unwrap()
+});
+
+/// Repos handed to the backfill state store for a full resync, by reason:
+/// `prev_mismatch` or `sync_event`.
+pub static INGESTER_SYNC11_RESYNCS_REQUESTED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "ingester_sync11_resyncs_requested_total",
+        "Resyncs requested from the live path, by reason",
+        &["reason"]
+    )
+    .unwrap()
+});
+
 pub static INGESTER_ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "ingester_errors_total",
