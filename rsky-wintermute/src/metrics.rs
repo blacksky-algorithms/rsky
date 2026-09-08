@@ -547,6 +547,8 @@ pub fn encode_metrics() -> Result<String, prometheus::Error> {
     // Pool gauges are pull-based: nothing else writes them, so they have to be
     // refreshed here or they would export whatever was true at registration.
     sample_pools();
+    // Same for process memory and the Fjall write buffer.
+    crate::procmem::sample();
 
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();

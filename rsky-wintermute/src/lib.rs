@@ -43,6 +43,7 @@ pub mod indexer;
 pub mod ingester;
 pub mod metrics;
 pub mod metrics_server;
+pub mod procmem;
 pub mod storage;
 pub mod types;
 

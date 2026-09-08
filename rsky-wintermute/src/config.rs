@@ -7,26 +7,99 @@ pub const CAPACITY_INDEX: usize = 1 << 14;
 
 pub const WORKERS_INGESTER: usize = 4;
 
-// Fjall storage config - tunable via environment variables
-// On high-memory servers (200GB+ RAM), these should be increased significantly
-// Rule of thumb: CACHE_SIZE = 20-25% of RAM, WRITE_BUFFER_SIZE = 1-2% of RAM
+// Fjall storage config - tunable via environment variables.
+//
+// The Fjall store is a set of short-lived queues (firehose_live, label_live,
+// cursors): entries are written once, read once a few seconds later, and
+// deleted. That workload lives almost entirely in the memtables, so the
+// block cache is only touched when the indexer falls behind far enough for
+// the queue to spill into segments. The defaults below are sized for that,
+// not for a general-purpose LSM database: the 32 GB cache / 256 MB memtable
+// defaults this crate used to ship were inherited from a design where Fjall
+// also held the multi-hundred-GB repo backfill queue, which is gone.
+
+const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+
+/// Block-cache capacity (`FJALL_CACHE_SIZE_GB`). Default 4 GB.
+///
+/// This is a ceiling, not an allocation: the cache only fills as segments are
+/// read. 4 GB covers a queue backlog of several million records, which is
+/// already a "something is wrong" state, while bounding the daemon's worst
+/// case on a 32 GB host. Raise it on hosts with memory to spare if
+/// `ingester_firehose_live_length` is routinely large.
 pub static CACHE_SIZE: LazyLock<u64> = LazyLock::new(|| {
     std::env::var("FJALL_CACHE_SIZE_GB")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map_or(32 * 1024 * 1024 * 1024, |gb| gb * 1024 * 1024 * 1024) // Default: 32GB
+        .map_or(4 * GIB, |gb| gb * GIB)
 });
 
+/// Total memtable bytes across all partitions before Fjall stalls writers
+/// (`FJALL_WRITE_BUFFER_SIZE_GB`). Default 1 GB.
+///
+/// Fjall's own default is 64 MiB. With five partitions at the default
+/// memtable size this is never reached in steady state; it only bites if
+/// flushing falls behind, at which point stalling the ingester (visible as a
+/// growing relay-side cursor lag) is preferable to unbounded growth.
 pub static WRITE_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| {
     std::env::var("FJALL_WRITE_BUFFER_SIZE_GB")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map_or(2 * 1024 * 1024 * 1024, |gb| gb * 1024 * 1024 * 1024) // Default: 2GB
+        .map_or(GIB, |gb| gb * GIB)
 });
 
 pub const FSYNC_MS: Option<u16> = Some(1000);
-pub const MEMTABLE_SIZE: u32 = 256 * 1024 * 1024; // 256MB (up from 64MB)
+
+const DEFAULT_MEMTABLE_MB: u64 = 64;
+
+/// Per-partition memtable flush threshold (`FJALL_MEMTABLE_MB`). Default 64 MB.
+///
+/// Fjall's documented recommendation is 8-64 MiB, and it warns that anything
+/// above 64 MiB needs a larger write buffer. Each partition may transiently
+/// hold `max_memtable_size * flush workers` while sealed memtables drain, so
+/// the old 256 MB setting could pin well over a gigabyte for a queue whose
+/// contents are gone seconds after arrival. 64 MB keeps a live-queue memtable
+/// at roughly 30-60 s of firehose traffic, which is plenty to batch flushes.
+/// Values are clamped to 1..=4095 MB (the option is a `u32`).
+pub static MEMTABLE_SIZE: LazyLock<u32> = LazyLock::new(|| {
+    let mb = std::env::var("FJALL_MEMTABLE_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MEMTABLE_MB)
+        .clamp(1, 4095);
+    u32::try_from(mb * MIB).unwrap_or(u32::MAX)
+});
+
 pub const BLOCK_SIZE: u32 = 64 * 1024;
+
+/// Concurrent identity/account/sync tasks (`IDENTITY_EVENT_CONCURRENCY`, default 64).
+///
+/// Each such firehose event spawns a task that resolves a DID (and usually a
+/// handle) over the network before writing to `actor`. When every permit is
+/// busy the event is shed and counted in `ingester_identity_tasks_shed_total`;
+/// the indexer's handle-resolution sweep picks the account up within a day.
+pub static IDENTITY_EVENT_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("IDENTITY_EVENT_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|n: &usize| *n >= 1)
+        .unwrap_or(64)
+});
+
+/// Deadline for one identity/account/sync task (`IDENTITY_EVENT_TIMEOUT_SECS`, default 15).
+///
+/// The resolver's own per-request timeout is 5 s, but a task makes up to three
+/// requests plus a DNS lookup that has no timeout at all; this is the backstop
+/// that returns the permit regardless.
+pub static IDENTITY_EVENT_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    let secs = std::env::var("IDENTITY_EVENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(15);
+    Duration::from_secs(secs)
+});
 
 pub const FIREHOSE_PING_INTERVAL: Duration = Duration::from_secs(30);
 
