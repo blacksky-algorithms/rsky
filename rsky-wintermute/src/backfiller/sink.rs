@@ -63,8 +63,13 @@ pub struct PgSinkConfig {
     /// Records per COPY batch. Small repos (median 3 KiB) are batched across
     /// repos to reach this; a whale is written on its own.
     pub batch_jobs: usize,
-    /// Parsed repos allowed to wait for a writer. This is the demand gate.
+    /// Parsed repos allowed to wait for a writer.
     pub queue_repos: usize,
+    /// Records accepted but not yet committed. Parsed records are JSON values
+    /// several times the size of their CBOR, so this -- not the repo count --
+    /// is what bounds the sink's memory. A whale repo can exceed it on its
+    /// own; it is admitted, and everything else waits.
+    pub max_records_in_flight: usize,
     /// How long a writer waits for a batch to fill before flushing a partial
     /// one.
     pub flush_after: Duration,
@@ -78,6 +83,7 @@ impl Default for PgSinkConfig {
             writers: 4,
             batch_jobs: 2000,
             queue_repos: 256,
+            max_records_in_flight: 250_000,
             flush_after: Duration::from_millis(500),
             skip_boilerplate: *crate::config::RECORD_SKIP_BOILERPLATE,
         }
@@ -98,6 +104,7 @@ pub struct SinkCounters {
 pub struct PgSink {
     tx: mpsc::Sender<Pending>,
     counters: Arc<SinkCounters>,
+    max_records_in_flight: usize,
     writers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -122,6 +129,7 @@ impl PgSink {
         Self {
             tx,
             counters,
+            max_records_in_flight: cfg.max_records_in_flight.max(1),
             writers: Mutex::new(writers),
         }
     }
@@ -149,6 +157,7 @@ impl PgSink {
         let Self {
             tx,
             counters: _,
+            max_records_in_flight: _,
             writers,
         } = self;
         drop(tx);
@@ -161,7 +170,12 @@ impl PgSink {
 
 impl RecordSink for PgSink {
     fn has_capacity(&self) -> bool {
-        self.tx.capacity() > 0
+        let in_flight = self.counters.records_in_flight.load(Ordering::Relaxed);
+        crate::metrics::BACKFILL_SINK_QUEUED_REPOS
+            .set(i64::try_from(self.queued()).unwrap_or(i64::MAX));
+        crate::metrics::BACKFILL_SINK_RECORDS_IN_FLIGHT
+            .set(i64::try_from(in_flight).unwrap_or(i64::MAX));
+        self.tx.capacity() > 0 && in_flight < self.max_records_in_flight
     }
 
     async fn ingest(&self, did: &str, body: RepoBody) -> Result<Receipt, WintermuteError> {
@@ -271,9 +285,12 @@ async fn write_batch(
             .fetch_add(failures as u64, Ordering::Relaxed);
     }
     counters.batches.fetch_add(1, Ordering::Relaxed);
-    counters
+    let remaining = counters
         .records_in_flight
-        .fetch_sub(n_jobs, Ordering::Relaxed);
+        .fetch_sub(n_jobs, Ordering::Relaxed)
+        .saturating_sub(n_jobs);
+    crate::metrics::BACKFILL_SINK_RECORDS_IN_FLIGHT
+        .set(i64::try_from(remaining).unwrap_or(i64::MAX));
     crate::metrics::BACKFILL_WRITE_SECONDS.observe(started.elapsed().as_secs_f64());
 
     if batch_failed {
@@ -363,5 +380,39 @@ mod tests {
         assert!(cfg.writers >= 1);
         assert!(cfg.batch_jobs >= 100);
         assert!(cfg.queue_repos >= 1);
+        assert!(cfg.max_records_in_flight >= cfg.batch_jobs);
+    }
+
+    #[tokio::test]
+    async fn the_sink_reports_no_room_once_records_in_flight_reach_the_bound() {
+        // A pool that never connects: nothing is written, so in-flight only grows.
+        let mut pg = deadpool_postgres::Config::new();
+        pg.url = Some("postgres://nobody@127.0.0.1:1/none".to_owned());
+        pg.manager = Some(deadpool_postgres::ManagerConfig {
+            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+        });
+        pg.pool = Some(crate::config::pg_pool_config(1));
+        let pool = pg
+            .create_pool(
+                Some(deadpool_postgres::Runtime::Tokio1),
+                tokio_postgres::NoTls,
+            )
+            .unwrap();
+        let sink = PgSink::new(
+            &pool,
+            &PgSinkConfig {
+                writers: 1,
+                queue_repos: 8,
+                max_records_in_flight: 5,
+                ..PgSinkConfig::default()
+            },
+        );
+        assert!(sink.has_capacity());
+        sink.counters.records_in_flight.store(5, Ordering::Relaxed);
+        assert!(!sink.has_capacity(), "records, not repos, are the bound");
+        sink.counters.records_in_flight.store(4, Ordering::Relaxed);
+        assert!(sink.has_capacity());
+        assert_eq!(sink.records_in_flight(), 4);
+        assert_eq!(sink.queued(), 0);
     }
 }

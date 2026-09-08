@@ -382,6 +382,7 @@ impl BackfillConfig {
             writers,
             batch_jobs: env_or("BACKFILL_BATCH_JOBS", 2000usize).max(1),
             queue_repos: env_or("BACKFILL_QUEUE_REPOS", 256usize).max(1),
+            max_records_in_flight: env_or("BACKFILL_MAX_RECORDS_IN_FLIGHT", 250_000usize).max(1),
             flush_after: Duration::from_millis(env_or("BACKFILL_FLUSH_MS", 500u64)),
             skip_boilerplate: *crate::config::RECORD_SKIP_BOILERPLATE,
         };

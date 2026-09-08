@@ -109,7 +109,8 @@ RUST_LOG=info \
 | `BACKFILL_MAX_INFLIGHT` | `8 * CPUs` | Archives downloading or parsing at once across all sources; parsing holds a whole repo in memory and costs a core, so this is the backfill's CPU and memory budget |
 | `BACKFILL_WRITERS` | `4` | Concurrent COPY writers |
 | `BACKFILL_BATCH_JOBS` | `2000` | Records per COPY batch (small repos are batched across repos) |
-| `BACKFILL_QUEUE_REPOS` | `256` | Parsed repos allowed to wait for a writer -- this is the demand gate |
+| `BACKFILL_QUEUE_REPOS` | `256` | Parsed repos allowed to wait for a writer |
+| `BACKFILL_MAX_RECORDS_IN_FLIGHT` | `250000` | Records accepted by the sink but not yet committed. Parsed records are JSON several times their CBOR size, so this is the sink's memory bound and the demand gate |
 | `BACKFILL_DB_POOL_SIZE` | `writers * 8` | Connections for the backfill's own pool |
 | `BACKFILL_SPILL_MB` / `BACKFILL_SPILL_DIR` | `1` / `$TMPDIR` | Archives larger than this stream to disk instead of memory |
 | `BACKFILL_MAX_BODY_MB` | `512` | Refuse archives larger than this |
