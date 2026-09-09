@@ -241,6 +241,52 @@ Requires a PostgreSQL database with the bsky dataplane schema. Tables include:
 - `record`, `sub_state`
 - `verification`
 
+## Running the database-backed tests
+
+`indexer::tests` and `ingester::tests` write to a real PostgreSQL that carries the
+appview dataplane schema. They read `DATABASE_URL` and default to
+`postgresql://postgres:postgres@localhost:5432/bsky_test`. A snapshot of that schema
+lives in [`tests/schema/appview.sql`](tests/schema/appview.sql); CI applies it to a
+stock `postgres:17` container before `cargo test`, and you can do the same locally:
+
+```bash
+docker run -d --name wintermute-pg -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=bsky_test -p 5432:5432 postgres:17
+until docker exec wintermute-pg pg_isready -U postgres -d bsky_test; do sleep 1; done
+docker exec -i wintermute-pg psql -U postgres -d bsky_test -v ON_ERROR_STOP=1 \
+  < rsky-wintermute/tests/schema/appview.sql
+
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bsky_test \
+  cargo test -p rsky-wintermute
+```
+
+The snapshot creates every object in `public` (the `bsky.` qualifiers from the dump
+are stripped) so the tests' default URL works without a `search_path` option.
+Production runs the same tables in schema `bsky` with `search_path=bsky` set on the
+connection string; wintermute's queries are unqualified, so both layouts behave the
+same. A few tests (`test_live_label_stream`, the hubble `getRepo` fetch) hit the
+network and are `#[ignore]`d.
+
+### Regenerating the schema snapshot
+
+The file is a cleaned `pg_dump` of a database migrated with the
+[blacksky-algorithms/atproto](https://github.com/blacksky-algorithms/atproto) fork's
+`packages/bsky` kysely migrations (currently `_20260816T120000000Z`). When those
+migrations change, redump from any database at the new migration head:
+
+```bash
+pg_dump --schema-only --no-owner --no-privileges --no-comments -n bsky appview_db \
+  > appview-bsky.sql
+```
+
+Then, to produce `tests/schema/appview.sql`: drop the `\restrict`/`\unrestrict`
+lines, the `SET ...`/`SELECT pg_catalog.set_config(...)` preamble and
+`CREATE SCHEMA bsky;`; strip the `bsky.` schema qualifier from every identifier
+(including the `nextval('bsky....')` defaults); prepend
+`CREATE EXTENSION IF NOT EXISTS pg_trgm;` for the trigram indexes; keep the
+provenance header up to date; and do not include any rows (in particular the
+`kysely_migration` rows). Verify with the docker commands above before committing.
+
 ## License
 
 rsky-wintermute is released under the [Apache License 2.0](../LICENSE).
