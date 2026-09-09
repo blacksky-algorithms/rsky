@@ -29,10 +29,9 @@ use super::pds::PdsSource;
 use super::sink::{Receipt, RecordSink};
 use super::source::{
     Class, FetchLimits, RepoSource, SourceError, backoff_secs, classify, cooldown_secs,
-    retry_after_secs, sleep_secs, status_is_unfetchable,
+    retry_after_secs, status_is_unfetchable,
 };
 use super::state::{HUBBLE_SOURCE, HostRow, ListState, RepoStateStore, StateError};
-use crate::SHUTDOWN;
 use crate::metrics;
 use crate::types::WintermuteError;
 
@@ -44,6 +43,35 @@ const LIST_RETRY_COOLDOWN_SECS: u64 = 300;
 const NOFILE_PER_FETCH: u64 = 2;
 /// Descriptors for the rest of the process: pools, sqlite, metrics, stdio.
 const NOFILE_SLACK: u64 = 1024;
+
+/// How often a long sleep re-checks the shutdown flag.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
+/// Sleep for `dur`, returning early -- with `true` -- once `shutdown` is set.
+///
+/// Every wait in the runner that can run long (retry backoff, host cooldown,
+/// the re-enumeration interval) goes through here, so a `Retry-After` of 300 s
+/// cannot hold the daemon past systemd's stop timeout.
+pub async fn sleep_or_shutdown(dur: Duration, shutdown: &AtomicBool) -> bool {
+    let deadline = tokio::time::Instant::now() + dur;
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(SHUTDOWN_POLL)).await;
+    }
+}
+
+/// Resolve once `shutdown` is set.
+pub async fn wait_for_shutdown(shutdown: &AtomicBool) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tokio::time::sleep(SHUTDOWN_POLL).await;
+    }
+}
 
 /// Make sure `RLIMIT_NOFILE` covers every worker at full concurrency.
 ///
@@ -123,6 +151,14 @@ pub struct RunnerConfig {
     pub connect_timeout: Duration,
     /// How often progress is logged and state gauges sampled.
     pub progress_every: Duration,
+    /// How long a shutdown may spend finishing work already in flight before
+    /// what is left is abandoned to the claimed-row recovery on restart.
+    /// Shared with the sink drain: `BACKFILL_SHUTDOWN_GRACE_SECS` bounds the
+    /// whole stop, not each stage.
+    pub shutdown_grace: Duration,
+    /// The flag that stops the runner: `crate::SHUTDOWN` in the binaries.
+    /// Tests inject their own so they do not race each other on the global.
+    pub shutdown: &'static AtomicBool,
 }
 
 impl Default for RunnerConfig {
@@ -148,6 +184,8 @@ impl Default for RunnerConfig {
             dry_run: false,
             connect_timeout: Duration::from_secs(15),
             progress_every: Duration::from_secs(30),
+            shutdown_grace: Duration::from_secs(20),
+            shutdown: &crate::SHUTDOWN,
         }
     }
 }
@@ -224,6 +262,9 @@ pub struct Runner<K: RecordSink> {
     client: reqwest::Client,
     hubble: Option<Arc<HubbleSource>>,
     inflight: Arc<tokio::sync::Semaphore>,
+    /// When the coordinator first saw the shutdown flag. The grace budget
+    /// counts from here.
+    shutdown_seen: std::sync::OnceLock<Instant>,
     pub progress: Arc<Progress>,
 }
 
@@ -260,6 +301,7 @@ impl<K: RecordSink> Runner<K> {
             client,
             hubble,
             inflight,
+            shutdown_seen: std::sync::OnceLock::new(),
             progress: Arc::new(Progress::default()),
         })
     }
@@ -267,6 +309,23 @@ impl<K: RecordSink> Runner<K> {
     #[must_use]
     pub const fn config(&self) -> &RunnerConfig {
         &self.cfg
+    }
+
+    /// Whether a stop has been requested.
+    #[must_use]
+    pub fn shutting_down(&self) -> bool {
+        self.cfg.shutdown.load(Ordering::Relaxed)
+    }
+
+    /// What is left of the shutdown grace budget: the whole budget until the
+    /// coordinator has seen the flag, then whatever the workers did not use.
+    #[must_use]
+    pub fn shutdown_grace_remaining(&self) -> Duration {
+        self.shutdown_seen
+            .get()
+            .map_or(self.cfg.shutdown_grace, |seen| {
+                self.cfg.shutdown_grace.saturating_sub(seen.elapsed())
+            })
     }
 
     #[must_use]
@@ -341,11 +400,17 @@ impl<K: RecordSink> Runner<K> {
         }
 
         loop {
-            if SHUTDOWN.load(Ordering::Relaxed) {
+            if self.shutting_down() {
                 return Ok(report);
             }
 
-            let page = self.list_page_with_retries(source, cursor.clone()).await?;
+            let page = match self.list_page_with_retries(source, cursor.clone()).await {
+                Ok(page) => page,
+                // A stop arrived during the backoff: the cursor is persisted,
+                // and the pass is simply not complete. Not a host failure.
+                Err(_) if self.shutting_down() => return Ok(report),
+                Err(e) => return Err(e.into()),
+            };
             report.pages += 1;
             report.seen += page.repos.len() as u64;
 
@@ -410,7 +475,9 @@ impl<K: RecordSink> Runner<K> {
                         error = %e,
                         "listRepos: transient failure, backing off"
                     );
-                    sleep_secs(delay).await;
+                    if sleep_or_shutdown(Duration::from_secs(delay), self.cfg.shutdown).await {
+                        return Err(e);
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -633,7 +700,7 @@ impl<K: RecordSink> Runner<K> {
         tracing::info!(source = %name, limit = health.limit(), "fetch worker started");
 
         loop {
-            if SHUTDOWN.load(Ordering::Relaxed) {
+            if self.shutting_down() {
                 break;
             }
             if let Some(new_limit) = health.maybe_recover(Instant::now()) {
@@ -661,7 +728,7 @@ impl<K: RecordSink> Runner<K> {
                     self.state.fail(&did, true, secs, "host cooldown", None)?;
                 }
                 if name == HUBBLE_SOURCE {
-                    sleep_secs(secs).await;
+                    sleep_or_shutdown(Duration::from_secs(secs), self.cfg.shutdown).await;
                 } else if let Ok(host) = Hostname::new(&name) {
                     self.state
                         .set_host_cooldown(&host, secs, "concurrency floor exhausted")?;
@@ -742,7 +809,7 @@ impl<K: RecordSink> Runner<K> {
             if let Ok(p) = Arc::clone(&self.inflight).try_acquire_owned() {
                 return Ok(Some(p));
             }
-            if SHUTDOWN.load(Ordering::Relaxed) {
+            if self.shutting_down() {
                 return Ok(None);
             }
             if let Some(joined) = in_flight.try_join_next() {
@@ -880,7 +947,7 @@ impl<K: RecordSink> Runner<K> {
         let started = Instant::now();
 
         loop {
-            if SHUTDOWN.load(Ordering::Relaxed) {
+            if self.shutting_down() {
                 break;
             }
             while let Some(joined) = active.try_join_next() {
@@ -918,17 +985,62 @@ impl<K: RecordSink> Runner<K> {
             {
                 break;
             }
-            tokio::time::sleep(self.cfg.coordinator_poll).await;
+            sleep_or_shutdown(self.cfg.coordinator_poll, self.cfg.shutdown).await;
         }
 
-        while let Some(joined) = active.join_next().await {
-            let (name, result) = joined?;
-            if let Err(e) = result {
-                tracing::error!(source = %name, error = %e, "fetch worker failed");
+        if self.shutting_down() {
+            self.stop_workers(active, active_names).await;
+        } else {
+            while let Some(joined) = active.join_next().await {
+                let (name, result) = joined?;
+                if let Err(e) = result {
+                    tracing::error!(source = %name, error = %e, "fetch worker failed");
+                }
             }
         }
         self.log_progress(&last, started, 0);
         Ok(())
+    }
+
+    /// Shutdown: let the workers finish what is in flight for as long as the
+    /// grace budget allows, then abort the rest. An aborted worker's repos
+    /// stay claimed -- a fetch that never reaches the sink leaves no receipt
+    /// and no completion task, so nothing settles them -- and
+    /// `reset_claimed` returns them to pending on the next start.
+    async fn stop_workers(
+        &self,
+        mut active: JoinSet<(String, Result<(), RunnerError>)>,
+        mut active_names: HashSet<String>,
+    ) {
+        let seen = *self.shutdown_seen.get_or_init(Instant::now);
+        let budget = self.cfg.shutdown_grace.saturating_sub(seen.elapsed());
+        let joined_all = tokio::time::timeout(budget, async {
+            while let Some(joined) = active.join_next().await {
+                match joined {
+                    Ok((name, result)) => {
+                        active_names.remove(&name);
+                        if let Err(e) = result {
+                            tracing::error!(source = %name, error = %e, "fetch worker failed");
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "fetch worker panicked"),
+                }
+            }
+        })
+        .await
+        .is_ok();
+        if !joined_all {
+            let mut sources: Vec<&str> = active_names.iter().map(String::as_str).collect();
+            sources.sort_unstable();
+            tracing::warn!(
+                workers = active.len(),
+                grace_secs = self.cfg.shutdown_grace.as_secs(),
+                ?sources,
+                "fetch workers still in flight past the shutdown grace budget; \
+                 aborting them -- their claimed repos return to pending on restart"
+            );
+            active.shutdown().await;
+        }
     }
 
     fn log_progress(
@@ -979,8 +1091,7 @@ impl<K: RecordSink> Runner<K> {
                 loop {
                     if let Err(e) = this.enumerate_all().await {
                         tracing::error!(error = %e, "enumeration failed; will retry after backoff");
-                        sleep_secs(60).await;
-                        if SHUTDOWN.load(Ordering::Relaxed) {
+                        if sleep_or_shutdown(Duration::from_secs(60), this.cfg.shutdown).await {
                             return;
                         }
                         continue;
@@ -988,12 +1099,8 @@ impl<K: RecordSink> Runner<K> {
                     let Some(after) = this.cfg.reenumerate_after else {
                         return;
                     };
-                    let deadline = Instant::now() + after;
-                    while Instant::now() < deadline {
-                        if SHUTDOWN.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    if sleep_or_shutdown(after, this.cfg.shutdown).await {
+                        return;
                     }
                     if let Err(e) = this.state.reset_enumeration() {
                         tracing::error!(error = %e, "reset enumeration failed");
@@ -1008,7 +1115,7 @@ impl<K: RecordSink> Runner<K> {
 
         let until_idle = self.cfg.reenumerate_after.is_none();
         let result = self.drain(until_idle).await;
-        if !until_idle || SHUTDOWN.load(Ordering::Relaxed) {
+        if !until_idle || self.shutting_down() {
             enumerator.abort();
         } else {
             drop(enumerator.await);
@@ -1112,6 +1219,9 @@ mod tests {
         room: AtomicBool,
         ingested: AtomicUsize,
         fail_commit: AtomicBool,
+        /// `finish` never resolves, as a sink stuck behind Postgres would not.
+        hang_finish: AtomicBool,
+        abandoned: AtomicBool,
     }
 
     impl FakeSink {
@@ -1120,6 +1230,8 @@ mod tests {
                 room: AtomicBool::new(room),
                 ingested: AtomicUsize::new(0),
                 fail_commit: AtomicBool::new(false),
+                hang_finish: AtomicBool::new(false),
+                abandoned: AtomicBool::new(false),
             })
         }
     }
@@ -1145,6 +1257,35 @@ mod tests {
                 rev: "3lz7gd2xq5c2c".into(),
                 committed: rx,
             })
+        }
+        async fn finish(&self) {
+            if self.hang_finish.load(Ordering::Relaxed) {
+                std::future::pending::<()>().await;
+            }
+        }
+        async fn abandon(&self) {
+            self.abandoned.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// A source whose fetches take `delay`; counts fetches started.
+    #[derive(Clone)]
+    struct SlowSource {
+        delay: Duration,
+        started: Arc<AtomicUsize>,
+    }
+
+    impl RepoSource for SlowSource {
+        fn name(&self) -> &'static str {
+            HOST
+        }
+        async fn list_repos(&self, _c: Option<String>, _l: u32) -> Result<RepoPage, SourceError> {
+            Ok(RepoPage::default())
+        }
+        async fn fetch_repo(&self, _d: String, _l: FetchLimits) -> Result<RepoBody, SourceError> {
+            self.started.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.delay).await;
+            Ok(RepoBody::Memory(vec![1]))
         }
     }
 
@@ -1673,6 +1814,250 @@ mod tests {
         let (soft_after, _) = rlimit::Resource::NOFILE.get().unwrap();
         assert!(soft_after >= soft_before.min(hard));
         assert!(soft_after <= hard);
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_aware_sleep_returns_as_soon_as_the_flag_flips() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        // No stop: the full duration elapses.
+        let started = Instant::now();
+        assert!(!sleep_or_shutdown(Duration::from_millis(60), &FLAG).await);
+        assert!(started.elapsed() >= Duration::from_millis(60));
+
+        // Already stopped: immediate.
+        FLAG.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        assert!(sleep_or_shutdown(Duration::from_secs(300), &FLAG).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        FLAG.store(false, Ordering::Relaxed);
+
+        // Stopped midway through a long backoff: out within a poll interval.
+        let stop = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            FLAG.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        assert!(sleep_or_shutdown(Duration::from_secs(300), &FLAG).await);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(100) && took < Duration::from_secs(2),
+            "{took:?}"
+        );
+        stop.await.unwrap();
+        FLAG.store(false, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn a_listing_backoff_ends_at_shutdown_without_blaming_the_host() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        #[derive(Clone)]
+        struct Throttled;
+        impl RepoSource for Throttled {
+            fn name(&self) -> &'static str {
+                "throttled"
+            }
+            async fn list_repos(
+                &self,
+                _c: Option<String>,
+                _l: u32,
+            ) -> Result<RepoPage, SourceError> {
+                Err(SourceError::Status {
+                    status: 429,
+                    retry_after_secs: Some(300),
+                    xrpc_error: false,
+                })
+            }
+            async fn fetch_repo(
+                &self,
+                _d: String,
+                _l: FetchLimits,
+            ) -> Result<RepoBody, SourceError> {
+                unreachable!()
+            }
+        }
+        let mut c = cfg();
+        c.shutdown = &FLAG;
+        c.list_max_retries = 10;
+        let r = Arc::new(
+            Runner::new(
+                c,
+                FakeSink::new(true),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        let stop = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            FLAG.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let rep = r.enumerate_pages(&Throttled, None).await.unwrap();
+        assert!(!rep.completed, "an interrupted pass is not a finished one");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        stop.await.unwrap();
+        FLAG.store(false, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_fetches_that_finish_within_the_grace_budget() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let sink = FakeSink::new(true);
+        let mut c = cfg();
+        c.shutdown = &FLAG;
+        c.shutdown_grace = Duration::from_secs(5);
+        let r = Arc::new(
+            Runner::new(
+                c,
+                Arc::clone(&sink),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        r.state()
+            .upsert_host(&Hostname::new(HOST).unwrap(), 1, None, true)
+            .unwrap();
+        r.state().upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        let started = Arc::new(AtomicUsize::new(0));
+        let src = SlowSource {
+            delay: Duration::from_millis(300),
+            started: Arc::clone(&started),
+        };
+        let this = Arc::clone(&r);
+        let health = Arc::new(HostHealth::new(1, 1, true));
+        let worker = tokio::spawn(async move { this.fetch_loop(&src, health).await });
+        while started.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        FLAG.store(true, Ordering::Relaxed);
+        worker.await.unwrap().unwrap();
+        settle_all().await;
+        FLAG.store(false, Ordering::Relaxed);
+        // The in-flight fetch was allowed to land and the repo completed.
+        assert_eq!(sink.ingested.load(Ordering::Relaxed), 1);
+        assert_eq!(r.state().stats().unwrap().done, 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_fetches_still_in_flight_past_the_grace_budget() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let sink = FakeSink::new(true);
+        sink.hang_finish.store(true, Ordering::Relaxed);
+        let mut c = cfg();
+        c.shutdown = &FLAG;
+        c.shutdown_grace = Duration::from_millis(400);
+        c.idle_exit = Duration::from_secs(60);
+        let r = Arc::new(
+            Runner::new(
+                c,
+                Arc::clone(&sink),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        r.state()
+            .upsert_host(&Hostname::new(HOST).unwrap(), 1, None, true)
+            .unwrap();
+        r.state().upsert(&repo("did:a", "r1"), HOST, false).unwrap();
+        r.progress.enumeration_done.store(true, Ordering::Relaxed);
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let src = SlowSource {
+            delay: Duration::from_secs(60),
+            started: Arc::clone(&started),
+        };
+        // The coordinator would build a real PdsSource for the host; put a
+        // slow fake worker in its JoinSet instead and hand that to the
+        // coordinator's stop logic.
+        let mut active: JoinSet<(String, Result<(), RunnerError>)> = JoinSet::new();
+        let mut names = HashSet::new();
+        names.insert(HOST.to_owned());
+        {
+            let this = Arc::clone(&r);
+            let src = src.clone();
+            active.spawn(async move {
+                let health = Arc::new(HostHealth::new(1, 1, true));
+                let res = this.fetch_loop(&src, health).await;
+                (HOST.to_owned(), res)
+            });
+        }
+        while started.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(r.state().stats().unwrap().claimed, 1);
+
+        FLAG.store(true, Ordering::Relaxed);
+        let t0 = Instant::now();
+        r.stop_workers(active, names).await;
+        let stopped_in = t0.elapsed();
+        assert!(
+            stopped_in >= Duration::from_millis(400) && stopped_in < Duration::from_secs(3),
+            "{stopped_in:?}"
+        );
+        // Nothing settled the aborted fetch: the row is still claimed, which
+        // is exactly what reset_claimed recovers on the next start.
+        assert_eq!(sink.ingested.load(Ordering::Relaxed), 0);
+        let st = r.state().stats().unwrap();
+        assert_eq!((st.claimed, st.done, st.pending), (1, 0, 0));
+        assert_eq!(r.state().reset_claimed().unwrap(), 1);
+        // The grace budget is shared with the sink drain: nothing is left
+        // for a hung sink, so it is abandoned at once.
+        assert!(r.shutdown_grace_remaining() < Duration::from_millis(100));
+        let t0 = Instant::now();
+        assert!(
+            !super::super::finish_sink(sink.as_ref(), &FLAG, r.shutdown_grace_remaining()).await
+        );
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        assert!(sink.abandoned.load(Ordering::Relaxed));
+        FLAG.store(false, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn drain_stops_within_the_grace_budget_on_shutdown() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let sink = FakeSink::new(true);
+        let mut c = cfg();
+        c.shutdown = &FLAG;
+        c.shutdown_grace = Duration::from_millis(300);
+        let r = Arc::new(
+            Runner::new(
+                c,
+                Arc::clone(&sink),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        // A real host worker against a host that does not resolve: its
+        // fetches fail as transport errors and it keeps polling for work,
+        // so drain would run until told to stop.
+        r.state()
+            .upsert_host(&Hostname::new(HOST).unwrap(), 1, None, true)
+            .unwrap();
+        for i in 0..4 {
+            r.state()
+                .upsert(&repo(&format!("did:{i}"), "r1"), HOST, false)
+                .unwrap();
+        }
+        let this = Arc::clone(&r);
+        let drain = tokio::spawn(async move { this.drain(false).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        FLAG.store(true, Ordering::Relaxed);
+        let t0 = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("drain stops")
+            .unwrap()
+            .unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        assert!(r.shutting_down());
+        FLAG.store(false, Ordering::Relaxed);
     }
 
     #[tokio::test]

@@ -18,7 +18,10 @@
 //!   400;
 //! * each repo has a `source` -- the PDS host it is fetched from directly, or
 //!   `hubble` -- and a direct source always wins over hubble, so the mirror is
-//!   only asked for repos no mushroom will serve us.
+//!   only asked for repos no mushroom will serve us;
+//! * a live-path resync request carries `priority = 1` and is claimed ahead of
+//!   every ordinary pending row for its source, so a repo the firehose has
+//!   proved out of sync is not queued behind millions of enumerated ones.
 //!
 //! `SQLite`, because `rusqlite` is already a dependency and a single writer at
 //! a few thousand rows a second is well within it. ~160 bytes per repo, so the
@@ -154,7 +157,8 @@ CREATE TABLE IF NOT EXISTS repo (
     attempts        INTEGER NOT NULL DEFAULT 0,
     cooldown_until  INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    priority        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS repo_claimable ON repo (source, state, cooldown_until);
 CREATE INDEX IF NOT EXISTS repo_state ON repo (state);
@@ -178,6 +182,17 @@ CREATE TABLE IF NOT EXISTS cursor (
     updated_at  INTEGER NOT NULL
 );
 ";
+
+/// Applied after [`SCHEMA`], once the `priority` column exists: a partial
+/// index over the handful of prioritised rows, so claiming them first costs a
+/// probe of a tiny index rather than a sort of the source's whole backlog.
+const PRIORITY_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS repo_priority_claimable
+    ON repo (source, state, cooldown_until) WHERE priority > 0;
+";
+
+/// Priority of a row the live path asked to resync. Ordinary rows are 0.
+const RESYNC_PRIORITY: i64 = 1;
 
 #[derive(Clone)]
 pub struct RepoStateStore {
@@ -220,9 +235,39 @@ impl RepoStateStore {
              PRAGMA busy_timeout=5000;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        Self::migrate_priority(&conn)?;
+        conn.execute_batch(PRIORITY_INDEX)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Bring a state file from before the `priority` column up to date, in
+    /// place. `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so
+    /// the column is added by hand; resync rows already waiting are promoted
+    /// so an upgrade does not leave them at the back of the queue.
+    fn migrate_priority(conn: &Connection) -> Result<(), StateError> {
+        let has_priority = conn
+            .prepare("PRAGMA table_info(repo)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "priority");
+        if has_priority {
+            return Ok(());
+        }
+        conn.execute_batch("ALTER TABLE repo ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")?;
+        let promoted = conn.execute(
+            "UPDATE repo SET priority = ?1
+              WHERE last_error LIKE 'resync:%' AND state IN (?2, ?3)",
+            params![
+                RESYNC_PRIORITY,
+                RepoState::Pending.as_str(),
+                RepoState::Claimed.as_str()
+            ],
+        )?;
+        tracing::info!(promoted, "backfill state: added repo.priority");
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StateError> {
@@ -373,8 +418,8 @@ impl RepoStateStore {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO repo (did, source, rev, indexed_rev, state, attempts, cooldown_until,
-                               last_error, updated_at)
-             VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, ?5, ?6)
+                               last_error, updated_at, priority)
+             VALUES (?1, ?2, ?3, NULL, ?4, 0, 0, ?5, ?6, ?7)
              ON CONFLICT(did) DO UPDATE SET
                  rev            = CASE WHEN excluded.rev > repo.rev THEN excluded.rev
                                        ELSE repo.rev END,
@@ -383,14 +428,16 @@ impl RepoStateStore {
                  attempts       = 0,
                  cooldown_until = 0,
                  last_error     = excluded.last_error,
-                 updated_at     = excluded.updated_at",
+                 updated_at     = excluded.updated_at,
+                 priority       = excluded.priority",
             params![
                 did,
                 HUBBLE_SOURCE,
                 rev,
                 RepoState::Pending.as_str(),
                 format!("resync: {reason}"),
-                now()
+                now(),
+                RESYNC_PRIORITY
             ],
         )?;
         drop(conn);
@@ -427,30 +474,34 @@ impl RepoStateStore {
     }
 
     /// Take up to `limit` repos of one source that are ready to fetch, marking
-    /// them claimed. Ordered by `cooldown_until` so a cooled-down row is not
-    /// starved behind newly enumerated ones; that is the index order, so a
-    /// claim never sorts the source's whole backlog.
+    /// them claimed. Ordered by `priority` descending, then `cooldown_until`,
+    /// then rowid: resync requests first, then cooled-down rows so they are
+    /// not starved behind newly enumerated ones. Each step is the order of an
+    /// index (the partial priority index, then `repo_claimable`), so a claim
+    /// never sorts the source's whole backlog.
     pub fn claim_for_source(&self, source: &str, limit: usize) -> Result<Claimed, StateError> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let rows: Claimed = {
-            let mut stmt = tx.prepare_cached(
+        let mut rows = Self::select_claimable(
+            &tx,
+            "SELECT did, rev FROM repo
+              WHERE source = ?1 AND state = ?2 AND cooldown_until <= ?3 AND priority > 0
+              ORDER BY cooldown_until, rowid
+              LIMIT ?4",
+            source,
+            limit,
+        )?;
+        if rows.len() < limit {
+            rows.extend(Self::select_claimable(
+                &tx,
                 "SELECT did, rev FROM repo
-                  WHERE source = ?1 AND state = ?2 AND cooldown_until <= ?3
-                  ORDER BY cooldown_until
+                  WHERE source = ?1 AND state = ?2 AND cooldown_until <= ?3 AND priority = 0
+                  ORDER BY cooldown_until, rowid
                   LIMIT ?4",
-            )?;
-            let iter = stmt.query_map(
-                params![
-                    source,
-                    RepoState::Pending.as_str(),
-                    now(),
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            iter.collect::<Result<_, _>>()?
-        };
+                source,
+                limit - rows.len(),
+            )?);
+        }
         {
             let mut stmt =
                 tx.prepare_cached("UPDATE repo SET state = ?2, updated_at = ?3 WHERE did = ?1")?;
@@ -460,6 +511,28 @@ impl RepoStateStore {
         }
         tx.commit()?;
         drop(conn);
+        Ok(rows)
+    }
+
+    fn select_claimable(
+        conn: &Connection,
+        sql: &str,
+        source: &str,
+        limit: usize,
+    ) -> Result<Claimed, StateError> {
+        let mut stmt = conn.prepare_cached(sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    source,
+                    RepoState::Pending.as_str(),
+                    now(),
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<Result<Claimed, _>>()?;
+        drop(stmt);
         Ok(rows)
     }
 
@@ -501,12 +574,13 @@ impl RepoStateStore {
     }
 
     /// Mark a repo indexed at `rev` -- the rev of the archive that was written,
-    /// not the rev seen at enumeration.
+    /// not the rev seen at enumeration. A resync's priority is spent here.
     pub fn complete(&self, did: &str, rev: &str) -> Result<(), StateError> {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE repo SET state = ?2, indexed_rev = ?3, attempts = 0,
-                             cooldown_until = 0, last_error = NULL, updated_at = ?4
+                             cooldown_until = 0, last_error = NULL, priority = 0,
+                             updated_at = ?4
               WHERE did = ?1",
             params![did, RepoState::Done.as_str(), rev, now()],
         )?;
@@ -521,7 +595,8 @@ impl RepoStateStore {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE repo SET state = ?2, indexed_rev = NULL, attempts = 0,
-                             cooldown_until = 0, last_error = 'dry-run', updated_at = ?3
+                             cooldown_until = 0, last_error = 'dry-run', priority = 0,
+                             updated_at = ?3
               WHERE did = ?1",
             params![did, RepoState::Done.as_str(), now()],
         )?;
@@ -1395,6 +1470,124 @@ mod tests {
         s.request_resync("did:a", "r2", "sync_event").unwrap();
         let st = s.stats().unwrap();
         assert_eq!((st.terminal, st.pending), (0, 1));
+    }
+
+    fn priority(s: &RepoStateStore, did: &str) -> i64 {
+        let conn = s.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT priority FROM repo WHERE did = ?1",
+            params![did],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_resync_is_claimed_ahead_of_older_pending_rows() {
+        let s = store();
+        for i in 0..50 {
+            s.upsert(&repo(&format!("did:enum{i:02}"), "r1"), HOST, false)
+                .unwrap();
+        }
+        // Filed long after the enumerated rows, and with a cooldown that
+        // would otherwise sort it behind none of them anyway.
+        s.upsert(&repo("did:live", "r1"), HOST, false).unwrap();
+        s.request_resync("did:live", "r2", "prev_mismatch").unwrap();
+        assert_eq!(priority(&s, "did:live"), 1);
+        assert_eq!(priority(&s, "did:enum00"), 0);
+
+        let claimed = s.claim_for_source(HOST, 3).unwrap();
+        assert_eq!(claimed[0], ("did:live".to_owned(), "r2".to_owned()));
+        assert_eq!(
+            &claimed[1..],
+            &[
+                ("did:enum00".to_owned(), "r1".to_owned()),
+                ("did:enum01".to_owned(), "r1".to_owned())
+            ],
+            "then the backlog in rowid order"
+        );
+        // A claim that the priority rows alone can fill takes nothing else.
+        s.request_resync("did:enum10", "r1", "sync_event").unwrap();
+        s.request_resync("did:enum20", "r1", "sync_event").unwrap();
+        let claimed = s.claim_for_source(HOST, 2).unwrap();
+        assert_eq!(
+            claimed,
+            vec![
+                ("did:enum10".to_owned(), "r1".to_owned()),
+                ("did:enum20".to_owned(), "r1".to_owned())
+            ]
+        );
+        // A prioritised row under cooldown still waits it out.
+        s.fail("did:enum10", true, 3600, "503", None).unwrap();
+        assert_eq!(priority(&s, "did:enum10"), 1, "kept for the retry");
+        let claimed = s.claim_for_source(HOST, 1).unwrap();
+        assert_eq!(claimed[0].0, "did:enum02");
+    }
+
+    #[test]
+    fn priority_is_spent_on_completion() {
+        let s = store();
+        s.request_resync("did:a", "r2", "sync_event").unwrap();
+        s.claim_for_source(HUBBLE_SOURCE, 10).unwrap();
+        s.complete("did:a", "r2").unwrap();
+        assert_eq!(priority(&s, "did:a"), 0);
+        // The next enumeration-driven fetch is an ordinary one.
+        s.upsert(&repo("did:a", "r3"), HUBBLE_SOURCE, false)
+            .unwrap();
+        assert_eq!(priority(&s, "did:a"), 0);
+        s.claim_for_source(HUBBLE_SOURCE, 10).unwrap();
+        s.mark_dry_run("did:a").unwrap();
+        assert_eq!(priority(&s, "did:a"), 0);
+    }
+
+    #[test]
+    fn a_state_file_from_before_priority_is_upgraded_in_place() {
+        const OLD_SCHEMA: &str = "
+CREATE TABLE repo (
+    did             TEXT PRIMARY KEY,
+    source          TEXT NOT NULL,
+    rev             TEXT NOT NULL DEFAULT '',
+    indexed_rev     TEXT,
+    state           TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    cooldown_until  INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX repo_claimable ON repo (source, state, cooldown_until);
+CREATE INDEX repo_state ON repo (state);
+INSERT INTO repo (did, source, rev, state, updated_at) VALUES ('did:old', 'hubble', 'r1', 'pending', 0);
+INSERT INTO repo (did, source, rev, state, last_error, updated_at)
+    VALUES ('did:resync', 'hubble', 'r2', 'pending', 'resync: sync_event', 0);
+INSERT INTO repo (did, source, rev, state, last_error, updated_at)
+    VALUES ('did:claimed', 'hubble', 'r2', 'claimed', 'resync: prev_mismatch', 0);
+INSERT INTO repo (did, source, rev, indexed_rev, state, last_error, updated_at)
+    VALUES ('did:done', 'hubble', 'r2', 'r2', 'done', 'resync: sync_event', 0);
+";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(OLD_SCHEMA).unwrap();
+        drop(conn);
+
+        let s = RepoStateStore::open(&path).unwrap();
+        assert_eq!(priority(&s, "did:old"), 0);
+        assert_eq!(
+            priority(&s, "did:resync"),
+            1,
+            "waiting resyncs are promoted"
+        );
+        assert_eq!(priority(&s, "did:claimed"), 1);
+        assert_eq!(priority(&s, "did:done"), 0, "a finished resync is not");
+        assert_eq!(
+            s.claim_for_source(HUBBLE_SOURCE, 1).unwrap(),
+            vec![("did:resync".to_owned(), "r2".to_owned())]
+        );
+        drop(s);
+        // Opening again is a no-op.
+        let s = RepoStateStore::open(&path).unwrap();
+        s.request_resync("did:new", "r1", "sync_event").unwrap();
+        assert_eq!(priority(&s, "did:new"), 1);
     }
 
     #[test]

@@ -132,6 +132,7 @@ Resident memory is exported as `wintermute_rss_bytes` / `wintermute_rss_peak_byt
 | `BACKFILL_FETCH_TIMEOUT_SECS` | `300` | Whole-request timeout per archive |
 | `BACKFILL_REENUMERATE_SECS` | `0` | Re-run enumeration this long after a pass completes; `0` enumerates once and then only drains |
 | `BACKFILL_WORKER_THREADS` | CPUs | Tokio threads for the backfill runtime |
+| `BACKFILL_SHUTDOWN_GRACE_SECS` | `20` | On stop, how long in-flight fetches and uncommitted writes may finish before they are abandoned to the claimed-row recovery on the next start; keep it under the unit's `TimeoutStopSec` |
 | `MIMALLOC_PURGE_DELAY` | (allocator default) | Set to `0` on memory-tight hosts so freed whale-repo allocations return to the OS promptly; the backfill CLI and daemon both use mimalloc |
 
 ## Utilities
@@ -172,7 +173,7 @@ BACKFILL_SINK=null ./target/release/backfill drain
 |-------|---------|
 | `firehose_live` (fjall) | Live records awaiting indexing |
 | `label_live` (fjall) | Labels awaiting indexing |
-| `backfill_state.sqlite` | Backfill: per-repo `source`, listed `rev`, `indexed_rev`, state, attempts, cooldown; per-host enumeration cursor, list state, adaptive concurrency floor, cooldown |
+| `backfill_state.sqlite` | Backfill: per-repo `source`, listed `rev`, `indexed_rev`, state, attempts, cooldown, resync priority; per-host enumeration cursor, list state, adaptive concurrency floor, cooldown |
 | `repo_sync` (PostgreSQL) | Live sync 1.1 state: per-repo `rev` and `data_cid` (MST root) of the last commit seen on the firehose, plus the relay `host`. Created by `migrations/create_repo_sync.sql` |
 
 Backfill has no record queue: parsed repos go to the COPY writers through a bounded channel, and fetch workers only claim work while that channel has room.
@@ -267,7 +268,7 @@ Every `#commit` frame from a sync 1.1 host carries `prevData`, the MST root of t
 
 A `#sync` frame means the repo's MST was rewritten upstream: unless its commit matches what is stored exactly, a resync is requested and the new root recorded. An `#account` frame taking a repo out of service (`deleted`, `takendown`, `deactivated`, `suspended`) writes the repo off in the backfill state store so no fetch is spent on it, and drops its sync state.
 
-A resync is a row in `backfill_state.sqlite` set back to `pending` with `indexed_rev` cleared (`last_error` says `resync: prev_mismatch` or `resync: sync_event`); the backfill runner's next tick fetches the whole repo through whichever source owns it. With `BACKFILL_MODE=off` requests are still recorded and are fetched once backfill is enabled; the first such request is logged at `info`.
+A resync is a row in `backfill_state.sqlite` set back to `pending` with `indexed_rev` cleared (`last_error` says `resync: prev_mismatch` or `resync: sync_event`); the backfill runner's next tick fetches the whole repo through whichever source owns it. Resync requests carry `priority = 1` and are claimed ahead of every enumerated repo for their source, so a repo the firehose has proved out of sync is fetched next rather than queued behind millions of pending rows. With `BACKFILL_MODE=off` requests are still recorded and are fetched once backfill is enabled; the first such request is logged at `info`.
 
 Cost on the live path: the check runs in a single tracker task behind a bounded channel, with a bounded in-memory cache (two generations of 150k repos) in front of `repo_sync`. Postgres is read only on cache miss, one query per drained batch, and written once a second as one `unnest` upsert per repo touched in that second.
 
@@ -281,7 +282,7 @@ Handles are resolved asynchronously after initial indexing. Actors with NULL han
 
 On SIGTERM or SIGINT, wintermute:
 1. Stops accepting new events
-2. Drains all in-flight work
+2. Drains all in-flight work; the backfill gives in-flight fetches and uncommitted writes `BACKFILL_SHUTDOWN_GRACE_SECS` (default 20 s) to land, then aborts what is left -- those repos stay claimed and are re-fetched on the next start
 3. Saves cursor positions
 4. Exits cleanly
 
