@@ -295,7 +295,7 @@ fn encode_frame(evt: &SeqEvt) -> Vec<u8> {
                             action: op.action.to_string(),
                         })
                         .collect(),
-                    blobs: e.blobs.iter().map(|blob| blob.to_string()).collect(),
+                    blobs: e.blobs.clone(),
                     prev_data: e.prev_data,
                 },
                 opts(&evt.r#type),
