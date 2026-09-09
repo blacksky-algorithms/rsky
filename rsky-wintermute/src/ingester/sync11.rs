@@ -22,12 +22,18 @@
 //! repo. "Observed" rather than "indexed": the record jobs are already durable
 //! in the fjall queue by the time a frame is recorded here, which is the same
 //! guarantee the firehose cursor gives.
+//!
+//! The tracker's cache doubles as the live path's stale-replay gate: it is
+//! shared with every [`Sync11Handle`] as [`KnownRevs`], so the firehose loop
+//! can ask, synchronously and without a Postgres round-trip, whether a
+//! commit's `rev` is already behind what we hold and drop it before anything
+//! is enqueued. See [`KnownRevs`] for the cold-cache caveat.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use deadpool_postgres::Pool;
@@ -182,6 +188,16 @@ pub fn rev_newer(rev: &str, stored: &str) -> bool {
     }
 }
 
+/// The live path's stale-replay gate, as a pure function.
+///
+/// A commit is a stale replay when we already hold a rev for the repo and
+/// the commit's `rev` is not newer than it. An unknown repo (`known == None`)
+/// always passes; the tracker will judge it with the full [`decide`] step.
+#[must_use]
+pub fn is_stale_replay(known: Option<&str>, rev: &str) -> bool {
+    known.is_some_and(|k| !rev_newer(rev, k))
+}
+
 /// The sync 1.1 inductive step, as a pure function of `(stored, frame)`.
 ///
 /// 1. nothing stored: `FirstSeen` (or `NoData` if there is nothing to store);
@@ -281,13 +297,19 @@ pub struct Sync11Config {
     pub backfill_enabled: bool,
 }
 
-/// Sending side of the tracker channel. Cheap to clone; one per connection.
+/// Sending side of the tracker channel plus a read-only view of the tracker's
+/// cache. Cheap to clone; one per connection.
 #[derive(Clone)]
 pub struct Sync11Handle {
     tx: mpsc::Sender<Msg>,
+    revs: KnownRevs,
 }
 
 impl Sync11Handle {
+    pub(crate) const fn new(tx: mpsc::Sender<Msg>, revs: KnownRevs) -> Self {
+        Self { tx, revs }
+    }
+
     /// Waits when the channel is full: the tracker is far cheaper than the
     /// CAR parse that precedes it, so this is backpressure, not a stall.
     pub async fn send(&self, msg: Msg) {
@@ -296,6 +318,20 @@ impl Sync11Handle {
                 .with_label_values(&["sync11_closed"])
                 .inc();
         }
+    }
+
+    /// Whether a `#commit` at `rev` for `did` is a replay of something we
+    /// already hold. Synchronous, one read lock, no allocation; see
+    /// [`KnownRevs`] for what "hold" covers and the cold-cache caveat.
+    #[must_use]
+    pub fn is_stale_replay(&self, did: &str, rev: &str) -> bool {
+        self.revs.is_stale_replay(did, rev)
+    }
+
+    /// The rev we hold for `did`, if any. For tests and diagnostics.
+    #[must_use]
+    pub fn known_rev(&self, did: &str) -> Option<String> {
+        self.revs.known_rev(did)
     }
 }
 
@@ -425,6 +461,14 @@ impl Cache {
         self.cur.get(did)
     }
 
+    /// Read without promoting, so a shared reader needs no write access.
+    fn peek_rev(&self, did: &str) -> Option<&str> {
+        self.cur
+            .get(did)
+            .or_else(|| self.prev.get(did))
+            .map(|s| s.rev.as_str())
+    }
+
     fn contains(&self, did: &str) -> bool {
         self.cur.contains_key(did) || self.prev.contains_key(did)
     }
@@ -447,6 +491,67 @@ impl Cache {
     }
 }
 
+/// The tracker's cache, shared read-only with the firehose loop so it can
+/// gate stale replays before enqueuing anything.
+///
+/// This *is* the tracker's [`Cache`], not a copy: every path that changes what
+/// the tracker holds (a recorded commit, a `repo_sync` batch load on cache
+/// miss, a forget on `#account` or `#sync`) is visible here the moment it
+/// happens, and the view is bounded by the cache's own two generations of
+/// [`CACHE_GENERATION_ENTRIES`]. The tracker takes the write lock for its own
+/// accesses; readers hold the read lock for one hash lookup and never wait on
+/// Postgres or the tracker task.
+///
+/// Cold-cache caveat: a repo the tracker has not touched since the process
+/// started (or that rotated out of the cache) has no entry here, so its next
+/// commit passes the gate even if it is a replay; the tracker then loads the
+/// persisted row and judges it `stale`, so the entry is present from then on.
+/// The gate therefore never drops anything newer than what we hold, but it
+/// cannot catch the first replay per repo after a restart. The same holds for
+/// a replay that arrives inside the tracker's channel lag behind the original.
+#[derive(Clone)]
+pub struct KnownRevs(Arc<RwLock<Cache>>);
+
+impl KnownRevs {
+    fn new(cap: usize) -> Self {
+        Self(Arc::new(RwLock::new(Cache::new(cap))))
+    }
+
+    /// A poisoned lock only means a panic elsewhere while it was held; the
+    /// map itself is still consistent (every mutation is a single insert or
+    /// remove), so keep serving it rather than take the ingester down.
+    fn read(&self) -> RwLockReadGuard<'_, Cache> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Cache> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// See [`is_stale_replay`]. One read lock, no allocation.
+    #[must_use]
+    pub fn is_stale_replay(&self, did: &str, rev: &str) -> bool {
+        is_stale_replay(self.read().peek_rev(did), rev)
+    }
+
+    /// The rev held for `did`, if any.
+    #[must_use]
+    pub fn known_rev(&self, did: &str) -> Option<String> {
+        self.read().peek_rev(did).map(str::to_owned)
+    }
+
+    /// Entries held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.read().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 // ------------------------------------------------------------------- tracker
 
 enum Pending {
@@ -456,7 +561,7 @@ enum Pending {
 
 /// Per-repo live sync state: cache, pending writes, and the resync hand-off.
 pub struct Tracker {
-    cache: Cache,
+    cache: KnownRevs,
     pending: HashMap<String, Pending>,
     state: RepoStateStore,
     store: Arc<dyn SyncStore>,
@@ -468,13 +573,19 @@ impl Tracker {
     #[must_use]
     pub fn new(store: Arc<dyn SyncStore>, state: RepoStateStore, backfill_enabled: bool) -> Self {
         Self {
-            cache: Cache::new(CACHE_GENERATION_ENTRIES),
+            cache: KnownRevs::new(CACHE_GENERATION_ENTRIES),
             pending: HashMap::new(),
             state,
             store,
             backfill_enabled,
             warned_backfill_off: false,
         }
+    }
+
+    /// The shared read-only view of this tracker's cache, for the handles.
+    #[must_use]
+    pub fn revs(&self) -> KnownRevs {
+        self.cache.clone()
     }
 
     /// Entries held in memory. For tests and the occasional log line.
@@ -490,33 +601,33 @@ impl Tracker {
     }
 
     fn known(&self, did: &str) -> bool {
-        self.pending.contains_key(did) || self.cache.contains(did)
+        self.pending.contains_key(did) || self.cache.read().contains(did)
     }
 
-    fn lookup(&mut self, did: &str) -> Option<SyncState> {
+    fn lookup(&self, did: &str) -> Option<SyncState> {
         match self.pending.get(did) {
             Some(Pending::Upsert(state, _)) => return Some(state.clone()),
             Some(Pending::Delete) => return None,
             None => {}
         }
-        self.cache.get(did).cloned()
+        self.cache.write().get(did).cloned()
     }
 
     fn record(&mut self, did: &str, state: SyncState, host: &Arc<str>) {
-        self.cache.insert(did.to_owned(), state.clone());
+        self.cache.write().insert(did.to_owned(), state.clone());
         self.pending
             .insert(did.to_owned(), Pending::Upsert(state, Arc::clone(host)));
     }
 
     fn forget(&mut self, did: &str) {
-        self.cache.remove(did);
+        self.cache.write().remove(did);
         self.pending.insert(did.to_owned(), Pending::Delete);
     }
 
     /// Warm the cache for every repo in the batch we know nothing about, in
     /// one read. A failed read is logged and the repos are treated as unseen:
     /// the frame is recorded rather than dropped.
-    async fn prefetch(&mut self, msgs: &[Msg]) {
+    async fn prefetch(&self, msgs: &[Msg]) {
         let mut want: Vec<String> = Vec::new();
         let mut seen: HashSet<&str> = HashSet::new();
         for m in msgs {
@@ -533,8 +644,11 @@ impl Tracker {
         }
         match self.store.load(&want).await {
             Ok(rows) => {
+                // One lock for the whole batch; the loaded revs are visible
+                // to the live path's gate as soon as it is released.
+                let mut cache = self.cache.write();
                 for (did, state) in rows {
-                    self.cache.insert(did, state);
+                    cache.insert(did, state);
                 }
             }
             Err(e) => {
@@ -760,8 +874,9 @@ pub fn spawn(
 ) -> (Sync11Handle, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     let tracker = Tracker::new(store, state, backfill_enabled);
+    let handle = Sync11Handle::new(tx, tracker.revs());
     let task = tokio::spawn(run(tracker, rx));
-    (Sync11Handle { tx }, task)
+    (handle, task)
 }
 
 async fn run(mut tracker: Tracker, mut rx: mpsc::Receiver<Msg>) {
@@ -792,11 +907,73 @@ async fn run(mut tracker: Tracker, mut rx: mpsc::Receiver<Msg>) {
     tracing::info!(cached = tracker.cached(), "sync11 tracker stopped");
 }
 
+/// In-memory [`SyncStore`] for tests in this module and in the ingester's.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{BoxFut, SyncState, SyncStore, Upsert};
+    use crate::types::WintermuteError;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub struct MemStore {
+        pub rows: Mutex<HashMap<String, (SyncState, String)>>,
+        pub fail: Mutex<bool>,
+        pub loads: Mutex<usize>,
+    }
+
+    impl MemStore {
+        pub fn row(&self, did: &str) -> Option<SyncState> {
+            self.rows.lock().unwrap().get(did).map(|(s, _)| s.clone())
+        }
+    }
+
+    impl SyncStore for MemStore {
+        fn load<'a>(
+            &'a self,
+            dids: &'a [String],
+        ) -> BoxFut<'a, Result<Vec<(String, SyncState)>, WintermuteError>> {
+            Box::pin(async move {
+                *self.loads.lock().unwrap() += 1;
+                if *self.fail.lock().unwrap() {
+                    return Err(WintermuteError::Other("down".into()));
+                }
+                let rows = self.rows.lock().unwrap();
+                Ok(dids
+                    .iter()
+                    .filter_map(|d| rows.get(d).map(|(s, _)| (d.clone(), s.clone())))
+                    .collect())
+            })
+        }
+
+        fn flush<'a>(
+            &'a self,
+            upserts: &'a [Upsert],
+            deletes: &'a [String],
+        ) -> BoxFut<'a, Result<(), WintermuteError>> {
+            Box::pin(async move {
+                if *self.fail.lock().unwrap() {
+                    return Err(WintermuteError::Other("down".into()));
+                }
+                let mut rows = self.rows.lock().unwrap();
+                for (did, s, h) in upserts {
+                    rows.insert(did.clone(), (s.clone(), h.to_string()));
+                }
+                for did in deletes {
+                    rows.remove(did);
+                }
+                drop(rows);
+                Ok(())
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::MemStore;
     use super::*;
     use crate::backfiller::state::HUBBLE_SOURCE;
-    use std::sync::Mutex;
 
     // ------------------------------------------------------------ fixtures
 
@@ -857,59 +1034,6 @@ mod tests {
         let root = rsky_common::ipld::cid_for_cbor(&commit).unwrap();
         let filler = serde_ipld_dagcbor::to_vec(&serde_json::json!({"x": 1})).unwrap();
         (car(Some(root), &[(root, bytes), (cid(200), filler)]), root)
-    }
-
-    #[derive(Default)]
-    struct MemStore {
-        rows: Mutex<HashMap<String, (SyncState, String)>>,
-        fail: Mutex<bool>,
-        loads: Mutex<usize>,
-    }
-
-    impl MemStore {
-        fn row(&self, did: &str) -> Option<SyncState> {
-            self.rows.lock().unwrap().get(did).map(|(s, _)| s.clone())
-        }
-    }
-
-    impl SyncStore for MemStore {
-        fn load<'a>(
-            &'a self,
-            dids: &'a [String],
-        ) -> BoxFut<'a, Result<Vec<(String, SyncState)>, WintermuteError>> {
-            Box::pin(async move {
-                *self.loads.lock().unwrap() += 1;
-                if *self.fail.lock().unwrap() {
-                    return Err(WintermuteError::Other("down".into()));
-                }
-                let rows = self.rows.lock().unwrap();
-                Ok(dids
-                    .iter()
-                    .filter_map(|d| rows.get(d).map(|(s, _)| (d.clone(), s.clone())))
-                    .collect())
-            })
-        }
-
-        fn flush<'a>(
-            &'a self,
-            upserts: &'a [Upsert],
-            deletes: &'a [String],
-        ) -> BoxFut<'a, Result<(), WintermuteError>> {
-            Box::pin(async move {
-                if *self.fail.lock().unwrap() {
-                    return Err(WintermuteError::Other("down".into()));
-                }
-                let mut rows = self.rows.lock().unwrap();
-                for (did, s, h) in upserts {
-                    rows.insert(did.clone(), (s.clone(), h.to_string()));
-                }
-                for did in deletes {
-                    rows.remove(did);
-                }
-                drop(rows);
-                Ok(())
-            })
-        }
     }
 
     fn tracker(store: &Arc<MemStore>, repo_state: &RepoStateStore) -> Tracker {
@@ -981,6 +1105,17 @@ mod tests {
         let s = state(R2, &a);
         assert_eq!(decide(Some(&s), R2, Some(&a), Some(&a)), Outcome::Stale);
         assert_eq!(decide(Some(&s), R1, Some(&z), None), Outcome::Stale);
+    }
+
+    #[test]
+    fn the_replay_gate_drops_equal_and_older_revs_and_passes_newer_or_unknown() {
+        assert!(!is_stale_replay(Some(R1), R2), "newer rev passes");
+        assert!(is_stale_replay(Some(R2), R2), "equal rev is a replay");
+        assert!(is_stale_replay(Some(R2), R1), "older rev is a replay");
+        assert!(!is_stale_replay(None, R1), "unknown repo passes");
+        // malformed revs are only ever judged by equality
+        assert!(is_stale_replay(Some("odd"), "odd"));
+        assert!(!is_stale_replay(Some("odd"), R1));
     }
 
     #[test]
@@ -1062,6 +1197,129 @@ mod tests {
         c.remove("a");
         assert!(!c.contains("a"));
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn cache_peek_reads_both_generations_without_promoting() {
+        let mut c = Cache::new(2);
+        c.insert("a".into(), state(R1, "x"));
+        c.insert("b".into(), state(R2, "y")); // rotates: both now in prev
+        assert_eq!(c.peek_rev("a"), Some(R1));
+        assert_eq!(c.peek_rev("b"), Some(R2));
+        assert_eq!(c.cur.len(), 0, "peek did not promote");
+        assert_eq!(c.peek_rev("z"), None);
+    }
+
+    // ----------------------------------------------------------- known revs
+
+    /// A handle wired to a tracker driven directly by the test, so the view
+    /// can be checked deterministically without the actor task.
+    fn handle_for(t: &Tracker) -> (Sync11Handle, mpsc::Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(8);
+        (Sync11Handle::new(tx, t.revs()), rx)
+    }
+
+    #[tokio::test]
+    async fn the_handle_sees_a_rev_once_the_tracker_records_it() {
+        let store = Arc::new(MemStore::default());
+        let rs = RepoStateStore::open_in_memory().unwrap();
+        let mut t = tracker(&store, &rs);
+        let (h, _rx) = handle_for(&t);
+
+        assert_eq!(h.known_rev("did:a"), None);
+        assert!(!h.is_stale_replay("did:a", R1), "cold: nothing to gate on");
+
+        t.handle(commit("did:a", R1, None, Some(&cid(1)))).await;
+        assert_eq!(h.known_rev("did:a").as_deref(), Some(R1));
+        assert!(h.is_stale_replay("did:a", R1));
+        assert!(!h.is_stale_replay("did:a", R2));
+
+        t.handle(commit("did:a", R2, Some(&cid(1)), Some(&cid(2))))
+            .await;
+        assert_eq!(h.known_rev("did:a").as_deref(), Some(R2));
+        assert!(h.is_stale_replay("did:a", R1));
+        assert!(h.is_stale_replay("did:a", R2));
+        assert!(!h.is_stale_replay("did:a", R3));
+
+        // a stale commit reaching the tracker anyway does not move the view
+        t.handle(commit("did:a", R1, Some(&cid(9)), Some(&cid(1))))
+            .await;
+        assert_eq!(h.known_rev("did:a").as_deref(), Some(R2));
+    }
+
+    #[tokio::test]
+    async fn the_handle_sees_revs_loaded_from_the_store_on_warm_up() {
+        let store = Arc::new(MemStore::default());
+        store.rows.lock().unwrap().insert(
+            "did:a".into(),
+            (state(R2, &cid(2).to_string()), "old".into()),
+        );
+        store.rows.lock().unwrap().insert(
+            "did:b".into(),
+            (state(R1, &cid(1).to_string()), "old".into()),
+        );
+        let rs = RepoStateStore::open_in_memory().unwrap();
+        let mut t = tracker(&store, &rs);
+        let (h, _rx) = handle_for(&t);
+        assert_eq!(h.known_rev("did:a"), None);
+
+        // A batch that only mentions did:a and did:b still warms both, even
+        // though the frame for did:a turns out to be stale.
+        t.handle_batch(vec![
+            commit("did:a", R1, Some(&cid(9)), Some(&cid(1))),
+            commit("did:b", R2, Some(&cid(1)), Some(&cid(2))),
+        ])
+        .await;
+        assert_eq!(
+            h.known_rev("did:a").as_deref(),
+            Some(R2),
+            "loaded, not advanced"
+        );
+        assert_eq!(
+            h.known_rev("did:b").as_deref(),
+            Some(R2),
+            "loaded, then advanced"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_handle_forgets_a_repo_the_tracker_forgets() {
+        let store = Arc::new(MemStore::default());
+        let rs = RepoStateStore::open_in_memory().unwrap();
+        let mut t = tracker(&store, &rs);
+        let (h, _rx) = handle_for(&t);
+        t.handle(commit("did:a", R1, None, Some(&cid(1)))).await;
+        assert!(h.is_stale_replay("did:a", R1));
+        t.handle(Msg::WriteOff {
+            did: "did:a".into(),
+            status: "deleted".into(),
+        })
+        .await;
+        assert_eq!(h.known_rev("did:a"), None);
+        assert!(!h.is_stale_replay("did:a", R1));
+        assert!(h.revs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_spawned_handle_shares_the_actor_tracker_view() {
+        let store = Arc::new(MemStore::default());
+        let rs = RepoStateStore::open_in_memory().unwrap();
+        let dyn_store: Arc<dyn SyncStore> = store.clone();
+        let (handle, task) = spawn(dyn_store, rs, false);
+        handle.send(commit("did:a", R2, None, Some(&cid(2)))).await;
+        // the actor is asynchronous: wait for it to have drained the message
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while handle.known_rev("did:a").is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "tracker never recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(handle.is_stale_replay("did:a", R1));
+        assert!(!handle.is_stale_replay("did:a", R3));
+        drop(handle);
+        task.await.unwrap();
     }
 
     // -------------------------------------------------------------- tracker

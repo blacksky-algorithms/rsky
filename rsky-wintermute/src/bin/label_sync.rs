@@ -179,11 +179,7 @@ async fn sync_labeler(
 
                     if total_events.is_multiple_of(10000) {
                         let elapsed = start.elapsed().as_secs();
-                        let rate = if elapsed > 0 {
-                            total_events / elapsed
-                        } else {
-                            0
-                        };
+                        let rate = total_events.checked_div(elapsed).unwrap_or(0);
                         println!(
                             "[{labeler_host}] seq={last_seq} events={total_events} \
                              negations={total_negations_applied} skipped={total_skipped} \

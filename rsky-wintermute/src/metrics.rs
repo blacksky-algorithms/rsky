@@ -149,6 +149,19 @@ pub static INGESTER_SYNC11_RESYNCS_REQUESTED_TOTAL: LazyLock<IntCounterVec> = La
     .unwrap()
 });
 
+/// Live `#commit` frames dropped whole before any job was enqueued, by reason.
+///
+/// `stale_replay`: the rev does not advance what the sync 1.1 tracker already
+/// holds for the repo; typically a second relay running behind the first.
+pub static INGESTER_LIVE_COMMITS_DROPPED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "ingester_live_commits_dropped_total",
+        "Live #commit frames dropped before enqueue, by reason",
+        &["reason"]
+    )
+    .unwrap()
+});
+
 pub static INGESTER_ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "ingester_errors_total",

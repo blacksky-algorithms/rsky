@@ -216,6 +216,7 @@ Prometheus metrics are exposed at `http://localhost:9090/metrics`:
 - `ingester_sync11_commits_total{outcome}` - Live `#commit` frames checked against stored sync state: `applied`, `first_seen`, `stale`, `lax`, `desync`, `no_data`
 - `ingester_sync11_sync_events_total{outcome}` - Live `#sync` frames: `resync` or `unchanged`
 - `ingester_sync11_resyncs_requested_total{reason}` - Repos handed to backfill for a full resync: `prev_mismatch` or `sync_event`
+- `ingester_live_commits_dropped_total{reason}` - Live `#commit` frames dropped whole before enqueue: `stale_replay` (the rev does not advance what the sync 1.1 tracker holds for the repo)
 - `ingester_identity_tasks_in_flight` - Identity/account/sync tasks running (bounded by `IDENTITY_EVENT_CONCURRENCY`)
 - `ingester_identity_task_timeouts_total{kind}` / `ingester_identity_tasks_shed_total{kind}` - Tasks abandoned at the deadline; events dropped because every permit was busy
 - `wintermute_rss_bytes` / `wintermute_rss_peak_bytes` - Resident set size and its high-water mark (Linux; 0 elsewhere)
@@ -269,6 +270,8 @@ A `#sync` frame means the repo's MST was rewritten upstream: unless its commit m
 A resync is a row in `backfill_state.sqlite` set back to `pending` with `indexed_rev` cleared (`last_error` says `resync: prev_mismatch` or `resync: sync_event`); the backfill runner's next tick fetches the whole repo through whichever source owns it. With `BACKFILL_MODE=off` requests are still recorded and are fetched once backfill is enabled; the first such request is logged at `info`.
 
 Cost on the live path: the check runs in a single tracker task behind a bounded channel, with a bounded in-memory cache (two generations of 150k repos) in front of `repo_sync`. Postgres is read only on cache miss, one query per drained batch, and written once a second as one `unnest` upsert per repo touched in that second.
+
+Stale replays are dropped before they reach the queue, not just left unrecorded: with several `RELAY_HOSTS` a relay running hours behind re-delivers commits the others already carried, so the firehose loop checks every `#commit` against the tracker's cache (shared with it as a synchronous read-only view) and, when the rev does not advance what is held, enqueues none of its creates, updates or deletes and counts it in `ingester_live_commits_dropped_total{reason="stale_replay"}`; the indexer's per-row rev gate cannot do this for a record deleted in between, because there is no row left to gate on. The gate is only as warm as the cache: a repo not seen since the process started passes its first commit through (the tracker then loads its `repo_sync` row and catches the next replay), as does a replay arriving within the tracker's channel lag of the original.
 
 ### Handle Resolution
 
