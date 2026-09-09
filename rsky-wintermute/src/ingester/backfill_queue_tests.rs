@@ -2,6 +2,7 @@
 mod tests {
     use crate::ingester::backfill_queue::populate_backfill_queue;
     use crate::storage::Storage;
+    use serial_test::serial;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -12,7 +13,10 @@ mod tests {
         (storage, temp_dir)
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_single_page() {
         let (storage, _dir) = setup_test_storage();
 
@@ -63,7 +67,10 @@ mod tests {
         );
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_multiple_pages() {
         let (storage, _dir) = setup_test_storage();
 
@@ -121,7 +128,10 @@ mod tests {
         assert_eq!(queue_len, 3, "expected 3 repos total from 2 pages");
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_http_error() {
         let (storage, _dir) = setup_test_storage();
 
@@ -142,7 +152,10 @@ mod tests {
         assert!(err_msg.contains("http error") || err_msg.contains("500"));
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_empty_response() {
         let (storage, _dir) = setup_test_storage();
 
@@ -176,7 +189,10 @@ mod tests {
         assert_eq!(queue_len, 0, "queue should be empty");
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_cursor_persistence() {
         let (storage, _dir) = setup_test_storage();
 
@@ -232,7 +248,10 @@ mod tests {
         assert!(stored_cursor.is_some(), "cursor should be stored");
     }
 
+    // `populate_backfill_queue` returns early while the process-global
+    // SHUTDOWN flag is set, so these must not run beside the tests that flip it.
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_populate_backfill_queue_fjall_data_loss_reset() {
         let (storage, _dir) = setup_test_storage();
 

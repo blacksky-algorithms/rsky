@@ -148,6 +148,185 @@ mod indexer_tests {
         assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
 
+    fn live_job(i: usize) -> IndexJob {
+        IndexJob {
+            uri: format!("at://did:plc:inflight{i}/app.bsky.feed.post/{i}"),
+            cid: format!("bafy{i}"),
+            action: WriteAction::Create,
+            record: None,
+            indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+            rev: "rev".to_owned(),
+        }
+    }
+
+    /// Enqueue `n` jobs, dequeue them as one batch (so they are gone from
+    /// Fjall, exactly like the live loop) and shard them.
+    fn dequeued_live_shards(
+        storage: &Storage,
+        n: usize,
+        shards: usize,
+    ) -> super::super::LiveShards {
+        for i in 0..n {
+            storage.enqueue_firehose_live(&live_job(i)).unwrap();
+        }
+        let batch = storage.dequeue_firehose_live_batch(n).unwrap();
+        assert_eq!(batch.len(), n);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        Arc::new(IndexerManager::shard_live_jobs(batch, shards))
+    }
+
+    /// The runner takes the shutdown flag as a parameter, so these tests use a
+    /// local flag instead of the process-global `crate::SHUTDOWN`; other
+    /// tests in this binary (e.g. `populate_backfill_queue`) read the global
+    /// concurrently and bail out early while it is set.
+    fn flag(set: bool) -> std::sync::atomic::AtomicBool {
+        std::sync::atomic::AtomicBool::new(set)
+    }
+
+    fn requeued_total(reason: &str) -> u64 {
+        crate::metrics::INDEXER_LIVE_JOBS_REQUEUED_TOTAL
+            .with_label_values(&[reason])
+            .get()
+    }
+
+    /// Shutdown while a batch is in flight: after the grace budget the shard
+    /// tasks are aborted and every job of the batch is back in the queue.
+    #[tokio::test]
+    async fn test_live_batch_aborted_on_shutdown_is_requeued() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 6usize;
+        let shards = dequeued_live_shards(&storage, total, 2);
+        let live_shards = shards.iter().filter(|s| !s.is_empty()).count();
+        let before = requeued_total("shutdown_inflight");
+        let shutdown = flag(true);
+
+        let grace = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        // A shard that never finishes: stands in for a slow Postgres batch.
+        let outcome = IndexerManager::run_live_batch(
+            &storage,
+            &shards,
+            grace,
+            &shutdown,
+            |_idx, _shards| async {
+                futures::future::pending::<()>().await;
+                Vec::new()
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(outcome.is_none(), "an aborted batch yields no results");
+        assert!(elapsed >= grace, "grace budget honoured: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "abort must not wait on the hung shards: {elapsed:?}"
+        );
+        assert_eq!(storage.firehose_live_len().unwrap(), total);
+        assert_eq!(requeued_total("shutdown_inflight") - before, total as u64);
+        assert!(live_shards >= 1);
+
+        let again = storage.dequeue_firehose_live_batch(total * 2).unwrap();
+        let mut got: Vec<String> = again.iter().map(|(_, j)| j.uri.clone()).collect();
+        let mut expected: Vec<String> = (0..total).map(|i| live_job(i).uri).collect();
+        got.sort();
+        expected.sort();
+        assert_eq!(got, expected);
+    }
+
+    /// Shutdown seen mid-batch but the shards finish inside the grace budget:
+    /// results are returned and nothing is requeued.
+    #[tokio::test]
+    async fn test_live_batch_finishing_within_grace_is_not_requeued() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 5usize;
+        let shards = dequeued_live_shards(&storage, total, 2);
+        let before = requeued_total("shutdown_inflight");
+        let shutdown = flag(true);
+
+        let outcome = IndexerManager::run_live_batch(
+            &storage,
+            &shards,
+            std::time::Duration::from_secs(10),
+            &shutdown,
+            |idx, shards| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                shards[idx]
+                    .iter()
+                    .map(|(k, _)| (k.clone(), Ok(())))
+                    .collect()
+            },
+        )
+        .await;
+
+        let results = outcome.expect("batch completed within grace");
+        assert_eq!(results.len(), total);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        assert_eq!(requeued_total("shutdown_inflight"), before);
+    }
+
+    /// No shutdown: a normal batch completes and returns every job's result.
+    #[tokio::test]
+    async fn test_live_batch_without_shutdown_completes() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 4usize;
+        let shards = dequeued_live_shards(&storage, total, 3);
+        let shutdown = flag(false);
+
+        let outcome = IndexerManager::run_live_batch(
+            &storage,
+            &shards,
+            std::time::Duration::from_secs(1),
+            &shutdown,
+            |idx, shards| async move {
+                shards[idx]
+                    .iter()
+                    .map(|(k, _)| (k.clone(), Ok(())))
+                    .collect()
+            },
+        )
+        .await;
+
+        assert_eq!(outcome.expect("completed").len(), total);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    /// A shard task that panics returns no results; its jobs are requeued
+    /// rather than silently lost, while the other shards' results survive.
+    #[tokio::test]
+    async fn test_live_batch_panicked_shard_is_requeued() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 8usize;
+        let shards = dequeued_live_shards(&storage, total, 4);
+        let victim = shards
+            .iter()
+            .position(|s| !s.is_empty())
+            .expect("at least one non-empty shard");
+        let victim_len = shards[victim].len();
+        let before = requeued_total("shard_failed");
+        let shutdown = flag(false);
+
+        let outcome = IndexerManager::run_live_batch(
+            &storage,
+            &shards,
+            std::time::Duration::from_secs(1),
+            &shutdown,
+            move |idx, shards| async move {
+                assert_ne!(idx, victim, "simulated shard panic");
+                shards[idx]
+                    .iter()
+                    .map(|(k, _)| (k.clone(), Ok(())))
+                    .collect()
+            },
+        )
+        .await;
+
+        let results = outcome.expect("a panicked shard does not abort the batch");
+        assert_eq!(results.len(), total - victim_len);
+        assert_eq!(storage.firehose_live_len().unwrap(), victim_len);
+        assert_eq!(requeued_total("shard_failed") - before, victim_len as u64);
+    }
+
     #[tokio::test]
     async fn test_index_job_processing() {
         let (storage, _dir) = setup_test_storage();

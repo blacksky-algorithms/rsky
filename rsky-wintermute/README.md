@@ -104,6 +104,8 @@ RUST_LOG=info \
 | `BACKFILLER_OUTPUT_HIGH_WATER_MARK` | `100000` | Max records in firehose_backfill before backpressure |
 | `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
 | `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
+| `FIREHOSE_LIVE_DRAIN_BATCH` | `2000` | Jobs drained from `firehose_live` per indexing batch |
+| `FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS` | `15` | Seconds an in-flight live batch may keep running after shutdown before its shards are aborted and the batch is requeued |
 | `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
 
 ## Utilities

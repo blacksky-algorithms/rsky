@@ -158,6 +158,17 @@ pub static FIREHOSE_LIVE_DRAIN_BATCH: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(2000)
 });
 
+/// Shutdown grace for an in-flight `firehose_live` batch, in seconds.
+///
+/// Past this the shard tasks are aborted and the whole batch is returned to
+/// the queue, so the process exits before systemd's SIGKILL.
+pub static FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15)
+});
+
 /// Concurrent shards a `firehose_live` batch is split into, partitioned by repo
 /// DID so per-repo ordering holds. 1 = single-shard (previous behavior).
 pub static FIREHOSE_LIVE_SHARDS: LazyLock<usize> = LazyLock::new(|| {
