@@ -254,7 +254,7 @@ async fn sign_in_and_accept_scoped(
     assert_eq!(response.status(), Status::Ok);
     let html = response.into_string().await.unwrap();
     assert!(html.contains("Authorize"));
-    assert!(html.contains("Uniquely identify your account"));
+    assert!(html.contains("Confirm your identity"));
     assert!(html.contains("did:plc:khvyd3oiw46vif5gm7hijslk"));
 
     let response = client
