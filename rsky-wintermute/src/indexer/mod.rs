@@ -63,8 +63,16 @@ type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
 type LiveJobResult = (Vec<u8>, Result<(), WintermuteError>);
 type LiveShards = Arc<Vec<Vec<(Vec<u8>, IndexJob)>>>;
 
-/// How often the in-flight live batch re-checks the shutdown flag.
-const LIVE_SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+/// How often a blocking wait in the indexer loops re-checks the shutdown flag.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
+/// Outcome of one handle-resolution batch.
+struct HandleDrain {
+    /// Resolutions that completed and reported a changed handle.
+    resolved: usize,
+    /// Resolutions still in flight or never started when shutdown was seen.
+    abandoned: usize,
+}
 
 /// How a live batch's shard tasks ended.
 enum LiveBatchOutcome {
@@ -197,9 +205,6 @@ impl IndexerManager {
     }
 
     async fn process_handle_resolution_loop(&self) {
-        type HandleFuture =
-            std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send>>;
-
         let max_concurrent = *HANDLE_RESOLUTION_CONCURRENCY;
         tracing::info!(
             "handle resolution processor started (concurrency={max_concurrent}, batch={})",
@@ -214,19 +219,32 @@ impl IndexerManager {
                 break;
             }
 
-            // Query actors with NULL handle or stale indexedAt
-            let dids_to_resolve = match self.get_actors_needing_handle_resolution().await {
+            // Query actors with NULL handle or stale indexedAt. The query is
+            // unbounded, so race it against the shutdown flag: a slow scan must
+            // not pin the runtime past SIGTERM. Dropping the future returns the
+            // client to the pool; the process is exiting anyway.
+            let query = tokio::select! {
+                res = self.get_actors_needing_handle_resolution() => res,
+                () = Self::wait_for_shutdown(&SHUTDOWN) => {
+                    tracing::info!(
+                        "shutdown requested for handle resolution processor while querying actors"
+                    );
+                    break;
+                }
+            };
+            let dids_to_resolve = match query {
                 Ok(dids) => dids,
                 Err(e) => {
                     tracing::warn!("failed to get actors needing handle resolution: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Self::sleep_or_shutdown(Duration::from_secs(5), &SHUTDOWN).await;
                     continue;
                 }
             };
 
             if dids_to_resolve.is_empty() {
-                // No work to do, sleep longer
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                // No work to do, sleep longer (returns early on shutdown; the
+                // loop top then exits).
+                Self::sleep_or_shutdown(Duration::from_secs(10), &SHUTDOWN).await;
                 continue;
             }
 
@@ -239,52 +257,40 @@ impl IndexerManager {
             let id_resolver = Arc::clone(&self.id_resolver);
             let pool = self.pool_labels.clone();
 
-            // Process handles in parallel using FuturesUnordered with boxed futures
-            let mut in_flight: FuturesUnordered<HandleFuture> = FuturesUnordered::new();
-            let mut pending_dids = dids_to_resolve.into_iter();
-            let mut resolved_count = 0usize;
-
-            let make_future = |pool: Pool,
-                               id_resolver: Arc<IdResolver>,
-                               did: String,
-                               timestamp: String|
-             -> HandleFuture {
-                Box::pin(async move {
+            let make_future = |did: String| {
+                let pool = pool.clone();
+                let id_resolver = Arc::clone(&id_resolver);
+                let timestamp = timestamp.clone();
+                async move {
                     let client = pool.get().await.ok()?;
                     Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
-                })
+                }
             };
 
-            // Seed initial batch of concurrent tasks
-            for did in pending_dids.by_ref().take(max_concurrent) {
-                in_flight.push(make_future(
-                    pool.clone(),
-                    Arc::clone(&id_resolver),
-                    did,
-                    timestamp.clone(),
-                ));
-            }
-
-            // Process results and spawn new tasks as slots free up
-            while let Some(result) = in_flight.next().await {
-                if result == Some(true) {
-                    resolved_count += 1;
-                }
-
-                // Spawn next task if there are more DIDs
-                if let Some(did) = pending_dids.next() {
-                    in_flight.push(make_future(
-                        pool.clone(),
-                        Arc::clone(&id_resolver),
-                        did,
-                        timestamp.clone(),
-                    ));
-                }
-            }
-
+            // Resolve handles concurrently, checking the shutdown flag between
+            // results and every SHUTDOWN_POLL while waiting on slow resolvers.
+            let drain = Self::drain_handle_resolutions(
+                dids_to_resolve,
+                max_concurrent,
+                make_future,
+                &SHUTDOWN,
+            )
+            .await;
+            let resolved_count = drain.resolved;
             total_resolved += resolved_count as u64;
+
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                // Nothing to requeue: unresolved actors still have a NULL or
+                // stale handle and are selected again on the next start.
+                tracing::info!(
+                    abandoned = drain.abandoned,
+                    resolved = resolved_count,
+                    "shutdown requested for handle resolution processor, abandoned in-flight resolutions"
+                );
+                break;
+            }
 
             // Log progress every 10 batches or when handles are resolved
             if batch_count % 10 == 1 || resolved_count > 0 {
@@ -294,7 +300,75 @@ impl IndexerManager {
             }
 
             // Small delay between batches to avoid overwhelming the system
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            Self::sleep_or_shutdown(Duration::from_millis(100), &SHUTDOWN).await;
+        }
+    }
+
+    /// Resolve up to `max_concurrent` handles at a time from `dids`, topping
+    /// up as slots free, until every DID is done or `shutdown` flips. The flag
+    /// is checked after every completed resolution and every `SHUTDOWN_POLL`
+    /// while waiting, so neither a long batch nor a stalled resolver can hold
+    /// the loop past shutdown. On shutdown the in-flight futures are dropped
+    /// (cancelled) and counted, together with the DIDs never started, as
+    /// `abandoned`. No grace period: abandoning a resolution costs nothing,
+    /// the actor is simply selected again on the next start.
+    async fn drain_handle_resolutions<F, Fut>(
+        dids: Vec<String>,
+        max_concurrent: usize,
+        mut make_future: F,
+        shutdown: &AtomicBool,
+    ) -> HandleDrain
+    where
+        F: FnMut(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Option<bool>> + Send,
+    {
+        let mut pending = dids.into_iter();
+        let mut in_flight: FuturesUnordered<Fut> = FuturesUnordered::new();
+        for did in pending.by_ref().take(max_concurrent) {
+            in_flight.push(make_future(did));
+        }
+
+        let mut resolved = 0usize;
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                return HandleDrain {
+                    resolved,
+                    abandoned: in_flight.len() + pending.len(),
+                };
+            }
+            if in_flight.is_empty() {
+                return HandleDrain {
+                    resolved,
+                    abandoned: 0,
+                };
+            }
+            tokio::select! {
+                Some(result) = in_flight.next() => {
+                    if result == Some(true) {
+                        resolved += 1;
+                    }
+                    if let Some(did) = pending.next() {
+                        in_flight.push(make_future(did));
+                    }
+                }
+                () = tokio::time::sleep(SHUTDOWN_POLL) => {}
+            }
+        }
+    }
+
+    /// Resolve once `shutdown` is set, polling every `SHUTDOWN_POLL`.
+    async fn wait_for_shutdown(shutdown: &AtomicBool) {
+        while !shutdown.load(Ordering::Relaxed) {
+            tokio::time::sleep(SHUTDOWN_POLL).await;
+        }
+    }
+
+    /// Sleep for `duration` unless `shutdown` flips first. Returns `true` when
+    /// it returned early because of shutdown.
+    async fn sleep_or_shutdown(duration: Duration, shutdown: &AtomicBool) -> bool {
+        tokio::select! {
+            () = tokio::time::sleep(duration) => false,
+            () = Self::wait_for_shutdown(shutdown) => true,
         }
     }
 
@@ -585,7 +659,7 @@ impl IndexerManager {
     }
 
     /// Spawn every non-empty shard into a `JoinSet` and collect their results
-    /// while polling `shutdown` every `LIVE_SHUTDOWN_POLL`. Once shutdown is
+    /// while polling `shutdown` every `SHUTDOWN_POLL`. Once shutdown is
     /// seen the batch gets `grace` more time; if any shard is still running
     /// after that, all remaining tasks are aborted and awaited. The flag is a
     /// parameter (production passes the global `SHUTDOWN`) so tests can drive
@@ -633,8 +707,8 @@ impl IndexerManager {
                     grace_used: seen.elapsed(),
                 };
             }
-            let tick = shutdown_seen.map_or(LIVE_SHUTDOWN_POLL, |seen| {
-                grace.saturating_sub(seen.elapsed()).min(LIVE_SHUTDOWN_POLL)
+            let tick = shutdown_seen.map_or(SHUTDOWN_POLL, |seen| {
+                grace.saturating_sub(seen.elapsed()).min(SHUTDOWN_POLL)
             });
             tokio::select! {
                 joined = set.join_next() => match joined {
