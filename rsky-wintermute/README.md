@@ -91,6 +91,8 @@ RUST_LOG=info \
 | `LIVE_AGGREGATES` | `true` | Update `post_agg`/`profile_agg` inline on the live path |
 | `IDENTITY_EVENT_CONCURRENCY` | `64` | Concurrent `#identity` / `#account` / `#sync` tasks (each resolves a DID and handle over the network). When all permits are busy the event is shed and counted in `ingester_identity_tasks_shed_total`; the handle sweep re-verifies the account within a day |
 | `IDENTITY_EVENT_TIMEOUT_SECS` | `15` | Deadline for one such task; expiries are counted in `ingester_identity_task_timeouts_total` |
+| `FIREHOSE_LIVE_DRAIN_BATCH` | `2000` | Jobs drained from `firehose_live` per indexing batch |
+| `FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS` | `15` | Seconds an in-flight live batch may keep running after shutdown before its shards are aborted and the batch is requeued |
 
 ### Memory Environment Variables
 

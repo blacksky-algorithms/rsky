@@ -406,6 +406,15 @@ pub static INDEXER_RECORDS_FAILED_TOTAL: LazyLock<IntCounter> = LazyLock::new(||
     .unwrap()
 });
 
+pub static INDEXER_LIVE_JOBS_REQUEUED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "indexer_live_jobs_requeued_total",
+        "Total number of firehose_live jobs returned to the queue after being dequeued",
+        &["reason"]
+    )
+    .unwrap()
+});
+
 pub static INDEXER_STALE_WRITES_SKIPPED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "indexer_stale_writes_skipped_total",
@@ -581,6 +590,11 @@ pub fn initialize_metrics() {
     INGESTER_BACKPRESSURE_ACTIVE.set(0);
     INGESTER_EVENTS_IN_MEMORY.set(0);
     BACKFILL_ENUMERATION_COMPLETE.set(0);
+    // Pre-create the requeue series so both reasons scrape as 0 before the
+    // first requeue rather than appearing only after a restart or failure.
+    for reason in ["shutdown", "failed"] {
+        drop(INDEXER_LIVE_JOBS_REQUEUED_TOTAL.with_label_values(&[reason]));
+    }
 }
 
 #[cfg(test)]
